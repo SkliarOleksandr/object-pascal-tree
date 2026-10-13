@@ -1097,6 +1097,74 @@ begin
   GCounter.Ok('doc: a builtin answers empty',
     GProj.SymDocComment(-1, 0) = '');
 
+  // B51 (A1-17): the doc of an enum value is its own line's, not its type's;
+  // `class` before a class member, `class var`, and the section word before
+  // a section's first declaration written on the same line sit outside the
+  // declaration's span and are crossed.
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  /// Doc of TColor.'#10 +
+    '  TColor = ('#10 +
+    '    /// Doc of cRed.'#10 +
+    '    cRed,'#10 +
+    '    cGreen);'#10 +
+    '/// The answer.'#10 +
+    'const Answer = 42;'#10 +
+    '/// Doc of GVal.'#10 +
+    'var GVal: Integer;'#10 +
+    '/// Doc of TBar.'#10 +
+    'type TBar = Integer;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  |'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('doc B51: an enum value shows its own doc',
+    Has('cRed') and (GComp.ItemDocComment(ItemNamed('cRed')) = 'Doc of cRed.'));
+  GCounter.Ok('doc B51: an undocumented enum value shows none, not its type''s',
+    Has('cGreen') and (GComp.ItemDocComment(ItemNamed('cGreen')) = ''));
+  GCounter.Ok('doc B51: the enum type keeps its doc',
+    GComp.ItemDocComment(ItemNamed('TColor')) = 'Doc of TColor.');
+  GCounter.Ok('doc B51: `const Answer` on the section line',
+    GComp.ItemDocComment(ItemNamed('Answer')) = 'The answer.');
+  GCounter.Ok('doc B51: `var GVal` on the section line',
+    GComp.ItemDocComment(ItemNamed('GVal')) = 'Doc of GVal.');
+  GCounter.Ok('doc B51: `type TBar` on the section line',
+    GComp.ItemDocComment(ItemNamed('TBar')) = 'Doc of TBar.');
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TDoc = class'#10 +
+    '  public'#10 +
+    '    /// Doc of Create2.'#10 +
+    '    class function Create2: TDoc;'#10 +
+    '    /// Doc of CVar.'#10 +
+    '    class var CVar: Integer;'#10 +
+    '    /// Doc of CProp.'#10 +
+    '    class property CProp: Integer read CVar;'#10 +
+    '    /// Doc of Plain.'#10 +
+    '    procedure Plain;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var D: TDoc;'#10 +
+    'begin'#10 +
+    '  D.|'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('doc B51: a class function',
+    GComp.ItemDocComment(ItemNamed('Create2')) = 'Doc of Create2.');
+  GCounter.Ok('doc B51: a class var',
+    GComp.ItemDocComment(ItemNamed('CVar')) = 'Doc of CVar.');
+  GCounter.Ok('doc B51: a class property',
+    GComp.ItemDocComment(ItemNamed('CProp')) = 'Doc of CProp.');
+  GCounter.Ok('doc B51: a plain method (control)',
+    GComp.ItemDocComment(ItemNamed('Plain')) = 'Doc of Plain.');
+
   // ======== sec. 8A: per-item accessors ==========================================
   ProjCase(PROJ_HEAD + '  B.|'#10 + PROJ_TAIL);
   GCounter.Ok('ItemParamsText: parameterless method answers empty',

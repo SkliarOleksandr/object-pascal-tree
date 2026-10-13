@@ -83,7 +83,7 @@ comment of the generated text says what it is and what it could not carry.
 | 4 | Name from the IMPLICIT `System` unit (`sLineBreak`) | System.pas decl | OK |
 | 5 | Builtin whose REAL decl exists in a used unit / System (`TBytes`, `TObject`) | real decl | OK |
 | 6 | Compiler intrinsic with NO source decl (`Integer`, `Length`, `True`) | **System.pas unit header** (like the IDE) | OK |
-| 7 | Implicit `Result` | enclosing routine's name | OK |
+| 7 | Implicit `Result` | enclosing routine's name (`Bar` of `function TFoo.Bar`); an anonymous method's own `function` keyword | OK |
 | 8 | `uses` clause unit name (single or dotted; any segment) | that unit's file, its `unit` header | OK |
 | 9 | Qualifier of a qualified expression (`System` in `System.sLineBreak`; longest-match: `System.SysUtils` wins in `System.SysUtils.TBytes`) | that unit's file | OK |
 | 10 | Identifier inside ANY unit of the project closure (not just the main file) | as above | OK (`AnalyzeProject`) |
@@ -762,13 +762,16 @@ included), keeping only the hits that sit in an assignment-target position.
 The filter is a node-kind walk from the hit's identifier (`IsAssignTarget`,
 no text read, so it runs on demoted models): climb out of the trailing NAME
 of a member chain (`Obj.Field := ` writes Field) and out of the BASE of an
-index (`A[i] := ` writes into A), then the identifier counts if what it
-reached is the left side of `:=` or the counter of a `for`. Anything else on
-the way up - a dereference, a call, an argument list - means it is read.
+index (`A[i] := ` writes into A - unless the brackets are a default array
+property's, whose setter runs while A is only read), then the identifier
+counts if what it reached is the left side of `:=`, the counter of a `for` or
+the element of a `for .. in`. Anything else on the way up - a dereference, a
+call, an argument list - means it is read.
 
 | # | Target | Row | Status |
 |---|--------|-----|--------|
-| 1 | A local/global var, a field, a parameter | every `X := `, `Obj.X := `, `X[i] := `, `for X := ` project-wide | OK |
+| 1 | A local/global var, a field, a parameter | every `X := `, `Obj.X := `, `X[i] := ` (an array or a string), `for X := `, `for X in` project-wide | OK (`for X in` 0.103.2) |
+| 1a | `L[i] := V` where the brackets are L's default array property (`SL[0] := 'x'`) | a row of the default property, none of L: L is read, its property's setter runs | OK (0.103.2) |
 | 2 | A property with a `write` specifier (field or setter method) | every write through the PROPERTY syntax (`Obj.Prop := X`), across its redeclaration chain; the setter's own body writes to the FIELD, and a direct call to the setter is a reference to the setter - neither is a row here | OK |
 | 3 | A property with NO `write` specifier | `AssignableAt` declines - the command is not offered (nothing to find is not an error); a bare redeclaration asks the whole chain, so `property Items;` under a writable root is writable | OK (by design) |
 | 4 | A constant, a type, a routine, `Result` | `AssignableAt` declines | OK (by design) |
@@ -804,11 +807,12 @@ text says - the table's "not a row" lines are runtime facts.
 | 1 | `TFoo.Create(...)` - qualifier bound to the class, member bound to a constructor (the class's own OR an inherited one: `TFoo.Create` with Create declared on TObject still makes a TFoo) | Creations row, positioned on the class name in the call; one per call, overloads included | OK |
 | 2 | `TFoo<T>.Create` (qualifier wrapped in type arguments) | Creations row | OK |
 | 2a | `TFooAlias.Create` where `TFooAlias = TFoo;` (VirtualTrees spells its base through such an alias) | Creations row on the alias name in the call | OK (0.25.2, `OvUnalias`) |
+| 2b | A qualified class name: `TOuter.TInner.Create`, `UnitA.TFoo.Create` | Creations row on the class's own name | OK (0.103.2) |
 | 3 | `TBar.Create` for a descendant TBar | no row - that is a TBar; §6 says which those are | OK (by design) |
 | 4 | `inherited Create` inside a descendant's constructor | no row - it constructs the object already being built | OK (by design) |
 | 5 | A class method or plain routine NAMED Create | no row - the member binding is not a constructor | OK |
 | 6 | `LClass.Create` through a class-reference VARIABLE (`LClass: TFooClass`) | - | GAP - the static type is a metaclass, the class a runtime value |
-| 7 | `X.Free`, `X.Destroy`, `FreeAndNil(X)` where the designator X has the STATIC type of the class (aliases followed; `Self.FFoo.Free`, `Items[i].Free` and the like resolve through `WithTargetTypeX`) | Destructions row, positioned on X's own name (FFoo, not Self) | OK |
+| 7 | `X.Free`, `X.Destroy`, `FreeAndNil(X)` (qualified `SysUtils.FreeAndNil(X)` too, 0.103.2) where the designator X has the STATIC type of the class (aliases followed; `Self.FFoo.Free`, `Items[i].Free` and the like resolve through `WithTargetTypeX`) | Destructions row, positioned on X's own name (FFoo, not Self) | OK |
 | 8 | The release routines themselves | matched as RESOLVED routine symbols named `free`/`destroy`/`freeandnil` - TObject's, System.SysUtils' FreeAndNil, or a project's own; a same-named method on an unrelated type is no row | OK |
 | 8a | `X.Release` on a form - the call bound to `TCustomForm.Release` (Vcl.Forms) or `TCommonCustomForm.Release` (FMX.Forms), which frees the form once its queued CM_RELEASE is handled; the idiomatic way to free a form | Destructions row, like row 7 | OK (0.50.3) |
 | 8b | A `Release` bound to anything else - a lock, a pool, a class not derived from a form, or a form class declaring its own `Release` | no row - matched by SYMBOL, never by name: those free nothing | OK (0.50.3) |

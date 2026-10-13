@@ -309,6 +309,57 @@ const
     'end;'#10 +                                 // 30
     'end.'#10;                                  // 31
 
+  { Audit B51: a creation through a qualified class name (A2-26), a
+    qualified FreeAndNil (B3-05), brackets of a default array property are
+    no write of the object (B2-19), a for-in element is one (B2-20), and
+    the implicit Result goes to the routine's NAME, not its qualifier or an
+    anonymous method's result type (B2-21). }
+  UNIT_B51 =
+    'unit NavB51;'#10 +                         // 1
+    'interface'#10 +                            // 2
+    'uses NavCD;'#10 +                          // 3
+    'type'#10 +                                 // 4
+    '  TOuter = class'#10 +                     // 5  TOuter col 3
+    '  type'#10 +                               // 6
+    '    TInner = class'#10 +                   // 7  TInner col 5
+    '    end;'#10 +                             // 8
+    '  end;'#10 +                               // 9
+    '  TList51 = class'#10 +                    // 10
+    '    function GetItem(I: Integer): Integer;'#10 + // 11
+    '    procedure SetItem(I: Integer; V: Integer);'#10 + // 12
+    '    property Items[I: Integer]: Integer read GetItem write SetItem; default;'#10 + // 13
+    '  end;'#10 +                               // 14
+    '  TFoo = class'#10 +                       // 15
+    '    function Bar: Integer;'#10 +           // 16
+    '  end;'#10 +                               // 17
+    '  TIntFunc = reference to function(X: Integer): Integer;'#10 + // 18
+    'procedure Work;'#10 +                      // 19
+    'implementation'#10 +                       // 20
+    'function TList51.GetItem(I: Integer): Integer; begin Result := I; end;'#10 + // 21
+    'procedure TList51.SetItem(I: Integer; V: Integer); begin end;'#10 + // 22
+    'function TFoo.Bar: Integer;'#10 +          // 23  TFoo col 10, Bar col 15
+    'begin'#10 +                                // 24
+    '  Result := 1;'#10 +                       // 25  Result col 3
+    'end;'#10 +                                 // 26
+    'procedure Work;'#10 +                      // 27
+    'var I: TOuter.TInner; O: TOuter; L: TList51; E: Integer;'#10 + // 28  L col 34, E col 46
+    '  A: TArray<Integer>; Fn: TIntFunc;'#10 +  // 29
+    'begin'#10 +                                // 30
+    '  I := TOuter.TInner.Create;'#10 +         // 31  TInner col 15 - creation
+    '  O := TOuter.Create;'#10 +                 // 32  TOuter col 8 - creation
+    '  O := NavB51.TOuter.Create;'#10 +         // 33  TOuter col 15 - creation
+    '  L[0] := 5;'#10 +                         // 34  not a write of L
+    '  L := nil;'#10 +                          // 35  L col 3 - a write
+    '  for E in A do ;'#10 +                    // 36  E col 7 - a write
+    '  NavCD.FreeAndNil(O);'#10 +               // 37  O col 20 - destruction
+    '  FreeAndNil(O);'#10 +                     // 38  O col 14 - destruction
+    '  Fn := function(X: Integer): Integer'#10 + // 39  `function` col 9
+    '    begin'#10 +                            // 40
+    '      Result := X + 1;'#10 +               // 41  Result col 7
+    '    end;'#10 +                             // 42
+    'end;'#10 +                                 // 43
+    'end.'#10;                                  // 44
+
   { Regressions pastree-mcp found on the client group (2026-09-25), analyzed
     in a directory of their own with the fixture System above.
     - Line 31: `TOwn.Create(1, 2)` inside TOwn's own unit. It used to bind to
@@ -3494,6 +3545,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOvrC.pas'), UNIT_OVRC);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavAsg.pas'), UNIT_ASG);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavCD.pas'), UNIT_CD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavB51.pas'), UNIT_B51);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRen.pas'), UNIT_REN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavFam.pas'), UNIT_FAM);
@@ -5168,6 +5220,46 @@ begin
       LHits := GNav.FindDestructions(LRTMid, LRSym);
       Ok('FindDestructions: TCdSub - `S.Free` only',
         (Length(LHits) = 1) and HasHitAt(LHits, 'NavCD.pas', 27, 3));
+
+      // ---- audit B51 ----
+      var LMid51 := GNav.ModelIdOf(TPath.Combine(LDir, 'NavB51.pas'));
+      Ok('NavB51 model found', LMid51 >= 0);
+      GNav.ClassAt(LMid51, 7, 5, {out} LRTMid, {out} LRSym, {out} LRName);
+      LHits := GNav.FindCreations(LRTMid, LRSym);
+      Ok('B51 FindCreations: a nested class created as `TOuter.TInner.Create`',
+        SameText(LRName, 'TInner') and (Length(LHits) = 1) and
+        HasHitAt(LHits, 'NavB51.pas', 31, 15));
+      GNav.ClassAt(LMid51, 5, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      LHits := GNav.FindCreations(LRTMid, LRSym);
+      Ok('B51 FindCreations: `NavB51.TOuter.Create` beside `TOuter.Create`; ' +
+        'the qualifier of `TOuter.TInner.Create` creates no TOuter',
+        SameText(LRName, 'TOuter') and (Length(LHits) = 2) and
+        HasHitAt(LHits, 'NavB51.pas', 32, 8) and
+        HasHitAt(LHits, 'NavB51.pas', 33, 15));
+      LHits := GNav.FindDestructions(LRTMid, LRSym);
+      Ok('B51 FindDestructions: `NavCD.FreeAndNil(O)` and `FreeAndNil(O)`',
+        (Length(LHits) = 2) and
+        HasHitAt(LHits, 'NavB51.pas', 37, 20) and
+        HasHitAt(LHits, 'NavB51.pas', 38, 14));
+      Ok('B51 AssignableAt: L',
+        GNav.AssignableAt(LMid51, 28, 34, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'L'));
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('B51 FindAssignments: `L[0] :=` writes the default property, not L',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavB51.pas', 35, 3));
+      Ok('B51 AssignableAt: E',
+        GNav.AssignableAt(LMid51, 28, 46, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'E'));
+      LHits := GNav.FindAssignments(LRTMid, LRSym);
+      Ok('B51 FindAssignments: a for-in element is written',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavB51.pas', 36, 7));
+      var LSaveMidB := GMidB;
+      GMidB := LMid51;
+      CheckNav('B51 Result -> the method''s name, not its qualifier', 25, 3,
+        'Result', 'NavB51.pas', 23, 15);
+      CheckNav('B51 an anonymous method''s Result -> the method, not its ' +
+        'result type', 41, 7, 'Result', 'NavB51.pas', 39, 9);
+      GMidB := LSaveMidB;
 
       // PasModuleOutline: source order, every declaration shape, landmarks,
       // include-file positions, implementation rows.

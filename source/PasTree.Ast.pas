@@ -292,8 +292,12 @@ type
       ancestor (nkRoutine, nkTypeDecl, nkConstDecl, nkVarDecl, ...), the climb
       stopping at containers - so a class member's root is the member, not the
       class, and a nested routine keeps its own nkRoutine. NIL_NODE when AIndex
-      sits in no declaration (a `uses` name, a statement). Shared by the doc
-      comment lookup and the module path's declaration comparison. }
+      sits in no declaration (a `uses` name, a statement). An enum value's
+      root is its TYPE (nkEnumType does not stop the climb), on purpose: the
+      module path compares declarations by span, and a value's ordinal
+      depends on its siblings - `X,` inserted before B changes Ord(B) while
+      B's own span reads the same. The module path's declaration comparison
+      uses it; DeclDocComment anchors an enum value on the value itself. }
     function DeclRootOf(AIndex: Integer): Integer;
     { Do two nodes read the same, token for token? Compares the VISIBLE token
       slices from each node's leftmost token through its LastToken - exact
@@ -351,7 +355,10 @@ type
       ANode may be the declaration's NAME node (a symbol's DeclNode) - it is
       climbed to the enclosing declaration root first (routine, type/const/
       var/property declaration, enum value), because the doc sits above the
-      whole declaration, not above the name mid-line. The walk then runs
+      whole declaration, not above the name mid-line. The head words the
+      parser keeps outside the declaration's span are crossed: `class`
+      before a class member, `class var`, and the section word before a
+      section's first declaration (`const Answer = 42;`). The walk then runs
       BACKWARD over the RAW token stream of the declaration's own file:
       whitespace is crossed (a BLANK line ends the run - attachment requires
       adjacency, the native IDE's rule), an attribute group between the doc
@@ -858,6 +865,10 @@ var
   LText: string;
   LLines: TArray<string>;
   LDone: Boolean;
+  // The head words written before the declaration's span, nearest first:
+  // LHead[0] directly before it, LHead[1] before that (`class var`).
+  LHead: array[0..1] of set of TPasTokenKind;
+  LHeadAt, LSec: Integer;
 
   function TokenText(ARaw: Integer): string;
   begin
@@ -870,10 +881,40 @@ begin
   if (AIndex < 0) or (AIndex > High(Nodes)) then
     Exit;
   // The declaration ROOT: a name node sits inside its declaration, the doc
-  // sits above the whole declaration - see DeclRootOf.
-  LDecl := DeclRootOf(AIndex);
+  // sits above the whole declaration - see DeclRootOf. An enum value is the
+  // exception: DeclRootOf climbs it to its type on purpose, and its doc is
+  // the line above the value (audit A1-17).
+  LDecl := AIndex;
+  if (Nodes[LDecl].Kind = nkIdent) and (Nodes[LDecl].Parent <> NIL_NODE) then
+    LDecl := Nodes[LDecl].Parent;
+  if Nodes[LDecl].Kind <> nkEnumValue then
+    LDecl := DeclRootOf(AIndex);
   if LDecl = NIL_NODE then
     Exit;
+  // Head words the parser keeps outside the declaration's span: `class`
+  // before a class method or property, `class var` / `class threadvar`
+  // before a class var section's first declaration, and the section word
+  // before a section's first declaration (`const Answer = 42;`). Trivia
+  // between a head word and the declaration is crossed as anywhere else.
+  LHead[0] := [];
+  LHead[1] := [];
+  if Nodes[LDecl].Kind in [nkRoutine, nkPropertyDecl] then
+    LHead[0] := [TPasTokenKind.tkClass];
+  LSec := Nodes[LDecl].Parent;
+  if (LSec <> NIL_NODE) and (Nodes[LSec].FirstChild = LDecl) then
+    case Nodes[LSec].Kind of
+      nkTypeSec:
+        LHead[0] := [tkType];
+      nkConstSec:
+        LHead[0] := [tkConst, tkResourcestring];
+      nkVarSec:
+        begin
+          LHead[0] := [tkVar, tkThreadvar];
+          if Nodes[LSec].Aux = 1 then
+            LHead[1] := [TPasTokenKind.tkClass];
+        end;
+    end;
+  LHeadAt := 0;
   LVis := NodeLeftmostVis(LDecl);
   if (LVis < 0) or (LVis > High(Source.Visible)) then
     Exit;
@@ -935,7 +976,12 @@ begin
         tkRBracket:
           Inc(LDepth);   // an attribute group between doc and declaration
       else
-        LDone := True;   // code, brace/paren comments, directives
+        // A head word between the declaration and its doc block.
+        if (LCount = 0) and (LHeadAt <= High(LHead)) and
+           (LTS.Tokens[LRaw].Kind in LHead[LHeadAt]) then
+          Inc(LHeadAt)
+        else
+          LDone := True;   // code, brace/paren comments, directives
       end;
     Dec(LRaw);
   end;

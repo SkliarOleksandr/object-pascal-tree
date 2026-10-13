@@ -20746,7 +20746,15 @@ var
   LA, LB: TSemaSymbol;
   LChanged: Boolean;
   LChangedNames, LRemovedNames, LAddedNames, LStem: string;
+  // The last whole-span comparison: an enum's values are consecutive symbols
+  // with ONE root, the type (DeclRootOf), so each would compare the whole
+  // type again - O(N^2) per enum.
+  LMemoOld, LMemoNew: Integer;
+  LMemoEq: Boolean;
 begin
+  LMemoOld := NIL_NODE;
+  LMemoNew := NIL_NODE;
+  LMemoEq := False;
   LChangedNames := '';
   LRemovedNames := '';
   LAddedNames := '';
@@ -20795,7 +20803,15 @@ begin
           MemberMask(AOld, LDeclOld, LA.MemberScope), ANew.Tree, LDeclNew,
           MemberMask(ANew, LDeclNew, LB.MemberScope))
       else
-        LChanged := not AOld.Tree.SpanTokensEqual(LDeclOld, ANew.Tree, LDeclNew);
+      begin
+        if (LDeclOld <> LMemoOld) or (LDeclNew <> LMemoNew) then
+        begin
+          LMemoOld := LDeclOld;
+          LMemoNew := LDeclNew;
+          LMemoEq := AOld.Tree.SpanTokensEqual(LDeclOld, ANew.Tree, LDeclNew);
+        end;
+        LChanged := not LMemoEq;
+      end;
     end;
     AChanged[LOldIdx] := LChanged;
     if LChanged then
@@ -20917,8 +20933,12 @@ class function TPasSemaProject.OracleConsumerAffected(ACons, AOld,
 var
   LName: string;
   LIdx, LNewIdx, LDeclOld, LDeclNew: Integer;
+  // See DiffInterface: an enum's values share one root, compared once.
+  LMemoOld, LMemoNew: Integer;
 begin
   Result := False;
+  LMemoOld := NIL_NODE;
+  LMemoNew := NIL_NODE;
   for LName in ACons.OracleNames do
   begin
     if AAdded.ContainsKey(LName) then
@@ -20937,8 +20957,14 @@ begin
       if (LDeclOld = NIL_NODE) <> (LDeclNew = NIL_NODE) then
         Exit(True);
       if (LDeclOld <> NIL_NODE) and
-         not AOld.Tree.SpanTokensEqual(LDeclOld, ANew.Tree, LDeclNew) then
-        Exit(True);
+         ((LDeclOld <> LMemoOld) or (LDeclNew <> LMemoNew)) then
+      begin
+        if not AOld.Tree.SpanTokensEqual(LDeclOld, ANew.Tree, LDeclNew) then
+          Exit(True);
+        // Only an EQUAL pair is remembered: an unequal one has exited.
+        LMemoOld := LDeclOld;
+        LMemoNew := LDeclNew;
+      end;
     end;
   end;
 end;

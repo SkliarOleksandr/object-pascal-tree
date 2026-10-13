@@ -396,7 +396,6 @@ type
       see the LibraryPaths property. Normalized: full paths, lower case, each
       with a trailing path delimiter, so a prefix test is a tree test. }
     FLibraryPaths: TArray<string>;
-    FByPath: TDictionary<string, Integer>;       // full lower path -> model id
     FCaches: TObjectDictionary<Integer, TNavCache>;
     // The project's form files, bound - created on the first search that can
     // reach one (FormBinder), dropped when LibraryPaths changes.
@@ -1242,23 +1241,17 @@ end;
 { TPasNavigator }
 
 constructor TPasNavigator.Create(AProject: TPasSemaProject);
-var
-  LMid: Integer;
 begin
   inherited Create;
   FProj := AProject;
   FGeneration := FProj.ModelGeneration;
-  FByPath := TDictionary<string, Integer>.Create;
   FCaches := TObjectDictionary<Integer, TNavCache>.Create([doOwnsValues]);
-  for LMid := 0 to FProj.ModelCount - 1 do
-    FByPath.AddOrSetValue(LowerCase(FProj.ModelFile(LMid)), LMid);
 end;
 
 destructor TPasNavigator.Destroy;
 begin
   FForms.Free;
   FCaches.Free;
-  FByPath.Free;
   inherited;
 end;
 
@@ -1300,25 +1293,10 @@ begin
 end;
 
 function TPasNavigator.ModelIdOf(const APath: string): Integer;
-var
-  LKey: string;
 begin
-  // An empty or invalid path is unknown, not an exception (GetFullPath
-  // raises on both): the contract of TPasSemaProject.ModelIdOf.
-  Result := -1;
-  if not PasFullPathKey(APath, LKey) then
-    Exit;
-  if FByPath.TryGetValue(LKey, Result) then
-    Exit;
-  // The index is built once, in the constructor, and the project can gain
-  // models AFTER that - ResolveDecl's intrinsic fallback reaches
-  // EnsureSystemUnit, which may register a brand-new id. Rather than answer
-  // "unknown file" for it, top the index up on a miss (bounded: it only ever
-  // runs when a lookup fails, and the project's model list only grows).
-  for var LMid := FByPath.Count to FProj.ModelCount - 1 do
-    FByPath.AddOrSetValue(LowerCase(FProj.ModelFile(LMid)), LMid);
-  if not FByPath.TryGetValue(LKey, Result) then
-    Result := -1;
+  // The project's own index, kept at every place a model is registered
+  // (EnsureSystemUnit's late ids included): one key rule, not two (D1-28).
+  Result := FProj.ModelIdOf(APath);
 end;
 
 function TPasNavigator.CacheOf(AMid: Integer): TNavCache;
@@ -1518,7 +1496,7 @@ function TPasNavigator.TargetFromNode(AMid, ANode: Integer;
   const AName: string; out ATarget: TPasNavTarget): Boolean;
 var
   LM: TPasSemaModel;
-  LFirst, LVisTok: Integer;
+  LVisTok: Integer;
   LVis: TPasVisibleToken;
 begin
   Result := False;
@@ -1532,11 +1510,10 @@ begin
   // An nkMember's OWN FirstToken is the '.' (see PasTree.Ast), not its first
   // visible character - descend to the leftmost descendant so a dotted
   // declaration name (`unit Namespace.NavD;`) lands on "Namespace", not on
-  // the dot. A no-op for any childless node (nkIdent has none).
-  LFirst := ANode;
-  while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
-    LFirst := LM.Tree.Nodes[LFirst].FirstChild;
-  LVisTok := LM.Tree.Nodes[LFirst].FirstToken;
+  // the dot. A no-op for any childless node (nkIdent has none). A node whose
+  // own token comes first keeps it: an anonymous method's `function`, not
+  // its first parameter (audit B2-21).
+  LVisTok := LM.Tree.NodeLeftmostVis(ANode);
   if (LVisTok < 0) or (LVisTok > High(LM.Tree.Source.Visible)) then
     Exit;
   LVis := LM.Tree.Source.Visible[LVisTok];
@@ -1610,7 +1587,8 @@ end;
 function TPasNavigator.RoutineNameNodeOfSym(AMid, ASym: Integer): Integer;
 var
   LM: TPasSemaModel;
-  LScope, LOwner, LChild: Integer;
+  LScope, LOwner, LChild, LName: Integer;
+  LQual: TArray<Integer>;
 begin
   Result := NIL_NODE;
   LM := FProj.Model(AMid);
@@ -1620,6 +1598,16 @@ begin
   LOwner := LM.Scopes[LScope].OwnerNode;
   if LOwner = NIL_NODE then
     Exit;
+  // A routine's NAME is its last name segment: `function TFoo.Bar` starts
+  // with the qualifier TFoo. An anonymous method has no name, and its first
+  // ident child may be its result type (audit B2-21).
+  case LM.Tree.Nodes[LOwner].Kind of
+    nkAnonMethod:
+      Exit(LOwner);
+    nkRoutine:
+      if RTSegments(LM, LOwner, LQual, LName) then
+        Exit(LName);
+  end;
   LChild := LM.Tree.Nodes[LOwner].FirstChild;
   while LChild <> NIL_NODE do
   begin
@@ -2339,13 +2327,21 @@ begin
         begin
           if LM.Tree.Nodes[LParent].FirstChild <> LCur then
             Exit;   // an index EXPRESSION, not the thing indexed
+          // Brackets bound to a default array property (the branch above)
+          // run its setter: the object holding it is only read (B2-19).
+          if ((LParent <= High(LM.RefMap)) and
+              (LM.RefMap[LParent] <> NIL_SYM)) or
+             LM.ExtRefMap.ContainsKey(LParent) then
+            Exit;
           LCur := LParent;
         end;
       nkAssign:
         Exit(LM.Tree.Nodes[LParent].FirstChild = LCur);
-      nkForStmt:
+      nkForStmt, nkForInStmt:
         // `for I := ` - the counter is the first child; `for var I := ` wraps
-        // it in an nkInlineVar, which is that first child then.
+        // it in an nkInlineVar, which is that first child then. A for-in
+        // element is written on every iteration the same way (E2081 on a
+        // write to it, B2-20).
         Exit(LM.Tree.Nodes[LParent].FirstChild = LCur);
       nkInlineVar:
         begin
@@ -2355,7 +2351,7 @@ begin
           // all (it is the DeclNode), so it never reaches here.
           LChild := LM.Tree.Nodes[LParent].Parent;
           Exit((LChild <> NIL_NODE) and
-            (LM.Tree.Nodes[LChild].Kind = nkForStmt) and
+            (LM.Tree.Nodes[LChild].Kind in [nkForStmt, nkForInStmt]) and
             (LM.Tree.Nodes[LChild].FirstChild = LParent));
         end;
     else
@@ -4847,7 +4843,9 @@ var
 
   // ANode is bound to the class. Is it the QUALIFIER of a member access whose
   // member is a constructor? `TFoo<T>.Create` wraps the name in nkTypeArgs
-  // first, so one such level is stepped over.
+  // first, so one such level is stepped over. A qualified class name -
+  // `TOuter.TInner.Create`, `UnitA.TFoo.Create` - is the MEMBER side of an
+  // inner nkMember, which is the qualifier then (audit A2-26).
   function IsCtorQualifier(ANode: Integer): Boolean;
   begin
     Result := False;
@@ -4856,6 +4854,13 @@ var
        (LM.Tree.Nodes[LM.Tree.Nodes[LBase].Parent].Kind = nkTypeArgs) then
       LBase := LM.Tree.Nodes[LBase].Parent;
     LName := LM.Tree.Nodes[LBase].Parent;
+    if (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkMember) and
+       (LM.Tree.Nodes[LName].FirstChild <> LBase) and
+       (LM.Tree.Nodes[LBase].NextSibling = NIL_NODE) then
+    begin
+      LBase := LName;
+      LName := LM.Tree.Nodes[LBase].Parent;
+    end;
     if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkMember) or
        (LM.Tree.Nodes[LName].FirstChild <> LBase) then
       Exit;
@@ -4958,6 +4963,8 @@ var
   // `X.Release` -> X is the member base; `FreeAndNil(X)` -> X is the first
   // argument.
   function ReleasedBy(ANode: Integer): Integer;
+  var
+    LCallee: Integer;
   begin
     Result := NIL_NODE;
     LNameLower := FProj.Model(LUid).Symbols[LSym].NameLower;
@@ -4973,9 +4980,21 @@ var
     end
     else if LNameLower = 'freeandnil' then
     begin
+      // A qualified `SysUtils.FreeAndNil(X)`: the callee is the nkMember
+      // whose member side is the name (audit B3-05).
+      LCallee := ANode;
+      if (LM.Tree.Nodes[LParent].Kind = nkMember) and
+         (LM.Tree.Nodes[LParent].FirstChild <> ANode) and
+         (LM.Tree.Nodes[ANode].NextSibling = NIL_NODE) then
+      begin
+        LCallee := LParent;
+        LParent := LM.Tree.Nodes[LCallee].Parent;
+        if LParent = NIL_NODE then
+          Exit;
+      end;
       if (LM.Tree.Nodes[LParent].Kind = nkCall) and
-         (LM.Tree.Nodes[LParent].FirstChild = ANode) then
-        Result := LM.Tree.Nodes[ANode].NextSibling;
+         (LM.Tree.Nodes[LParent].FirstChild = LCallee) then
+        Result := LM.Tree.Nodes[LCallee].NextSibling;
     end;
   end;
 
@@ -6193,11 +6212,8 @@ begin
   if (ASym < 0) or (ASym >= LM.SymCount) or
      (LM.Symbols[ASym].Kind <> skType) then
     Exit;
-  // RTSegments tells a qualifier from the name by the separator after it,
-  // which a demoted model reads back as tkUnknown - every header would look
-  // unqualified and the rename would silently miss them all.
-  if not FProj.EnsureHydrated(AMid) then
-    Exit;
+  // Nodes, flags and scopes only (RTSegments reads nfName), which a demoted
+  // model keeps: no hydration here - the caller hydrates for HitFromNode.
   for LScope := 0 to LM.Scopes.Count - 1 do
   begin
     if (LM.Scopes[LScope].Kind <> sckRoutine) or
