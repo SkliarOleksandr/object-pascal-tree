@@ -24,14 +24,19 @@ program PasTreeCompleteOracle;
     a documented stage-E gap).
 
   Usage: PasTreeCompleteOracle <dir|file.dpr|file.dproj> [-p:<platform>]
-           [-max:<N>] [-list] [-at:<file>|<line>|<col>] [-studio:<dir>]
-           [-L<dir>]
+           [-max:<N>] [-list] [-overlay] [-at:<file>|<line>|<col>]
+           [-studio:<dir>] [-L<dir>]
 
   -p:      platform (default Win32, matching the flat corpora; a .dproj
            carries its own and wins).
   -max:N   sample cap PER UNIT (default 200), stride-spread so the sample
            covers the whole file rather than its head. -max:0 = everything.
   -list    print every miss site (default: the first 25).
+  -overlay the overlay oracle (T3) instead of the self-oracle: at every dot
+           and every call's `(`, completion over a fresh overlay model of the
+           file's unchanged text must list the member names, and signature
+           help the targets, that the project's own model of the file gives.
+           -max caps dots and calls per unit separately.
   -at:     one verbose request instead of the sweep - the drill-down mode.
   -studio: RAD Studio root for the RTL/VCL/FMX source trees (.dproj targets;
            $BDS when unset), same contract as PasTreeSemaProject's.
@@ -355,6 +360,342 @@ begin
   end;
 end;
 
+// ---------------------------------------------------------------------------
+// -overlay (T3): the overlay pipeline against the project model. A fresh
+// overlay model of the file's UNCHANGED text - what the demo and the LSP
+// server build per request - must answer what the project's own model of
+// that file answers: at every dot the same member names, at every call's
+// `(` the same call targets. The project side is the reference (it has the
+// cross-unit typing); a row the overlay misses or adds is the overlay's
+// second typer drifting from the project's rules (audit B47-B50).
+
+type
+  TOvlRow = record
+    Site: string;      // file(line,col)
+    What: string;      // 'dot' or 'call'
+    Missing: string;   // reference names the overlay lacks (first few)
+    Extra: string;     // overlay names the reference lacks (first few)
+  end;
+
+var
+  GOverlay: Boolean;
+  GOvlSM: TPasSourceManager;
+  GOvlDefines: TPasDefines;
+  GOvlPP: TPasPreprocessor;
+  GOvlRows: TList<TOvlRow>;
+  GOvlDots, GOvlDotDiff, GOvlCalls, GOvlCallDiff: Int64;
+  GOvlRefusedDots: Int64;        // the reference itself refused the caret
+
+procedure EnsureOverlayPP(const ASearchPaths: TArray<string>;
+  const AExtraDefines: TArray<string>);
+begin
+  if GOvlPP <> nil then
+    Exit;
+  GOvlSM := TPasSourceManager.Create(ASearchPaths);
+  // The analysis's define set: the platform's, then the project's on top -
+  // what TPasSemaProject builds and what the demo's completion pipeline
+  // builds (EnsureComplPP).
+  GOvlDefines := CreatePlatformDefines(GPlatform);
+  for var LName in AExtraDefines do
+    GOvlDefines.Define(LName);
+  GOvlPP := TPasPreprocessor.Create(GOvlSM, GOvlDefines,
+    DEFAULT_COMPILER_VERSION, PlatformInfo(GPlatform).PointerBytes,
+    PlatformInfo(GPlatform).ExtendedBytes, PlatformInfo(GPlatform).LongBytes,
+    PlatformInfo(GPlatform).ExtendedAlign);
+end;
+
+// The names of a list, lower-cased, sorted, unique.
+function NameSet(const AItems: TArray<TPasComplItem>): TArray<string>;
+var
+  LList: TList<string>;
+begin
+  LList := TList<string>.Create;
+  try
+    for var LIt in AItems do
+      LList.Add(LIt.Name.ToLower);
+    LList.Sort;
+    Result := nil;
+    for var LIdx := 0 to LList.Count - 1 do
+      if (LIdx = 0) or (LList[LIdx] <> LList[LIdx - 1]) then
+        Result := Result + [LList[LIdx]];
+  finally
+    LList.Free;
+  end;
+end;
+
+// The signatures of a call's targets: name, parameter text and result,
+// sorted (a multiset - two overloads may print alike).
+function TargetSet(const AInfo: TPasCallInfo): TArray<string>;
+var
+  LList: TList<string>;
+begin
+  LList := TList<string>.Create;
+  try
+    for var LT in AInfo.Targets do
+      LList.Add((LT.Name + LT.ParamsText + ':' + LT.ResultText).ToLower);
+    LList.Sort;
+    Result := LList.ToArray;
+  finally
+    LList.Free;
+  end;
+end;
+
+// Sorted-set difference; the first few of each side as display text.
+procedure DiffSets(const ARef, AOvl: TArray<string>; out AMissing,
+  AExtra: string; out ADiffers: Boolean);
+const
+  SHOW = 6;
+var
+  LI, LJ, LNMiss, LNExtra, LCmp: Integer;
+begin
+  AMissing := '';
+  AExtra := '';
+  LNMiss := 0;
+  LNExtra := 0;
+  LI := 0;
+  LJ := 0;
+  while (LI < Length(ARef)) or (LJ < Length(AOvl)) do
+  begin
+    if LI >= Length(ARef) then
+      LCmp := 1
+    else if LJ >= Length(AOvl) then
+      LCmp := -1
+    else
+      LCmp := CompareStr(ARef[LI], AOvl[LJ]);
+    if LCmp = 0 then
+    begin
+      Inc(LI);
+      Inc(LJ);
+    end
+    else if LCmp < 0 then
+    begin
+      if LNMiss < SHOW then
+        AMissing := AMissing + ' ' + ARef[LI];
+      Inc(LNMiss);
+      Inc(LI);
+    end
+    else
+    begin
+      if LNExtra < SHOW then
+        AExtra := AExtra + ' ' + AOvl[LJ];
+      Inc(LNExtra);
+      Inc(LJ);
+    end;
+  end;
+  ADiffers := (LNMiss > 0) or (LNExtra > 0);
+  if LNMiss > SHOW then
+    AMissing := AMissing + Format(' (+%d)', [LNMiss - SHOW]);
+  if LNExtra > SHOW then
+    AExtra := AExtra + Format(' (+%d)', [LNExtra - SHOW]);
+end;
+
+procedure OverlayOneModel(AMid: Integer);
+var
+  LM, LOvModel: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LOvTree: TPasTree;
+  LRef, LOvl: TPasCompletion;
+  LDots, LCalls: TArray<Integer>;   // visible index of each `.` / `(`
+  LRow: TOvlRow;
+
+  procedure Collect;
+  var
+    LNode, LVis, LUp, LTok: Integer;
+  begin
+    for LNode := 0 to High(LM.Tree.Nodes) do
+      case LM.Tree.Nodes[LNode].Kind of
+        nkMember:
+          begin
+            // FirstToken is the dot (see PasTree.Sema.Complete's header).
+            LVis := LM.Tree.Nodes[LNode].FirstToken;
+            if (LVis < 0) or (LVis > High(LM.Tree.Source.Visible)) or
+               (LM.Tree.Source.Visible[LVis].FileId <> 0) then
+              Continue;
+            LTok := LM.Tree.Source.Visible[LVis].TokenIndex;
+            if LTS.Tokens[LTok].Kind <> tkDot then
+              Continue;
+            // A dotted name in a module header or a uses clause is a
+            // naming position, not a member access.
+            LUp := LNode;
+            while (LUp <> NIL_NODE) and
+                  (LM.Tree.Nodes[LUp].Kind in [nkIdent, nkMember]) do
+              LUp := LM.Tree.Nodes[LUp].Parent;
+            if (LUp <> NIL_NODE) and (LM.Tree.Nodes[LUp].Kind in
+              [nkUnit, nkProgram, nkLibrary, nkPackage, nkUsesItem]) then
+              Continue;
+            LDots := LDots + [LVis];
+          end;
+        nkCall:
+          begin
+            LUp := LM.Tree.Nodes[LNode].FirstChild;
+            if LUp = NIL_NODE then
+              Continue;
+            LVis := LM.Tree.Nodes[LUp].LastToken + 1;
+            if (LVis < 1) or (LVis > High(LM.Tree.Source.Visible)) or
+               (LM.Tree.Source.Visible[LVis].FileId <> 0) then
+              Continue;
+            LTok := LM.Tree.Source.Visible[LVis].TokenIndex;
+            if LTS.Tokens[LTok].Kind <> tkLParen then
+              Continue;
+            LCalls := LCalls + [LVis];
+          end;
+      end;
+  end;
+
+  // Stride-sample ASites down to the per-unit cap.
+  function Sample(const ASites: TArray<Integer>): TArray<Integer>;
+  var
+    LTake: Integer;
+    LStride: Double;
+  begin
+    LTake := Length(ASites);
+    if (GMaxPerUnit > 0) and (LTake > GMaxPerUnit) then
+      LTake := GMaxPerUnit;
+    SetLength(Result, LTake);
+    if LTake = 0 then
+      Exit;
+    LStride := Length(ASites) / LTake;
+    for var LIdx := 0 to LTake - 1 do
+      Result[LIdx] := ASites[Min(Trunc(LIdx * LStride), High(ASites))];
+  end;
+
+  procedure CaretAfter(AVis: Integer; out ALine, ACol: Integer);
+  var
+    LTok: Integer;
+  begin
+    LTok := LM.Tree.Source.Visible[AVis].TokenIndex;
+    LTS.OffsetToLineCol(LTS.Tokens[LTok].Start, ALine, ACol);
+    Inc(ACol);   // right after the one-character `.` / `(`
+  end;
+
+var
+  LLine, LCol: Integer;
+  LCtxR, LCtxO: TPasComplContext;
+  LItR, LItO: TArray<TPasComplItem>;
+  LCallR, LCallO: TPasCallInfo;
+  LDiffers: Boolean;
+begin
+  LM := GProj.Model(AMid);
+  if (LM = nil) or (LM.Tree.Nodes = nil) then
+    Exit;
+  LTS := LM.Tree.Source.Files[0];
+  LDots := nil;
+  LCalls := nil;
+  Collect;
+  if (LDots = nil) and (LCalls = nil) then
+    Exit;
+  LDots := Sample(LDots);
+  LCalls := Sample(LCalls);
+
+  LPre := GOvlPP.ProcessText(GProj.ModelFile(AMid), LTS.Source);
+  LOvTree := TPasParser.ParseFile(LPre, LDiags);
+  LOvModel := TPasSemaResolver.Analyze(LOvTree, False, GPlatform);
+  LRef := nil;
+  LOvl := nil;
+  try
+    LRef := TPasCompletion.Create(LM, GProj, AMid);
+    LOvl := TPasCompletion.Create(LOvModel, GProj, AMid);
+    for var LVis in LDots do
+    begin
+      CaretAfter(LVis, LLine, LCol);
+      LRow.Site := Format('%s(%d,%d)', [GProj.ModelFile(AMid), LLine, LCol]);
+      LRow.What := 'dot';
+      LDiffers := False;
+      try
+        if not LRef.CompleteAt(LLine, LCol, LCtxR, LItR) then
+        begin
+          Inc(GOvlRefusedDots);
+          Continue;
+        end;
+        Inc(GOvlDots);
+        if not LOvl.CompleteAt(LLine, LCol, LCtxO, LItO) then
+        begin
+          LCtxO := ccNone;
+          LItO := nil;
+        end;
+        DiffSets(NameSet(LItR), NameSet(LItO), LRow.Missing, LRow.Extra,
+          LDiffers);
+        if LCtxR <> LCtxO then
+        begin
+          LDiffers := True;
+          LRow.Extra := LRow.Extra + Format(' [context %s vs %s]',
+            [CTX_NAMES[LCtxR], CTX_NAMES[LCtxO]]);
+        end;
+      except
+        on E: Exception do
+        begin
+          LDiffers := True;
+          LRow.Missing := '';
+          LRow.Extra := 'EXCEPTION ' + E.ClassName + ': ' + E.Message;
+        end;
+      end;
+      if LDiffers then
+      begin
+        Inc(GOvlDotDiff);
+        GOvlRows.Add(LRow);
+      end;
+    end;
+    for var LVis in LCalls do
+    begin
+      CaretAfter(LVis, LLine, LCol);
+      LRow.Site := Format('%s(%d,%d)', [GProj.ModelFile(AMid), LLine, LCol]);
+      LRow.What := 'call';
+      LDiffers := False;
+      try
+        if not LRef.CallAt(LLine, LCol, LCallR) or
+           (LCallR.Targets = nil) then
+          Continue;   // nothing proven to compare against
+        Inc(GOvlCalls);
+        if not LOvl.CallAt(LLine, LCol, LCallO) then
+          LCallO.Targets := nil;
+        DiffSets(TargetSet(LCallR), TargetSet(LCallO), LRow.Missing,
+          LRow.Extra, LDiffers);
+      except
+        on E: Exception do
+        begin
+          LDiffers := True;
+          LRow.Missing := '';
+          LRow.Extra := 'EXCEPTION ' + E.ClassName + ': ' + E.Message;
+        end;
+      end;
+      if LDiffers then
+      begin
+        Inc(GOvlCallDiff);
+        GOvlRows.Add(LRow);
+      end;
+    end;
+  finally
+    LOvl.Free;
+    LRef.Free;
+    LOvModel.Free;
+  end;
+end;
+
+procedure ReportOverlay;
+var
+  LShow: Integer;
+begin
+  Writeln(Format('overlay: %d dots (%d differ, %d refused by the reference),'
+    + ' %d calls (%d differ) in %d ms', [GOvlDots, GOvlDotDiff,
+    GOvlRefusedDots, GOvlCalls, GOvlCallDiff, GSW.ElapsedMilliseconds]));
+  if GOvlRows.Count = 0 then
+  begin
+    Writeln('OVERLAY CLEAN');
+    Exit;
+  end;
+  if GListAll then
+    LShow := GOvlRows.Count
+  else
+    LShow := Min(25, GOvlRows.Count);
+  Writeln(Format('first %d differences (- the overlay lacks, + it adds):',
+    [LShow]));
+  for var LIdx := 0 to LShow - 1 do
+    Writeln(Format('  %s %s -%s +%s', [GOvlRows[LIdx].Site,
+      GOvlRows[LIdx].What, GOvlRows[LIdx].Missing, GOvlRows[LIdx].Extra]));
+end;
+
 var
   LMid, LShow: Integer;
   LCtx: TPasComplContext;
@@ -369,7 +710,7 @@ begin
   if ParamCount < 1 then
   begin
     Writeln('usage: PasTreeCompleteOracle <dir|file.dpr> [-p:<platform>]'
-      + ' [-max:<N>] [-list] [-L<dir>]');
+      + ' [-max:<N>] [-list] [-overlay] [-L<dir>]');
     ExitCode := 2;
     Exit;
   end;
@@ -377,6 +718,7 @@ begin
   GPlatform := pfWin32;
   GMaxPerUnit := 200;
   GListAll := False;
+  GOverlay := False;
   GExtraPaths := nil;
   for GIdx := 2 to ParamCount do
   begin
@@ -394,6 +736,8 @@ begin
       GMaxPerUnit := StrToIntDef(Copy(GArg, 6, MaxInt), 200)
     else if SameText(GArg, '-list') then
       GListAll := True
+    else if SameText(GArg, '-overlay') then
+      GOverlay := True
     else if GArg.StartsWith('-at:', True) then
       GAtSpec := Copy(GArg, 5, MaxInt)
     else if GArg.StartsWith('-studio:', True) then
@@ -454,6 +798,29 @@ begin
     end;
 
     GSW := TStopwatch.StartNew;
+    if GOverlay then
+    begin
+      if GDProj <> nil then
+        EnsureOverlayPP([GDProj.Dir] + GDProj.SearchPaths
+          + StudioSearchPaths(GStudio) + GExtraPaths, GDProj.Defines)
+      else if TDirectory.Exists(GPath) then
+        EnsureOverlayPP([GPath] + GExtraPaths, [])
+      else
+        EnsureOverlayPP([ExtractFileDir(ExpandFileName(GPath))]
+          + GExtraPaths, []);
+      GOvlRows := TList<TOvlRow>.Create;
+      try
+        for LMid := 0 to GProj.ModelCount - 1 do
+          OverlayOneModel(LMid);
+        ReportOverlay;
+      finally
+        GOvlRows.Free;
+        GOvlPP.Free;
+        GOvlDefines.Free;
+        GOvlSM.Free;
+      end;
+      Exit;
+    end;
     for LMid := 0 to GProj.ModelCount - 1 do
       OracleOneModel(LMid);
 
