@@ -111,7 +111,10 @@ type
     function DecodeRange(AFrom, ACount: Integer): string;
   public
     Path: string;
-    // The text as read - or, for a binary form file, as converted.
+    // The text as read - or, for a binary form file, as converted. A binary
+    // file the RTL could not convert keeps its ORIGINAL bytes (Error set,
+    // nothing read): its names are length-prefixed strings MentionsText still
+    // finds.
     Bytes: TBytes;
     Encoding: TPasDfmEncoding;
     BomLen: Integer;
@@ -119,6 +122,9 @@ type
     // '' when the whole file was read. Otherwise why not, and Objects/Props/
     // Idents hold what was read before that point.
     Error: string;
+    // The file exists but its bytes could not be read at all (held open for
+    // writing, denied): nothing is known of it, Bytes is empty.
+    Unreadable: Boolean;
     // The byte offset of the first token after the root object's `end`; 0
     // when nothing follows it (the root comes first, so no token after it
     // is at 0). dcc's form conversion reads one object and drops the rest,
@@ -131,17 +137,20 @@ type
     function Doc: TPasDfmDoc;
     // The line TrailingOffset is on; 0 when nothing follows the root.
     function TrailingLine: Integer;
-    // Whether the text after the root's `end` spells ANameLower as a word -
-    // what "no form file names it" owes a reader who greps the file.
-    function MentionsTrailing(const ANameLower: string): Boolean;
+    // Whether the text after the root's `end` spells AName as a word - what
+    // "no form file names it" owes a reader who greps the file. Case-
+    // insensitive (FoldName), a letter of any script a word character.
+    function MentionsTrailing(const AName: string): Boolean;
     // The identifier's text as written.
     function IdentText(AIdx: Integer): string;
     // Every identifier spelled ANameLower (case-insensitively - form files
     // are read by the RTL with SameText rules); ANameLower must be lower case.
     function FindIdents(const ANameLower: string): TArray<Integer>;
-    // Whether ANameLower occurs anywhere in the bytes - the one question an
-    // UNREADABLE file can still answer ("might it name this symbol?").
-    function MentionsText(const ANameLower: string): Boolean;
+    // Whether AName occurs anywhere in the bytes, case-insensitively
+    // (FoldName) - the one question an UNREADABLE file can still answer
+    // ("might it name this symbol?"). True for a file whose bytes could not
+    // be read (Unreadable): unknown means it might.
+    function MentionsText(const AName: string): Boolean;
     function LineOf(AOffset: Integer): Integer;          // 1-based
     function ColOf(AOffset: Integer): Integer;           // 1-based, characters
     function LineText(ALine: Integer): string;           // trailing blanks trimmed
@@ -189,6 +198,7 @@ uses
   Winapi.Windows,
 {$ENDIF}
   System.IOUtils,
+  System.Character,
   System.Generics.Collections;
 
 type
@@ -618,10 +628,32 @@ begin
   end;
 end;
 
-function TPasDfmDoc.MentionsText(const ANameLower: string): Boolean;
+// The one case rule of the text searches below: the RTL reads a form's names
+// with SameText, and the name a caller holds may be folded already (a symbol
+// key) or not - both sides fold here, every script alike (audit B1-25).
+function FoldName(const AText: string): string;
 begin
-  Result := Pos(ANameLower, LowerCase(DecodeRange(BomLen,
+  Result := AnsiLowerCase(AText);
+end;
+
+function TPasDfmDoc.MentionsText(const AName: string): Boolean;
+var
+  LName: string;
+begin
+  if Unreadable then
+    Exit(True);
+  LName := FoldName(AName);
+  if LName = '' then
+    Exit(False);
+  Result := Pos(LName, FoldName(DecodeRange(BomLen,
     Length(Bytes) - BomLen))) > 0;
+  // An unconverted binary file stores a non-ASCII name as UTF-8, which the
+  // ANSI reading above garbles (and a strict UTF-8 reading of the whole
+  // stream raises on): unknown, so it might.
+  if not Result and IsBinary and (Error <> '') then
+    for var LChar in LName do
+      if Ord(LChar) > 127 then
+        Exit(True);
 end;
 
 function TPasDfmDoc.TrailingLine: Integer;
@@ -631,26 +663,32 @@ begin
   Result := LineOf(TrailingOffset);
 end;
 
-function TPasDfmDoc.MentionsTrailing(const ANameLower: string): Boolean;
+function TPasDfmDoc.MentionsTrailing(const AName: string): Boolean;
+
+  function IsWordChar(AChar: Char): Boolean;
+  begin
+    Result := (AChar = '_') or AChar.IsLetterOrDigit;
+  end;
+
 var
-  LText: string;
+  LText, LName: string;
   LAt: Integer;
 begin
   Result := False;
-  if (TrailingOffset <= 0) or (ANameLower = '') then
+  LName := FoldName(AName);
+  if (TrailingOffset <= 0) or (LName = '') then
     Exit;
-  LText := LowerCase(DecodeRange(TrailingOffset, Length(Bytes) -
+  LText := FoldName(DecodeRange(TrailingOffset, Length(Bytes) -
     TrailingOffset));
-  LAt := Pos(ANameLower, LText);
+  LAt := Pos(LName, LText);
   while LAt > 0 do
   begin
     // A whole word: `OnClick = SaveClick` names SaveClick, not Save.
-    if ((LAt = 1) or not CharInSet(LText[LAt - 1], ['a'..'z', '0'..'9', '_']))
-       and ((LAt + Length(ANameLower) > Length(LText)) or
-       not CharInSet(LText[LAt + Length(ANameLower)], ['a'..'z', '0'..'9',
-       '_'])) then
+    if ((LAt = 1) or not IsWordChar(LText[LAt - 1])) and
+       ((LAt + Length(LName) > Length(LText)) or
+        not IsWordChar(LText[LAt + Length(LName)])) then
       Exit(True);
-    LAt := Pos(ANameLower, LText, LAt + 1);
+    LAt := Pos(LName, LText, LAt + 1);
   end;
 end;
 
@@ -850,7 +888,7 @@ begin
     LDoc.IsBinary := True;
     if not BinaryToText(ABytes, LText, LError) then
     begin
-      LDoc.Bytes := nil;
+      // The original bytes stay for MentionsText (audit B1-24).
       LDoc.Error := LError;
       LDoc.FLineStarts := [0];
       Exit;
@@ -944,6 +982,7 @@ begin
       Result := LDoc;
       LDoc.Path := APath;
       LDoc.Error := 'could not be read: ' + E.Message;
+      LDoc.Unreadable := True;
       LDoc.FLineStarts := [0];
       Exit;   // not cached: the next call tries again
     end;

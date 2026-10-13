@@ -218,6 +218,10 @@ type
       RootClass: TSemaXType;
       ObjDone: TArray<Boolean>;
       ObjClass: TArray<TSemaXType>;
+      // The published field an object's name fills (ObjFieldOf), filled by
+      // ObjClassOf with ObjClass; NIL_SYM when none.
+      ObjFieldMid: TArray<Integer>;
+      ObjFieldSym: TArray<Integer>;
       // IsInlineObj, memoized: 0 not yet known, 1 no, 2 yes.
       ObjInline: TArray<Byte>;
     end;
@@ -250,10 +254,24 @@ type
     function HeaderLookupRoot(AEntry: TFormEntry; AObj: Integer): Integer;
     function InnerLookupRoot(AEntry: TFormEntry; AObj: Integer): Integer;
     function ObjClassOf(AEntry: TFormEntry; AObj: Integer): TSemaXType;
+    function ObjFieldOf(AEntry: TFormEntry; AObj: Integer;
+      out AFMid, AFSym: Integer): Boolean;
+    function TopObjectNamed(AEntry: TFormEntry;
+      const ANameLower: string): Integer;
+    function MemberNamed(AMid: Integer; const AClass: TSemaXType;
+      const ANameLower: string; out AFMid, AFSym: Integer): Boolean;
+    function MemberOfKind(AMid: Integer; const AClass: TSemaXType;
+      const ANameLower: string; AKind: TSemaSymbolKind; APublished: Boolean;
+      out AFMid, AFSym: Integer): Boolean;
+    function SymIsKind(AMid, ASym: Integer; AKind: TSemaSymbolKind;
+      APublished: Boolean): Boolean;
     function FieldIn(AMid: Integer; const AClass: TSemaXType;
       const ANameLower: string; out AFMid, AFSym: Integer): Boolean;
     function MethodIn(AMid: Integer; const AClass: TSemaXType;
       const ANameLower: string; out AFMid, AFSym: Integer): Boolean;
+    function WalkPath(AEntry: TFormEntry; AFirst, AFromSeg, ALastSeg: Integer;
+      const AClass: TSemaXType; AByName: Boolean;
+      out ATMid, ATSym: Integer): Boolean;
     function FieldClass(AFMid, AFSym: Integer): TSemaXType;
     function SameType(const A, B: TSemaXType): Boolean;
     function ShapeOf(ATMid, ASym: Integer; out AOwner: TSemaXType): TSymShape;
@@ -267,7 +285,6 @@ type
     function SiteOf(AEntry: TFormEntry; AIdent: Integer;
       AKind: TPasFormSiteKind; AVia: TPasFormSiteVia): TPasFormSite;
     function EntryOf(const APath: string): TFormEntry;
-    function SameProperty(AMid1, ASym1, AMid2, ASym2: Integer): Boolean;
     function CreatedIn(const AClass: TSemaXType; const ANameLower: string;
       out AObjClass: TSemaXType): Boolean;
     function ReachedByName(AEntry: TFormEntry; AIdent: Integer): Boolean;
@@ -551,6 +568,8 @@ begin
       LEntry.ObjDone := nil;
       SetLength(LEntry.ObjDone, Length(LDoc.Doc.Objects));
       SetLength(LEntry.ObjClass, Length(LDoc.Doc.Objects));
+      SetLength(LEntry.ObjFieldMid, Length(LDoc.Doc.Objects));
+      SetLength(LEntry.ObjFieldSym, Length(LDoc.Doc.Objects));
       LEntry.ObjInline := nil;
       SetLength(LEntry.ObjInline, Length(LDoc.Doc.Objects));
       FRootNamesBuilt := False;
@@ -686,7 +705,7 @@ var
   LClass: TSemaXType;
   LAnc: TFormEntry;
   LName: string;
-  LFound, LAnswer: Boolean;
+  LAnswer: Boolean;
 begin
   Result := False;
   LDoc := DocOf(AEntry);
@@ -701,7 +720,7 @@ begin
   if AEntry.ObjInline[AObj] <> 0 then
     Exit(AEntry.ObjInline[AObj] = 2);
   AEntry.ObjInline[AObj] := 1;   // "no" while it is worked out: no cycle
-  LName := LDoc.ObjectName(AObj);
+  LName := LowerCase(LDoc.ObjectName(AObj));
   LOwnerObj := HeaderLookupRoot(AEntry, AObj);
   LClass := ObjClassOf(AEntry, LOwnerObj);
   // A component of the form: created by an ANCESTOR's form file - this one
@@ -716,18 +735,13 @@ begin
     if (LAnc <> nil) and (LAnc <> AEntry) then
     begin
       LAncDoc := DocOf(LAnc);
-      LFound := False;
-      for LIdx := 1 to High(LAncDoc.Objects) do
-        if SameText(LAncDoc.ObjectName(LIdx), LName) and
-           (HeaderLookupRoot(LAnc, LIdx) = 0) then
-        begin
-          LFound := LAncDoc.Objects[LIdx].Kind <> dokInherited;
-          if LFound then
-            LAnswer := LAncDoc.Objects[LIdx].Kind = dokInline;
-          Break;
-        end;
-      if LFound then
+      LIdx := TopObjectNamed(LAnc, LName);
+      // `inherited` there only reopens it: one class further up.
+      if (LIdx > 0) and (LAncDoc.Objects[LIdx].Kind <> dokInherited) then
+      begin
+        LAnswer := LAncDoc.Objects[LIdx].Kind = dokInline;
         Break;
+      end;
     end;
     LClass := FProj.CanonTypeX(FProj.AncestorOfX(LClass));
     Inc(LGuard);
@@ -790,13 +804,19 @@ begin
     Exit(AEntry.ObjClass[AObj]);
   AEntry.ObjDone[AObj] := True;
   AEntry.ObjClass[AObj] := XNil;
+  AEntry.ObjFieldMid[AObj] := NIL_SYM;
+  AEntry.ObjFieldSym[AObj] := NIL_SYM;
   LClassName := LDoc.ObjectClassName(AObj);
   LName := LowerCase(LDoc.ObjectName(AObj));
   LFieldType := XNil;
   LOwner := ObjClassOf(AEntry, HeaderLookupRoot(AEntry, AObj));
   if (LName <> '') and XValid(LOwner) and
      FieldIn(AEntry.Mid, LOwner, LName, LFMid, LFSym) then
+  begin
+    AEntry.ObjFieldMid[AObj] := LFMid;
+    AEntry.ObjFieldSym[AObj] := LFSym;
     LFieldType := FieldClass(LFMid, LFSym);
+  end;
   if XValid(LFieldType) and SameText(
      FProj.Model(LFieldType.UnitId).Symbols[LFieldType.Sym].Name, LClassName) then
     Result := LFieldType
@@ -809,39 +829,83 @@ begin
   AEntry.ObjClass[AObj] := Result;
 end;
 
+// The published field an object's NAME fills - the header root's class's,
+// what FieldAddress finds when TReader creates it (ObjClassOf works it out).
+function TPasFormBinder.ObjFieldOf(AEntry: TFormEntry; AObj: Integer;
+  out AFMid, AFSym: Integer): Boolean;
+begin
+  AFMid := NIL_SYM;
+  AFSym := NIL_SYM;
+  if (AObj <= 0) or (AObj > High(DocOf(AEntry).Objects)) then
+    Exit(False);
+  ObjClassOf(AEntry, AObj);
+  AFMid := AEntry.ObjFieldMid[AObj];
+  AFSym := AEntry.ObjFieldSym[AObj];
+  Result := AFSym <> NIL_SYM;
+end;
+
+// The component named ANameLower at the TOP of the form - not inside an
+// inline frame's block, where the name is the frame's - first in file order;
+// 0 when there is none. Through FindIdents, so no object's name is decoded.
+function TPasFormBinder.TopObjectNamed(AEntry: TFormEntry;
+  const ANameLower: string): Integer;
+var
+  LDoc: TPasDfmDoc;
+  LIdx: Integer;
+begin
+  LDoc := DocOf(AEntry);
+  for LIdx in LDoc.FindIdents(ANameLower) do
+    if (LDoc.Idents[LIdx].Role = dirObjectName) and
+       (LDoc.Idents[LIdx].Obj > 0) and
+       (HeaderLookupRoot(AEntry, LDoc.Idents[LIdx].Obj) = 0) then
+      Exit(LDoc.Idents[LIdx].Obj);
+  Result := 0;
+end;
+
+// Any member named ANameLower reachable from AClass (its ancestors
+// included), whatever its kind - "found, but not that kind" is not "not
+// found" for every caller.
+function TPasFormBinder.MemberNamed(AMid: Integer; const AClass: TSemaXType;
+  const ANameLower: string; out AFMid, AFSym: Integer): Boolean;
+var
+  LCtx: Integer;
+begin
+  Result := XValid(AClass) and FProj.FindMemberX(AMid, AClass, ANameLower,
+    AFMid, AFSym, LCtx) and (AFMid >= 0) and (AFSym <> NIL_SYM);
+end;
+
+// MemberNamed of kind AKind - published (or default visibility) when
+// APublished. Read in place: no symbol record is copied.
+function TPasFormBinder.MemberOfKind(AMid: Integer; const AClass: TSemaXType;
+  const ANameLower: string; AKind: TSemaSymbolKind; APublished: Boolean;
+  out AFMid, AFSym: Integer): Boolean;
+begin
+  Result := MemberNamed(AMid, AClass, ANameLower, AFMid, AFSym) and
+    SymIsKind(AFMid, AFSym, AKind, APublished);
+end;
+
+function TPasFormBinder.SymIsKind(AMid, ASym: Integer; AKind: TSemaSymbolKind;
+  APublished: Boolean): Boolean;
+begin
+  Result := (FProj.Model(AMid).Symbols[ASym].Kind = AKind) and
+    (not APublished or (FProj.Model(AMid).Symbols[ASym].Visibility in
+     [svDefault, svPublished]));
+end;
+
 // A published FIELD named ANameLower reachable from AClass (its ancestors
 // included) - what FieldAddress would find.
 function TPasFormBinder.FieldIn(AMid: Integer; const AClass: TSemaXType;
   const ANameLower: string; out AFMid, AFSym: Integer): Boolean;
-var
-  LCtx: Integer;
-  LSym: TSemaSymbol;
 begin
-  Result := XValid(AClass) and FProj.FindMemberX(AMid, AClass, ANameLower,
-    AFMid, AFSym, LCtx) and (AFMid >= 0) and (AFSym <> NIL_SYM);
-  if Result then
-  begin
-    LSym := FProj.Model(AFMid).Symbols[AFSym];
-    Result := (LSym.Kind = skField) and
-      (LSym.Visibility in [svDefault, svPublished]);
-  end;
+  Result := MemberOfKind(AMid, AClass, ANameLower, skField, True, AFMid, AFSym);
 end;
 
 // A published METHOD - what MethodAddress would find.
 function TPasFormBinder.MethodIn(AMid: Integer; const AClass: TSemaXType;
   const ANameLower: string; out AFMid, AFSym: Integer): Boolean;
-var
-  LCtx: Integer;
-  LSym: TSemaSymbol;
 begin
-  Result := XValid(AClass) and FProj.FindMemberX(AMid, AClass, ANameLower,
-    AFMid, AFSym, LCtx) and (AFMid >= 0) and (AFSym <> NIL_SYM);
-  if Result then
-  begin
-    LSym := FProj.Model(AFMid).Symbols[AFSym];
-    Result := (LSym.Kind = skRoutine) and
-      (LSym.Visibility in [svDefault, svPublished]);
-  end;
+  Result := MemberOfKind(AMid, AClass, ANameLower, skRoutine, True, AFMid,
+    AFSym);
 end;
 
 function TPasFormBinder.FieldClass(AFMid, AFSym: Integer): TSemaXType;
@@ -956,23 +1020,11 @@ var
   LRoots: TArray<Integer>;
   LHasMethod: Boolean;
 
-  // Segments 1..LId.Seg of the path, from LClass on.
-  function Walk(AFrom: TSemaXType): Boolean;
-  var
-    LS: Integer;
-    LC: TSemaXType;
+  // Segments 1..LId.Seg of the path, from AFrom on, through fields.
+  function Walk(const AFrom: TSemaXType): Boolean;
   begin
-    Result := False;
-    LC := AFrom;
-    for LS := 1 to LId.Seg do
-    begin
-      if not FieldIn(AEntry.Mid, LC, LowerCase(LDoc.IdentText(LFirst + LS)),
-        ATMid, ATSym) then
-        Exit;
-      if LS < LId.Seg then
-        LC := FieldClass(ATMid, ATSym);
-    end;
-    Result := LId.Seg >= 1;
+    Result := WalkPath(AEntry, LFirst, 1, LId.Seg, AFrom, False, ATMid,
+      ATSym);
   end;
 
 begin
@@ -1074,28 +1126,49 @@ begin
   Result.IsUtf8 := LDoc.Encoding = dfeUtf8;
 end;
 
-// Whether two property declarations are one property: each followed up its
-// bare redeclarations (`property X;`) to the declaration that writes the type.
-function TPasFormBinder.SameProperty(AMid1, ASym1, AMid2, ASym2: Integer): Boolean;
-
-  procedure Up(var AMid, ASym: Integer);
-  var
-    LPMid, LPSym, LDepth: Integer;
-  begin
-    for LDepth := 1 to 32 do
-    begin
-      if not FProj.IsBarePropertyRedecl(AMid, ASym) or
-         not FProj.PropertyRedeclPrev(AMid, ASym, LPMid, LPSym) then
-        Exit;
-      AMid := LPMid;
-      ASym := LPSym;
-    end;
-  end;
-
+{ Segments AFromSeg..ALastSeg of the component path whose segment 0 is ident
+  AFirst, from AClass on: each segment a published field of the class so far
+  (ATMid, ATSym: the last one), or with AByName also a component the form
+  files of that class create without a field (CreatedIn: what
+  FindNestedComponent finds by Name - ATSym NIL_SYM then). The one walk of
+  ValueTarget (fields only: what binds a symbol) and ReachedByName (audit
+  B2-41). False for an empty range. }
+function TPasFormBinder.WalkPath(AEntry: TFormEntry; AFirst, AFromSeg,
+  ALastSeg: Integer; const AClass: TSemaXType; AByName: Boolean;
+  out ATMid, ATSym: Integer): Boolean;
+var
+  LDoc: TPasDfmDoc;
+  LC, LNext: TSemaXType;
+  LS: Integer;
+  LName: string;
 begin
-  Up(AMid1, ASym1);
-  Up(AMid2, ASym2);
-  Result := (AMid1 = AMid2) and (ASym1 = ASym2);
+  Result := False;
+  ATMid := NIL_SYM;
+  ATSym := NIL_SYM;
+  if ALastSeg < AFromSeg then
+    Exit;
+  LDoc := DocOf(AEntry);
+  LC := AClass;
+  for LS := AFromSeg to ALastSeg do
+  begin
+    if not XValid(LC) then
+      Exit;
+    LName := LowerCase(LDoc.IdentText(AFirst + LS));
+    if FieldIn(AEntry.Mid, LC, LName, ATMid, ATSym) then
+    begin
+      if LS < ALastSeg then
+        LC := FieldClass(ATMid, ATSym);
+    end
+    else if AByName and CreatedIn(LC, LName, LNext) then
+    begin
+      ATMid := NIL_SYM;
+      ATSym := NIL_SYM;
+      LC := LNext;   // not CreatedIn(LC, ..., LC): the out clears the const
+    end
+    else
+      Exit;
+  end;
+  Result := True;
 end;
 
 { Whether a form file of AClass's chain - its own, then its ancestors' -
@@ -1107,8 +1180,7 @@ function TPasFormBinder.CreatedIn(const AClass: TSemaXType;
 var
   LK: TSemaXType;
   LEntry: TFormEntry;
-  LDoc: TPasDfmDoc;
-  LIdx, LGuard: Integer;
+  LObj, LGuard: Integer;
 begin
   AObjClass := XNil;
   LK := AClass;
@@ -1118,14 +1190,12 @@ begin
     LEntry := RootEntryOfClass(LK);
     if LEntry <> nil then
     begin
-      LDoc := DocOf(LEntry);
-      for LIdx := 1 to High(LDoc.Objects) do
-        if SameText(LDoc.ObjectName(LIdx), ANameLower) and
-           (HeaderLookupRoot(LEntry, LIdx) = 0) then
-        begin
-          AObjClass := ObjClassOf(LEntry, LIdx);
-          Exit(True);
-        end;
+      LObj := TopObjectNamed(LEntry, ANameLower);
+      if LObj > 0 then
+      begin
+        AObjClass := ObjClassOf(LEntry, LObj);
+        Exit(True);
+      end;
     end;
     LK := FProj.CanonTypeX(FProj.AncestorOfX(LK));
     Inc(LGuard);
@@ -1136,46 +1206,38 @@ end;
 { Whether the component path ending at AIdent names a component that exists
   at run time though no field chain reaches it: a segment is a field, else a
   component the form files of the class so far create (CreatedIn) - what
-  FindNestedComponent walks by Name. From the lookup root, and inside an
-  inline frame's block from the form's root too (see ValueTarget). A frame's
-  component the designer left without a field read as a dangling reference
-  (probed, dcc32 37.0: it binds). }
+  FindNestedComponent walks by Name. From the starting points ValueTarget
+  has: the lookup root, inside an inline frame's block the form's root too,
+  and another module's root by its Name (`DM.Table1`, a data module's
+  component with no field - audit B2-41). A frame's component the designer
+  left without a field read as a dangling reference (probed, dcc32 37.0: it
+  binds). }
 function TPasFormBinder.ReachedByName(AEntry: TFormEntry;
   AIdent: Integer): Boolean;
 var
   LDoc: TPasDfmDoc;
   LId: TPasDfmIdent;
-  LFirst: Integer;
-
-  function From(const AClass: TSemaXType): Boolean;
-  var
-    LC, LNext: TSemaXType;
-    LS, LFMid, LFSym: Integer;
-    LName: string;
-  begin
-    Result := False;
-    LC := AClass;
-    for LS := 0 to LId.Seg do
-    begin
-      if not XValid(LC) then
-        Exit;
-      LName := LowerCase(LDoc.IdentText(LFirst + LS));
-      if FieldIn(AEntry.Mid, LC, LName, LFMid, LFSym) then
-        LC := FieldClass(LFMid, LFSym)
-      else if CreatedIn(LC, LName, LNext) then
-        LC := LNext   // not CreatedIn(LC, ..., LC): the out clears the const
-      else
-        Exit;
-    end;
-    Result := True;
-  end;
-
+  LFirst, LTMid, LTSym, LCand: Integer;
+  LRoots: TArray<Integer>;
 begin
   LDoc := DocOf(AEntry);
   LId := LDoc.Idents[AIdent];
   LFirst := AIdent - LId.Seg;
-  Result := From(ObjClassOf(AEntry, InnerLookupRoot(AEntry, LId.Obj))) or
-    ((InnerLookupRoot(AEntry, LId.Obj) > 0) and From(RootClassOf(AEntry)));
+  if WalkPath(AEntry, LFirst, 0, LId.Seg, ObjClassOf(AEntry,
+     InnerLookupRoot(AEntry, LId.Obj)), True, LTMid, LTSym) then
+    Exit(True);
+  if (InnerLookupRoot(AEntry, LId.Obj) > 0) and WalkPath(AEntry, LFirst, 0,
+     LId.Seg, RootClassOf(AEntry), True, LTMid, LTSym) then
+    Exit(True);
+  Result := False;
+  if LId.Seg = 0 then
+    Exit;
+  EnsureRootNames;
+  if FRootNames.TryGetValue(LowerCase(LDoc.IdentText(LFirst)), LRoots) then
+    for LCand in LRoots do
+      if WalkPath(AEntry, LFirst, 1, LId.Seg, RootClassOf(FForms[LCand]),
+         True, LTMid, LTSym) then
+        Exit(True);
 end;
 
 // The declared type of AClass's property ANameLower (a bare redeclaration
@@ -1184,12 +1246,11 @@ end;
 function TPasFormBinder.PropClassOf(AMid: Integer; const AClass: TSemaXType;
   const ANameLower: string; out AFound: Boolean): TSemaXType;
 var
-  LPMid, LPSym, LCtx: Integer;
+  LPMid, LPSym: Integer;
 begin
   Result := XNil;
-  AFound := XValid(AClass) and FProj.FindMemberX(AMid, AClass, ANameLower,
-    LPMid, LPSym, LCtx) and (LPMid >= 0) and (LPSym <> NIL_SYM) and
-    (FProj.Model(LPMid).Symbols[LPSym].Kind = skProperty);
+  AFound := MemberOfKind(AMid, AClass, ANameLower, skProperty, False, LPMid,
+    LPSym);
   if AFound then
     Result := FProj.CanonTypeX(FProj.SymDeclTypeX(LPMid, LPSym));
 end;
@@ -1370,7 +1431,7 @@ var
   LList: TList<TPasFormSite>;
   LEntry: TFormEntry;
   LDoc: TPasDfmDoc;
-  LIdx, LTMid, LTSym, LCtx: Integer;
+  LIdx, LTMid, LTSym, LRootMid, LRootSym, LPMid, LPSym: Integer;
   LId: TPasDfmIdent;
   LIsMethod: Boolean;
   LVia: TPasFormSiteVia;
@@ -1406,10 +1467,18 @@ begin
   LShape := ShapeOf(ATMid, ASym, LOwner);
   if LShape = ssNone then
     Exit;
-  LNameLower := AnsiLowerCase(FProj.Model(ATMid).Symbols[ASym].Name);
+  // The symbol's KEY: the form spells the RTTI name - `Type` for `&Type` -
+  // and its name lookups fold as the key does (audit A2-36).
+  LNameLower := FProj.Model(ATMid).Symbols[ASym].NameLower;
   LSelf := XNil;
   if LShape = ssClass then
     LSelf := FProj.CanonTypeX(XPlain(ATMid, ASym));
+  // A property's sites are those of the declaration it republishes: the
+  // target's root, once for the query.
+  LRootMid := ATMid;
+  LRootSym := ASym;
+  if LShape = ssProperty then
+    FProj.PropertyRedeclRoot(ATMid, ASym, LRootMid, LRootSym);
   Refresh;
   LList := TList<TPasFormSite>.Create;
   try
@@ -1447,8 +1516,8 @@ begin
                       Exit;
                     end;
                   end
-                  else if FieldIn(LEntry.Mid, LClass, LNameLower, LTMid,
-                    LTSym) and (LTMid = ATMid) and (LTSym = ASym) then
+                  else if ObjFieldOf(LEntry, LId.Obj, LTMid, LTSym) and
+                    (LTMid = ATMid) and (LTSym = ASym) then
                     LList.Add(SiteOf(LEntry, LIdx, fskComponent,
                       HeaderVia(LEntry, LId.Obj)));
                 end;
@@ -1545,15 +1614,15 @@ begin
                   LList.Add(LSite);
                 Continue;
               end;
-              if FProj.FindMemberX(LEntry.Mid, LClass, LNameLower, LTMid,
-                 LTSym, LCtx) and (LTMid >= 0) and (LTSym <> NIL_SYM) then
+              if MemberNamed(LEntry.Mid, LClass, LNameLower, LTMid, LTSym) then
               begin
-                if (FProj.Model(LTMid).Symbols[LTSym].Kind = skProperty) and
-                   (FProj.Model(LTMid).Symbols[LTSym].Visibility in
-                   [svDefault, svPublished]) and
-                   SameProperty(LTMid, LTSym, ATMid, ASym) then
-                  LList.Add(SiteOf(LEntry, LIdx, fskProperty,
-                    HeaderVia(LEntry, LId.Obj)));
+                if SymIsKind(LTMid, LTSym, skProperty, True) then
+                begin
+                  FProj.PropertyRedeclRoot(LTMid, LTSym, LPMid, LPSym);
+                  if (LPMid = LRootMid) and (LPSym = LRootSym) then
+                    LList.Add(SiteOf(LEntry, LIdx, fskProperty,
+                      HeaderVia(LEntry, LId.Obj)));
+                end;
               end
               else if LDeclared and not SameType(LClass, LOwner) and
                 FProj.XDescendsFrom(LOwner, LClass) and
@@ -1622,8 +1691,8 @@ var
   LShape: TSymShape;
   LOwner, LRoot: TSemaXType;
   LNewLower, LMember: string;
-  LAscii: Boolean;
-  LIdx, LObj, LMMid, LMSym, LCtx: Integer;
+  LAscii, LCaseOnly: Boolean;
+  LIdx, LObj, LMMid, LMSym: Integer;
   LEntry: TFormEntry;
   LDoc: TPasDfmDoc;
 begin
@@ -1646,7 +1715,11 @@ begin
   LShape := ShapeOf(ATMid, ASym, LOwner);
   if not (LShape in [ssField, ssMethod]) or (Length(ASites) = 0) then
     Exit;
-  LNewLower := AnsiLowerCase(ANewName);
+  // Keys as the symbols' (A2-36): `&Type` is `type`. A case-only rename
+  // (btnok -> btnOK) can collide with no component but its own (B2-42) -
+  // TComponent.ValidateRename allows it.
+  LNewLower := PasNameKey(ANewName);
+  LCaseOnly := LNewLower = FProj.Model(ATMid).Symbols[ASym].NameLower;
   // Every form that streams the owner - its own and its descendants' - must
   // not already reach a member, or hold a component, of the new name. The
   // docs are the ones SitesOf just refreshed.
@@ -1658,8 +1731,7 @@ begin
     LRoot := RootClassOf(LEntry);
     if not XValid(LRoot) or (FProj.XDescent(LRoot, LOwner) = xdNo) then
       Continue;
-    if FProj.FindMemberX(LEntry.Mid, LRoot, LNewLower, LMMid, LMSym, LCtx) and
-       (LMMid >= 0) and (LMSym <> NIL_SYM) and
+    if MemberNamed(LEntry.Mid, LRoot, LNewLower, LMMid, LMSym) and
        ((LMMid <> ATMid) or (LMSym <> ASym)) then
     begin
       LMember := FProj.Model(LMMid).Symbols[LMSym].Name;
@@ -1668,12 +1740,13 @@ begin
         'planned.', [LDoc.RootClassName, LMember,
         TPath.GetFileName(FProj.ModelFile(LMMid))]));
     end;
-    for LObj := 1 to High(LDoc.Objects) do
-      if (HeaderLookupRoot(LEntry, LObj) = 0) and
-         SameText(LDoc.ObjectName(LObj), ANewName) then
-        Exit(Format('%s already has a component named "%s" - rename ' +
-          'refused, nothing planned.', [TPath.GetFileName(LEntry.Path),
-          LDoc.ObjectName(LObj)]));
+    if LCaseOnly then
+      Continue;
+    LObj := TopObjectNamed(LEntry, LNewLower);
+    if LObj > 0 then
+      Exit(Format('%s already has a component named "%s" - rename ' +
+        'refused, nothing planned.', [TPath.GetFileName(LEntry.Path),
+        LDoc.ObjectName(LObj)]));
   end;
 end;
 
@@ -1697,7 +1770,10 @@ begin
   LShape := ShapeOf(ATMid, ASym, LOwner);
   if (LShape <> ssField) or (Length(ASites) = 0) then
     Exit;
+  // The names a form spells: the RTTI name, no `&` (A2-36).
   LOldName := FProj.Model(ATMid).Symbols[ASym].Name;
+  if LOldName.StartsWith('&') then
+    Delete(LOldName, 1, 1);
   if not FListed then
     Refresh;
   // An action's clients, as far as form files say: whatever links it
@@ -1796,8 +1872,9 @@ begin
   if not XValid(LOwner) then
     Exit;
   Result.OwnerClass := FProj.Model(LOwner.UnitId).Symbols[LOwner.Sym].Name;
-  if not FListed then
-    Refresh;
+  // A public entry point (TPasNavigator.FormRoleOf): a form file written
+  // since the last query is read now, as every other query reads it (B2-43).
+  Refresh;
   for LEntry in FForms do
   begin
     LRoot := RootClassOf(LEntry);
@@ -1819,7 +1896,6 @@ var
   LO: TPasFormObject;
   LB: TPasFormBinding;
   LId: TPasDfmIdent;
-  LOwner: TSemaXType;
   LTMid, LTSym, LFirst: Integer;
   LIsMethod: Boolean;
   LVia: TPasFormSiteVia;
@@ -1857,14 +1933,10 @@ begin
       LO.ClassX := ObjClassOf(LEntry, LObj);
       LO.FieldMid := NIL_SYM;
       LO.FieldSym := NIL_SYM;
-      if (LObj > 0) and (LO.Name <> '') then
+      if ObjFieldOf(LEntry, LObj, LTMid, LTSym) then
       begin
-        LOwner := ObjClassOf(LEntry, HeaderLookupRoot(LEntry, LObj));
-        if FieldIn(LEntry.Mid, LOwner, LowerCase(LO.Name), LTMid, LTSym) then
-        begin
-          LO.FieldMid := LTMid;
-          LO.FieldSym := LTSym;
-        end;
+        LO.FieldMid := LTMid;
+        LO.FieldSym := LTSym;
       end;
       LObjects.Add(LO);
     end;

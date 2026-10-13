@@ -36,6 +36,103 @@ uses
 const
   CRLF = #13#10;
 
+  // B52 (A2-36): an `&`-escaped name (a field, a property) and a name with
+  // an upper-case non-ASCII letter (U+00C4). Written UTF-8 with a BOM.
+  UNIT_ESC =
+    'unit FixEsc;'#10 +                                          // 1
+    'interface'#10 +                                             // 2
+    'uses FixVcl;'#10 +                                          // 3
+    'type'#10 +                                                  // 4
+    '  TKindBox = class(TControl)'#10 +                          // 5
+    '  private'#10 +                                             // 6
+    '    FKind: Integer;'#10 +                                   // 7
+    '  published'#10 +                                           // 8
+    '    property &Type: Integer read FKind write FKind;'#10 +   // 9  Type col 15
+    '  end;'#10 +                                                // 10
+    '  TFixEscForm = class(TForm)'#10 +                          // 11
+    '    &Type: TButton;'#10 +                                   // 12 Type col 6
+    '    Button'#$00C4': TButton;'#10 +                          // 13 col 5
+    '    Lbl: TLabel;'#10 +                                      // 14 col 5
+    '    Box: TKindBox;'#10 +                                    // 15
+    '    procedure TypeClick(Sender: TObject);'#10 +             // 16 col 15
+    '  end;'#10 +                                                // 17
+    'implementation'#10 +                                        // 18
+    'procedure TFixEscForm.TypeClick(Sender: TObject); begin end;'#10 + // 19
+    'end.'#10;                                                   // 20
+
+  DFM_ESC =
+    'object FixEscForm: TFixEscForm'#10 +                        // 1
+    '  object Type: TButton'#10 +                                // 2  Type col 10
+    '    OnClick = TypeClick'#10 +                               // 3  col 15
+    '  end'#10 +                                                 // 4
+    '  object Button'#$00C4': TButton'#10 +                      // 5  col 10
+    '  end'#10 +                                                 // 6
+    '  object Lbl: TLabel'#10 +                                  // 7
+    '    FocusControl = Button'#$00C4#10 +                       // 8  col 20
+    '  end'#10 +                                                 // 9
+    '  object Box: TKindBox'#10 +                                // 10
+    '    Type = 1'#10 +                                          // 11 col 5
+    '  end'#10 +                                                 // 12
+    'end'#10;                                                    // 13
+
+  // B52 (B2-41): a data module's component with no field, named through the
+  // module's root (`FixDM.Table1`), against a really dangling one.
+  UNIT_DM =
+    'unit FixDM;'#10 +
+    'interface'#10 +
+    'uses FixVcl;'#10 +
+    'type'#10 +
+    '  TFixDM = class(TDataModule)'#10 +
+    '    Table2: TButton;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  DFM_DM =
+    'object FixDM: TFixDM'#10 +
+    '  object Table1: TButton'#10 +
+    '  end'#10 +
+    '  object Table2: TButton'#10 +
+    '  end'#10 +
+    'end'#10;
+
+  UNIT_USE =
+    'unit FixUse;'#10 +
+    'interface'#10 +
+    'uses FixVcl;'#10 +
+    'type'#10 +
+    '  TFixUseForm = class(TForm)'#10 +
+    '    L1: TLabel;'#10 +
+    '    L2: TLabel;'#10 +
+    '    L3: TLabel;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
+  DFM_USE =
+    'object FixUseForm: TFixUseForm'#10 +
+    '  object L1: TLabel'#10 +
+    '    FocusControl = FixDM.Table1'#10 +
+    '  end'#10 +
+    '  object L2: TLabel'#10 +
+    '    FocusControl = FixDM.Table9'#10 +
+    '  end'#10 +
+    '  object L3: TLabel'#10 +
+    '    FocusControl = FixDM.Table2'#10 +
+    '  end'#10 +
+    'end'#10;
+
+  // B52 (B2-43): a form class whose form file is written after the listing.
+  UNIT_ROLE =
+    'unit FixRole;'#10 +
+    'interface'#10 +
+    'uses FixVcl;'#10 +
+    'type'#10 +
+    '  TFixRoleForm = class(TForm)'#10 +                         // 5  col 3
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+
   UNIT_SYS =
     'unit System;'#10 +
     'interface'#10 +
@@ -1712,6 +1809,103 @@ begin
     'FixLate.dfm', 3, 15, fskHandler, 'LateButton'));
 end;
 
+{ Audit B52: the form binder's name keys, its path walks and its staleness. }
+procedure B52Checks;
+var
+  LSites: TArray<TPasFormSite>;
+  LEdits: TArray<TPasRenameEdit>;
+  LCarried: TArray<TPasCarriedRename>;
+  LErr: string;
+  LInfo: TPasFormInfo;
+  LIdx: Integer;
+  LDoc: IPasDfmDoc;
+  LBytes: TBytes;
+  LLock: TFileStream;
+begin
+  // A2-36: the form spells the RTTI name - `Type` for `&Type`.
+  LSites := Sites('FixEsc.pas', 12, 6);
+  Ok('B52 escaped field: its object header is a site',
+    HasSite(LSites, 'FixEsc.dfm', 2, 10, fskComponent, 'Type'));
+  Ok('B52 escaped field: rename writes the RTTI name and carries TypeClick',
+    PlanCarried('FixEsc.pas', 12, 6, 'Kind', LEdits, LCarried, LErr) and
+    EditWrites(LEdits, 'FixEsc.dfm', 2, 10, 'Kind', '  object Kind: TButton') and
+    (Length(LCarried) = 1) and (LCarried[0].NewName = 'KindClick'));
+  LSites := Sites('FixEsc.pas', 9, 15);
+  Ok('B52 escaped published property: the line setting it is a site',
+    HasSite(LSites, 'FixEsc.dfm', 11, 5, fskProperty, 'Box'));
+  Ok('B52 escaped published property: its rename is refused',
+    not Plan('FixEsc.pas', 9, 15, 'Kind2', LEdits, LErr) and
+    (Pos('property', LErr) > 0));
+  // A2-36: an upper-case non-ASCII letter in a component's name.
+  LSites := Sites('FixEsc.pas', 13, 5);
+  Ok('B52 non-ASCII name: its object header and the reference are sites',
+    (Length(LSites) = 2) and
+    HasSite(LSites, 'FixEsc.dfm', 5, 10, fskComponent, 'Button'#$00C4) and
+    HasSite(LSites, 'FixEsc.dfm', 8, 20, fskComponentRef, 'Lbl'));
+  Ok('B52 non-ASCII name: the rename rewrites the header',
+    Plan('FixEsc.pas', 13, 5, 'Knopf', LEdits, LErr) and
+    HasEdit(LEdits, 'FixEsc.dfm', 5, 10, fskComponent, '') and
+    HasEdit(LEdits, 'FixEsc.dfm', 8, 20, fskComponentRef, ''));
+  // B2-42: a case-only rename collides with nothing but itself.
+  Ok('B52 a case-only component rename is planned',
+    Plan('FixEsc.pas', 14, 5, 'LBL', LEdits, LErr) and
+    HasEdit(LEdits, 'FixEsc.dfm', 7, 10, fskComponent, '  object LBL: TLabel'));
+  // B2-41: `FixDM.Table1` exists at run time (the module's form creates it)
+  // though TFixDM has no field for it; `FixDM.Table9` is really dangling.
+  Ok('B52 module path: FixUse.dfm described',
+    GNav.DescribeForm(FilePath('FixUse.dfm'), LInfo));
+  LIdx := FormBinding(LInfo, 'L1', 'FocusControl');
+  Ok('B52 module path: a field-less component of the module is NoField',
+    (LIdx >= 0) and (LInfo.Bindings[LIdx].TSym = NIL_SYM) and
+    LInfo.Bindings[LIdx].NoField);
+  LIdx := FormBinding(LInfo, 'L2', 'FocusControl');
+  Ok('B52 module path: a component nothing creates is dangling',
+    (LIdx >= 0) and (LInfo.Bindings[LIdx].TSym = NIL_SYM) and
+    not LInfo.Bindings[LIdx].NoField);
+  LIdx := FormBinding(LInfo, 'L3', 'FocusControl');
+  Ok('B52 module path: a field of the module binds (control)',
+    (LIdx >= 0) and IsSymAt(LInfo.Bindings[LIdx].TMid,
+    LInfo.Bindings[LIdx].TSym, 'FixDM.pas', 6, 5));
+  // B2-43: FormRoleOf reads a form file written after the last query.
+  Ok('B52 role: no form file yet', RoleAt('FixRole.pas', 5, 3).FormFile = '');
+  TFile.WriteAllText(FilePath('FixRole.dfm'),
+    'object FixRoleForm: TFixRoleForm'#10'end'#10, TEncoding.ASCII);
+  Ok('B52 role: a form file written since is found',
+    SameText(RoleAt('FixRole.pas', 5, 3).FormFile, FilePath('FixRole.dfm')));
+  // B1-24: an unconvertible binary keeps its bytes; an unreadable file might
+  // name anything.
+  WriteBinaryForm(FilePath('FixBinCut.dfm'), DFM_BIN_TEXT);
+  LBytes := TFile.ReadAllBytes(FilePath('FixBinCut.dfm'));
+  SetLength(LBytes, Length(LBytes) - 3);
+  TFile.WriteAllBytes(FilePath('FixBinCut.dfm'), LBytes);
+  LDoc := PasDfmLoad(FilePath('FixBinCut.dfm'));
+  Ok('B52 a truncated binary: an error, and its names still found',
+    (LDoc <> nil) and LDoc.Doc.IsBinary and (LDoc.Doc.Error <> '') and
+    LDoc.Doc.MentionsText('BinButtonClick') and
+    not LDoc.Doc.MentionsText('NoSuchName'));
+  TFile.WriteAllText(FilePath('FixLock.dfm'), 'object X: TX'#10'end'#10,
+    TEncoding.ASCII);
+  PasDfmForget(FilePath('FixLock.dfm'));
+  LLock := TFileStream.Create(FilePath('FixLock.dfm'),
+    fmOpenReadWrite or fmShareExclusive);
+  try
+    LDoc := PasDfmLoad(FilePath('FixLock.dfm'));
+    Ok('B52 a file that cannot be read may name anything',
+      (LDoc <> nil) and LDoc.Doc.Unreadable and
+      LDoc.Doc.MentionsText('anything'));
+  finally
+    LLock.Free;
+  end;
+  // B1-25: one case rule for the text searches, every script.
+  TFile.WriteAllText(FilePath('FixUml.dfm'), 'object F: TF'#10 +
+    '  object Knopf_'#$00DC'bernehmen: TButton'#10, TEncoding.UTF8);
+  LDoc := PasDfmLoad(FilePath('FixUml.dfm'));
+  Ok('B52 a malformed UTF-8 form finds a non-ASCII name in any case',
+    (LDoc <> nil) and (LDoc.Doc.Error <> '') and
+    LDoc.Doc.MentionsText('knopf_'#$00FC'bernehmen') and
+    LDoc.Doc.MentionsText('KNOPF_'#$00DC'BERNEHMEN'));
+end;
+
 begin
   GCounter.Init;
   GDir := TPath.Combine(TPath.GetTempPath, 'pastree_dfm_smoke');
@@ -1757,6 +1951,13 @@ begin
   TFile.WriteAllText(FilePath('FixColl.dfm'), DFM_COLL, TEncoding.ASCII);
   TFile.WriteAllText(FilePath('FixSub.pas'), UNIT_SUB);
   TFile.WriteAllText(FilePath('FixSub.dfm'), DFM_SUB, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixEsc.pas'), UNIT_ESC, TEncoding.UTF8);
+  TFile.WriteAllText(FilePath('FixEsc.dfm'), DFM_ESC, TEncoding.UTF8);
+  TFile.WriteAllText(FilePath('FixDM.pas'), UNIT_DM);
+  TFile.WriteAllText(FilePath('FixDM.dfm'), DFM_DM, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixUse.pas'), UNIT_USE);
+  TFile.WriteAllText(FilePath('FixUse.dfm'), DFM_USE, TEncoding.ASCII);
+  TFile.WriteAllText(FilePath('FixRole.pas'), UNIT_ROLE);
 
   GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
   try
@@ -1775,6 +1976,7 @@ begin
       DockChecks;
       PropChecks;
       LateChecks;
+      B52Checks;
       ConcurrentLoadChecks;
     finally
       GNav.Free;

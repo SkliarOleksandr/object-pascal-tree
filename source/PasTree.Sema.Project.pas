@@ -1302,6 +1302,14 @@ type
     function IsBarePropertyRedecl(AMid, ASym: Integer): Boolean;
     function PropertyRedeclPrev(AMid, ASym: Integer;
       out APrevMid, APrevSym: Integer): Boolean;
+    { The declaration a bare redeclaration republishes: PropertyRedeclPrev
+      link by link while the link is bare (IsBarePropertyRedecl), at most 32
+      links. (AMid, ASym) itself for anything else - a typed property, a
+      non-property, a chain that does not resolve. The one climb of the
+      navigator's PropertyChain, the form binder's SameProperty and
+      PropertyHasParams / PropertyParamCount (audit D1-42). }
+    procedure PropertyRedeclRoot(AMid, ASym: Integer;
+      out ARootMid, ARootSym: Integer);
     { The type of an arbitrary designator NODE, computed on demand - written
       for `with` targets (hence the name) and used for every other position
       that needs one expression's type outside the cross-type pass: a for-in
@@ -15691,6 +15699,23 @@ begin
     (LM.Scopes[LScope].StructSym <> NIL_SYM);
 end;
 
+procedure TPasSemaProject.PropertyRedeclRoot(AMid, ASym: Integer;
+  out ARootMid, ARootSym: Integer);
+var
+  LDepth, LPrevMid, LPrevSym: Integer;
+begin
+  ARootMid := AMid;
+  ARootSym := ASym;
+  for LDepth := 1 to 32 do
+  begin
+    if not IsBarePropertyRedecl(ARootMid, ARootSym) or
+       not PropertyRedeclPrev(ARootMid, ARootSym, LPrevMid, LPrevSym) then
+      Exit;
+    ARootMid := LPrevMid;
+    ARootSym := LPrevSym;
+  end;
+end;
+
 function TPasSemaProject.PropertyRedeclPrev(AMid, ASym: Integer;
   out APrevMid, APrevSym: Integer): Boolean;
 var
@@ -15963,7 +15988,7 @@ end;
 function TPasSemaProject.PropertyHasParams(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LDepth, LPrevMid, LPrevSym: Integer;
+  LPrevMid, LPrevSym: Integer;
 begin
   Result := False;
   LM := FModels[AMid];
@@ -15976,16 +16001,10 @@ begin
   // indexed the property's STRING type down to Char, and `.IsEmpty` on the
   // result was a false E2003 (a web framework's JWT claims: `Items[Key]`
   // republished public from a private ancestor property).
-  for LDepth := 1 to 32 do
-  begin
-    if LM.Symbols[ASym].TypeNode <> NIL_NODE then
-      Break;
-    if not PropertyRedeclPrev(AMid, ASym, LPrevMid, LPrevSym) then
-      Break;
-    AMid := LPrevMid;
-    ASym := LPrevSym;
-    LM := FModels[AMid];
-  end;
+  PropertyRedeclRoot(AMid, ASym, LPrevMid, LPrevSym);
+  AMid := LPrevMid;
+  ASym := LPrevSym;
+  LM := FModels[AMid];
   // The symbol's DeclNode is the property's NAME node; the parameter list is a
   // sibling of it under the nkPropertyDecl - same shape Phase 1 walks for
   // sfDefaultArrayProp.
@@ -16007,22 +16026,16 @@ end;
 function TPasSemaProject.PropertyParamCount(AMid, ASym: Integer): Integer;
 var
   LM: TPasSemaModel;
-  LDecl, LChild, LParam, LName, LDepth, LPrevMid, LPrevSym: Integer;
+  LDecl, LChild, LParam, LName, LPrevMid, LPrevSym: Integer;
 begin
   Result := 0;
   LM := FModels[AMid];
   if (ASym = NIL_SYM) or (LM.Symbols[ASym].Kind <> skProperty) then
     Exit;
-  for LDepth := 1 to 32 do
-  begin
-    if LM.Symbols[ASym].TypeNode <> NIL_NODE then
-      Break;
-    if not PropertyRedeclPrev(AMid, ASym, LPrevMid, LPrevSym) then
-      Break;
-    AMid := LPrevMid;
-    ASym := LPrevSym;
-    LM := FModels[AMid];
-  end;
+  PropertyRedeclRoot(AMid, ASym, LPrevMid, LPrevSym);
+  AMid := LPrevMid;
+  ASym := LPrevSym;
+  LM := FModels[AMid];
   LDecl := LM.Symbols[ASym].DeclNode;
   if LDecl = NIL_NODE then
     Exit;

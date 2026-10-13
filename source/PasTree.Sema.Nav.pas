@@ -2523,7 +2523,7 @@ end;
   through. }
 function TPasNavigator.PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
 var
-  LStruct, LPMid, LPSym, LDepth, LIdx, LCand: Integer;
+  LStruct, LPMid, LPSym, LIdx, LCand: Integer;
   LNameLower, LKey: string;
   LRoot, LCur, LLink: TPasExtRef;
   LIndex: TDictionary<string, TArray<TOvEdge>>;
@@ -2539,14 +2539,9 @@ begin
     Exit;
   LNameLower := FProj.Model(ATMid).Symbols[ASym].NameLower;
   // Up to the root.
-  for LDepth := 1 to 32 do
-  begin
-    if not FProj.IsBarePropertyRedecl(LRoot.UnitId, LRoot.Sym) or
-       not FProj.PropertyRedeclPrev(LRoot.UnitId, LRoot.Sym, LPMid, LPSym) then
-      Break;
-    LRoot.UnitId := LPMid;
-    LRoot.Sym := LPSym;
-  end;
+  FProj.PropertyRedeclRoot(ATMid, ASym, LPMid, LPSym);
+  LRoot.UnitId := LPMid;
+  LRoot.Sym := LPSym;
   if not OvStructOfProperty(LRoot.UnitId, LRoot.Sym, LStruct) then
     Exit;   // the chain climbed into something that is not a class - keep
             // the clicked symbol alone rather than half a chain
