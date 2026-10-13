@@ -6736,6 +6736,64 @@ begin
   end;
 end;
 
+{ Legacy object New / Dispose, audit B45 (E2-30; local/probe-b45, dcc64
+  37.0): the second argument of `New(P, Init2)`, `New(P, InitN(5))`,
+  `Dispose(P, Done)` and `P := New(PBaseObj, Init)` is a constructor or
+  destructor of the pointee object, found through its ancestry and across
+  units - each was a false E2003 in the default mode. }
+procedure TestObjectNewDispose;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_objnew');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ObA.pas'),
+    'unit ObA;'#10'interface'#10'type'#10 +
+    '  PBaseObj = ^TBaseObj;'#10 +
+    '  TBaseObj = object'#10 +
+    '    BX: Integer;'#10 +
+    '    constructor Init;'#10 +
+    '    constructor InitN(N: Integer);'#10 +
+    '    destructor Done; virtual;'#10'  end;'#10 +
+    'implementation'#10 +
+    'constructor TBaseObj.Init; begin BX := 0; end;'#10 +
+    'constructor TBaseObj.InitN(N: Integer); begin BX := N; end;'#10 +
+    'destructor TBaseObj.Done; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ObP.dpr'),
+    'program ObP;'#10'uses ObA;'#10'type'#10 +
+    '  PDerived = ^TDerived;'#10 +
+    '  TDerived = object(TBaseObj)'#10 +
+    '    constructor Init2;'#10'  end;'#10 +
+    'constructor TDerived.Init2; begin inherited Init; end;'#10 +
+    'var P: PDerived; B: PBaseObj;'#10 +
+    'begin'#10 +
+    '  New(P, Init2);'#10 +
+    '  New(P, InitN(5));'#10 +
+    '  Dispose(P, Done);'#10 +
+    '  B := New(PBaseObj, Init);'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'ObP.dpr'));
+    LM := ModelByName('obp');
+    Ok('objnew: no E2003 on the constructor / destructor arguments [' +
+      IntToStr(DiagCount(LM, 'E2003')) + ']', DiagCount(LM, 'E2003') = 0);
+    Ok('objnew: Init2 is TDerived''s, InitN / Done / Init TBaseObj''s',
+      (CrossRefCountInUnit(LM, 'Init2', 'Init2', 'obp') = 1) and
+      (CrossRefCountInUnit(LM, 'InitN', 'InitN', 'oba') = 1) and
+      (CrossRefCountInUnit(LM, 'Done', 'Done', 'oba') = 1) and
+      (CrossRefCountInUnit(LM, 'Init', 'Init', 'oba') = 2));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { The cross-unit scorer (ScoreCandidate) and SelectCallTarget, audit B32
   (6.2.5, 6.3.1; dcc64 37.0, local/probe-b32 T2): a trailing comma's empty
   slot is no argument (`K(1, 2,)` keeps K, `D.M(1, 2,)` TDer.M, not TBase's
@@ -13212,6 +13270,7 @@ begin
   TestConstTyping;
   TestBlockScopes;
   TestWithRecheck;
+  TestObjectNewDispose;
   TestOneScorer;
   TestOverloadSets;
   TestValueOverloads;

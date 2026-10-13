@@ -1222,6 +1222,8 @@ type
     procedure QueueDecl(AId, ANode: Integer);
     function ResolutionMethodHead(AModel: TPasSemaModel;
       ANode: Integer): Integer;
+    function NewDisposePointerArg(AModel: TPasSemaModel;
+      ANode: Integer): Integer;
     procedure QueueOuterDeclRecheck(AId: Integer; AModel: TPasSemaModel;
       ANode: Integer);
     // The (model, symbol) a designator node names, when one does.
@@ -14297,6 +14299,14 @@ begin
             QueueDecl(AId, LNode);
             Continue;
           end;
+          // The constructor / destructor of a legacy object's `New(P,
+          // Init)` / `Dispose(P, Done)`: a member of P's pointee, looked up
+          // there by the decl pass (audit E2-30).
+          if NewDisposePointerArg(LModel, LNode) <> NIL_NODE then
+          begin
+            QueueDecl(AId, LNode);
+            Continue;
+          end;
           if (LNode > High(LModel.NodeScope)) or
              (LModel.NodeScope[LNode] = NIL_SCOPE) then
             Continue;   // not a reference in a real scope (e.g. uses name)
@@ -14433,6 +14443,41 @@ begin
       nkIdent) then
     Exit;
   Result := AModel.Tree.Nodes[LClause].FirstChild;
+end;
+
+{ The first argument of the builtin `New` / `Dispose` call whose SECOND
+  argument ANode names - `Init` in `New(P, Init)`, the callee of `New(P,
+  InitN(5))` - else NIL_NODE. The legacy-object extension of the two
+  (11.5); a routine of the unit's own named New is not it. }
+function TPasSemaProject.NewDisposePointerArg(AModel: TPasSemaModel;
+  ANode: Integer): Integer;
+var
+  LArg, LCall, LCallee, LSym: Integer;
+begin
+  Result := NIL_NODE;
+  LArg := ANode;
+  LCall := AModel.Tree.Nodes[LArg].Parent;
+  // The callee of a constructor call with arguments: `InitN(5)`.
+  if (LCall <> NIL_NODE) and (AModel.Tree.Nodes[LCall].Kind = nkCall) and
+     (AModel.Tree.Nodes[LCall].FirstChild = LArg) then
+  begin
+    LArg := LCall;
+    LCall := AModel.Tree.Nodes[LArg].Parent;
+  end;
+  if (LCall = NIL_NODE) or (AModel.Tree.Nodes[LCall].Kind <> nkCall) then
+    Exit;
+  LCallee := AModel.Tree.Nodes[LCall].FirstChild;
+  if (LCallee = NIL_NODE) or (LCallee = LArg) or
+     (AModel.Tree.Nodes[LCallee].Kind <> nkIdent) or
+     not (AModel.Tree.NodeTextEquals(LCallee, 'New') or
+          AModel.Tree.NodeTextEquals(LCallee, 'Dispose')) then
+    Exit;
+  LSym := AModel.RefMap[LCallee];
+  if (LSym = NIL_SYM) or not (sfBuiltin in AModel.Symbols[LSym].Flags) then
+    Exit;
+  Result := AModel.Tree.Nodes[LCallee].NextSibling;
+  if (Result = NIL_NODE) or (AModel.Tree.Nodes[Result].NextSibling <> LArg) then
+    Result := NIL_NODE;
 end;
 
 { Points a callee NAME node at ASym - the node RefMap/ExtRefMap are keyed by,
@@ -18610,6 +18655,29 @@ begin
     // interface its head names, inherited ones included (`IFoo._AddRef`,
     // an ancestor interface's method) - never a name of the class. dcc
     // reports a clause naming no such method itself; this pass stays quiet.
+    // `New(P, Init)`, `New(P, InitN(5))`, `P := New(PObj, Init)`,
+    // `Dispose(P, Done)` (11.5): a constructor or destructor of the object
+    // the first argument points at - a variable of a pointer type, or the
+    // pointer type itself in New's function form. A name that is no member
+    // stays unreported here (dcc: E2601, not modelled).
+    var LPtrArg := NewDisposePointerArg(LModel, LNode);
+    if LPtrArg <> NIL_NODE then
+    begin
+      var LObjX := WithTargetTypeX(AId, LPtrArg);
+      if XValid(LObjX) then
+        LObjX := PointeeX(CanonTypeX(LObjX));
+      if not LBound and XValid(LObjX) and
+         FindMemberX(AId, LObjX, LNameLower, LUid, LSym, LCtx) then
+      begin
+        LPend.Node := LNode;
+        LPend.Ext.UnitId := LUid;
+        LPend.Ext.Sym := LSym;
+        LPend.X := XNil;
+        LOut[LPendCount] := LPend;
+        Inc(LPendCount);
+      end;
+      Continue;
+    end;
     var LHead := ResolutionMethodHead(LModel, LNode);
     if LHead <> NIL_NODE then
     begin
