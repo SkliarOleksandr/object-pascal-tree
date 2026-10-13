@@ -457,8 +457,134 @@ const
     '  R: record X: TItem; end;'#10 +
     'begin'#10;
 
+  // Audit B48: how an overlay symbol gets its type and its rows - the class
+  // scope (inherited members from another unit included) before the unit,
+  // the overlay's call targets, intrinsic results, redeclared properties,
+  // for-in elements, the class side.
+  B48_EXT =
+    'unit ext48;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TRec48 = record'#10 +
+    '    RecF: Integer;'#10 +
+    '  end;'#10 +
+    '  TItem48 = class'#10 +
+    '  public'#10 +
+    '    ItemF: Integer;'#10 +
+    '  end;'#10 +
+    '  TWrap48 = record'#10 +
+    '    Inner: TItem48;'#10 +
+    '  end;'#10 +
+    '  TStrH48 = record helper for string'#10 +
+    '    function Up: string;'#10 +
+    '  end;'#10 +
+    '  TChH48 = record helper for Char'#10 +
+    '    function IsUp: Boolean;'#10 +
+    '  end;'#10 +
+    '  TBase48 = class'#10 +
+    '  private'#10 +
+    '    FBP: TRec48;'#10 +
+    '  public'#10 +
+    '    Canvas: TItem48;'#10 +
+    '    Tag: Integer;'#10 +
+    '    class function CF: Integer;'#10 +
+    '    property BP: TRec48 read FBP;'#10 +
+    '    property ext48: TItem48 read Canvas;'#10 +
+    '    function GetObj: TItem48; overload;'#10 +
+    '    function GetObj(I: Integer): TRec48; overload;'#10 +
+    '    function Remove(I: Integer): TItem48; overload; virtual;'#10 +
+    '  end;'#10 +
+    '  TBase48Class = class of TBase48;'#10 +
+    '  TEnum48 = class'#10 +
+    '  public'#10 +
+    '    function GetCurrent: TItem48;'#10 +
+    '    function MoveNext: Boolean;'#10 +
+    '    property Current: TItem48 read GetCurrent;'#10 +
+    '  end;'#10 +
+    '  TList48 = class'#10 +
+    '  public'#10 +
+    '    function GetEnumerator: TEnum48;'#10 +
+    '  end;'#10 +
+    '  TBox<T> = class'#10 +
+    '  public'#10 +
+    '    BoxF: T;'#10 +
+    '  end;'#10 +
+    '  TCol48 = class'#10 +
+    '  public'#10 +
+    '    constructor Create(AItem: Integer);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'constructor TCol48.Create(AItem: Integer);'#10'begin'#10'end;'#10 +
+    'function TStrH48.Up: string;'#10'begin'#10'end;'#10 +
+    'function TChH48.IsUp: Boolean;'#10'begin'#10'end;'#10 +
+    'class function TBase48.CF: Integer;'#10'begin'#10'end;'#10 +
+    'function TBase48.GetObj: TItem48;'#10'begin'#10'end;'#10 +
+    'function TBase48.GetObj(I: Integer): TRec48;'#10'begin'#10'end;'#10 +
+    'function TBase48.Remove(I: Integer): TItem48;'#10'begin'#10'end;'#10 +
+    'function TEnum48.GetCurrent: TItem48;'#10'begin'#10'end;'#10 +
+    'function TEnum48.MoveNext: Boolean;'#10'begin'#10'end;'#10 +
+    'function TList48.GetEnumerator: TEnum48;'#10'begin'#10'end;'#10 +
+    'end.'#10;
+  B48_HEAD =
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses ext48;'#10 +
+    'type'#10 +
+    '  TBox = class'#10 +
+    '  public'#10 +
+    '    OwnF: Integer;'#10 +
+    '  end;'#10 +
+    '  TKid = class(TBase48)'#10 +
+    '  public'#10 +
+    '    property BP;'#10 +
+    '    procedure Remove(const S: string); reintroduce; overload;'#10 +
+    '    procedure M;'#10 +
+    '    class procedure CM;'#10 +
+    '  end;'#10 +
+    'var'#10 +
+    '  Tag: string;'#10 +
+    '  Canvas: TRec48;'#10 +
+    'function Pick: TItem48; overload;'#10 +
+    'function Pick(I: Integer): TRec48; overload;'#10 +
+    'implementation'#10 +
+    'function Pick: TItem48;'#10'begin'#10'end;'#10 +
+    'function Pick(I: Integer): TRec48;'#10'begin'#10'end;'#10 +
+    'procedure TKid.Remove(const S: string);'#10'begin'#10'end;'#10 +
+    'class procedure TKid.CM;'#10 +
+    'begin'#10 +
+    '  Self.CF;'#10 +
+    'end;'#10 +
+    'procedure TKid.M;'#10 +
+    'var'#10 +
+    '  L: TList48;'#10 +
+    '  C: TBase48Class;'#10 +
+    '  W: TWrap48;'#10 +
+    '  S: string;'#10 +
+    '  B: TBase48;'#10 +
+    '  GB: TBox<TItem48>;'#10 +
+    '  CA: array of TBase48Class;'#10 +
+    'begin'#10;
+
 var
   GDir: string;
+
+// One B48 overlay case: the list at the marker (a ccMember or a bare-name
+// position) holds AWant and not ANot ('' = no check).
+procedure B48Case(const ALine, AWant, ANot: string);
+begin
+  ProjCase(B48_HEAD + '  ' + ALine + #10 + PROJ_TAIL);
+  GCounter.Ok(Format('B48 %s lists %s%s', [ALine, IfThen(AWant <> '',
+    AWant, '(any)'), IfThen(ANot <> '', ', not ' + ANot, '')]),
+    GHit and ((AWant = '') or Has(AWant)) and
+    ((ANot = '') or not Has(ANot)),
+    procedure
+    begin
+      Write('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':');
+      for var LFi := 0 to Min(High(GItems), 9) do
+        Write(' ', GItems[LFi].Name);
+      Writeln;
+    end);
+end;
 
 // One B47 overlay case: the members a dot after ABase lists must hold
 // AWant and not ANot ('' = no check).
@@ -1162,6 +1288,114 @@ begin
     GHit and Has('NestF'));
   GProj.Free;
   GProj := nil;
+
+  // ======== audit B48: overlay symbol typing ==================================
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_smoke48');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'ext48.pas'), B48_EXT);
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'),
+    B48_HEAD + PROJ_TAIL);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  GCounter.Ok('B48 mini-project analyzed', GProjMid >= 0);
+  // A1-18: a bare inherited member outranks a same-named unit global.
+  B48Case('Canvas.|', 'ItemF', 'RecF');
+  // A1-19: the row of a bare name is the inherited member's.
+  ProjCase(B48_HEAD + '  Ta|'#10 + PROJ_TAIL);
+  GCounter.Ok('B48 Ta| gives the inherited field''s row, not the unit var''s',
+    GHit and Has('Tag') and (ItemNamed('Tag').Mid >= 0) and
+    (ItemNamed('Tag').Bucket = cbStructMember));
+  // A1-26: the overload the arguments pick.
+  B48Case('GetObj(1).|', 'RecF', 'ItemF');
+  B48Case('B.GetObj(1).|', 'RecF', 'ItemF');
+  B48Case('Pick(1).|', 'RecF', 'ItemF');
+  // A1-27: intrinsic call results.
+  B48Case('Copy(S, 1, 2).|', 'Up', '');
+  B48Case('Chr(65).|', 'IsUp', 'Up');
+  // A1-28: a bare property redeclaration in the edited unit.
+  B48Case('BP.|', 'RecF', '');
+  B48Case('Self.BP.|', 'RecF', '');
+  // A1-29: an inferred for-in variable.
+  ProjCase(B48_HEAD + '  for var X in L do'#10'    X.|'#10 + PROJ_TAIL);
+  GCounter.Ok('B48 for var X in L do X.| lists the enumerator''s Current',
+    GHit and Has('ItemF'));
+  // B2-27: a class-reference value is class side.
+  B48Case('C.|', 'CF', 'Tag');
+  B48Case('CA[0].|', 'CF', 'Tag');
+  B48Case('TBase48Class(B.ClassType).|', 'CF', 'Tag');
+  // B2-28: Self in a class method is the class.
+  ProjCase(StringReplace(B48_HEAD, '  Self.CF;', '  Self.|', []) + 'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('B48 Self.| in a class method lists class members only',
+    GHit and Has('CF') and not Has('Tag'));
+  // An unopened with over another unit's record; `as`; `inherited Name(`.
+  B48Case('with W do Inner.|', 'ItemF', '');
+  B48Case('(B as TItem48).|', 'ItemF', '');
+  CallCase(B48_HEAD + '  inherited Remove(|'#10 + PROJ_TAIL);
+  GCounter.Ok('B48 inherited Remove( is the ancestor''s Remove',
+    GHit and (TargetsNamed('Remove') >= 1) and
+    (TargetOf('Remove').ParamsText = '(I: Integer)'));
+  // `inherited Create(` in a constructor: the ancestor's constructor.
+  CallCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses ext48;'#10 +
+    'type'#10 +
+    '  TMyCol = class;'#10 +
+    '  TMyCol = class(TCol48)'#10 +
+    '  public'#10 +
+    '    constructor Create(const S: string);'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'constructor TMyCol.Create(const S: string);'#10 +
+    'begin'#10 +
+    '  inherited Create(|'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('B48 inherited Create( in a constructor is the ancestor''s',
+    GHit and (TargetsNamed('Create') >= 1) and
+    (TargetOf('Create').ParamsText = '(AItem: Integer)'),
+    procedure
+    begin
+      Writeln('    hit=', GHit, ' targets=', Length(GCall.Targets));
+      for var LT in GCall.Targets do
+        Writeln('      ', LT.Name, LT.ParamsText, ' mid=', LT.Mid);
+    end);
+  // A member named like a unit hides the unit only in a routine body
+  // (3.3.2 step 4): a field's type in the class declaration is the unit's.
+  ProjCase(StringReplace(B48_HEAD, '    property BP;'#10,
+    '    property BP;'#10'    FX: ext48.|'#10, []) + PROJ_TAIL);
+  GCounter.Ok('B48 ext48.| in a class declaration lists the unit''s types',
+    GHit and Has('TRec48') and not Has('ItemF'));
+  B48Case('ext48.|', 'ItemF', 'TRec48');
+  // A plain own TBox written with type arguments is the generic one.
+  B48Case('GB.BoxF.|', 'ItemF', '');
+  GProj.Free;
+  GProj := nil;
+
+  // B2-38: standalone (no project) - an ancestor's strict protected members.
+  GProjMid := -1;
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TOwn = class'#10 +
+    '  strict protected'#10 +
+    '    SPField: Integer;'#10 +
+    '  end;'#10 +
+    '  TOwnKid = class(TOwn)'#10 +
+    '    procedure KM;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TOwnKid.KM;'#10 +
+    'begin'#10 +
+    '  SP|'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('B48 standalone: an ancestor''s strict protected field',
+    GHit and Has('SPField'));
 
   if GCounter.Finish('SemaCompleteSmoke') then
     ExitCode := 1;

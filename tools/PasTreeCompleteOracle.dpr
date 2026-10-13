@@ -737,9 +737,14 @@ begin
         else
           Writeln('  refused');
         if LComp.CallAt(LLine, LCol, LCall) then
+        begin
+          Writeln(Format('  call at %d:%d, node %d, bound %d/%d, %d targets',
+            [LCall.OpenLine, LCall.OpenCol, LCall.CallNode, LCall.BoundMid,
+             LCall.BoundSym, Length(LCall.Targets)]));
           for var LT in LCall.Targets do
             Writeln(Format('  call %s%s: %s', [LT.Name, LT.ParamsText,
               LT.ResultText]));
+        end;
       finally
         LComp.Free;
       end;
@@ -855,7 +860,15 @@ begin
       GProj.AddUnitAlias(LA.Alias, LA.UnitName);
   end
   else
+  begin
     GProj := TPasSemaProject.Create(GPlatform, GExtraPaths, []);
+    // A directory or bare-file run has no project to state its prefixes:
+    // the IDE's defaults, as PasTreeSemaProject sets them - with none, a
+    // `uses Classes` resolves nothing and every bridged name of it is lost.
+    GProj.SetNamespaces(PasDefaultNamespaces(GPlatform));
+    for var LDef in PasDefaultUnitAliases(GPlatform) do
+      GProj.AddUnitAlias(LDef.Alias, LDef.UnitName);
+  end;
   try
     GSW := TStopwatch.StartNew;
     if GDProj <> nil then
