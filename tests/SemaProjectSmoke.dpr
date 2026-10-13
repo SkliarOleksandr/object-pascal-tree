@@ -6575,6 +6575,97 @@ begin
   end;
 end;
 
+{ Block scopes for inline declarations, audit B43 (local/probe-b43, dcc64
+  37.0): an inline var's own type and initializer see the outer name it
+  hides (A2-09: `var G: Integer := G.Count`); an initialization section's
+  inline var is a block, invisible to the routines above it (A4-06); the
+  sole statement of if / case / while scopes its inline var (B4-10); a
+  nested heritage naming a later sibling takes the earlier outer type
+  (B4-11); a scoped enum's value names an earlier value bare (B4-12); a
+  procedure literal's `Result` is the class's property (B4-16); a duplicate
+  type is E2004 (B4-19). }
+procedure TestBlockScopes;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_blockscopes');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TList = class Count: Integer; procedure Clear; end;'#10 +
+    '  TStr = class Length: Integer; end;'#10 +
+    'implementation'#10 +
+    'procedure TList.Clear; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BsG.pas'),
+    'unit BsG;'#10'interface'#10 +
+    'var GHidden: TList;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BsH.pas'),
+    'unit BsH;'#10'interface'#10'uses BsG;'#10 +
+    'procedure Before;'#10 +
+    'implementation'#10 +
+    'procedure Before;'#10'begin'#10'  GHidden.Clear;'#10'end;'#10 +
+    'initialization'#10 +
+    '  var GHidden := 5;'#10 +
+    '  if GHidden = 5 then;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BsP.dpr'),
+    'program BsP;'#10'uses BsG, BsH;'#10'type'#10 +
+    '{$SCOPEDENUMS ON}'#10 +
+    '  TE = (seA = 3, seB = seA + 2);'#10 +
+    '{$SCOPEDENUMS OFF}'#10 +
+    '  TB = class GB: Integer; end;'#10 +
+    '  TOuter = class'#10'  public type'#10 +
+    '    TA = class(TB) procedure M; end;'#10 +
+    '    TB = class NB: Integer; end;'#10'  end;'#10 +
+    '  TProc = reference to procedure;'#10 +
+    '  TA2 = class'#10 +
+    '    FRes: TList;'#10 +
+    '    procedure Run;'#10 +
+    '    property Result: TList read FRes;'#10'  end;'#10 +
+    '  TX = Integer;'#10 +
+    '  TX = TObject;'#10 +
+    'procedure TOuter.TA.M; begin GB := 1; end;'#10 +
+    'procedure TA2.Run;'#10'var P: TProc;'#10 +
+    'begin'#10'  P := procedure begin Result.Clear; Result.BogusR; end;'#10 +
+    'end;'#10 +
+    'var G: TList; X: TStr;'#10 +
+    'procedure Q(B: Boolean; N: Integer);'#10 +
+    'begin'#10 +
+    '  var G: Integer := G.Count;'#10 +
+    '  var X: Integer := X.Length;'#10 +
+    '  if B then var A := 1;'#10 +
+    '  case N of 1: var C := 2; end;'#10 +
+    '  while B do var D := 3;'#10 +
+    '  var A := G;'#10 +
+    '  var C := X;'#10 +
+    '  var D := A + C;'#10 +
+    'end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'BsP.dpr'));
+    LM := ModelByName('bsp');
+    Ok('blockscopes: the program reports BogusR and the duplicate TX, nothing' +
+      ' else [' + IntToStr(DiagCount(LM, 'E2003')) + ' E2003, ' +
+      IntToStr(DiagCount(LM, 'E2004')) + ' E2004]',
+      (DiagCount(LM, 'E2003') = 1) and DiagHasText(LM, 'E2003', 'BogusR') and
+      (DiagCount(LM, 'E2004') = 1) and DiagHasText(LM, 'E2004', 'TX'));
+    Ok('blockscopes: GHidden.Clear above the initialization section is the' +
+      ' used unit''s [' +
+      IntToStr(DiagCount(ModelByName('bsh'), 'E2003')) + ']',
+      (DiagCount(ModelByName('bsh'), 'E2003') = 0) and
+      (CrossRefCountInUnit(ModelByName('bsh'), 'GHidden', 'GHidden',
+       'bsg') = 1));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { The cross-unit scorer (ScoreCandidate) and SelectCallTarget, audit B32
   (6.2.5, 6.3.1; dcc64 37.0, local/probe-b32 T2): a trailing comma's empty
   slot is no argument (`K(1, 2,)` keeps K, `D.M(1, 2,)` TDer.M, not TBase's
@@ -13049,6 +13140,7 @@ begin
   TestHelperIdentity;
   TestTypeSlotsAndOwners;
   TestConstTyping;
+  TestBlockScopes;
   TestOneScorer;
   TestOverloadSets;
   TestValueOverloads;

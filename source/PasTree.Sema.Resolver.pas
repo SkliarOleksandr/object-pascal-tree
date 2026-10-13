@@ -159,6 +159,7 @@ type
     function GenericArityOfSym(ASym: Integer): Integer;
     procedure DeclareNamesAndType(ADecl, AScope: Integer;
       AKind: TSemaSymbolKind);
+    function IsForwardTypeSym(ASym: Integer): Boolean;
     procedure CollectTypeDecl(ANode, AScope: Integer);
     function ResolveSkipping(AScope: Integer; const ANameLower: string;
       ASkipSym: Integer): Integer;
@@ -421,7 +422,8 @@ begin
   LDecl := FModel.Symbols[ASym].DeclNode;
   if LDecl = NIL_NODE then
     Exit;
-  Result := FTree.Nodes[LDecl].FirstToken > FTree.Nodes[ANode].FirstToken;
+  // The model's rule: an inline declaration is visible past its end.
+  Result := FModel.DeclaredAfter(ASym, FTree.Nodes[ANode].FirstToken);
 end;
 
 { A TYPE's type parameter - `T` of `TGen<T>`, in the type's declaration or
@@ -1225,9 +1227,8 @@ end;
     those RoutineHolds adds;
   - the module's own body - the initialization section, the legacy `begin`
     form too, and a program's or library's main block: every name of the
-    module, the interface's and the implementation's - the initialization
-    section's top-level inline declarations among them, which share the
-    implementation scope (CollectRoot).
+    module, the interface's and the implementation's; the initialization
+    section is a block of the implementation scope, so the walk reaches it.
   The finalization section is a body of its own: only its enclosing blocks
   count there, so its inline vars may take any module-level name, the
   initialization's included.
@@ -1607,6 +1608,35 @@ begin
     Result := GenericArityOfDecl(LParent);
 end;
 
+{ Is ASym's declaration a forward one - `TFoo = class;`, `IFoo =
+  interface;` (dispinterface too) - that a later declaration of the same
+  name completes? Read off the type node its DeclNode's declaration holds;
+  CollectTypeDecl moves DeclNode to the completion, so a completed forward
+  answers False. }
+function TPasSemaResolver.IsForwardTypeSym(ASym: Integer): Boolean;
+var
+  LDecl, LChild: Integer;
+begin
+  Result := False;
+  LDecl := FModel.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := FTree.Nodes[LDecl].Parent;
+  if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkTypeDecl) then
+    Exit;
+  LChild := FirstChild(LDecl);
+  while LChild <> NIL_NODE do
+  begin
+    case KindOf(LChild) of
+      nkClassType:
+        Exit(FTree.Nodes[LChild].Aux = 1);
+      nkInterfaceType:
+        Exit(FTree.Nodes[LChild].Aux and 2 <> 0);
+    end;
+    LChild := NextSib(LChild);
+  end;
+end;
+
 procedure TPasSemaResolver.CollectTypeDecl(ANode, AScope: Integer);
 var
   LName, LChild, LSym, LExisting, LGen, LBody: Integer;
@@ -1653,7 +1683,14 @@ begin
     end;
     LProbe := FModel.Symbols[LProbe].NextOverload;
   end;
-  if LMatch <> NIL_SYM then
+  // Only a FORWARD is completed: `TX = Integer; TX = string;`, a complete
+  // class followed by another, `TE = class(TObject);` and then a body, a
+  // forward completed twice - each is E2004 (dcc64 37.0; audit B4-19).
+  // DeclareSym reports it and gives the second its own symbol, so the
+  // first's declaration and member scope stand.
+  if (LMatch <> NIL_SYM) and not IsForwardTypeSym(LMatch) then
+    LSym := DeclareSym(AScope, skType, LName)
+  else if LMatch <> NIL_SYM then
   begin
     LSym := LMatch;
     MarkDeclName(LName, LSym);
@@ -1972,9 +2009,16 @@ begin
   // like unit U in `F: (U, V)` inside a record and in `TE = (U, V)` nested in a
   // class, `TG<T>` too; a scoped enum's value clashes with nothing outside it.
   LOwnScope := NIL_SCOPE;
+  // Where an explicit value's expression resolves: the enclosing scope, which
+  // an unscoped enum's values are joined into - or, for a scoped one, the
+  // enum's own scope, whose parent that is: `TE = (seA = 3, seB = seA + 2)`
+  // under SCOPEDENUMS ON names its earlier value bare (dcc64 37.0; audit
+  // B4-12).
+  var LValScope := LEnum;
   if (ATypeSym = NIL_SYM) or
      not FTree.Source.ScopedEnumsAt(FTree.Nodes[ANode].FirstToken) then
   begin
+    LValScope := AOuter;
     LOwnScope := EnumJoinTarget(AOuter);
     FModel.JoinScope(LOwnScope, LEnum);
     // Past an include that did not load, the enum may be scoped after all:
@@ -2021,7 +2065,7 @@ begin
       LVal := NextSib(LName);
       while LVal <> NIL_NODE do
       begin
-        Collect(LVal, AOuter);   // explicit value expression
+        Collect(LVal, LValScope);   // explicit value expression
         LVal := NextSib(LVal);
       end;
     end;
@@ -2573,6 +2617,18 @@ begin
         // an INITIALIZER with no type at all (`var Name := Expr;`), and that
         // routine anchors its tail walk on the type node, so the initializer
         // would go uncollected.
+        // The SOLE statement of an if / else, while, with or case branch is a
+        // block of its own: `if B then var A := 1;` scopes A to that
+        // statement, so a later `var A` in the enclosing block is no
+        // redeclaration and a later `A` does not bind the dead one (dcc64
+        // 37.0; audit B4-10).
+        if (FTree.Nodes[ANode].Parent <> NIL_NODE) and
+           (KindOf(FTree.Nodes[ANode].Parent) in [nkIfStmt, nkWhileStmt,
+            nkWithStmt, nkCaseSel]) then
+        begin
+          AScope := FModel.AddScope(sckBlock, AScope, ANode);
+          FNodeScope[ANode] := AScope;
+        end;
         var LKind := skVar;
         if KindOf(ANode) = nkInlineConst then
           LKind := skConst;
@@ -2670,8 +2726,15 @@ begin
           LChild := NextSib(LChild);
         end;
         // A procedure literal has no result type child: still shadow the
-        // enclosing Result so it cannot leak into the anonymous body.
-        if FModel.FindLocal(LAnon, 'result') = NIL_SYM then
+        // enclosing function's implicit Result so it cannot leak into the
+        // anonymous body (dcc: E2555). Only that one - in a procedure,
+        // `Result` may be a field, a property or a local the literal
+        // captures like any other name (dcc64 37.0; audit B4-16).
+        var LOuterRes := FModel.Resolve(AScope, 'result');
+        if (FModel.FindLocal(LAnon, 'result') = NIL_SYM) and
+           (LOuterRes <> NIL_SYM) and
+           (FModel.Symbols[LOuterRes].DeclNode = NIL_NODE) and
+           (FModel.Symbols[LOuterRes].Kind = skVar) then
         begin
           var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE,
             'result');
@@ -2744,7 +2807,7 @@ begin
       // name, it exists only to carry the member scope.
       CollectStruct(ANode, AScope, DeclareAnonStruct(AScope, ANode));
 
-    nkBlock, nkForStmt, nkForInStmt, nkFinalSec:
+    nkBlock, nkForStmt, nkForInStmt, nkInitSec, nkFinalSec:
       begin
         // Inline vars are block-scoped: give each begin..end its own scope so
         // the same name in sibling blocks does not read as a redeclaration.
@@ -2753,7 +2816,12 @@ begin
         // reusing one name are not a redeclaration (dcc behavior). So does
         // the finalization section, a body of its own whose inline vars may
         // take a module-level name (RedeclaresBodyName) - in the
-        // implementation scope they would clash with it.
+        // implementation scope they would clash with it. The initialization
+        // section (or a unit's legacy `begin`) is a block too: its top-level
+        // inline vars are visible from their declaration on, never to the
+        // routines above it - one that hides a used unit's name hid it there
+        // as well (audit A4-06). A module-level name is still E2004 there
+        // (RedeclaresBodyName climbs to the implementation scope).
         // Only a block that declares something gets one (DeclaresInOwnScope).
         var LBlock := AScope;
         if DeclaresInOwnScope(ANode) then
@@ -3213,9 +3281,36 @@ begin
         // (CrossResolve) is what binds an unresolved name against the uses
         // clause. This runs before it, and leaving NIL_SYM is exactly the
         // handoff that pass expects.
+        // A later SIBLING of a nested type is not that handoff: the type
+        // meant is an outer one of this unit, which no later pass searches -
+        // `TOuter = class type TA = class(TB) ... end; TB = class ... end;
+        // end` with a unit-level TB before TOuter derives TA from that TB
+        // (dcc64 37.0; audit B4-11). So past a struct member the lookup goes
+        // on outward.
         if (FModel.RefMap[ANode] <> NIL_SYM) and IsHeritageRef(ANode) and
            DeclaredAfter(FModel.RefMap[ANode], ANode) then
+        begin
+          var LLater := FModel.RefMap[ANode];
           FModel.RefMap[ANode] := NIL_SYM;
+          for var LHop := 1 to 32 do
+          begin
+            var LOwner := FModel.Symbols[LLater].Scope;
+            if (LOwner = NIL_SCOPE) or
+               (FModel.Scopes[LOwner].Kind <> sckStruct) or
+               (FModel.Scopes[LOwner].Parent = NIL_SCOPE) then
+              Break;
+            LLater := FModel.ResolveAt(FModel.Scopes[LOwner].Parent,
+              NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken);
+            if LLater = NIL_SYM then
+              Break;
+            if not DeclaredAfter(LLater, ANode) then
+            begin
+              if FModel.Symbols[LLater].Kind = skType then
+                FModel.RefMap[ANode] := LLater;
+              Break;
+            end;
+          end;
+        end;
         // A name in a parameter list - a parameter's type, a default - is not
         // one of the list's parameters: dcc looks it up outside the routine.
         // `var AuthenticateSoapResponse: authenticateSoapResponse` (a SOAP
@@ -4534,7 +4629,7 @@ begin
             // A body of its own: its inline vars get a block scope (Collect)
             // and may take any module-level name, the module's own included -
             // see RedeclaresBodyName and RedeclaresOwnName. The initialization
-            // section's share the implementation scope.
+            // section's are a block of the implementation scope (Collect).
             FInFinalization := True;
             Collect(LChild, FImpl);
             FInFinalization := False;

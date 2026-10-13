@@ -2237,6 +2237,13 @@ begin
   LDecl := Symbols[ASym].DeclNode;
   if (LDecl = NIL_NODE) or (LDecl > High(Tree.Nodes)) then
     Exit;
+  // An inline `var` / `const` is visible past its WHOLE declaration (3.1.3):
+  // in `var X: Integer := X.Length;` the X of the initializer, and of the
+  // type, is the outer X (audit A2-09).
+  if (Tree.Nodes[LDecl].Parent <> NIL_NODE) and
+     (Tree.Nodes[Tree.Nodes[LDecl].Parent].Kind in [nkInlineVar,
+      nkInlineConst]) then
+    Exit(Tree.Nodes[Tree.Nodes[LDecl].Parent].LastToken >= AAtToken);
   Result := Tree.Nodes[LDecl].FirstToken > AAtToken;
 end;
 
