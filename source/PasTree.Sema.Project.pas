@@ -853,9 +853,6 @@ type
     // Phase 3c: cross-model typing.
     function InstanceRead(AInst: Integer): TSemaInstance;
     function TypeDefNodeOf(AMid, ASym: Integer): Integer;
-    // The same over a model that need not be in FModels (see
-    // GenericParamIdentsOf).
-    class function TypeDefNodeIn(LM: TPasSemaModel; ASym: Integer): Integer;
     function GenericParamIdents(AMid, ASym: Integer): TArray<Integer>;
     // The same walk over a model that need not be in FModels yet (a fresh
     // re-parse the module path is still deciding about).
@@ -1261,6 +1258,34 @@ type
     // TActionClients.ActionClients[]: TActionClientItem).
     function DefaultArrayPropX(const AX: TSemaXType;
       out AMid, ASym: Integer; out AOwner: TSemaXType): Boolean;
+    { Is (AMid, ASym) an ARRAY property - one declaring index parameters,
+      itself or, for a bare redeclaration, the declaration it republishes
+      (13.1.2)? Indexing it consumes those parameters: its declared type is
+      already the per-element one, so brackets after its name peel nothing.
+      The rule CrossType's nkIndex and the completion overlay both read. }
+    function IsArrayPropertySym(AMid, ASym: Integer): Boolean;
+    { The type definition node of a type symbol in ANY model, a fresh overlay
+      included: the nkTypeDecl's child after the name and its generic
+      parameters (a trailing hint directive comes after it), or an anonymous
+      struct's own node. NIL_NODE for anything that is no skType. }
+    class function TypeDefNodeIn(LM: TPasSemaModel; ASym: Integer): Integer;
+    { The declaration a written `Name<...>` with AArity arguments names,
+      given ABase - what a by-name lookup of Name found from model AId
+      (16.1.2): its real generic base, then the declaration of that arity on
+      its overload chain, then - when the arities live in different units -
+      AId's own interface section and its used units by arity, the name read
+      off ANameNode (a node of AId's tree) unless ANameLower gives it. ABase
+      itself when nothing better is found. One rule for ResolveTypeExpr and the
+      completion overlay's bridge, which only has a name to start from. }
+    function TypeAtArityX(AId: Integer; const ABase: TSemaXType;
+      AArity: Integer; ANameNode: Integer = NIL_NODE;
+      const ANameLower: string = ''): TSemaXType;
+    { A type reference with NO type arguments names the arity-0 declaration
+      (16.1.2): (AMid, ASym) - a generic found by name from model AId - or
+      the non-generic of that name on its overload chain or in AId's used
+      units. }
+    function PreferNonGenericByName(AId, AMid, ASym: Integer;
+      const ANameLower: string): TSemaXType;
     { The property REDECLARATION chain (`property Items;` republishing an
       inherited property), for the navigator. PropertyInAncestorsX is the
       link - see its implementation comment for the dcc-probed rules;
@@ -8844,10 +8869,8 @@ end;
 function TPasSemaProject.PreferNonGeneric(AId, AMid, ASym,
   ANameNode: Integer): TSemaXType;
 var
-  LProbe, LDepth, LUid, LFound: Integer;
   LNameLower: string;
 begin
-  Result := XPlain(AMid, ASym);
   // Reached only for a BARE reference to a GENERIC type - both conditions are
   // tested INLINE by the callers, because this body allocates (NodeNameLower)
   // and every type reference in the closure would otherwise pass through it.
@@ -8855,6 +8878,15 @@ begin
   // corpus; deriving "is generic" here instead of reading sfGeneric cost a
   // further +1.7%. Same shape as the PasNameKey-on-FindLocal trap.
   LNameLower := FModels[AId].Tree.NodeNameLower(ANameNode);
+  Result := PreferNonGenericByName(AId, AMid, ASym, LNameLower);
+end;
+
+function TPasSemaProject.PreferNonGenericByName(AId, AMid, ASym: Integer;
+  const ANameLower: string): TSemaXType;
+var
+  LProbe, LDepth, LUid, LFound: Integer;
+begin
+  Result := XPlain(AMid, ASym);
   LProbe := FModels[AMid].Symbols[ASym].NextOverload;
   for LDepth := 1 to 32 do
   begin
@@ -8873,7 +8905,7 @@ begin
   // and a unit importing BOTH gets whichever it happened to import later. Four
   // classes in one debug library then inherited from the wrong TObjectList and
   // lost every member of the real one.
-  if FindTypeInUsesArity(AId, LNameLower, 0, LUid, LFound) then
+  if FindTypeInUsesArity(AId, ANameLower, 0, LUid, LFound) then
     Result := XPlain(LUid, LFound);
 end;
 
@@ -9066,7 +9098,7 @@ function TPasSemaProject.ResolveTypeExpr(AId, ANode: Integer;
   ABare: Boolean = True): TSemaXType;
 var
   LM: TPasSemaModel;
-  LName, LSym, LArgNode, LArgCount, LUid: Integer;
+  LName, LSym, LArgNode, LArgCount: Integer;
   LExt: TPasExtRef;
   LBase, LArg: TSemaXType;
   LArgs: TArray<TSemaXType>;
@@ -9140,7 +9172,6 @@ begin
         LBase := ResolveTypeExpr(AId, LM.Tree.Nodes[ANode].FirstChild, False);
         if not XValid(LBase) then
           Exit;
-        LBase := RealGenericBase(LBase);
         LArgs := nil;
         LArgCount := 0;
         LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
@@ -9149,57 +9180,8 @@ begin
           Inc(LArgCount);
           LArgNode := LM.Tree.Nodes[LArgNode].NextSibling;
         end;
-        // 16.1.2: one name may be declared at several ARITIES, chained on
-        // NextOverload by CollectTypeDecl. Only the head is registered under
-        // the name, so pick the declaration whose parameter count matches the
-        // arguments actually written. Walking the chain is safe for a type
-        // symbol: every other NextOverload consumer reaches the chain through
-        // a ROUTINE head.
-        if ArityOfTypeSym(LBase.UnitId, LBase.Sym) <> LArgCount then
-        begin
-          LSym := FModels[LBase.UnitId].Symbols[LBase.Sym].NextOverload;
-          while LSym <> NIL_SYM do
-          begin
-            if (FModels[LBase.UnitId].Symbols[LSym].Kind = skType) and
-               (ArityOfTypeSym(LBase.UnitId, LSym) = LArgCount) then
-            begin
-              LBase.Sym := LSym;
-              Break;
-            end;
-            LSym := FModels[LBase.UnitId].Symbols[LSym].NextOverload;
-          end;
-          // The chain only links declarations in ONE model. When the arities
-          // live in DIFFERENT used units there is nothing to chain, and the
-          // ordinary lookup returned whichever was imported last - so
-          // `TdxPDFObjectList<T>` can land on a plain class of that name in
-          // another unit and take a whole ancestry with it. Mirror of the bare
-          // case in PreferNonGeneric; searched only after the chain misses, so
-          // the common single-declaration name never reaches it.
-          // BUILTINS excluded, and that guard is load-bearing for the clock:
-          // a seeded type carries no parameter list, so `TArray<T>` and friends
-          // "mismatch" on every single use and would each pay a full scan of
-          // the referring unit's imports. Measured at +1.8% before the guard.
-          if (ArityOfTypeSym(LBase.UnitId, LBase.Sym) <> LArgCount) and
-             not (sfBuiltin in FModels[LBase.UnitId].Symbols[LBase.Sym].Flags) then
-          begin
-            // The referring unit's own interface section first - see
-            // FindTypeInSelfArity; then the used units.
-            if FindTypeInSelfArity(AId,
-                 LM.Tree.NodeNameLower(LM.Tree.Nodes[ANode].FirstChild),
-                 LArgCount, LSym) then
-            begin
-              LBase.UnitId := AId;
-              LBase.Sym := LSym;
-            end
-            else if FindTypeInUsesArity(AId,
-                 LM.Tree.NodeNameLower(LM.Tree.Nodes[ANode].FirstChild),
-                 LArgCount, LUid, LSym) then
-            begin
-              LBase.UnitId := LUid;
-              LBase.Sym := LSym;
-            end;
-          end;
-        end;
+        LBase := TypeAtArityX(AId, LBase, LArgCount,
+          LM.Tree.Nodes[ANode].FirstChild);
         LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
         while LArgNode <> NIL_NODE do
         begin
@@ -9228,6 +9210,69 @@ begin
             Length(LArgs)) then
           Result.Inst := Instantiate(LBase, LArgs);
       end;
+  end;
+end;
+
+function TPasSemaProject.TypeAtArityX(AId: Integer; const ABase: TSemaXType;
+  AArity, ANameNode: Integer; const ANameLower: string): TSemaXType;
+var
+  LSym, LUid: Integer;
+  LName: string;
+begin
+  // The name is needed only when the arities live in different units, and
+  // taking it allocates - ResolveTypeExpr passes the node and no text.
+  LName := ANameLower;
+  Result := RealGenericBase(ABase);
+  if not XValid(Result) then
+    Exit;
+  // 16.1.2: one name may be declared at several ARITIES, chained on
+  // NextOverload by CollectTypeDecl. Only the head is registered under
+  // the name, so pick the declaration whose parameter count matches the
+  // arguments actually written. Walking the chain is safe for a type
+  // symbol: every other NextOverload consumer reaches the chain through
+  // a ROUTINE head.
+  if ArityOfTypeSym(Result.UnitId, Result.Sym) <> AArity then
+  begin
+    LSym := FModels[Result.UnitId].Symbols[Result.Sym].NextOverload;
+    while LSym <> NIL_SYM do
+    begin
+      if (FModels[Result.UnitId].Symbols[LSym].Kind = skType) and
+         (ArityOfTypeSym(Result.UnitId, LSym) = AArity) then
+      begin
+        Result.Sym := LSym;
+        Break;
+      end;
+      LSym := FModels[Result.UnitId].Symbols[LSym].NextOverload;
+    end;
+    // The chain only links declarations in ONE model. When the arities
+    // live in DIFFERENT used units there is nothing to chain, and the
+    // ordinary lookup returned whichever was imported last - so
+    // `TdxPDFObjectList<T>` can land on a plain class of that name in
+    // another unit and take a whole ancestry with it. Mirror of the bare
+    // case in PreferNonGeneric; searched only after the chain misses, so
+    // the common single-declaration name never reaches it.
+    // BUILTINS excluded, and that guard is load-bearing for the clock:
+    // a seeded type carries no parameter list, so `TArray<T>` and friends
+    // "mismatch" on every single use and would each pay a full scan of
+    // the referring unit's imports. Measured at +1.8% before the guard.
+    if (ArityOfTypeSym(Result.UnitId, Result.Sym) <> AArity) and
+       not (sfBuiltin in FModels[Result.UnitId].Symbols[Result.Sym].Flags) then
+    begin
+      // The referring unit's own interface section first - see
+      // FindTypeInSelfArity; then the used units.
+      if LName = '' then
+        LName := FModels[AId].Tree.NodeNameLower(ANameNode);
+      if FindTypeInSelfArity(AId, LName, AArity, LSym) then
+      begin
+        Result.UnitId := AId;
+        Result.Sym := LSym;
+      end
+      else if FindTypeInUsesArity(AId, LName, AArity, LUid, LSym) then
+      begin
+        Result.UnitId := LUid;
+        Result.Sym := LSym;
+      end;
+    end;
   end;
 end;
 
@@ -11456,9 +11501,7 @@ var
   var
     LMid, LSym: Integer;
   begin
-    Result := TargetSym(N, LMid, LSym) and
-      (FModels[LMid].Symbols[LSym].Kind = skProperty) and
-      PropertyHasParams(LMid, LSym);
+    Result := TargetSym(N, LMid, LSym) and IsArrayPropertySym(LMid, LSym);
   end;
 
   // Does N name a TYPE rather than a value? A DOTTED name binds on its last
@@ -15931,7 +15974,7 @@ end;
 function TPasSemaProject.PropertyHasParams(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LDecl, LChild, LDepth, LPrevMid, LPrevSym: Integer;
+  LDepth, LPrevMid, LPrevSym: Integer;
 begin
   Result := False;
   LM := FModels[AMid];
@@ -15957,19 +16000,14 @@ begin
   // The symbol's DeclNode is the property's NAME node; the parameter list is a
   // sibling of it under the nkPropertyDecl - same shape Phase 1 walks for
   // sfDefaultArrayProp.
-  LDecl := LM.Symbols[ASym].DeclNode;
-  if LDecl = NIL_NODE then
-    Exit;
-  LDecl := LM.Tree.Nodes[LDecl].Parent;
-  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
-    Exit;
-  LChild := LM.Tree.Nodes[LDecl].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    if LM.Tree.Nodes[LChild].Kind = nkParams then
-      Exit(True);
-    LChild := LM.Tree.Nodes[LChild].NextSibling;
-  end;
+  Result := PasPropertyHasParams(LM.Tree, LM.Symbols[ASym].DeclNode);
+end;
+
+function TPasSemaProject.IsArrayPropertySym(AMid, ASym: Integer): Boolean;
+begin
+  Result := (AMid >= 0) and (AMid < FModels.Count) and (ASym <> NIL_SYM) and
+    (FModels[AMid].Symbols[ASym].Kind = skProperty) and
+    PropertyHasParams(AMid, ASym);
 end;
 
 { How many index parameters a property declares - `Cells[ACol, ARow:
@@ -16215,13 +16253,13 @@ end;
 
 function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
 
-  // Element child of an nkArrayType: its LAST child. For a multi-dimensional
+  // The element type of an inline nkArrayType. For a multi-dimensional
   // `array[a, b] of T` this reaches T rather than the intermediate row type -
   // over-eager by one level in a shape too rare to model, and it can only find
   // members of T instead of failing.
   function ElemOf(AMid, ANode: Integer): TSemaXType;
   var
-    LChild, LLast, LSysUid, LSysSym: Integer;
+    LSysUid, LSysSym: Integer;
   begin
     Result := XNil;
     if (ANode = NIL_NODE) or
@@ -16239,36 +16277,15 @@ function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
         Result := XPlain(LSysUid, LSysSym);
       Exit;
     end;
-    LChild := FModels[AMid].Tree.Nodes[ANode].FirstChild;
-    LLast := NIL_NODE;
-    while LChild <> NIL_NODE do
-    begin
-      LLast := LChild;
-      LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
-    end;
-    // NESTED inline arrays - `array of array of T`, written as one nkArrayType
-    // inside another. Descend to the innermost element, which is the same
-    // deliberate over-eagerness the header already documents for the
-    // comma-dimension spelling `array[a, b] of T`: right when the index count
-    // matches the nesting (`AMatrix[I, J]`, the only shape that occurs), and
-    // one level too deep otherwise, where it can only find members of T
-    // instead of failing. The intermediate row type is ANONYMOUS and has no
-    // symbol, so it could not be named as a type in any case.
-    while (LLast <> NIL_NODE) and
-          (FModels[AMid].Tree.Nodes[LLast].Kind = nkArrayType) and
-          (FModels[AMid].Tree.Nodes[LLast].Aux <> 1) do
-    begin
-      LChild := FModels[AMid].Tree.Nodes[LLast].FirstChild;
-      LLast := NIL_NODE;
-      while LChild <> NIL_NODE do
-      begin
-        LLast := LChild;
-        LChild := FModels[AMid].Tree.Nodes[LChild].NextSibling;
-      end;
-    end;
-    // Nested-aware, as SymDeclTypeX: FMX.Layouts' `NewTargets: array of
+    // NESTED inline arrays - `array of array of T` - descend to the innermost
+    // element (PasArrayInnermostElem): right when the index count matches the
+    // nesting (`AMatrix[I, J]`, the only shape that occurs here), one level
+    // too deep otherwise, where it can only find members of T instead of
+    // failing; the intermediate row is anonymous and has no symbol. Nested-
+    // aware, as SymDeclTypeX: FMX.Layouts' `NewTargets: array of
     // TAniCalculations.TTarget`, then `NewTargets[0].TargetType` (F46).
-    Result := ResolveTypeExprNested(AMid, LLast);
+    Result := ResolveTypeExprNested(AMid,
+      PasArrayInnermostElem(FModels[AMid].Tree, ANode));
   end;
 
 var

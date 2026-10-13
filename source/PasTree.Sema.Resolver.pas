@@ -196,6 +196,7 @@ type
     function DefaultArrayPropTypeSym(ATypeSym: Integer): Integer;
     function WithTargetTypeSym(ANode: Integer): Integer;
     function PointeeTypeSym(ATypeSym: Integer): Integer;
+    function ElemOfArrayNode(ANode: Integer): Integer;
     function ElementTypeOf(ABaseNode: Integer): Integer;
     function ElementOfTypeSym(ATypeSym: Integer): Integer;
     procedure RepointScope(ANode, ANewScope: Integer);
@@ -3823,25 +3824,11 @@ end;
   type is a class the brackets mean that class's DEFAULT array property. }
 function TPasSemaResolver.IsArrayPropDesignator(ABaseNode: Integer): Boolean;
 var
-  LSym, LDecl, LChild: Integer;
+  LSym: Integer;
 begin
-  Result := False;
   LSym := DesignatorHead(ABaseNode);
-  if (LSym = NIL_SYM) or (FModel.Symbols[LSym].Kind <> skProperty) then
-    Exit;
-  LDecl := FModel.Symbols[LSym].DeclNode;
-  if LDecl = NIL_NODE then
-    Exit;
-  LDecl := FTree.Nodes[LDecl].Parent;
-  if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkPropertyDecl) then
-    Exit;
-  LChild := FirstChild(LDecl);
-  while LChild <> NIL_NODE do
-  begin
-    if KindOf(LChild) = nkParams then
-      Exit(True);
-    LChild := NextSib(LChild);
-  end;
+  Result := (LSym <> NIL_SYM) and (FModel.Symbols[LSym].Kind = skProperty) and
+    PasPropertyHasParams(FTree, FModel.Symbols[LSym].DeclNode);
 end;
 
 { The declared type of ATypeSym's DEFAULT array property - the one indexing an
@@ -4141,6 +4128,34 @@ begin
   end;
 end;
 
+{ The element type SYMBOL of an inline `array ... of T` definition node -
+  the innermost element (PasArrayInnermostElem): for `array[a, b] of T` and
+  `array of array of T` this is T rather than the anonymous row, over-eager
+  by one level when fewer indices are written, a shape too rare to model for
+  a `with` target, and it can only find members of T instead of failing.
+  NIL_SYM for `array of const` and anything that is no array. }
+function TPasSemaResolver.ElemOfArrayNode(ANode: Integer): Integer;
+var
+  LLast: Integer;
+begin
+  Result := NIL_SYM;
+  LLast := PasArrayInnermostElem(FTree, ANode);
+  if LLast = NIL_NODE then
+    Exit;
+  // An ANONYMOUS element type (`array[...] of record ... end`) is a struct
+  // NODE, not a designator, so DesignatorHead has nothing to read. Its
+  // synthetic symbol is reachable through the member scope CollectStruct
+  // hung off that node - see DeclareAnonStruct.
+  if KindOf(LLast) in [nkRecordType, nkClassType, nkInterfaceType,
+     nkObjectType] then
+  begin
+    if (LLast <= High(FNodeScope)) and (FNodeScope[LLast] <> NIL_SCOPE) then
+      Result := FModel.Scopes[FNodeScope[LLast]].StructSym;
+    Exit;
+  end;
+  Result := DesignatorHead(LLast);
+end;
+
 { The ELEMENT type of an indexable designator, or NIL_SYM when it is not an
   array at all (which the caller reads as "leave the type alone").
 
@@ -4151,55 +4166,6 @@ end;
   first, then the named type it resolves to. Alias links are chased in both
   (TArr = TInner = array of T), depth-capped like PointeeTypeSym. }
 function TPasSemaResolver.ElementTypeOf(ABaseNode: Integer): Integer;
-
-  // Element child of an nkArrayType node: the LAST child (`array[dims] of T`).
-  // NB for a multi-dimensional `array[a, b] of T` this jumps straight to T
-  // rather than to the intermediate row type - over-eager by one level in a
-  // shape too rare to model, and it can only ever find members of T instead
-  // of failing.
-  function ElemOfArrayNode(ANode: Integer): Integer;
-  var
-    LChild, LLast: Integer;
-  begin
-    Result := NIL_SYM;
-    if (ANode = NIL_NODE) or (KindOf(ANode) <> nkArrayType) or
-       (FTree.Nodes[ANode].Aux = 1) then
-      Exit;   // Aux = 1: `array of const`, no element type node at all
-    LChild := FirstChild(ANode);
-    LLast := NIL_NODE;
-    while LChild <> NIL_NODE do
-    begin
-      LLast := LChild;
-      LChild := NextSib(LChild);
-    end;
-    // NESTED inline arrays (`array of array of T`) - descend to the innermost
-    // element. Same accepted over-eagerness as the comma-dimension spelling
-    // documented above, and the intermediate row type is anonymous anyway.
-    while (LLast <> NIL_NODE) and (KindOf(LLast) = nkArrayType) and
-          (FTree.Nodes[LLast].Aux <> 1) do
-    begin
-      LChild := FirstChild(LLast);
-      LLast := NIL_NODE;
-      while LChild <> NIL_NODE do
-      begin
-        LLast := LChild;
-        LChild := NextSib(LChild);
-      end;
-    end;
-    // An ANONYMOUS element type (`array[...] of record ... end`) is a struct
-    // NODE, not a designator, so DesignatorHead has nothing to read. Its
-    // synthetic symbol is reachable through the member scope CollectStruct
-    // hung off that node - see DeclareAnonStruct.
-    if (LLast <> NIL_NODE) and (KindOf(LLast) in [nkRecordType, nkClassType,
-       nkInterfaceType, nkObjectType]) then
-    begin
-      if (LLast <= High(FNodeScope)) and (FNodeScope[LLast] <> NIL_SCOPE) then
-        Result := FModel.Scopes[FNodeScope[LLast]].StructSym;
-      Exit;
-    end;
-    Result := DesignatorHead(LLast);
-  end;
-
 var
   LSym: Integer;
 begin
@@ -4224,43 +4190,6 @@ end;
   peels again. NIL_SYM when the type is not an array (or the element is an
   inline nesting, which ElemOfArrayNode already descended). }
 function TPasSemaResolver.ElementOfTypeSym(ATypeSym: Integer): Integer;
-
-  function ElemOfArrayNode(ANode: Integer): Integer;
-  var
-    LChild, LLast: Integer;
-  begin
-    Result := NIL_SYM;
-    if (ANode = NIL_NODE) or (KindOf(ANode) <> nkArrayType) or
-       (FTree.Nodes[ANode].Aux = 1) then
-      Exit;
-    LChild := FirstChild(ANode);
-    LLast := NIL_NODE;
-    while LChild <> NIL_NODE do
-    begin
-      LLast := LChild;
-      LChild := NextSib(LChild);
-    end;
-    while (LLast <> NIL_NODE) and (KindOf(LLast) = nkArrayType) and
-          (FTree.Nodes[LLast].Aux <> 1) do
-    begin
-      LChild := FirstChild(LLast);
-      LLast := NIL_NODE;
-      while LChild <> NIL_NODE do
-      begin
-        LLast := LChild;
-        LChild := NextSib(LChild);
-      end;
-    end;
-    if (LLast <> NIL_NODE) and (KindOf(LLast) in [nkRecordType, nkClassType,
-       nkInterfaceType, nkObjectType]) then
-    begin
-      if (LLast <= High(FNodeScope)) and (FNodeScope[LLast] <> NIL_SCOPE) then
-        Result := FModel.Scopes[FNodeScope[LLast]].StructSym;
-      Exit;
-    end;
-    Result := DesignatorHead(LLast);
-  end;
-
 var
   LSym, LDef, LDepth: Integer;
 begin

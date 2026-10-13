@@ -160,6 +160,20 @@ type
       longest-match, accumulated segment by segment (the same rule
       navigation's QualifierUnitAt applies). Not a "valid" ref by itself. }
     PendingUnit: string;
+    { An ANONYMOUS array type, which no symbol names: its nkArrayType node
+      (`var A: array of TRec`, an open-array parameter, the row of `array of
+      array of T`) in model ArrMid (-1 = the overlay), with ArrSkip of its
+      index types already consumed (`M[I]` over `array[0..1, 0..1] of T` is
+      a row), closed over the frame ArrCtx. A named array keeps its symbol
+      until a bracket leaves a row of it. }
+    ArrMid: Integer;
+    ArrNode: Integer;
+    ArrSkip: Integer;
+    ArrCtx: Integer;
+    { The value is a POINTER to the type the other fields name: an inline
+      `^T` resolves to T for the implicit deref (`P.X`), and this keeps the
+      level an explicit `P^` or a `P[I]` takes. }
+    ViaPointer: Boolean;
   end;
 
   { One resolved target of a located call (CallAt): a routine its designator
@@ -267,7 +281,8 @@ type
     function ProjModel(AMid: Integer; const AWhere: string): TPasSemaModel;
     function BridgeName(const AKey: string; out AMid, ASym: Integer): Boolean;
     function BridgeUnitMid(const AName: string): Integer;
-    function OwnModelTypeX(AOvSym: Integer): TSemaXType;
+    function OwnModelTypeX(AOvSym: Integer;
+      ADepth: Integer = 0): TSemaXType;
     function TypeOfOverlaySym(ASym, ADepth: Integer): TPasComplTypeRef;
     function TypeOfProjectSym(AMid, ASym, ACtx, ADepth: Integer):
       TPasComplTypeRef;
@@ -301,8 +316,13 @@ type
     function OverlayStructDef(AOvSym: Integer): Integer;
     function OverlayHeritageRef(AOvSym, ADepth: Integer): TPasComplTypeRef;
     function ProjectTypeDef(const AX: TSemaXType): Integer;
-    function ElementTypeOf(const ABase: TPasComplTypeRef;
+    function ArrayElemRef(AMid, ADef, ACtx,
       ADepth: Integer): TPasComplTypeRef;
+    function ElementTypeOf(const ABase: TPasComplTypeRef;
+      ACount, ADepth: Integer): TPasComplTypeRef;
+    function DesignatorSymOf(ANode, ADepth: Integer;
+      out AMid, ASym: Integer): Boolean;
+    function IsArrayPropertyDesignator(ANode, ADepth: Integer): Boolean;
     function PointeeTypeOf(const ABase: TPasComplTypeRef;
       ADepth: Integer): TPasComplTypeRef;
     // collection
@@ -690,11 +710,27 @@ begin
   Result.UnitMid := -1;
   Result.IsTypeRef := False;
   Result.PendingUnit := '';
+  Result.ArrMid := -1;
+  Result.ArrNode := NIL_NODE;
+  Result.ArrSkip := 0;
+  Result.ArrCtx := NIL_INST;
+  Result.ViaPointer := False;
 end;
 
 function ComplValid(const ARef: TPasComplTypeRef): Boolean;
 begin
-  Result := XValid(ARef.X) or (ARef.OvSym <> NIL_SYM) or (ARef.UnitMid >= 0);
+  Result := XValid(ARef.X) or (ARef.OvSym <> NIL_SYM) or (ARef.UnitMid >= 0) or
+    (ARef.ArrNode <> NIL_NODE);
+end;
+
+// An anonymous array definition as a type reference (see ArrNode).
+function ComplArrRef(AMid, ANode, ASkip, ACtx: Integer): TPasComplTypeRef;
+begin
+  Result := ComplNilRef;
+  Result.ArrMid := AMid;
+  Result.ArrNode := ANode;
+  Result.ArrSkip := ASkip;
+  Result.ArrCtx := ACtx;
 end;
 
 // Every project-model access in this engine goes through here, so a wrong
@@ -797,20 +833,38 @@ end;
   (its parent chain covers the interface). A freshly typed type that the
   last-good analysis never saw still answers XNil - the frame then stays
   open, exactly the old behavior. When this model IS the project's, the
-  symbol needs no bridging at all. }
-function TPasCompletion.OwnModelTypeX(AOvSym: Integer): TSemaXType;
+  symbol needs no bridging at all. A NESTED type is found through its outer
+  type's twin (`TServicePair` declared in a class and written bare in its
+  methods, `TList<TServicePair>`), ADepth bounding the nest. }
+function TPasCompletion.OwnModelTypeX(AOvSym: Integer;
+  ADepth: Integer): TSemaXType;
 var
   LM: TPasSemaModel;
   LScope, LSym: Integer;
+  LOuter: TSemaXType;
 begin
   Result := XNil;
-  if (AOvSym = NIL_SYM) or (FProj = nil) or (FProjMid < 0) then
+  if (AOvSym = NIL_SYM) or (FProj = nil) or (FProjMid < 0) or
+     (ADepth > 16) then
     Exit;
   if not (FModel.Symbols[AOvSym].Kind in [skType, skBuiltinType]) then
     Exit;
   if FIsProjectModel then
     Exit(XPlain(FProjMid, AOvSym));
   LM := ProjModel(FProjMid, 'OwnModelTypeX');
+  LScope := FModel.Symbols[AOvSym].Scope;
+  if (LScope <> NIL_SCOPE) and (FModel.Scopes[LScope].Kind = sckStruct) then
+  begin
+    LOuter := OwnModelTypeX(FModel.Scopes[LScope].StructSym, ADepth + 1);
+    if not XValid(LOuter) or (LOuter.UnitId <> FProjMid) or
+       (LM.Symbols[LOuter.Sym].MemberScope = NIL_SCOPE) then
+      Exit;
+    LSym := LM.FindLocal(LM.Symbols[LOuter.Sym].MemberScope,
+      FModel.Symbols[AOvSym].NameLower);
+    if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind = skType) then
+      Result := XPlain(FProjMid, LSym);
+    Exit;
+  end;
   if FOwnImplScope = -2 then
   begin
     FOwnImplScope := NIL_SCOPE;
@@ -946,7 +1000,7 @@ function TPasCompletion.TypeOfProjectSym(AMid, ASym, ACtx, ADepth: Integer):
   TPasComplTypeRef;
 var
   LM: TPasSemaModel;
-  LIdx: Integer;
+  LIdx, LNode: Integer;
 begin
   Result := ComplNilRef;
   if (FProj = nil) or (AMid < 0) or (ASym = NIL_SYM) or (ADepth > 16) then
@@ -970,7 +1024,21 @@ begin
   else
     begin
       Result.X := FProj.SymDeclTypeX(AMid, ASym);
-      if ACtx <> NIL_INST then
+      // An inline `array ... of T` or `^T` slot names no type: the
+      // declaration's own node is the type (audit A1-22, A1-24).
+      LNode := LM.Symbols[ASym].TypeNode;
+      if not XValid(Result.X) and (LNode <> NIL_NODE) then
+        case LM.Tree.Nodes[LNode].Kind of
+          nkArrayType:
+            Exit(ComplArrRef(AMid, LNode, 0, ACtx));
+          nkPointerType:
+            begin
+              Result.X := FProj.ResolveTypeExpr(AMid,
+                LM.Tree.Nodes[LNode].FirstChild);
+              Result.ViaPointer := True;
+            end;
+        end;
+      if (ACtx <> NIL_INST) and XValid(Result.X) then
         Result.X := FProj.SubstX(Result.X, ACtx, 0);
       Result.IsTypeRef := False;
     end;
@@ -982,7 +1050,7 @@ end;
 function TPasCompletion.ResolveTypeRefNode(ANode, ADepth: Integer):
   TPasComplTypeRef;
 var
-  LSym, LMid, LChild: Integer;
+  LSym, LMid, LChild, LCount, LArgNode, LNameNode: Integer;
   LKey: string;
   LBase, LArg: TPasComplTypeRef;
   LArgs: TArray<TSemaXType>;
@@ -1010,6 +1078,14 @@ begin
         then
         begin
           Result.X := XPlain(LMid, LSym);
+          // A name with no type arguments names the arity-0 declaration
+          // (16.1.2) - the bridge's last-uses-wins lookup may land on a
+          // generic of that name (`TList` with Classes listed before
+          // Generics.Collections; audit A1-21).
+          if sfGeneric in ProjModel(LMid, 'ResolveTypeRefIdent').
+             Symbols[LSym].Flags then
+            Result.X := FProj.PreferNonGenericByName(FProjMid, LMid, LSym,
+              LKey);
           Result.IsTypeRef := True;
         end;
       end;
@@ -1031,8 +1107,30 @@ begin
         LBase := ResolveTypeRefNode(LChild, ADepth + 1);
         if LBase.OvSym <> NIL_SYM then
           Exit(LBase);   // overlay generic: members enumerable, frame v2
-        if not XValid(LBase.X) or (FProj = nil) then
+        if not XValid(LBase.X) or (FProj = nil) or (FProjMid < 0) then
           Exit;
+        // The declaration of the WRITTEN arity (16.1.2) - the by-name bridge
+        // took whichever `TArray` was imported last, and System.Generics.
+        // Collections' non-generic TArray class is not `TArray<T>` (audit
+        // A1-21). The project's own rule, TypeAtArityX.
+        LCount := 0;
+        LArgNode := FModel.Tree.Nodes[LChild].NextSibling;
+        while LArgNode <> NIL_NODE do
+        begin
+          Inc(LCount);
+          LArgNode := FModel.Tree.Nodes[LArgNode].NextSibling;
+        end;
+        LNameNode := LChild;
+        if FModel.Tree.Nodes[LNameNode].Kind = nkMember then
+        begin
+          LNameNode := FModel.Tree.Nodes[LNameNode].FirstChild;
+          while (LNameNode <> NIL_NODE) and
+                (FModel.Tree.Nodes[LNameNode].NextSibling <> NIL_NODE) do
+            LNameNode := FModel.Tree.Nodes[LNameNode].NextSibling;
+        end;
+        if LNameNode <> NIL_NODE then
+          LBase.X := FProj.TypeAtArityX(FProjMid, LBase.X, LCount, NIL_NODE,
+            FModel.Tree.NodeNameLower(LNameNode));
         // Build the instantiation frame when EVERY argument lands in project
         // space. An OVERLAY-declared argument type is bridged by NAME into
         // this file's own last-good model first (OwnModelTypeX) - the
@@ -1061,10 +1159,29 @@ begin
       begin
         // A value of an inline `^T` reaches T's members through the implicit
         // deref - resolve to the pointee directly (the same hop FindMemberX
-        // makes for a NAMED pointer type).
+        // makes for a NAMED pointer type), marked so `P^` and `P[I]` still
+        // take the level (audit A1-24).
         Result := ResolveTypeRefNode(FModel.Tree.Nodes[ANode].FirstChild,
           ADepth + 1);
         Result.IsTypeRef := False;
+        Result.ViaPointer := True;
+      end;
+    // An inline `array ... of T`: the node is the type (audit A1-22).
+    nkArrayType:
+      Result := ComplArrRef(-1, ANode, 0, NIL_INST);
+    // An anonymous struct written inline (`var R: record X: T; end`): the
+    // symbol DeclareAnonStruct gave it (audit B2-31).
+    nkRecordType, nkClassType, nkInterfaceType, nkObjectType:
+      begin
+        Result.OvSym := FModel.StructSymAtNode(ANode);
+        Result.IsTypeRef := True;
+      end;
+    // `string[N]` is a ShortString (7.1.3).
+    nkStringType:
+      if BridgeName('shortstring', LMid, LSym) then
+      begin
+        Result.X := XPlain(LMid, LSym);
+        Result.IsTypeRef := True;
       end;
     nkClassOf:
       begin
@@ -1226,8 +1343,23 @@ begin
       end;
     nkIndex:
       begin
-        Result := ElementTypeOf(DesignatorType(
-          FModel.Tree.Nodes[ANode].FirstChild, ADepth + 1), ADepth + 1);
+        LChild := FModel.Tree.Nodes[ANode].FirstChild;
+        Result := DesignatorType(LChild, ADepth + 1);
+        // An array property's declared type is already the element's: the
+        // brackets consume its parameters and peel nothing (13.1.2; audit
+        // A1-20, E2-45 - `Components[0].` indexed TComponent again).
+        if not IsArrayPropertyDesignator(LChild, ADepth + 1) then
+        begin
+          // One dimension per index expression (8.1.2; audit A1-25).
+          LScope := 0;
+          LNode := FModel.Tree.Nodes[LChild].NextSibling;
+          while LNode <> NIL_NODE do
+          begin
+            Inc(LScope);
+            LNode := FModel.Tree.Nodes[LNode].NextSibling;
+          end;
+          Result := ElementTypeOf(Result, LScope, ADepth + 1);
+        end;
         Result.IsTypeRef := False;   // an indexed value is an INSTANCE
       end;
   end;
@@ -1372,154 +1504,331 @@ begin
 end;
 
 // The type-definition node of a PROJECT type symbol - OverlayStructDef's
-// cross-model twin (same trailing-directive rule).
+// cross-model twin; both read TPasSemaProject.TypeDefNodeIn (audit D1-33).
 function TPasCompletion.ProjectTypeDef(const AX: TSemaXType): Integer;
-var
-  LM: TPasSemaModel;
-  LDecl: Integer;
 begin
   Result := NIL_NODE;
   if (FProj = nil) or not XValid(AX) then
     Exit;
-  LM := ProjModel(AX.UnitId, 'ProjectTypeDef');
-  LDecl := LM.Symbols[AX.Sym].DeclNode;
-  if LDecl = NIL_NODE then
-    Exit;
-  LDecl := LM.Tree.Nodes[LDecl].Parent;
-  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkTypeDecl) then
-    Exit;
-  LDecl := LM.Tree.Nodes[LDecl].FirstChild;
-  while LDecl <> NIL_NODE do
-  begin
-    if not (LM.Tree.Nodes[LDecl].Kind in [nkDirective, nkAttrGroup]) then
-      Result := LDecl;
-    LDecl := LM.Tree.Nodes[LDecl].NextSibling;
-  end;
+  Result := TPasSemaProject.TypeDefNodeIn(ProjModel(AX.UnitId,
+    'ProjectTypeDef'), AX.Sym);
 end;
 
-// typeof(base[...]): an ARRAY type's element, a STRING's Char, a POINTER's
-// pointee (pointer indexing) - enough for `A[I].` in a live overlay, where
-// no ExprTypeX cache exists. Default array properties are a stage-E+ item.
-function TPasCompletion.ElementTypeOf(const ABase: TPasComplTypeRef;
+{ The type of an array's ELEMENT node, read in the model that holds it
+  (AMid = -1: the overlay), closed over ACtx: another anonymous array (the
+  row of `array of array of T`), an inline pointer, `array of const`'s
+  TVarRec (6.2.6), or a type reference. }
+function TPasCompletion.ArrayElemRef(AMid, ADef, ACtx,
   ADepth: Integer): TPasComplTypeRef;
 var
-  LDef, LElem: Integer;
   LM: TPasSemaModel;
+  LElem, LMid, LSym: Integer;
+begin
+  Result := ComplNilRef;
+  if not SymModelOf(AMid, 'ArrayElemRef', LM) then
+    Exit;
+  if LM.Tree.Nodes[ADef].Aux = 1 then
+  begin
+    if BridgeName('tvarrec', LMid, LSym) then
+      Result.X := XPlain(LMid, LSym);
+    Exit;
+  end;
+  LElem := PasArrayElemNode(LM.Tree, ADef);
+  if LElem = NIL_NODE then
+    Exit;
+  if LM.Tree.Nodes[LElem].Kind = nkArrayType then
+    Exit(ComplArrRef(AMid, LElem, 0, ACtx));
+  if AMid < 0 then
+  begin
+    Result := ResolveTypeRefNode(LElem, ADepth + 1);
+    Result.IsTypeRef := False;
+    Exit;
+  end;
+  if LM.Tree.Nodes[LElem].Kind = nkPointerType then
+  begin
+    Result.X := FProj.ResolveTypeExpr(AMid, LM.Tree.Nodes[LElem].FirstChild);
+    Result.ViaPointer := True;
+  end
+  else
+    Result.X := FProj.ResolveTypeExpr(AMid, LElem);
+  if (ACtx <> NIL_INST) and XValid(Result.X) then
+    Result.X := FProj.SubstX(Result.X, ACtx, 0);
+end;
+
+{ typeof(base[i1, .., iN]) - ACount index expressions applied to ABase, one
+  DIMENSION each (8.1.2: `M[I, J]` is `M[I][J]`): an array consumes as many
+  as it has index types and hands the rest to its element - a row of a
+  multi-dimensional array, which has no type of its own, stays an ArrNode
+  with ArrSkip dimensions consumed (audit A1-25); a string yields its
+  character (AnsiChar for the 1-byte kinds, the project's StringElementX); a
+  pointer its pointee (`P[I]`); a struct with a DEFAULT array property that
+  property's type (13.1.2; the property takes the bracket's indices). Alias
+  links are chased on both sides - an own-unit `TFooArray = TArray<TFoo>`
+  was the everyday shape the overlay half missed (audit A1-23); an overlay
+  struct's default property is asked of its last-good project twin. Where
+  no ExprTypeX cache exists - every live overlay - this is the only answer. }
+function TPasCompletion.ElementTypeOf(const ABase: TPasComplTypeRef;
+  ACount, ADepth: Integer): TPasComplTypeRef;
+var
+  LCur, LNext: TPasComplTypeRef;
+  LM: TPasSemaModel;
+  LRem, LHop, LDef, LDims, LPropMid, LPropSym: Integer;
+  LX: TSemaXType;
+  LOwner: TSemaXType;
 begin
   Result := ComplNilRef;
   if ADepth > 16 then
     Exit;
-  if ABase.OvSym <> NIL_SYM then
+  LCur := ABase;
+  LCur.IsTypeRef := False;
+  LRem := ACount;
+  for LHop := 1 to 64 do
   begin
-    LDef := OverlayStructDef(ABase.OvSym);
-    if (LDef <> NIL_NODE) and
-       (FModel.Tree.Nodes[LDef].Kind = nkArrayType) then
+    if LRem <= 0 then
     begin
-      LElem := FModel.Tree.Nodes[LDef].FirstChild;
-      while (LElem <> NIL_NODE) and
-            (FModel.Tree.Nodes[LElem].NextSibling <> NIL_NODE) do
-        LElem := FModel.Tree.Nodes[LElem].NextSibling;
-      Exit(ResolveTypeRefNode(LElem, ADepth + 1));
+      Result := LCur;
+      Result.IsTypeRef := False;
+      Exit;
     end;
-    Exit;
-  end;
-  if (FProj = nil) or not XValid(ABase.X) then
-    Exit;
-  LM := ProjModel(ABase.X.UnitId, 'ElementTypeOf');
-  // Indexing a STRING yields its character type - AnsiChar for the 1-byte
-  // kinds, `string[N]` and the code-page strings included (7.2.1; the
-  // project's StringElementX, audit B3-29: this answered Char for all).
-  Result.X := FProj.StringElementX(ABase.X.UnitId, ABase.X);
-  if XValid(Result.X) then
-  begin
-    Result.IsTypeRef := False;
-    Exit;
-  end;
-  // A character pointer's element is its character (no declaration node).
-  if LM.Symbols[ABase.X.Sym].Kind = skBuiltinType then
-  begin
-    Result.X := FProj.PointeeX(ABase.X);
-    Exit;
-  end;
-  LDef := ProjectTypeDef(ABase.X);
-  if LDef = NIL_NODE then
-    Exit;
-  case LM.Tree.Nodes[LDef].Kind of
-    nkArrayType:
+    // An anonymous array definition in hand: consume its dimensions.
+    if LCur.ArrNode <> NIL_NODE then
+    begin
+      if not SymModelOf(LCur.ArrMid, 'ElementTypeOf', LM) then
+        Exit;
+      LDims := PasArrayDims(LM.Tree, LCur.ArrNode) - LCur.ArrSkip;
+      if LRem < LDims then
       begin
-        LElem := LM.Tree.Nodes[LDef].FirstChild;
-        while (LElem <> NIL_NODE) and
-              (LM.Tree.Nodes[LElem].NextSibling <> NIL_NODE) do
-          LElem := LM.Tree.Nodes[LElem].NextSibling;
-        if LElem <> NIL_NODE then
+        Result := LCur;
+        Inc(Result.ArrSkip, LRem);
+        Exit;
+      end;
+      Dec(LRem, LDims);
+      LCur := ArrayElemRef(LCur.ArrMid, LCur.ArrNode, LCur.ArrCtx, ADepth);
+      Continue;
+    end;
+    // An inline `^T` value is resolved to T (the implicit deref); indexing
+    // it is pointer indexing, which takes that level.
+    if LCur.ViaPointer then
+    begin
+      LCur.ViaPointer := False;
+      Dec(LRem);
+      Continue;
+    end;
+    if LCur.OvSym <> NIL_SYM then
+    begin
+      LDef := OverlayStructDef(LCur.OvSym);
+      if LDef = NIL_NODE then
+        Exit;
+      case FModel.Tree.Nodes[LDef].Kind of
+        nkArrayType:
+          LCur := ComplArrRef(-1, LDef, 0, NIL_INST);
+        nkPointerType:
+          begin
+            LCur := ResolveTypeRefNode(FModel.Tree.Nodes[LDef].FirstChild,
+              ADepth + 1);
+            Dec(LRem);
+          end;
+        nkIdent, nkMember, nkTypeArgs:
+          begin
+            // An alias - chase it and index THAT.
+            LNext := ResolveTypeRefNode(LDef, ADepth + 1);
+            if LNext.OvSym = LCur.OvSym then
+              Exit;
+            LCur := LNext;
+          end;
+        nkClassType, nkRecordType, nkObjectType, nkInterfaceType:
+          begin
+            // A default array property: asked of the last-good twin.
+            LX := OwnModelTypeX(LCur.OvSym);
+            if not XValid(LX) then
+              Exit;
+            LCur := ComplNilRef;
+            LCur.X := LX;
+          end;
+      else
+        Exit;
+      end;
+      Continue;
+    end;
+    if (FProj = nil) or not XValid(LCur.X) then
+      Exit;
+    LM := ProjModel(LCur.X.UnitId, 'ElementTypeOf');
+    // Indexing a STRING yields its character type - AnsiChar for the 1-byte
+    // kinds, `string[N]` and the code-page strings included (7.2.1).
+    LX := FProj.StringElementX(LCur.X.UnitId, LCur.X);
+    if XValid(LX) then
+    begin
+      LCur := ComplNilRef;
+      LCur.X := LX;
+      Dec(LRem);
+      Continue;
+    end;
+    // A character pointer's element is its character (no declaration node).
+    if LM.Symbols[LCur.X.Sym].Kind = skBuiltinType then
+    begin
+      LX := FProj.PointeeX(LCur.X);
+      LCur := ComplNilRef;
+      LCur.X := LX;
+      Dec(LRem);
+      Continue;
+    end;
+    LDef := ProjectTypeDef(LCur.X);
+    if LDef = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[LDef].Kind of
+      nkArrayType:
+        LCur := ComplArrRef(LCur.X.UnitId, LDef, 0, LCur.X.Inst);
+      nkPointerType:
         begin
-          Result.X := FProj.ResolveTypeExpr(ABase.X.UnitId, LElem);
-          if ABase.X.Inst <> NIL_INST then
-            Result.X := FProj.SubstX(Result.X, ABase.X.Inst, 0);
+          LX := FProj.PointeeX(LCur.X);   // P[I] - pointer indexing
+          LCur := ComplNilRef;
+          LCur.X := LX;
+          Dec(LRem);
         end;
-      end;
-    nkPointerType:
-      Result.X := FProj.PointeeX(ABase.X);   // P[I] - pointer indexing
-    nkIdent, nkMember, nkTypeArgs:
-      begin
-        // An alias - chase it and index THAT.
-        Result.X := FProj.ResolveTypeExpr(ABase.X.UnitId, LDef);
-        if ABase.X.Inst <> NIL_INST then
-          Result.X := FProj.SubstX(Result.X, ABase.X.Inst, 0);
-        if XValid(Result.X) and ((Result.X.UnitId <> ABase.X.UnitId) or
-           (Result.X.Sym <> ABase.X.Sym)) then
-          Exit(ElementTypeOf(Result, ADepth + 1));
-        Result := ComplNilRef;
-      end;
+      nkIdent, nkMember, nkTypeArgs:
+        begin
+          // An alias - chase it and index THAT.
+          LX := FProj.ResolveTypeExpr(LCur.X.UnitId, LDef);
+          if (LCur.X.Inst <> NIL_INST) and XValid(LX) then
+            LX := FProj.SubstX(LX, LCur.X.Inst, 0);
+          if not XValid(LX) or ((LX.UnitId = LCur.X.UnitId) and
+             (LX.Sym = LCur.X.Sym)) then
+            Exit;
+          LCur := ComplNilRef;
+          LCur.X := LX;
+        end;
+      nkClassType, nkRecordType, nkObjectType, nkInterfaceType:
+        begin
+          // `L[I]` reads L.Items[I]: the default property's declared type is
+          // the element's, closed over the frame it was found in; the
+          // property takes the bracket's indices (a comma list read on past
+          // it is dcc's E2016 - typed leniently, as the project typer does).
+          if not FProj.DefaultArrayPropX(LCur.X, LPropMid, LPropSym,
+             LOwner) then
+            Exit;
+          LCur := TypeOfProjectSym(LPropMid, LPropSym, LOwner.Inst,
+            ADepth + 1);
+          LRem := 0;
+        end;
+    else
+      Exit;
+    end;
   end;
 end;
 
 // typeof(base^): the pointee - project pointers via PointeeX, overlay
-// pointer types via their definition node.
+// pointer types via their definition node, alias links chased on both
+// sides (`PRecAlias = PRec`, audit A1-23), and an inline `^T` value, which
+// is resolved to T already, just loses its pointer mark (audit A1-24).
 function TPasCompletion.PointeeTypeOf(const ABase: TPasComplTypeRef;
   ADepth: Integer): TPasComplTypeRef;
 var
   LDef: Integer;
+  LNext: TPasComplTypeRef;
 begin
   Result := ComplNilRef;
   if ADepth > 16 then
     Exit;
+  if ABase.ViaPointer then
+  begin
+    Result := ABase;
+    Result.ViaPointer := False;
+    Exit;
+  end;
   if ABase.OvSym <> NIL_SYM then
   begin
     LDef := OverlayStructDef(ABase.OvSym);
-    if (LDef <> NIL_NODE) and
-       (FModel.Tree.Nodes[LDef].Kind = nkPointerType) then
-      Result := ResolveTypeRefNode(FModel.Tree.Nodes[LDef].FirstChild,
-        ADepth + 1);
+    if LDef = NIL_NODE then
+      Exit;
+    case FModel.Tree.Nodes[LDef].Kind of
+      nkPointerType:
+        Result := ResolveTypeRefNode(FModel.Tree.Nodes[LDef].FirstChild,
+          ADepth + 1);
+      nkIdent, nkMember, nkTypeArgs:
+        begin
+          LNext := ResolveTypeRefNode(LDef, ADepth + 1);
+          if LNext.OvSym <> ABase.OvSym then
+            Result := PointeeTypeOf(LNext, ADepth + 1);
+        end;
+    end;
     Exit;
   end;
   if (FProj <> nil) and XValid(ABase.X) then
     Result.X := FProj.PointeeX(ABase.X);
 end;
 
-// The type-definition node of an overlay type symbol: the LAST child of its
-// nkTypeDecl (name and generic params come first).
+// The type-definition node of an overlay type symbol (TypeDefNodeIn: the
+// child after the name and the generic parameters; an anonymous struct's own
+// node).
 function TPasCompletion.OverlayStructDef(AOvSym: Integer): Integer;
-var
-  LDecl: Integer;
 begin
-  Result := NIL_NODE;
-  LDecl := FModel.Symbols[AOvSym].DeclNode;
-  if LDecl = NIL_NODE then
+  Result := TPasSemaProject.TypeDefNodeIn(FModel, AOvSym);
+end;
+
+{ The symbol a designator names, for the nkIndex rule below: an overlay
+  binding (AMid = -1), the analysis's cross-unit one, or the member a dot
+  hop finds. False when nothing names it. }
+function TPasCompletion.DesignatorSymOf(ANode, ADepth: Integer;
+  out AMid, ASym: Integer): Boolean;
+var
+  LExt: TPasExtRef;
+  LChild, LCtx: Integer;
+begin
+  Result := False;
+  AMid := -1;
+  ASym := NIL_SYM;
+  if (ANode = NIL_NODE) or (ADepth > 16) then
     Exit;
-  LDecl := FModel.Tree.Nodes[LDecl].Parent;
-  if (LDecl = NIL_NODE) or (FModel.Tree.Nodes[LDecl].Kind <> nkTypeDecl) then
-    Exit;
-  // The LAST child that is not a trailing hint directive: `TAlias =
-  // Other.TType deprecated 'msg'` hangs the nkDirective after the type
-  // expression, and taking the literal last child returned the directive.
-  LDecl := FModel.Tree.Nodes[LDecl].FirstChild;
-  while LDecl <> NIL_NODE do
-  begin
-    if not (FModel.Tree.Nodes[LDecl].Kind in [nkDirective, nkAttrGroup]) then
-      Result := LDecl;
-    LDecl := FModel.Tree.Nodes[LDecl].NextSibling;
+  case FModel.Tree.Nodes[ANode].Kind of
+    nkIdent:
+      begin
+        ASym := FModel.RefMap[ANode];
+        if ASym <> NIL_SYM then
+          Exit(True);
+        if FModel.ExtRefMap.TryGetValue(ANode, LExt) then
+        begin
+          AMid := LExt.UnitId;
+          ASym := LExt.Sym;
+          Exit(True);
+        end;
+      end;
+    nkMember:
+      begin
+        LChild := FModel.Tree.Nodes[ANode].FirstChild;
+        if LChild = NIL_NODE then
+          Exit;
+        Result := MemberSymOf(DesignatorType(LChild, ADepth + 1),
+          FModel.Tree.NodeNameLower(FModel.Tree.Nodes[LChild].NextSibling),
+          ADepth + 1, AMid, ASym, LCtx);
+      end;
+    nkParen:
+      Result := DesignatorSymOf(FModel.Tree.Nodes[ANode].FirstChild,
+        ADepth + 1, AMid, ASym);
   end;
+end;
+
+{ Does the designator ANode name an ARRAY property (13.1.2)? Then the
+  brackets after it consume the property's parameters and the property's
+  declared type IS the result - the rule CrossType's nkIndex applies
+  (TPasSemaProject.IsArrayPropertySym); an overlay property reads its own
+  declaration. }
+function TPasCompletion.IsArrayPropertyDesignator(ANode,
+  ADepth: Integer): Boolean;
+var
+  LMid, LSym: Integer;
+begin
+  Result := False;
+  if not DesignatorSymOf(ANode, ADepth, LMid, LSym) then
+    Exit;
+  if LMid >= 0 then
+    Exit((FProj <> nil) and FProj.IsArrayPropertySym(LMid, LSym));
+  if FModel.Symbols[LSym].Kind <> skProperty then
+    Exit;
+  // `property Items;` - typeless: the parameters are the republished
+  // declaration's, which only the analysis links.
+  if FIsProjectModel then
+    Exit(FProj.IsArrayPropertySym(FProjMid, LSym));
+  Result := PasPropertyHasParams(FModel.Tree, FModel.Symbols[LSym].DeclNode);
 end;
 
 // Where an overlay type's member walk goes NEXT: the first heritage entry

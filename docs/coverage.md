@@ -376,8 +376,9 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 
 ### 13.1.3 Indexed properties (`index` directive)
 - the `index` specifier's dispatch typing is not modeled;
-  accessors are resolved as names only. Default array properties are not
-  typed on the completion overlay path.
+  accessors are resolved as names only. On the completion overlay a default
+  array property of a type declared in the edited unit is read off that
+  type's last-good analysis, so one typed since then is not seen.
 
 ### 13.1.4 Default array properties
 - `L[I]` is a use of L's default array property with no name written: bound

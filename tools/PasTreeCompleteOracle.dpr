@@ -673,6 +673,82 @@ begin
   end;
 end;
 
+// -overlay -at:<file>|<line>|<col>: one request against both models - the
+// items and the call targets each side gives, for drilling a difference.
+procedure OverlayProbeAt(const ASpec: string);
+var
+  LParts: TArray<string>;
+  LMid, LLine, LCol: Integer;
+  LM, LOvModel: TPasSemaModel;
+  LPre: TPasPreprocessed;
+  LDiags: TArray<TPasParseDiag>;
+  LComp: TPasCompletion;
+  LCtx: TPasComplContext;
+  LItems: TArray<TPasComplItem>;
+  LCall: TPasCallInfo;
+begin
+  LParts := ASpec.Split(['|']);
+  if Length(LParts) <> 3 then
+  begin
+    Writeln('-at wants <file>|<line>|<col>');
+    Exit;
+  end;
+  LMid := -1;
+  for var LIdx := 0 to GProj.ModelCount - 1 do
+    if SameText(ExtractFileName(GProj.ModelFile(LIdx)),
+      ExtractFileName(LParts[0])) then
+    begin
+      LMid := LIdx;
+      Break;
+    end;
+  if LMid < 0 then
+  begin
+    Writeln('not analyzed: ', LParts[0]);
+    Exit;
+  end;
+  LLine := StrToIntDef(LParts[1], 1);
+  LCol := StrToIntDef(LParts[2], 1);
+  LM := GProj.Model(LMid);
+  LPre := GOvlPP.ProcessText(GProj.ModelFile(LMid),
+    LM.Tree.Source.Files[0].Source);
+  LOvModel := TPasSemaResolver.Analyze(TPasParser.ParseFile(LPre, LDiags),
+    False, GPlatform);
+  try
+    for var LSide := 0 to 1 do
+    begin
+      if LSide = 0 then
+      begin
+        Writeln('project model:');
+        LComp := TPasCompletion.Create(LM, GProj, LMid);
+      end
+      else
+      begin
+        Writeln('overlay model:');
+        LComp := TPasCompletion.Create(LOvModel, GProj, LMid);
+      end;
+      try
+        if LComp.CompleteAt(LLine, LCol, LCtx, LItems) then
+        begin
+          Write(Format('  %s, %d items:', [CTX_NAMES[LCtx], Length(LItems)]));
+          for var LIdx := 0 to Min(High(LItems), 11) do
+            Write(' ', LItems[LIdx].Name);
+          Writeln;
+        end
+        else
+          Writeln('  refused');
+        if LComp.CallAt(LLine, LCol, LCall) then
+          for var LT in LCall.Targets do
+            Writeln(Format('  call %s%s: %s', [LT.Name, LT.ParamsText,
+              LT.ResultText]));
+      finally
+        LComp.Free;
+      end;
+    end;
+  finally
+    LOvModel.Free;
+  end;
+end;
+
 procedure ReportOverlay;
 var
   LShow: Integer;
@@ -791,7 +867,7 @@ begin
     Writeln(Format('analyzed %d units in %d ms (%s)',
       [GProj.ModelCount, GSW.ElapsedMilliseconds, PlatformName(GPlatform)]));
 
-    if GAtSpec <> '' then
+    if (GAtSpec <> '') and not GOverlay then
     begin
       ProbeAt(GAtSpec);
       Exit;
@@ -810,9 +886,14 @@ begin
           + GExtraPaths, []);
       GOvlRows := TList<TOvlRow>.Create;
       try
-        for LMid := 0 to GProj.ModelCount - 1 do
-          OverlayOneModel(LMid);
-        ReportOverlay;
+        if GAtSpec <> '' then
+          OverlayProbeAt(GAtSpec)
+        else
+        begin
+          for LMid := 0 to GProj.ModelCount - 1 do
+            OverlayOneModel(LMid);
+          ReportOverlay;
+        end;
       finally
         GOvlRows.Free;
         GOvlPP.Free;

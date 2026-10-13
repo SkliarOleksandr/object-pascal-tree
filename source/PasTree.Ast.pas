@@ -434,6 +434,29 @@ type
     then the `for` target) and is not read here. }
   function PasHeritageRef(const ATree: TPasTree; ADef: Integer): Integer;
 
+  { The parts of an `array [dims] of T` definition node (8.1.1, 8.2.1): the
+    index types lead the children, the element type is the LAST child, and
+    `array of const` (Aux = 1) has no element node at all. The one reading
+    every typer takes (audit D2-10: four hand copies).
+    PasArrayElemNode: the element child, NIL_NODE for `array of const` or a
+    node that is no nkArrayType. PasArrayInnermostElem: the same, descending
+    nested inline arrays (`array of array of T` gives T) - the shortcut the
+    `with` typers take. PasArrayDims: how many indices the definition takes
+    before its element - one for a dynamic or open array, one per index type
+    of a static one (`array[0..1, 0..2] of T` is 2: `M[I, J]` and `M[I][J]`
+    both reach T, 8.1.2). }
+  function PasArrayElemNode(const ATree: TPasTree; ADef: Integer): Integer;
+  function PasArrayInnermostElem(const ATree: TPasTree;
+    ADef: Integer): Integer;
+  function PasArrayDims(const ATree: TPasTree; ADef: Integer): Integer;
+
+  { Does the property whose NAME node is ANameNode declare index parameters
+    (an array property, 13.1.2)? Read off its own nkPropertyDecl; a bare
+    redeclaration (`property Items;`) declares none - asking its ancestor is
+    the caller's business. }
+  function PasPropertyHasParams(const ATree: TPasTree;
+    ANameNode: Integer): Boolean;
+
 implementation
 
 uses
@@ -475,6 +498,78 @@ begin
   if (Result <> NIL_NODE) and not (ATree.Nodes[Result].Kind in
      [nkIdent, nkMember, nkTypeArgs]) then
     Result := NIL_NODE;
+end;
+
+function PasArrayElemNode(const ATree: TPasTree; ADef: Integer): Integer;
+var
+  LChild: Integer;
+begin
+  Result := NIL_NODE;
+  if (ADef = NIL_NODE) or (ATree.Nodes[ADef].Kind <> nkArrayType) or
+     (ATree.Nodes[ADef].Aux = 1) then
+    Exit;
+  LChild := ATree.Nodes[ADef].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    Result := LChild;
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function PasArrayInnermostElem(const ATree: TPasTree;
+  ADef: Integer): Integer;
+var
+  LDepth: Integer;
+begin
+  Result := PasArrayElemNode(ATree, ADef);
+  for LDepth := 1 to 64 do
+  begin
+    if (Result = NIL_NODE) or (ATree.Nodes[Result].Kind <> nkArrayType) or
+       (ATree.Nodes[Result].Aux = 1) then
+      Exit;
+    Result := PasArrayElemNode(ATree, Result);
+  end;
+end;
+
+function PasArrayDims(const ATree: TPasTree; ADef: Integer): Integer;
+var
+  LChild: Integer;
+begin
+  Result := 0;
+  if (ADef = NIL_NODE) or (ATree.Nodes[ADef].Kind <> nkArrayType) then
+    Exit;
+  LChild := ATree.Nodes[ADef].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    Inc(Result);
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+  // Every child but the element is an index type; `array of T` and
+  // `array of const` take one index and write none.
+  if ATree.Nodes[ADef].Aux <> 1 then
+    Dec(Result);
+  if Result < 1 then
+    Result := 1;
+end;
+
+function PasPropertyHasParams(const ATree: TPasTree;
+  ANameNode: Integer): Boolean;
+var
+  LDecl, LChild: Integer;
+begin
+  Result := False;
+  if ANameNode = NIL_NODE then
+    Exit;
+  LDecl := ATree.Nodes[ANameNode].Parent;
+  if (LDecl = NIL_NODE) or (ATree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+    Exit;
+  LChild := ATree.Nodes[LDecl].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if ATree.Nodes[LChild].Kind = nkParams then
+      Exit(True);
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
 end;
 
 { TPasTree }

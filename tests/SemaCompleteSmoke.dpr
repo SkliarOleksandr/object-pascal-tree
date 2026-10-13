@@ -14,6 +14,8 @@ program SemaCompleteSmoke;
 uses
   System.SysUtils,
   System.IOUtils,
+  System.Math,
+  System.StrUtils,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -355,8 +357,126 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // Audit B47: the overlay's type references - generic arity, anonymous
+  // arrays, own-unit aliases, inline pointers, index counts, array
+  // properties. A mini-project of its own: ext47 and plain47 each declare a
+  // name at the arity the other lacks, and plain47 is imported LAST, so a
+  // by-name lookup lands on the wrong one both ways (16.1.2).
+  B47_EXT =
+    'unit ext47;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TItem = class'#10 +
+    '  public'#10 +
+    '    ItemVal: Integer;'#10 +
+    '  end;'#10 +
+    '  TCell = record'#10 +
+    '    CellVal: Integer;'#10 +
+    '  end;'#10 +
+    '  TExtArr = array of TCell;'#10 +
+    '  TExtMat = array of TExtArr;'#10 +
+    '  TExtSq = array[0..1, 0..1] of TCell;'#10 +
+    '  TExtRec = record'#10 +
+    '    ExtF: Integer;'#10 +
+    '  end;'#10 +
+    '  TOwner = class'#10 +
+    '  private'#10 +
+    '    function GetItem(I: Integer): TItem;'#10 +
+    '  public'#10 +
+    '    Cells: array of TCell;'#10 +
+    '    CellPtr: ^TCell;'#10 +
+    '    property Items[I: Integer]: TItem read GetItem; default;'#10 +
+    '  end;'#10 +
+    '  TBox<T> = class'#10 +
+    '  public'#10 +
+    '    BoxF: T;'#10 +
+    '  end;'#10 +
+    '  TBag = class'#10 +
+    '  public'#10 +
+    '    BagF: Integer;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'function TOwner.GetItem(I: Integer): TItem;'#10 +
+    'begin'#10 +
+    '  Result := nil;'#10 +
+    'end;'#10 +
+    'end.'#10;
+  B47_PLAIN =
+    'unit plain47;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TBox = class'#10 +
+    '  public'#10 +
+    '    PlainF: Integer;'#10 +
+    '  end;'#10 +
+    '  TBag<T> = class'#10 +
+    '  public'#10 +
+    '    GenBagF: T;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'end.'#10;
+  B47_HEAD =
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses ext47, plain47;'#10 +
+    'type'#10 +
+    '  TRecArr = array of TCell;'#10 +
+    '  TRecArrAlias = TRecArr;'#10 +
+    '  TExtAlias = TExtArr;'#10 +
+    '  TItems = array of TItem;'#10 +
+    '  TItems2 = TItems;'#10 +
+    '  TBoxes = TBox<TItem>;'#10 +
+    '  PCell = ^TCell;'#10 +
+    '  PCellAlias = PCell;'#10 +
+    '  TNestOwner = class'#10 +
+    '  type'#10 +
+    '    TNested = record'#10 +
+    '      NestF: Integer;'#10 +
+    '    end;'#10 +
+    '  public'#10 +
+    '    procedure Run;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure P(const Q: array of TCell);'#10 +
+    'var'#10 +
+    '  A: array of TCell;'#10 +
+    '  M: array of array of TCell;'#10 +
+    '  S2: array[0..1, 0..1] of TCell;'#10 +
+    '  A1: TRecArrAlias;'#10 +
+    '  A2: TExtAlias;'#10 +
+    '  A6: TExtMat;'#10 +
+    '  A7: TExtSq;'#10 +
+    '  I2: TItems2;'#10 +
+    '  P1: ^TCell;'#10 +
+    '  P3: PCellAlias;'#10 +
+    '  P4: ^TExtRec;'#10 +
+    '  O: TOwner;'#10 +
+    '  D: TBox<TItem>;'#10 +
+    '  DB: TBoxes;'#10 +
+    '  B2: TBag;'#10 +
+    '  R: record X: TItem; end;'#10 +
+    'begin'#10;
+
 var
   GDir: string;
+
+// One B47 overlay case: the members a dot after ABase lists must hold
+// AWant and not ANot ('' = no check).
+procedure B47Case(const ABase, AWant, ANot: string);
+begin
+  ProjCase(B47_HEAD + '  ' + ABase + '.|'#10 + PROJ_TAIL);
+  GCounter.Ok(Format('B47 %s. lists %s%s', [ABase, IfThen(AWant <> '',
+    AWant, '(any)'), IfThen(ANot <> '', ', not ' + ANot, '')]),
+    GHit and (GCtx = ccMember) and ((AWant = '') or Has(AWant)) and
+    ((ANot = '') or not Has(ANot)),
+    procedure
+    begin
+      Write('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':');
+      for var LFi := 0 to Min(High(GItems), 9) do
+        Write(' ', GItems[LFi].Name);
+      Writeln;
+    end);
+end;
 
 begin
   GSM := TPasSourceManager.Create([]);
@@ -983,6 +1103,63 @@ begin
     'end.'#10);
   GCounter.Ok('a declaration''s parameter list is not a call', not GHit);
 
+  GProj.Free;
+  GProj := nil;
+
+  // ======== audit B47: overlay type references ===============================
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_smoke47');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'ext47.pas'), B47_EXT);
+  TFile.WriteAllText(TPath.Combine(GDir, 'plain47.pas'), B47_PLAIN);
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'),
+    B47_HEAD + PROJ_TAIL);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  GCounter.Ok('B47 mini-project analyzed', GProjMid >= 0);
+  // A1-21: the written arity, both ways.
+  B47Case('D', 'BoxF', 'PlainF');
+  B47Case('D.BoxF', 'ItemVal', '');
+  B47Case('DB.BoxF', 'ItemVal', '');
+  B47Case('B2', 'BagF', 'GenBagF');
+  // A1-22, B2-31: anonymous arrays and records.
+  B47Case('A[0]', 'CellVal', '');
+  B47Case('Q[0]', 'CellVal', '');
+  B47Case('M[0, 1]', 'CellVal', '');
+  B47Case('M[0][1]', 'CellVal', '');
+  B47Case('R.X', 'ItemVal', '');
+  B47Case('O.Cells[0]', 'CellVal', '');
+  // A1-23: own-unit aliases.
+  B47Case('A1[0]', 'CellVal', '');
+  B47Case('A2[0]', 'CellVal', '');
+  B47Case('I2[0]', 'ItemVal', '');
+  B47Case('P3^', 'CellVal', '');
+  // A1-24: inline pointers, explicit and implicit dereference.
+  B47Case('P1^', 'CellVal', '');
+  B47Case('P1', 'CellVal', '');
+  B47Case('P4^', 'ExtF', '');
+  B47Case('O.CellPtr^', 'CellVal', '');
+  // A1-25: one dimension per index.
+  B47Case('A6[0, 1]', 'CellVal', '');
+  B47Case('A6[0][1]', 'CellVal', '');
+  B47Case('A7[0, 1]', 'CellVal', '');
+  B47Case('A7[0][1]', 'CellVal', '');
+  B47Case('S2[0][1]', 'CellVal', '');
+  B47Case('A7[0]', '', 'CellVal');
+  // A1-20, E2-45: an array property's type is the element's.
+  B47Case('O.Items[0]', 'ItemVal', '');
+  B47Case('O[0]', 'ItemVal', '');
+  // A nested own type as a type argument, written bare in its class's
+  // method: the frame closes through the outer type's last-good twin.
+  ProjCase(B47_HEAD + 'end;'#10 +
+    'procedure TNestOwner.Run;'#10 +
+    'var'#10 +
+    '  NB: TBox<TNested>;'#10 +
+    'begin'#10 +
+    '  NB.BoxF.|'#10 + PROJ_TAIL);
+  GCounter.Ok('B47 TBox<TNested> in TNestOwner.Run: NB.BoxF. lists NestF',
+    GHit and Has('NestF'));
   GProj.Free;
   GProj := nil;
 
