@@ -803,6 +803,15 @@ type
     function ParamlessOverload(AHead: Integer): Integer;
     // ASym is a `class` routine - its nkRoutine carries Aux = 1 (6.1).
     function IsClassRoutine(ASym: Integer): Boolean;
+    { ASym is a CLASS constructor or destructor (15.1.5) - never nameable:
+      no call, no member list, no completion row may offer it. Reads the
+      routine node's Aux and RoutineHead, so a text-demoted model answers
+      too. The one test the project's member walks and completion share. }
+    function IsClassCtorDtor(ASym: Integer): Boolean;
+    { The innermost struct whose scope encloses AScope - StructSym stamped on
+      a struct's member scope and on a method implementation's routine
+      scope. NIL_SYM outside any struct. EnclosingStructSym's scope half. }
+    function EnclosingStructSymOfScope(AScope: Integer): Integer;
     { Stage 2 of the release: snapshots RoutineHead for every routine symbol
       and the stream identity counts, then frees the whole text layer
       (Visible + per-file Source/Tokens/LineStarts). See the Demoted field. }
@@ -2383,12 +2392,36 @@ begin
     ANode := Tree.Nodes[ANode].Parent;
   end;
   // ...then out through the enclosing scopes.
-  while LScope <> NIL_SCOPE do
+  Result := EnclosingStructSymOfScope(LScope);
+end;
+
+function TPasSemaModel.EnclosingStructSymOfScope(AScope: Integer): Integer;
+begin
+  Result := NIL_SYM;
+  while AScope <> NIL_SCOPE do
   begin
-    if Scopes[LScope].StructSym <> NIL_SYM then
-      Exit(Scopes[LScope].StructSym);
-    LScope := Scopes[LScope].Parent;
+    if Scopes[AScope].StructSym <> NIL_SYM then
+      Exit(Scopes[AScope].StructSym);
+    AScope := Scopes[AScope].Parent;
   end;
+end;
+
+function TPasSemaModel.IsClassCtorDtor(ASym: Integer): Boolean;
+var
+  LName, LRoutine: Integer;
+begin
+  Result := False;
+  if (ASym < 0) or (ASym >= SymCount) or
+     (Symbols[ASym].Kind <> skRoutine) then
+    Exit;
+  LName := Symbols[ASym].DeclNode;
+  if (LName = NIL_NODE) or (LName > High(Tree.Nodes)) then
+    Exit;
+  LRoutine := Tree.Nodes[LName].Parent;
+  if (LRoutine = NIL_NODE) or (Tree.Nodes[LRoutine].Kind <> nkRoutine) or
+     (Tree.Nodes[LRoutine].Aux <> 1) then
+    Exit;   // not a `class` routine at all - the cheap half of the test first
+  Result := RoutineHead(ASym) in [rhConstructor, rhDestructor];
 end;
 
 function TPasSemaModel.StructSymAtNode(ANode: Integer): Integer;

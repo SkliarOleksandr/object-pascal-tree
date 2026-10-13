@@ -956,7 +956,6 @@ type
       ANameNode: Integer): TSemaXType;
     function TypeSlotByNameX(AMid, ANode, AScope: Integer): TSemaXType;
     function IsGenericTypeSym(AMid, ASym: Integer): Boolean;
-    function IsDynArrayTypeX(const AX: TSemaXType): Boolean;
     function ResolveTypeExprNested(AId, ANode: Integer;
       ADepth: Integer = 0): TSemaXType;
     procedure BuildHelperMap;
@@ -1264,6 +1263,11 @@ type
       already the per-element one, so brackets after its name peel nothing.
       The rule CrossType's nkIndex and the completion overlay both read. }
     function IsArrayPropertySym(AMid, ASym: Integer): Boolean;
+    { Is AX a DYNAMIC array type, through its aliases (`TBytes` is
+      `TArray<Byte>` is `array of T`)? Only a dynamic array type has the
+      `Create` pseudo-constructor (8.2.3) - completion offers it after
+      `TBytes.`. }
+    function IsDynArrayTypeX(const AX: TSemaXType): Boolean;
     { The type definition node of a type symbol in ANY model, a fresh overlay
       included: the nkTypeDecl's child after the name and its generic
       parameters (a trailing hint directive comes after it), or an anonymous
@@ -10656,23 +10660,8 @@ end;
   the pair (that answer, Aux) is what separates them, and reading the tokens for
   the `class` would find `constructor` and be wrong. }
 function TPasSemaProject.IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
-var
-  LM: TPasSemaModel;
-  LName, LRoutine: Integer;
 begin
-  Result := False;
-  LM := FModels[AMid];
-  if LM.Symbols[ASym].Kind <> skRoutine then
-    Exit;
-  LName := LM.Symbols[ASym].DeclNode;
-  if LName = NIL_NODE then
-    Exit;
-  LRoutine := LM.Tree.Nodes[LName].Parent;
-  if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) or
-     (LM.Tree.Nodes[LRoutine].Aux <> 1) then
-    Exit;   // not a `class` routine at all - the cheap half of the test first
-  // RoutineHead for the same reason as IsConstructorSym.
-  Result := LM.RoutineHead(ASym) in [rhConstructor, rhDestructor];
+  Result := FModels[AMid].IsClassCtorDtor(ASym);
 end;
 
 // Type category of a cross-model type - the symbol's own TypeCat, computed by

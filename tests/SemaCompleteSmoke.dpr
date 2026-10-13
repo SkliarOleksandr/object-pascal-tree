@@ -1229,8 +1229,156 @@ begin
     'end.'#10);
   GCounter.Ok('a declaration''s parameter list is not a call', not GHit);
 
+  // ======== audit B49: candidates and caret context ==========================
+  // B2-30: never the edited unit itself or System in a uses clause.
+  ProjCase(StringReplace(PROJ_HEAD, 'uses exta, exth;', 'uses exta, exth, |;',
+    []) + PROJ_TAIL);
+  GCounter.Ok('B49 uses | offers no own unit and no System',
+    GHit and (GCtx = ccUses) and Has('exta') and not Has('mainu') and
+    not Has('System'));
+  // B2-32: the unit qualifying itself reaches its implementation names.
+  ProjCase(PROJ_HEAD + '  mainu.|'#10 + PROJ_TAIL);
+  GCounter.Ok('B49 mainu.| lists the implementation var and the types',
+    GHit and Has('ImplVar') and Has('TMy'));
+  // E2-48: the dynamic-array pseudo-constructor; a heading's qualifier.
+  ProjCase(PROJ_HEAD + '  TArr.|'#10 + PROJ_TAIL);
+  GCounter.Ok('B49 TArr.| (a dynamic array type) offers Create',
+    GHit and Has('Create'));
+  ProjCase(StringReplace(PROJ_HEAD, 'procedure TMy.Own;',
+    'procedure TMy.|Own;', []) + PROJ_TAIL);
+  GCounter.Ok('B49 procedure TMy.| lists the declared method',
+    GHit and Has('Own') and not Has('ImplVar'));
+  // B2-34, D1-32: one innermost-first with walk - an inner opened record
+  // with beats an outer unopened class with, as a with member.
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta;'#10 +
+    'type'#10 +
+    '  TRecW = record'#10 +
+    '    Zeta: Integer;'#10 +
+    '  end;'#10 +
+    '  TFooW = class(TBase)'#10 +
+    '    Zeta: string;'#10 +
+    '    procedure Run;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TFooW.Run;'#10 +
+    'var'#10 +
+    '  R: TRecW;'#10 +
+    '  F: TFooW;'#10 +
+    'begin'#10 +
+    '  with F do with R do Ze|'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('B49 with F do with R do Ze| is the record''s Zeta',
+    GHit and Has('Zeta') and (ItemNamed('Zeta').Mid = -1) and
+    (GModel.Scopes[GModel.Symbols[ItemNamed('Zeta').Sym].Scope].StructSym <>
+      NIL_SYM) and
+    (GModel.Symbols[GModel.Scopes[GModel.Symbols[ItemNamed('Zeta').Sym].
+      Scope].StructSym].Name = 'TRecW') and
+    (ItemNamed('Zeta').Bucket = cbWithMember));
+  // E2-47, B2-29, B2-36: class operators and class constructors are never
+  // offered; a unit's enum values rank as unit symbols.
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TE49 = (eAlpha, eBeta);'#10 +
+    '  TVec = record'#10 +
+    '    X: Integer;'#10 +
+    '    class operator Add(const A, B: TVec): TVec;'#10 +
+    '    class operator Implicit(const A: TVec): Integer;'#10 +
+    '    function Len: Integer;'#10 +
+    '  end;'#10 +
+    '  TFoo49 = class'#10 +
+    '    class constructor InitZz;'#10 +
+    '    class destructor DoneZz;'#10 +
+    '    procedure Run;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class operator TVec.Add(const A, B: TVec): TVec;'#10'begin'#10'end;'#10 +
+    'class operator TVec.Implicit(const A: TVec): Integer;'#10 +
+    'begin'#10'end;'#10 +
+    'function TVec.Len: Integer;'#10'begin'#10'end;'#10 +
+    'class constructor TFoo49.InitZz;'#10'begin'#10'end;'#10 +
+    'class destructor TFoo49.DoneZz;'#10'begin'#10'end;'#10 +
+    'procedure TFoo49.Run;'#10 +
+    'var'#10 +
+    '  V: TVec;'#10 +
+    'begin'#10 +
+    '  V.|'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('B49 V.| lists X and Len, no class operator',
+    GHit and Has('X') and Has('Len') and not Has('Add') and
+    not Has('Implicit'));
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TE49 = (eAlpha, eBeta);'#10 +
+    '  TFoo49 = class'#10 +
+    '    class constructor InitZz;'#10 +
+    '    class destructor DoneZz;'#10 +
+    '    procedure Run;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'class constructor TFoo49.InitZz;'#10'begin'#10'end;'#10 +
+    'class destructor TFoo49.DoneZz;'#10'begin'#10'end;'#10 +
+    'procedure TFoo49.Run;'#10 +
+    'begin'#10 +
+    '  |'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('B49 a method body offers no class constructor / destructor',
+    GHit and Has('Run') and not Has('InitZz') and not Has('DoneZz'));
+  GCounter.Ok('B49 a unit''s enum value is a unit symbol',
+    Has('eAlpha') and (BucketOf('eAlpha') = cbUnitSym));
   GProj.Free;
   GProj := nil;
+
+  // B49 standalone cases (no project): keywords by position, comments,
+  // array aggregates.
+  GProjMid := -1;
+  ProjCase('program p2;'#10'var G: Integer;'#10'begin'#10 +
+    '  G := 1;'#10'  wh|'#10'end.'#10);
+  GCounter.Ok('B49 a program''s main block offers while',
+    GHit and Has('while'));
+  ProjCase('unit u;'#10'interface'#10'implementation'#10 +
+    'var H: Integer;'#10'initialization'#10'  H := 1;'#10'  wh|'#10'end.'#10);
+  GCounter.Ok('B49 an initialization section offers while',
+    GHit and Has('while'));
+  ProjCase('unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10'var X: Integer;'#10'co|'#10'begin'#10'end;'#10'end.'#10);
+  GCounter.Ok('B49 a routine''s declaration part offers const',
+    GHit and Has('const') and not Has('while'));
+  ProjCase('unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10'begin'#10'end;'#10'|'#10'end.'#10);
+  GCounter.Ok('B49 after a routine''s end; the unit words',
+    GHit and Has('procedure') and Has('initialization'));
+  ProjCase('unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10'var B: Boolean;'#10'begin'#10'  if no|'#10'end;'#10 +
+    'end.'#10);
+  GCounter.Ok('B49 if no| offers not (an expression)',
+    GHit and (GCtx = ccExpression) and Has('not'));
+  ProjCase('unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10'var B: Boolean;'#10'begin'#10 +
+    '  while B and no|'#10'end;'#10'end.'#10);
+  GCounter.Ok('B49 while B and no| offers not', GHit and Has('not'));
+  ProjCase('unit u;'#10'interface'#10'implementation'#10 +
+    'procedure P;'#10'var X: Integer;'#10'begin'#10 +
+    '  X := 1; // note|'#10'end;'#10'end.'#10);
+  GCounter.Ok('B49 the right edge of a // comment offers nothing', not GHit);
+  ProjCase('unit u;'#10'interface'#10'const'#10'  K1 = 1;'#10 +
+    '  A: array[0..1] of Integer = (1, |);'#10'implementation'#10'end.'#10);
+  GCounter.Ok('B49 (1, | in an array constant is an expression',
+    GHit and (GCtx = ccExpression) and Has('K1'));
+  ProjCase('unit u;'#10'interface'#10'type'#10 +
+    '  TRec = record Alpha, Beta: Integer; end;'#10'const'#10 +
+    '  R: TRec = (|);'#10'implementation'#10'end.'#10);
+  GCounter.Ok('B49 (| in a record constant is a field name',
+    GHit and (GCtx = ccRecField) and Has('Alpha'));
 
   // ======== audit B47: overlay type references ===============================
   GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_smoke47');

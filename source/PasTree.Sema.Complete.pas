@@ -349,7 +349,14 @@ type
     function OverlayMemberVisible(ASym: Integer): Boolean;
     function ClassSideMember(AModel: TPasSemaModel; ASym: Integer): Boolean;
     function RoutineNodeOf(AModel: TPasSemaModel; ASym: Integer): Integer;
-    procedure CollectMembers(const ABase: TPasComplTypeRef);
+    procedure CollectMembers(const ABase: TPasComplTypeRef;
+      ABucket: TPasComplBucket = cbMember);
+    procedure AddSeeds;
+    function IsDynArrayRef(const ARef: TPasComplTypeRef;
+      ADepth: Integer): Boolean;
+    function HeaderQualifierStruct(const AInfo: TPasCaretInfo): Integer;
+    function IsRecordAggregate(AAggNode: Integer;
+      AAnchor: TPasTokenKind): Boolean;
     procedure CollectOverlayChain(AOvSym: Integer; AIncludeOwn: Boolean;
       ABucket: TPasComplBucket);
     procedure CollectProjectMembers(const AX: TSemaXType;
@@ -659,8 +666,11 @@ begin
   // the ordinary "caret in trivia" case the walk-back below reads as "after
   // whatever came before". An unterminated string/comment extends to the
   // line end, so its right EDGE still counts as inside.
+  // A `//` comment always runs to the line end, so its right edge - where
+  // typing in it happens - is inside it too (audit A1-34).
   else if ((LOffset < LTS.Tokens[LRaw].EndPos) or
-           (tfUnterminated in LTS.Tokens[LRaw].Flags)) and
+           (tfUnterminated in LTS.Tokens[LRaw].Flags) or
+           (LKind = tkCommentLine)) and
           (LKind in [tkCommentLine, tkCommentBrace, tkCommentParen,
             tkDirective, tkStringLiteral, tkMultilineString, tkControlChar,
             tkCaretChar, tkIntLiteral, tkRealLiteral, tkAsmChunk, tkUnknown]) then
@@ -2374,6 +2384,12 @@ begin
   // nothing but a label means anything.
   if (LM.Symbols[ASym].Kind = skLabel) <> (FContext = ccLabel) then
     Exit;
+  // A `class operator` is never reachable by name (9.3.1: `V.Add`,
+  // `TVec.Add(V, V)` are E2003; audit E2-47), and a class constructor or
+  // destructor can never be named (15.1.5; audit B2-29).
+  if (LM.Symbols[ASym].Kind = skRoutine) and
+     ((LM.RoutineHead(ASym) = rhOperator) or LM.IsClassCtorDtor(ASym)) then
+    Exit;
   // Type positions take what can name a type - consts and enum values
   // included, because a SUBRANGE type's bounds are constant expressions
   // (`TVCLElements = teCategoryButtons..teTextLabel`, 2.2.5).
@@ -2713,24 +2729,9 @@ begin
       if LScope <> NIL_SCOPE then
         FModel.EnumScopeDeep(LScope,
           procedure(ASym, AScopeOfSym: Integer)
-          var
-            LNode: Integer;
           begin
-            // Class constructors/destructors are never nameable. Kind-gated
-            // and token-KIND-tested - this closure is the per-candidate hot
-            // path, and a parent walk per field/const was pure waste (the
-            // review's finding #4; the token-kind policy is the one
-            // IsConstructorSym documents for itself).
-            if FModel.Symbols[ASym].Kind = skRoutine then
-            begin
-              LNode := RoutineNodeOf(FModel, ASym);
-              if (LNode <> NIL_NODE) and
-                 (FModel.Tree.Nodes[LNode].Aux = 1) and
-                 (FModel.Tree.Source.VisibleToken(
-                    FModel.Tree.Nodes[LNode].FirstToken).Kind in
-                    [tkConstructor, tkDestructor]) then
-                Exit;
-            end;
+            // Class constructors / destructors and class operators are
+            // AddSym's to refuse, as for every other walk.
             if FFieldsOnly and (FModel.Symbols[ASym].Kind <> skField) then
               Exit;
             if not OverlayMemberVisible(ASym) then
@@ -2789,26 +2790,203 @@ begin
         end);
 end;
 
-procedure TPasCompletion.CollectMembers(const ABase: TPasComplTypeRef);
+procedure TPasCompletion.CollectMembers(const ABase: TPasComplTypeRef;
+  ABucket: TPasComplBucket);
+var
+  LScope, LIdx, LSym: Integer;
 begin
   if ABase.UnitMid >= 0 then
   begin
-    CollectUnitInterface(ABase.UnitMid, cbMember);
+    // The edited unit qualifying ITSELF (`u4.`) reaches its unit-level
+    // declarations of either section made so far (3.3.2 step 4) - the
+    // overlay's own, typed since the last analysis included (audit B2-32).
+    if (ABase.UnitMid = FProjMid) and (FModel.InterfaceScope <> NIL_SCOPE) then
+    begin
+      for LScope := 0 to FModel.Scopes.Count - 1 do
+        if (LScope = FModel.InterfaceScope) or
+           (FModel.Scopes[LScope].Kind = sckImplementation) then
+          for LIdx := 0 to FModel.Scopes[LScope].Symbols.Count - 1 do
+          begin
+            LSym := FModel.Scopes[LScope].Symbols[LIdx];
+            if (FModel.Symbols[LSym].Kind <> skUnitRef) and
+               ((FCaretVis < 0) or
+                not FModel.DeclaredAfter(LSym, FCaretVis)) then
+              AddSym(-1, LSym, NIL_INST, ABucket);
+          end;
+      Exit;
+    end;
+    CollectUnitInterface(ABase.UnitMid, ABucket);
     // dcc lets `System.` qualify EVERY compiler-provided name (System.Delete,
     // System.PAnsiChar), so the System unit's list carries the seeds too -
     // and only System's: seeds are per-model copies, not anyone's exports.
-    if (FProj <> nil) and (ABase.UnitMid = FProj.EnsureSystemUnit) and
-       (FModel.SystemScope <> NIL_SCOPE) then
-      FModel.EnumScopeDeep(FModel.SystemScope,
-        procedure(ASym, AScopeOfSym: Integer)
-        begin
-          AddSym(-1, ASym, NIL_INST, cbBuiltin);
-        end);
+    if (FProj <> nil) and (ABase.UnitMid = FProj.EnsureSystemUnit) then
+      AddSeeds;
   end
-  else if ABase.OvSym <> NIL_SYM then
-    CollectOverlayChain(ABase.OvSym, True, cbMember)
   else
-    CollectProjectMembers(ABase.X, cbMember);
+  begin
+    if ABase.OvSym <> NIL_SYM then
+      CollectOverlayChain(ABase.OvSym, True, ABucket)
+    else if XValid(ABase.X) then
+      CollectProjectMembers(ABase.X, ABucket);
+    // `TBytes.Create(...)`: a dynamic array TYPE has the pseudo-constructor
+    // (8.2.3), which no declaration carries (audit E2-48).
+    if ABase.IsTypeRef and IsDynArrayRef(ABase, 0) then
+      AddItem('Create', 'create', skRoutine, ABucket, -1, NIL_SYM,
+        NIL_INST);
+  end;
+end;
+
+// Does ARef name a DYNAMIC array type - an own-unit `array of T`, through
+// aliases, or a project type (TPasSemaProject.IsDynArrayTypeX)?
+function TPasCompletion.IsDynArrayRef(const ARef: TPasComplTypeRef;
+  ADepth: Integer): Boolean;
+var
+  LDef: Integer;
+  LNext: TPasComplTypeRef;
+begin
+  Result := False;
+  if ADepth > 16 then
+    Exit;
+  if ARef.OvSym <> NIL_SYM then
+  begin
+    LDef := OverlayStructDef(ARef.OvSym);
+    if LDef = NIL_NODE then
+      Exit;
+    case FModel.Tree.Nodes[LDef].Kind of
+      nkArrayType:
+        Result := (FModel.Tree.Nodes[LDef].Aux <> 1) and
+          (FModel.Tree.Nodes[LDef].FirstChild <> NIL_NODE) and
+          (FModel.Tree.Nodes[FModel.Tree.Nodes[LDef].FirstChild].NextSibling =
+            NIL_NODE);
+      nkIdent, nkMember, nkTypeArgs:
+        begin
+          LNext := ResolveTypeRefNode(LDef, ADepth + 1);
+          if LNext.OvSym <> ARef.OvSym then
+            Result := IsDynArrayRef(LNext, ADepth + 1);
+        end;
+    end;
+  end
+  else if XValid(ARef.X) and (FProj <> nil) then
+    Result := FProj.IsDynArrayTypeX(ARef.X);
+end;
+
+// The compiler seeds of this model's System scope, as cbBuiltin rows.
+procedure TPasCompletion.AddSeeds;
+begin
+  if FModel.SystemScope <> NIL_SCOPE then
+    FModel.EnumScopeDeep(FModel.SystemScope,
+      procedure(ASym, AScopeOfSym: Integer)
+      begin
+        AddSym(-1, ASym, NIL_INST, cbBuiltin);
+      end);
+end;
+
+{ The struct an implementation heading's qualifier names, when the caret
+  is the dot after it (`procedure TFoo.|Bar;`, `procedure TOuter.TInner.|`):
+  the header's name segments are no bound designator (the resolver binds no
+  qualifier segment), so they are looked up here - the first in the unit's
+  scope, each next one among the previous struct's members. NIL_SYM when
+  the caret is no such dot. }
+function TPasCompletion.HeaderQualifierStruct(
+  const AInfo: TPasCaretInfo): Integer;
+var
+  LTS: TPasTokenStream;
+  LDot, LPrev, LVis, LNode, LRoutine, LSeg, LSym, LScope: Integer;
+begin
+  Result := NIL_SYM;
+  LTS := FModel.Tree.Source.Files[0];
+  if AInfo.Kind = ckAfterDot then
+    LDot := AInfo.RawToken
+  else if AInfo.Kind = ckIdent then
+    LDot := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    Exit;
+  if (LDot < 0) or (LTS.Tokens[LDot].Kind <> tkDot) then
+    Exit;
+  LPrev := PrevVisibleRaw(LDot - 1);
+  if (LPrev < 0) or (LPrev > High(FVisOfRaw)) then
+    Exit;
+  LVis := FVisOfRaw[LPrev];
+  if LVis < 0 then
+    Exit;
+  LNode := InnermostNodeAt(LVis);
+  if (LNode = NIL_NODE) or (FModel.Tree.Nodes[LNode].Kind <> nkIdent) or
+     not (nfName in FModel.Tree.Nodes[LNode].Flags) then
+    Exit;
+  LRoutine := FModel.Tree.Nodes[LNode].Parent;
+  if (LRoutine = NIL_NODE) or
+     (FModel.Tree.Nodes[LRoutine].Kind <> nkRoutine) then
+    Exit;
+  LScope := ScopeOfNode(FModel.Tree.Nodes[LRoutine].Parent);
+  LSeg := FModel.Tree.Nodes[LRoutine].FirstChild;
+  LSym := NIL_SYM;
+  while LSeg <> NIL_NODE do
+  begin
+    if (FModel.Tree.Nodes[LSeg].Kind = nkIdent) and
+       (nfName in FModel.Tree.Nodes[LSeg].Flags) then
+    begin
+      if LSym = NIL_SYM then
+      begin
+        if LScope = NIL_SCOPE then
+          Exit;
+        LSym := FModel.Resolve(LScope, FModel.Tree.NodeNameLower(LSeg));
+      end
+      else if FModel.Symbols[LSym].MemberScope <> NIL_SCOPE then
+        LSym := FModel.FindLocal(FModel.Symbols[LSym].MemberScope,
+          FModel.Tree.NodeNameLower(LSeg))
+      else
+        LSym := NIL_SYM;
+      if (LSym = NIL_SYM) or (FModel.Symbols[LSym].Kind <> skType) then
+        Exit(NIL_SYM);
+      if LSeg = LNode then
+        Exit(LSym);
+    end;
+    LSeg := FModel.Tree.Nodes[LSeg].NextSibling;
+  end;
+end;
+
+{ Is the aggregate a RECORD's (3.2.2), so that a fresh spot after its `(`
+  or `;` is a field-name position? A `;` separates fields, a `,` array
+  elements; after the `(` it is a record when a field is already written or
+  the declared type is a record. An array constant's `(1, |` is an
+  expression (audit A1-35). }
+function TPasCompletion.IsRecordAggregate(AAggNode: Integer;
+  AAnchor: TPasTokenKind): Boolean;
+var
+  LChild, LDef: Integer;
+  LRef: TPasComplTypeRef;
+  LM: TPasSemaModel;
+begin
+  case AAnchor of
+    tkSemicolon:
+      Exit(True);
+    tkLParen:
+      ;
+  else
+    Exit(False);
+  end;
+  LChild := FModel.Tree.Nodes[AAggNode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if FModel.Tree.Nodes[LChild].Kind = nkAggregateField then
+      Exit(True);
+    LChild := FModel.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := False;
+  LRef := AggregateTypeOf(AAggNode, 0);
+  if LRef.OvSym <> NIL_SYM then
+  begin
+    LDef := OverlayStructDef(LRef.OvSym);
+    Result := (LDef <> NIL_NODE) and
+      (FModel.Tree.Nodes[LDef].Kind = nkRecordType);
+  end
+  else if XValid(LRef.X) and (FProj <> nil) then
+  begin
+    LM := ProjModel(LRef.X.UnitId, 'IsRecordAggregate');
+    LDef := ProjectTypeDef(LRef.X);
+    Result := (LDef <> NIL_NODE) and
+      (LM.Tree.Nodes[LDef].Kind = nkRecordType);
+  end;
 end;
 
 function TPasCompletion.IsDescendantNode(ANode, AAncestor: Integer): Boolean;
@@ -2871,12 +3049,13 @@ end;
 
 procedure TPasCompletion.CollectScope(const AInfo: TPasCaretInfo);
 var
-  LScope, LIdx, LTarget, LBody: Integer;
+  LScope, LIdx, LTarget, LBody, LWith: Integer;
   LTargets, LJoins: TArray<Integer>;
   LStructDone: TArray<Boolean>;
   LOnSym: TPasSymEnumProc;
   LInterfaceOnly: Boolean;
   LRef: TPasComplTypeRef;
+  LChainBucket: TPasComplBucket;
 
   // The inherited members of the caret struct whose own member scope AScope
   // is - once per struct.
@@ -2897,64 +3076,69 @@ var
 
 begin
   FCaretVis := AInfo.VisToken;
-  // 1. Enclosing UNOPENED with statements (cross-unit targets, ch.05 sec. 5.7):
-  // their members shadow everything, so they go first. Opened (intra-unit)
-  // withs are ordinary sckWith scopes and come through the chain below.
-  //
-  // INNERMOST FIRST, and within one statement LAST TARGET FIRST - that is the
-  // shadowing order 5.7 gives, and AddItem keeps the FIRST hit for a name. In
-  // source order the OUTER target's member identity survived where the inner
-  // one must shadow it: the inserted text was the same, but the (Mid, Sym)
-  // behind it - and so the detail, doc and kind shown - belonged to the wrong
-  // member. WithUnopened is in source order, so a descending walk is
-  // innermost-first for the nested case.
-  for LIdx := High(FModel.WithUnopened) downto 0 do
+  // 1. The enclosing WITH statements (5.7), one walk: innermost statement
+  // first and, within one statement, the LAST target first - the shadowing
+  // order, and AddItem keeps the FIRST hit for a name. Opened (same-unit)
+  // and unopened targets alike: an outer unopened with must not beat an
+  // inner opened one, and an opened with's join is Phase 1's guess (audit
+  // B2-34, D1-32). Each target through the with pass's own typer on an
+  // analyzed model (an INDEXED target - `with Palette.palPalEntry[I] do` -
+  // is typed by nothing else), DesignatorType on an overlay; its own members
+  // before its ancestors, as cbWithMember rows.
+  LWith := AInfo.Node;
+  while LWith <> NIL_NODE do
   begin
-    LBody := FModel.Tree.Nodes[FModel.WithUnopened[LIdx]].FirstChild;
-    if LBody = NIL_NODE then
-      Continue;
-    while FModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE do
-      LBody := FModel.Tree.Nodes[LBody].NextSibling;
-    if not IsDescendantNode(AInfo.Node, LBody) then
-      Continue;
-    // Targets of THIS statement, gathered so they can be walked backwards.
-    LTargets := nil;
-    LTarget := FModel.Tree.Nodes[FModel.WithUnopened[LIdx]].FirstChild;
-    while (LTarget <> NIL_NODE) and (LTarget <> LBody) do
+    if FModel.Tree.Nodes[LWith].Kind = nkWithStmt then
     begin
-      LTargets := LTargets + [LTarget];
-      LTarget := FModel.Tree.Nodes[LTarget].NextSibling;
-    end;
-    for var LTi := High(LTargets) downto 0 do
-    begin
-      LTarget := LTargets[LTi];
-      // The with pass's own target typer first, when this model IS the
-      // project's: it covers shapes the caches do not (an INDEXED target -
-      // `with Palette.palPalEntry[I] do` - is typed by nothing else).
-      LRef := ComplNilRef;
-      if FIsProjectModel then
-        LRef.X := FProj.WithTargetTypeX(FProjMid, LTarget);
-      if not ComplValid(LRef) then
+      LBody := FModel.Tree.Nodes[LWith].FirstChild;
+      while (LBody <> NIL_NODE) and
+            (FModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE) do
+        LBody := FModel.Tree.Nodes[LBody].NextSibling;
+      if (LBody <> NIL_NODE) and
+         (LBody <> FModel.Tree.Nodes[LWith].FirstChild) and
+         IsDescendantNode(AInfo.Node, LBody) then
       begin
-        LRef := DesignatorType(LTarget, 0);
-        LRef.IsTypeRef := False;
-      end;
-      if ComplValid(LRef) then
-      begin
-        FClassSide := False;
-        CollectMembers(LRef);
+        LTargets := nil;
+        LTarget := FModel.Tree.Nodes[LWith].FirstChild;
+        while (LTarget <> NIL_NODE) and (LTarget <> LBody) do
+        begin
+          LTargets := LTargets + [LTarget];
+          LTarget := FModel.Tree.Nodes[LTarget].NextSibling;
+        end;
+        for var LTi := High(LTargets) downto 0 do
+        begin
+          LRef := ComplNilRef;
+          if FIsProjectModel then
+            LRef.X := FProj.WithTargetTypeX(FProjMid, LTargets[LTi]);
+          if not ComplValid(LRef) then
+          begin
+            LRef := DesignatorType(LTargets[LTi], 0);
+            LRef.IsTypeRef := False;
+          end;
+          if ComplValid(LRef) then
+          begin
+            FClassSide := False;
+            CollectMembers(LRef, cbWithMember);
+          end;
+        end;
       end;
     end;
+    LWith := FModel.Tree.Nodes[LWith].Parent;
   end;
   FClassSide := False;
   // 2. The lexical scope chain, deep (joined scopes included) - this is
   // exactly what unqualified lookup sees intra-unit: locals, params, the
-  // enclosing struct's own members through the method-body join, opened
-  // withs, enum values, and the unit's own names. The builtin seeds joined
-  // into the interface scope are skipped here and added LAST (a real name
-  // must win the dedup against a seed).
+  // enclosing struct's own members through the method-body join, enum
+  // values, and the unit's own names; a with scope was step 1's. The
+  // builtin seeds joined into the interface scope are skipped here and
+  // added LAST (a real name must win the dedup against a seed).
+  //
+  // The BUCKET is the chain scope's (audit B2-36): a unit's own enum values
+  // are unit symbols, not locals; a struct member joined into a method body
+  // stays a struct member.
   EnsureAncestry(AInfo.Scope);
   SetLength(LStructDone, Length(FCaretStructs));
+  LChainBucket := cbLocal;
   LOnSym :=
     procedure(ASym, AScopeOfSym: Integer)
     var
@@ -2965,12 +3149,8 @@ begin
           Exit;   // seeds come last, as cbBuiltin
         sckStruct:
           LBucket := cbStructMember;
-        sckWith:
-          LBucket := cbWithMember;
-        sckUnit, sckImplementation:
-          LBucket := cbUnitSym;
       else
-        LBucket := cbLocal;
+        LBucket := LChainBucket;
       end;
       // Inline vars/consts are visible only BELOW their declaration
       // (3.1.3) - the same positional rule ResolveAt applies.
@@ -2983,44 +3163,23 @@ begin
   LInterfaceOnly := True;
   while LScope <> NIL_SCOPE do
   begin
-    if FModel.Scopes[LScope].Kind = sckImplementation then
-      LInterfaceOnly := False;
-    // An OPENED (intra-unit) with joins only the target's OWN member scope -
-    // and that join is phase 1's GUESS, which the cross with pass revises in
-    // the BINDINGS without touching the scope (the oracle's Orpheus
-    // `with CT[J] do` was joined to the wrong struct entirely). So: walk the
-    // joined structs' cross-unit ancestors (the TListActionLink/FClient
-    // shape), and in project-model mode ALSO re-type the with's own targets
-    // with the with pass's typer and inject those members - the authoritative
-    // answer, deduped against whatever the join already provided.
+    case FModel.Scopes[LScope].Kind of
+      sckImplementation:
+        begin
+          LInterfaceOnly := False;
+          LChainBucket := cbUnitSym;
+        end;
+      sckUnit:
+        LChainBucket := cbUnitSym;
+      sckStruct:
+        LChainBucket := cbStructMember;
+    else
+      LChainBucket := cbLocal;
+    end;
     if FModel.Scopes[LScope].Kind = sckWith then
     begin
-      for LIdx := 0 to High(FModel.Scopes[LScope].Additional) do
-      begin
-        LTarget := FModel.Scopes[
-          FModel.Scopes[LScope].Additional[LIdx]].StructSym;
-        if LTarget <> NIL_SYM then
-          CollectOverlayChain(LTarget, False, cbWithMember);
-      end;
-      if FIsProjectModel then
-      begin
-        LTarget := FModel.Scopes[LScope].OwnerNode;
-        if (LTarget <> NIL_NODE) and
-           (FModel.Tree.Nodes[LTarget].Kind = nkWithStmt) and
-           (FModel.Tree.Nodes[LTarget].FirstChild <> NIL_NODE) then
-        begin
-          LBody := FModel.Tree.Nodes[LTarget].FirstChild;
-          while FModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE do
-            LBody := FModel.Tree.Nodes[LBody].NextSibling;
-          LTarget := FModel.Tree.Nodes[LTarget].FirstChild;
-          while (LTarget <> NIL_NODE) and (LTarget <> LBody) do
-          begin
-            CollectProjectMembers(
-              FProj.WithTargetTypeX(FProjMid, LTarget), cbWithMember);
-            LTarget := FModel.Tree.Nodes[LTarget].NextSibling;
-          end;
-        end;
-      end;
+      LScope := FModel.Scopes[LScope].Parent;
+      Continue;
     end;
     // EnumScopeDeep's order, one join at a time: the shadowing joins, the
     // scope's own names, then its additional joins innermost first - and
@@ -3053,12 +3212,7 @@ begin
   // 4. Cross-unit names: uses (reverse, last-wins), System, SysInit.
   CollectUsesImports(LInterfaceOnly);
   // 5. Compiler seeds, last - every real declaration outranks a seed.
-  if FModel.SystemScope <> NIL_SCOPE then
-    FModel.EnumScopeDeep(FModel.SystemScope,
-      procedure(ASym, AScopeOfSym: Integer)
-      begin
-        AddSym(-1, ASym, NIL_INST, cbBuiltin);
-      end);
+  AddSeeds;
 end;
 
 // `goto |`: labels live in `label` sections of the lexical chain and nowhere
@@ -3144,24 +3298,42 @@ end;
 // model id where a path-scanned name has none).
 procedure TPasCompletion.CollectUnitNames;
 var
-  LIdx: Integer;
-  LName: string;
+  LIdx, LRoot: Integer;
+  LName, LKey, LOwn: string;
+  LM: TPasSemaModel;
 begin
   if FProj = nil then
     Exit;
+  // Never a candidate (audit B2-30): the edited unit itself (F2092), the
+  // implicit System and SysInit (`uses System` is E2004), and a program,
+  // library or package (F2047) - only units can be used.
+  LOwn := FModel.UnitNameLower;
   for LIdx := 0 to FProj.ModelCount - 1 do
     if LIdx <> FProjMid then
     begin
+      LM := FProj.Model(LIdx);
+      if (LM = nil) or (LM.Tree.Nodes = nil) then
+        Continue;
+      LRoot := LM.Tree.Nodes[0].FirstChild;
+      if (LRoot <> NIL_NODE) and (LM.Tree.Nodes[LRoot].Kind in
+         [nkProgram, nkLibrary, nkPackage]) then
+        Continue;
       LName := ChangeFileExt(ExtractFileName(FProj.ModelFile(LIdx)), '');
-      AddItem(LName, PasNameKey(LName), skUnitRef, cbUnitName, LIdx,
-        NIL_SYM, NIL_INST);
+      LKey := PasNameKey(LName);
+      if (LKey = LOwn) or (LKey = 'system') or (LKey = 'sysinit') then
+        Continue;
+      AddItem(LName, LKey, skUnitRef, cbUnitName, LIdx, NIL_SYM, NIL_INST);
     end;
   // Mid = -1 for a path-scanned name: there is no model to point at. A
   // cbUnitName item's identity is its NAME either way - nothing resolves
   // these rows further.
   for LName in FProj.SearchPathUnitNames do
-    AddItem(LName, PasNameKey(LName), skUnitRef, cbUnitName, -1,
-      NIL_SYM, NIL_INST);
+  begin
+    LKey := PasNameKey(LName);
+    if (LKey = LOwn) or (LKey = 'system') or (LKey = 'sysinit') then
+      Continue;
+    AddItem(LName, LKey, skUnitRef, cbUnitName, -1, NIL_SYM, NIL_INST);
+  end;
 end;
 
 // The record type an aggregate initializer fills: the declared type of the
@@ -3297,8 +3469,8 @@ begin
   end
   else if (AInfo.Node <> NIL_NODE) and
      (FModel.Tree.Nodes[AInfo.Node].Kind = nkAggregate) and
-     (LTS.Tokens[AInfo.RawToken].Kind in [tkLParen, tkSemicolon, tkComma])
-  then
+     (LTS.Tokens[AInfo.RawToken].Kind in [tkLParen, tkSemicolon]) and
+     IsRecordAggregate(AInfo.Node, LTS.Tokens[AInfo.RawToken].Kind) then
     Exit(ccRecField);
   // The significant token LEFT of the (possibly empty) prefix decides.
   if AInfo.Kind = ckIdent then
@@ -3380,9 +3552,21 @@ begin
         Result := ccType
       else
         Result := ccExpression;
-    tkSemicolon, tkBegin, tkThen, tkElse, tkDo, tkRepeat, tkTry, tkFinally,
-    tkExcept, tkEnd:
+    tkSemicolon, tkBegin, tkDo, tkRepeat, tkTry, tkFinally, tkExcept, tkEnd:
       Result := ccStatement;
+    tkThen, tkElse:
+      // The branches of an inline `if` are EXPRESSIONS (5.4.1).
+      if UpChainKind(AInfo.Node, [nkInlineIf, nkIfStmt, nkCaseStmt]) =
+         nkInlineIf then
+        Result := ccExpression
+      else
+        Result := ccStatement;
+    // Words that open or continue an EXPRESSION - a condition, a bound, a
+    // selector, a raised object, an operand (audit A1-33: `if no|` never
+    // offered `not`).
+    tkIf, tkWhile, tkUntil, tkTo, tkDownto, tkCase, tkRaise, tkAnd, tkOr,
+    tkXor, tkNot, tkDiv, tkMod, tkShl, tkShr, tkIn:
+      Result := ccExpression;
   else
     // A reserved word (interface/implementation/var/type/...) opens a
     // declaration head; anything else - an operator, `:=`, a bracket, a
@@ -3411,6 +3595,11 @@ const
   TYPE_WORDS: array[0..11] of string = ('array', 'set', 'file', 'record',
     'class', 'interface', 'procedure', 'function', 'packed', 'string',
     'reference', 'of');
+  // A routine's declaration part, before its `begin` (6.1).
+  ROUTINE_WORDS: array[0..7] of string = ('var', 'const', 'type', 'label',
+    'procedure', 'function', 'begin', 'asm');
+var
+  LNode: Integer;
 begin
   case FContext of
     ccExpression:
@@ -3418,15 +3607,37 @@ begin
     ccType:
       AddKeywords(TYPE_WORDS);
     ccStatement:
-      if (AInfo.Scope <> NIL_SCOPE) then
-        case FModel.Scopes[AInfo.Scope].Kind of
-          sckUnit, sckImplementation:
-            AddKeywords(UNIT_WORDS);
-          sckStruct:
-            AddKeywords(STRUCT_WORDS);
+      begin
+        // Decided by the NODE (audit A1-32): a statement list - a block, a
+        // program's main block, an initialization or finalization section -
+        // takes statement words; a routine's declaration part declaration
+        // words; elsewhere the scope says unit level or a struct body. A
+        // caret right after a construct's closing `;` / `end` is past it.
+        LNode := AInfo.Node;
+        if (LNode <> NIL_NODE) and
+           (FModel.Tree.Nodes[LNode].LastToken = AInfo.VisToken) and
+           (FModel.Tree.Source.Files[0].Tokens[AInfo.RawToken].Kind in
+             [tkSemicolon, tkEnd]) then
+          LNode := FModel.Tree.Nodes[LNode].Parent;
+        case UpChainKind(LNode, [nkBlock, nkInitSec, nkFinalSec, nkRoutine,
+          nkClassType, nkRecordType, nkObjectType, nkInterfaceType,
+          nkHelperType]) of
+          nkBlock, nkInitSec, nkFinalSec:
+            AddKeywords(STMT_WORDS);
+          nkRoutine:
+            AddKeywords(ROUTINE_WORDS);
         else
-          AddKeywords(STMT_WORDS);
-        end
+          if AInfo.Scope <> NIL_SCOPE then
+            case FModel.Scopes[AInfo.Scope].Kind of
+              sckUnit, sckImplementation:
+                AddKeywords(UNIT_WORDS);
+              sckStruct:
+                AddKeywords(STRUCT_WORDS);
+            else
+              AddKeywords(STMT_WORDS);
+            end;
+        end;
+      end;
       else
         AddKeywords(STMT_WORDS);
   end;
@@ -3983,6 +4194,7 @@ begin
   ACaret := LInfo;
   if not Result then
     Exit;
+  FCaretVis := LInfo.VisToken;
   FContext := ClassifyAt(LInfo);
   AContext := FContext;
   if FContext = ccUses then
@@ -4005,7 +4217,24 @@ begin
     ccNone:
       Exit(False);
     ccMember:
-      if LInfo.DotBase <> NIL_NODE then
+      if LInfo.DotBase = NIL_NODE then
+      begin
+        // `procedure TFoo.|Bar;` - an implementation heading's qualifier:
+        // the struct's declared routines and nested types (audit E2-48).
+        LNode := HeaderQualifierStruct(LInfo);
+        if (LNode <> NIL_SYM) and
+           (FModel.Symbols[LNode].MemberScope <> NIL_SCOPE) then
+        begin
+          var LMembers := FModel.Symbols[LNode].MemberScope;
+          for var LI := 0 to FModel.Scopes[LMembers].Symbols.Count - 1 do
+          begin
+            var LMem := FModel.Scopes[LMembers].Symbols[LI];
+            if FModel.Symbols[LMem].Kind in [skRoutine, skType] then
+              AddSym(-1, LMem, NIL_INST, cbMember);
+          end;
+        end;
+      end
+      else
       begin
         LRef := DesignatorType(LInfo.DotBase, 0);
         if ComplValid(LRef) then
@@ -4091,13 +4320,7 @@ end;
 
 function TPasCompletion.EnclosingStructSym(AScope: Integer): Integer;
 begin
-  Result := NIL_SYM;
-  while AScope <> NIL_SCOPE do
-  begin
-    if FModel.Scopes[AScope].StructSym <> NIL_SYM then
-      Exit(FModel.Scopes[AScope].StructSym);
-    AScope := FModel.Scopes[AScope].Parent;
-  end;
+  Result := FModel.EnclosingStructSymOfScope(AScope);
 end;
 
 end.
