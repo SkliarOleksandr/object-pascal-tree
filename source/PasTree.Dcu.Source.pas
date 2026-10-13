@@ -137,6 +137,10 @@ type
     function CharLiteral(ACode: Integer): string;
     function StringLiteral(const AText: string): string;
     function FloatLiteral(const ABytes: TBytes; AScale: Integer): string;
+    function RealLiteral(AValue: Double): string;
+    function CurrencyAt(AOfs: Integer): string;
+    function CompAt(AOfs: Integer): string;
+    function UnsignedSize(AUnit: TPasDcuUnit; ATypeIdx: Integer): Integer;
     function StringConstText(const ABytes: TBytes; AUnicode: Boolean): string;
     function OrdinalText(ATypeIdx: Integer; AValue: Int64): string; overload;
     function OrdinalText(AUnit: TPasDcuUnit; ATypeIdx: Integer; AValue: Int64): string; overload;
@@ -448,7 +452,7 @@ function TPasDcuPrinter.OwnRef(AType: TPasDcuType): string;
 var
   LHead: string;
 begin
-  Result := StripArity(AType.Name);
+  Result := Esc(StripArity(AType.Name));
   if FDeclared.ContainsKey(AType.Index) or FPrinting.ContainsKey(AType.Index) then
     Exit;
   if AType.Kind in [tkClass, tkInterface] then
@@ -893,7 +897,9 @@ begin
     Exit;
   Result := LDecl.BareName;
   if IsHidden(Result) or (Result = '&') then
-    Result := '';
+    Result := ''
+  else
+    Result := Esc(Result);
 end;
 
 { Values }
@@ -950,9 +956,13 @@ begin
     Result := Result + '''';
 end;
 
-// A float constant's bytes: Single, Double, or the 80-bit Extended the Win32
-// compiler stores (converted through its sign, exponent and mantissa - this
-// code may itself be compiled for Win64 where Extended is 8 bytes).
+// A float constant's bytes: Single, Double, or the 80-bit Extended dcc
+// stores for every true float constant (converted through its sign, exponent
+// and mantissa - this code may itself be compiled for Win64 where Extended is
+// 8 bytes). Ldexp keeps the arithmetic in floating point: Power over two
+// Integers picked the Single overload, which overflowed above 2^127 and
+// printed MaxDouble as 0.0 (audit A1-43). NaN and the infinities are the
+// constant expressions that make them.
 function TPasDcuPrinter.FloatLiteral(const ABytes: TBytes; AScale: Integer): string;
 var
   LSingle: Single;
@@ -960,9 +970,7 @@ var
   LMant: UInt64;
   LExp: Integer;
   LNeg: Boolean;
-  LFmt: TFormatSettings;
 begin
-  LFmt := TFormatSettings.Invariant;
   case Length(ABytes) of
     4:
       begin
@@ -976,24 +984,84 @@ begin
         Move(ABytes[0], LMant, 8);
         LExp := ABytes[8] or ((ABytes[9] and $7F) shl 8);
         LNeg := (ABytes[9] and $80) <> 0;
+        if LExp = $7FFF then
+        begin
+          // The integer bit aside, a zero mantissa is an infinity.
+          if (LMant shl 1) <> 0 then
+            Exit('(0.0 / 0.0)');
+          if LNeg then
+            Exit('(-1.0 / 0.0)');
+          Exit('(1.0 / 0.0)');
+        end;
         if (LExp = 0) and (LMant = 0) then
           LDouble := 0
         else
-          LDouble := (LMant / Power(2, 63)) * Power(2, LExp - 16383);
+          LDouble := Ldexp(LMant, LExp - 16383 - 63);
         if LNeg then
           LDouble := -LDouble;
       end;
   else
     Exit(Unresolved(Format('float constant of %d bytes', [Length(ABytes)])));
   end;
-  if IsNan(LDouble) or IsInfinite(LDouble) then
-    Exit('0.0');
+  if IsNan(LDouble) then
+    Exit('(0.0 / 0.0)');
+  if IsInfinite(LDouble) then
+  begin
+    if LDouble < 0 then
+      Exit('(-1.0 / 0.0)');
+    Exit('(1.0 / 0.0)');
+  end;
   if AScale <> 1 then
     LDouble := LDouble / AScale;
-  Result := FloatToStrF(LDouble, ffGeneral, 17, 0, LFmt);
-  // Keep it a real literal: `3` would type as an integer.
+  Result := RealLiteral(LDouble);
+end;
+
+// A real value as a literal: invariant, 17 digits, and kept REAL - `3`
+// would type as an integer.
+function TPasDcuPrinter.RealLiteral(AValue: Double): string;
+begin
+  Result := FloatToStrF(AValue, ffGeneral, 17, 0, TFormatSettings.Invariant);
   if (Result.IndexOf('.') < 0) and (Result.IndexOf('E') < 0) then
     Result := Result + '.0';
+end;
+
+// A Currency in the data block: stored scaled by 10000.
+function TPasDcuPrinter.CurrencyAt(AOfs: Integer): string;
+begin
+  Result := RealLiteral(DataInt(AOfs, 8, True) / 10000);
+end;
+
+// A Comp in the data block: a 64-bit integer, written as a real literal.
+function TPasDcuPrinter.CompAt(AOfs: Integer): string;
+begin
+  Result := IntToStr(DataInt(AOfs, 8, True)) + '.0';
+end;
+
+// The width of an UNSIGNED integer type of AUnit, 0 for any other type: a
+// subrange with no negative values, a System integer type by name, or an
+// imported type its own unit describes (THandle is NativeUInt there).
+function TPasDcuPrinter.UnsignedSize(AUnit: TPasDcuUnit;
+  ATypeIdx: Integer): Integer;
+var
+  LUnsigned: Boolean;
+  LType: TPasDcuType;
+  LDepth: Integer;
+begin
+  Result := 0;
+  for LDepth := 1 to 8 do
+  begin
+    if AUnit.IntegerType(ATypeIdx, Result, LUnsigned) then
+    begin
+      if not LUnsigned then
+        Result := 0;
+      Exit;
+    end;
+    Result := 0;
+    LType := AUnit.TypeAt(ATypeIdx);
+    if (LType = nil) or (LType.Kind <> tkImport) or
+       not ResolveImport(AUnit, ATypeIdx) then
+      Exit;
+  end;
 end;
 
 // An ordinal of the given type as source: an enumeration member's name, a
@@ -1014,7 +1082,7 @@ var
   LMember: TPasDcuDecl;
   LName: string;
   LOther: TPasDcuUnit;
-  LOtherIdx: Integer;
+  LOtherIdx, LUnsignedSize: Integer;
 begin
   LType := AUnit.TypeAt(ATypeIdx);
   if LType <> nil then
@@ -1104,6 +1172,16 @@ begin
           Exit('nil');
     end;
   end;
+  // An unsigned type's value (A1-39): the reader masks this unit's own
+  // constants; an imported type is known only here.
+  if AValue < 0 then
+  begin
+    LUnsignedSize := UnsignedSize(AUnit, ATypeIdx);
+    if LUnsignedSize = 8 then
+      Exit(UIntToStr(UInt64(AValue)));
+    if LUnsignedSize > 0 then
+      AValue := AValue and ((Int64(1) shl (8 * LUnsignedSize)) - 1);
+  end;
   Result := IntToStr(AValue);
 end;
 
@@ -1190,8 +1268,10 @@ end;
 
 function TPasDcuPrinter.ConstValueText(AConst: TPasDcuDecl; ATypeIdx: Integer): string;
 var
-  LType: TPasDcuType;
-  LScale: Integer;
+  LType, LSetType: TPasDcuType;
+  LScale, LIdx: Integer;
+  LUnit: TPasDcuUnit;
+  LUnsigned: Boolean;
 begin
   LType := FUnit.TypeAt(ATypeIdx);
   case AConst.ValueKind of
@@ -1228,8 +1308,30 @@ begin
       end;
     4:
       begin
+        // A byte image (TPasDcuDecl.ValueKind): nil, a set, or a 64-bit value
+        // of an imported type the reader could not tell an integer
+        // (NormalizeConstValues) - a Comp, or an integer its own unit
+        // declares (A1-38).
         if Length(AConst.ValueBytes) = 0 then
           Exit('nil');
+        LSetType := LType;
+        LUnit := FUnit;
+        LIdx := ATypeIdx;
+        if (LType <> nil) and (LType.Kind = tkImport) and
+           ResolveImport(LUnit, LIdx) then
+          LSetType := LUnit.TypeAt(LIdx);
+        if (Length(AConst.ValueBytes) = 8) and (LSetType <> nil) then
+        begin
+          if ((LSetType.Kind = tkFloat) and (LSetType.FloatKind = 4)) or
+             ((LSetType.Kind = tkImport) and
+              SameText(LSetType.ImportName, 'Comp')) then
+            Exit(IntToStr(PInt64(@AConst.ValueBytes[0])^) + '.0');
+          if (LSetType.Kind = tkRange) or
+             LUnit.IntegerType(LIdx, LScale, LUnsigned) then
+            Exit(OrdinalText(ATypeIdx, PInt64(@AConst.ValueBytes[0])^));
+        end;
+        if LSetType <> nil then
+          Exit(SetText(LUnit, LSetType, AConst.ValueBytes));
         Exit(SetText(LType, AConst.ValueBytes));
       end;
   end;
@@ -1594,10 +1696,7 @@ begin
         end;
         if LName = 'currency' then
         begin
-          AText := FloatToStrF(DataInt(AOfs, 8, True) / 10000, ffGeneral, 17, 0,
-            TFormatSettings.Invariant);
-          if (AText.IndexOf('.') < 0) and (AText.IndexOf('E') < 0) then
-            AText := AText + '.0';
+          AText := CurrencyAt(AOfs);
           Exit(True);
         end;
         if (LName = 'single') or (LName = 'double') or (LName = 'extended') or
@@ -1609,7 +1708,7 @@ begin
         end;
         if LName = 'comp' then
         begin
-          AText := IntToStr(DataInt(AOfs, 8, True)) + '.0';
+          AText := CompAt(AOfs);
           Exit(True);
         end;
         if (LName = 'nativeint') or (LName = 'intptr') then
@@ -1619,7 +1718,7 @@ begin
         end;
         if (LName = 'nativeuint') or (LName = 'uintptr') or (LName = 'thandle') then
         begin
-          AText := IntToStr(DataInt(AOfs, LSize, False));
+          AText := UIntToStr(UInt64(DataInt(AOfs, LSize, False)));
           Exit(True);
         end;
         if (LName = 'pointer') or (LName = 'tclass') or (LName = 'tobject') or
@@ -1642,14 +1741,9 @@ begin
       begin
         case LType.FloatKind of
           4:   // Comp
-            AText := IntToStr(DataInt(AOfs, 8, True)) + '.0';
+            AText := CompAt(AOfs);
           5:   // Currency, stored scaled by 10000
-            begin
-              AText := FloatToStrF(DataInt(AOfs, 8, True) / 10000, ffGeneral, 17, 0,
-                TFormatSettings.Invariant);
-              if (AText.IndexOf('.') < 0) and (AText.IndexOf('E') < 0) then
-                AText := AText + '.0';
-            end;
+            AText := CurrencyAt(AOfs);
         else
           AText := FloatLiteral(Copy(FUnit.DataBlock, AOfs, LSize), 1);
         end;
@@ -2135,9 +2229,9 @@ begin
   begin
     LName := LName.Substring(0, Length(LName) - 1);
     if (AMember.Kind = dkDestructor) or SameText(LName, 'Destroy') then
-      Line('class destructor ' + LName + ';')
+      Line('class destructor ' + Esc(LName) + ';')
     else
-      Line('class constructor ' + LName + ';');
+      Line('class constructor ' + Esc(LName) + ';');
     Exit;
   end;
   case AMember.Kind of
@@ -2370,6 +2464,10 @@ begin
   case AType.Kind of
     tkRange:
       begin
+        // A UInt64-based range keeps its bit pattern in High.
+        if ((AType.BaseIdx = AType.Index) or (AType.BaseIdx = 0)) and
+           (AType.Low >= 0) and (AType.High < 0) then
+          Exit(IntToStr(AType.Low) + '..' + UIntToStr(UInt64(AType.High)));
         if (AType.BaseIdx = AType.Index) or (AType.BaseIdx = 0) then
           Exit(Format('%d..%d', [AType.Low, AType.High]));
         Exit(OrdinalText(AType.BaseIdx, AType.Low) + '..' +
@@ -2798,7 +2896,8 @@ var
   LText: string;
 begin
   LType := FUnit.TypeAt(ADecl.TypeIdx);
-  LText := ADecl.BareName;
+  // Escaped like every sibling printer's name (A1-40): `&Label = 5`.
+  LText := Esc(ADecl.BareName);
   // A typed value (a set, a float, a string) keeps its type when the source
   // declared one; a scalar of an ordinal type is plain.
   if (LType <> nil) and (LType.Kind = tkSet) and (LType.Name <> '') and
@@ -2819,7 +2918,7 @@ begin
   begin
     LTarget := FUnit.AddrAt(ADecl.Offset);
     if (LTarget <> nil) and not IsHidden(LTarget.Name) then
-      LText := LText + ' absolute ' + LTarget.BareName;
+      LText := LText + ' absolute ' + Esc(LTarget.BareName);
   end;
   // A variable of an inline procedural type cannot carry a hint directive:
   // dcc reads the word as a calling convention (E1030, probed 2026-09-17).
@@ -2956,7 +3055,8 @@ begin
   Line('unit ' + FUnit.UnitName + ';');
   Blank;
   Line('{ Interface section reconstructed by PasTree from');
-  Line('  ' + FUnit.FileName);
+  // Braces would close the comment (A1-41): `C:\libs\{vendor}\X.dcu`.
+  Line('  ' + FUnit.FileName.Replace('{', '[').Replace('}', ']'));
   Line(Format('  (compiled by %s for %s). Declarations only, with the values of',
     [DcuVersionName(FUnit.VersionByte), LPlatform]));
   Line('  constants read out of the compiled data; there is no implementation.');

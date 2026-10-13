@@ -138,8 +138,16 @@ type
     IsAliasImport: Boolean;    // imported through `A = type B` (drImpTypeDef)
     ImportInf: Cardinal;       // the exporting unit's stamp for the name
     // a true constant's value (dkConst)
-    ValueKind: Integer;        // 0 ordinal, 1 AnsiString, 2 resourcestring, 3 float, 4 set / nil, 5 UnicodeString
-    ValueInt: Int64;           // the ordinal when ValueBytes is empty
+    // 0 ordinal, 1 AnsiString, 2 resourcestring, 3 float, 5 UnicodeString;
+    // 4 a byte image: a set, a nil pointer (no bytes), and - dcc stores a
+    // 64-bit value so - an ordinal of 8 bytes, which the reader turns into
+    // kind 0 when the declared type says integer (NormalizeConstValues).
+    ValueKind: Integer;
+    // The ordinal when ValueBytes is empty, as the declared type reads it: an
+    // unsigned type's value is not negative below 8 bytes (dcc stores the
+    // sign-extended pattern: Cardinal $FFFFFFFF as -1); an 8-byte unsigned
+    // value keeps its bit pattern (print it through UInt64).
+    ValueInt: Int64;
     ValueBytes: TBytes;        // the value's bytes when it is not an ordinal
     // members and locals
     LocFlags: Integer;         // the member flags word (virtual/dynamic/message/override, const-param)
@@ -303,6 +311,13 @@ type
     function NewDecl(AKind: TPasDcuDeclKind): TPasDcuDecl;
     function TypeAt(AIdx: Integer): TPasDcuType;      // nil when out of range
     function AddrAt(ASlot: Integer): TPasDcuDecl;     // nil when out of range or empty
+    { Whether type AIdx is an INTEGER type as far as this unit can tell, with
+      its storage size and sign: a subrange (Boolean and the characters
+      included), or an import of a System integer type by its name. False
+      for anything else - an import of another name only its own unit can
+      describe. }
+    function IntegerType(AIdx: Integer; out ASize: Integer;
+      out AUnsigned: Boolean): Boolean;
     { The uses entry a slot or type belongs to, nil when it is the unit's own. }
     function UsesOf(AUnitIdx: Integer): TPasDcuUses;
     { The fixup that patches a pointer stored at exactly AOffset of the data
@@ -603,6 +618,7 @@ type
     procedure ReadFixups;
     procedure AssignDataRanges;
     procedure ReattachEmbedded;
+    procedure NormalizeConstValues;
     procedure SkipCodeLines;
     procedure SkipLineRanges;
     procedure SkipStrucScope;
@@ -730,6 +746,80 @@ begin
     Result := nil
   else
     Result := Types[AIdx - 1];
+end;
+
+function TPasDcuUnit.IntegerType(AIdx: Integer; out ASize: Integer;
+  out AUnsigned: Boolean): Boolean;
+var
+  LType: TPasDcuType;
+  LName: string;
+  LPtr: Integer;
+begin
+  Result := False;
+  ASize := 0;
+  AUnsigned := False;
+  LType := TypeAt(AIdx);
+  if LType = nil then
+    Exit;
+  case LType.Kind of
+    tkRange:
+      begin
+        if (LType.Size <= 0) or (LType.Size > 8) then
+          Exit;
+        ASize := LType.Size;
+        AUnsigned := LType.Low >= 0;
+        Result := True;
+      end;
+    tkImport:
+      begin
+        if Platform = dcuWin64 then
+          LPtr := 8
+        else
+          LPtr := 4;
+        LName := LowerCase(LType.ImportName);
+        Result := True;
+        if (LName = 'shortint') or (LName = 'int8') then
+          ASize := 1
+        else if (LName = 'byte') or (LName = 'uint8') then
+        begin
+          ASize := 1;
+          AUnsigned := True;
+        end
+        else if (LName = 'smallint') or (LName = 'int16') then
+          ASize := 2
+        else if (LName = 'word') or (LName = 'uint16') then
+        begin
+          ASize := 2;
+          AUnsigned := True;
+        end
+        else if (LName = 'integer') or (LName = 'longint') or
+           (LName = 'int32') or (LName = 'fixedint') then
+          ASize := 4
+        else if (LName = 'cardinal') or (LName = 'longword') or
+           (LName = 'uint32') or (LName = 'fixeduint') then
+        begin
+          ASize := 4;
+          AUnsigned := True;
+        end
+        else if LName = 'int64' then
+          ASize := 8
+        else if LName = 'uint64' then
+        begin
+          ASize := 8;
+          AUnsigned := True;
+        end
+        else if (LName = 'nativeint') or (LName = 'intptr') then
+          ASize := LPtr
+        else if (LName = 'nativeuint') or (LName = 'uintptr') or
+           (LName = 'thandle') then
+        begin
+          ASize := LPtr;
+          AUnsigned := True;
+        end
+        else
+          Result := False;
+      end;
+  end;
 end;
 
 function TPasDcuUnit.AddrAt(ASlot: Integer): TPasDcuDecl;
@@ -1795,6 +1885,7 @@ begin
   begin
     ADecl.ValueBytes := nil;
     // Kind 4 with no bytes is a nil pointer: no value follows at all.
+    // (Kind 4 with bytes may be a 64-bit ordinal: NormalizeConstValues.)
     if ADecl.ValueKind <> 4 then
       ADecl.ValueInt := ReadIndex64
     else
@@ -2992,6 +3083,37 @@ begin
     Error('Unknown record ended the declaration list');
   AssignDataRanges;
   ReattachEmbedded;
+  NormalizeConstValues;
+end;
+
+{ A true constant's value as its declared type reads it (audit A1-38,
+  A1-39), once, for every consumer. dcc stores a value that needs 64 bits
+  the way it stores a set - kind 4, an 8-byte block (Int64 beyond 32 bits,
+  High(UInt64), THandle(-1)): with an integer type that is kind 0 here. And
+  it stores an unsigned value in the signed index encoding of its bit
+  pattern - Cardinal $FFFFFFFF as -1 - so below 8 bytes the value is masked
+  back to the type's width. }
+procedure TPasDcuReader.NormalizeConstValues;
+var
+  LDecl: TPasDcuDecl;
+  LSize: Integer;
+  LUnsigned: Boolean;
+begin
+  for LDecl in FUnit.FOwned do
+  begin
+    if (LDecl.Kind <> dkConst) or
+       not FUnit.IntegerType(LDecl.TypeIdx, LSize, LUnsigned) then
+      Continue;
+    if (LDecl.ValueKind = 4) and (Length(LDecl.ValueBytes) = 8) then
+    begin
+      Move(LDecl.ValueBytes[0], LDecl.ValueInt, 8);
+      LDecl.ValueBytes := nil;
+      LDecl.ValueKind := 0;
+    end;
+    if (LDecl.ValueKind = 0) and (LDecl.ValueBytes = nil) and LUnsigned and
+       (LSize < 8) and (LDecl.ValueInt < 0) then
+      LDecl.ValueInt := LDecl.ValueInt and ((Int64(1) shl (8 * LSize)) - 1);
+  end;
 end;
 
 end.

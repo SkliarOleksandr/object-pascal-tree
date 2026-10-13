@@ -196,6 +196,23 @@ the RTL's 75 helpers were printed as record helpers before). Over the Delphi
 into things this reader does not name (a `Pointer` whose fixup targets an
 imported routine, `DPI_AWARENESS_CONTEXT(-1)`, a `WideString`).
 
+**True constants' values (2026-10-13, v0.103.4).** A true constant's value
+sits in its own record: a kind, then an inline ordinal or a byte block. Two
+encodings need the declared type to read (`NormalizeConstValues`, once for
+every consumer): dcc stores a value that needs 64 bits the way it stores a
+set - kind 4, an 8-byte block (`$7FFFFFFFFFFF`, `Low(Int64)`,
+`High(UInt64)`, `THandle(-1)`) - and an unsigned value in the signed index
+encoding of its bit pattern (`$FFFFFFFF` as -1). With an integer type - a
+subrange, or a System integer type by its imported name - the first becomes
+an ordinal and the second is masked back to the type's width; an 8-byte
+unsigned value keeps its bit pattern and prints through `UInt64`. An import
+of any other name is resolved by the printer in its own unit (a set, an
+integer, a Comp). Every true float constant is stored as 10-byte Extended,
+on Win64 too; NaN and the infinities print as `(0.0 / 0.0)`,
+`(1.0 / 0.0)`, `(-1.0 / 0.0)`. Probed over the Delphi 13 RTL:
+`INVALID_HANDLE_VALUE`, `HKEY_CLASSES_ROOT` and `INFINITE` used to print as
+sets or -1, `MaxDouble` as 0.0.
+
 **Modifiers, probed 2026-09-18** by compiling one-difference units and
 reading the dumps: `strict` is bit `$10` of a member's normalized flag word
 beside the scope (`$10` strict private, `$14` strict protected; records

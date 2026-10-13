@@ -48,7 +48,7 @@ uses
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
 const
-  FIXTURE: array[0..78] of string = (
+  FIXTURE: array[0..95] of string = (
     'unit DcuFix;',
     'interface',
     'uses System.SysUtils, System.Classes;',
@@ -57,6 +57,20 @@ const
     '  KName = ''PasTree'';',
     '  KPi = 3.25;',
     '  KTyped: Integer = 5;',
+    // B53: values dcc stores in ways the printer misread (A1-38, A1-39,
+    // A1-43) and a reserved-word name (A1-40).
+    '  CBigU = $FFFFFFFF;',
+    '  CU2 = Cardinal(4000000000);',
+    '  C64 = $7FFFFFFFFFFF;',
+    '  CNegBig = -$100000000;',
+    '  CU64 = High(UInt64);',
+    '  CI64 = Low(Int64);',
+    '  CMaxD = 1.7976931348623157E308;',
+    '  CTiny = 1E-50;',
+    '  &Label = 5;',
+    '  KAfterLabel = 6;',
+    '  CNaN = 0.0 / 0.0;',
+    '  CInf = 1.0 / 0.0;',
     'resourcestring',
     '  SHello = ''Hello'';',
     'type',
@@ -104,6 +118,11 @@ const
     '  end;',
     '  TShapeHelper = class helper for TShape',
     '    procedure Ext;',
+    '  end;',
+    '  TRecC = record',
+    '    X: Integer;',
+    '    const &End = 7;',
+    '    const Other = 8;',
     '  end;',
     '  TVec = record',
     '    X, Y: Integer;',
@@ -366,6 +385,23 @@ begin
     Ok(ATag + ': ordinal constant', LSrc.Contains('KAnswer = 42;'));
     Ok(ATag + ': string constant', LSrc.Contains('KName = ''PasTree'';'));
     Ok(ATag + ': float constant', LSrc.Contains('KPi = 3.25;'));
+    Ok(ATag + ': B53 unsigned constants print unsigned',
+      LSrc.Contains('CBigU = 4294967295;') and
+      LSrc.Contains('CU2 = 4000000000;') and
+      LSrc.Contains('CU64 = 18446744073709551615;'));
+    Ok(ATag + ': B53 64-bit ordinals are numbers, not sets',
+      LSrc.Contains('C64 = 140737488355327;') and
+      LSrc.Contains('CNegBig = -4294967296;') and
+      LSrc.Contains('CI64 = -9223372036854775808;'));
+    Ok(ATag + ': B53 floats beyond Single range keep their value',
+      LSrc.Contains('CMaxD = 1.797693134862315') and
+      LSrc.Contains('CTiny = 1') and not LSrc.Contains('CTiny = 0.0'));
+    Ok(ATag + ': B53 NaN and infinity as constant expressions',
+      LSrc.Contains('CNaN = (0.0 / 0.0);') and
+      LSrc.Contains('CInf = (1.0 / 0.0);'));
+    Ok(ATag + ': B53 a reserved-word constant name is escaped',
+      LSrc.Contains('&Label = 5;') and LSrc.Contains('KAfterLabel = 6;') and
+      LSrc.Contains('    &End = 7;') and LSrc.Contains('    Other = 8;'));
     Ok(ATag + ': typed constant as a typed variable',
       LSrc.Contains('KTyped: Integer = 5;'));
     Ok(ATag + ': resourcestring with its text', LSrc.Contains('SHello = ''Hello'';'));
@@ -651,6 +687,7 @@ var
   GBytes: TBytes;
   GVer, GPlat: Byte;
   GMsg: string;
+  GUnit: TPasDcuUnit;
 
 begin
   GCounter.Init;
@@ -704,6 +741,23 @@ begin
       CheckReaderAndPrinter(TPath.Combine(GLib32, 'DcuFix.dcu'), dcuWin32, 'win32');
     if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then
       CheckReaderAndPrinter(TPath.Combine(GLib64, 'DcuFix.dcu'), dcuWin64, 'win64');
+    // B53 (A1-41): a `}` in the .dcu's path must not close the header
+    // comment of the generated text.
+    if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
+    begin
+      TDirectory.CreateDirectory(TPath.Combine(GDir, 'lib{v}'));
+      TFile.Copy(TPath.Combine(GLib32, 'DcuFix.dcu'),
+        TPath.Combine(GDir, 'lib{v}\DcuFix.dcu'));
+      GUnit := LoadDcu(TPath.Combine(GDir, 'lib{v}\DcuFix.dcu'));
+      try
+        GMsg := DcuInterfaceSource(GUnit);
+        Ok('B53 a brace in the .dcu path keeps the header a comment',
+          GMsg.Contains('KAnswer = 42;') and
+          (ParseDiagCount(GMsg, 'DcuFix.dcu') = 0));
+      finally
+        GUnit.Free;
+      end;
+    end;
     if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
       CheckStamp(TPath.Combine(GLib32, 'DcuFix.dcu'));
     if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
