@@ -368,6 +368,19 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   multi-dimensional row (`High(M[0])` of `array[a, b] of T`) has no bounds
   type.
 
+## 09-records.md
+
+### 9.1.2 Record layout (the `$IF SizeOf` oracle)
+- a field's type name resolves where the record is written only as far as
+  interface vs implementation: a type local to a routine, and a class's or
+  object's ancestor, resolve from the implementation scope.
+- a used unit's type named like a builtin (`Text`, `Single`) loses to the
+  builtin: the oracle's lookup meets System's seeded name before the
+  imports. The unit's own declaration wins, as in dcc.
+- `SizeOf` of an instantiation in a `$IF` takes a bare generic name and
+  plain names as its actuals; a qualified head or a nested instantiation
+  (`TPair<Byte, TList<Integer>>`) stays a guess.
+
 ## 11-classes.md
 
 ### 11.2.1 `private` / `protected` / `public` / `published` (+ `strict`)

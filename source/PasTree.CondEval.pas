@@ -165,6 +165,15 @@ function PasBuiltinLayout(const AName: string;
   const ATarget: TPasBuiltinTarget; out ASize: Double;
   out AAlign: Integer): Boolean;
 
+{ The value range of a builtin ordinal type - the integers by width and
+  sign (LongInt by the target's long, NativeInt by its pointer), Boolean,
+  ByteBool, Char / WideChar and AnsiChar (AKind cvStr: characters) - the one
+  table for `High` / `Low` in a `$IF` and the layout oracle's index and set
+  bases (audit D2-02: its own list had drifted). False for any other name. }
+function PasBuiltinOrdinalRange(const AName: string;
+  const ATarget: TPasBuiltinTarget; out ALo, AHi: Double;
+  out AKind: TPasCondKind): Boolean;
+
 { A target from its four facts (tests and hosts that hold no platform). }
 function PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
   ALongBytes: Integer): TPasBuiltinTarget;
@@ -690,50 +699,46 @@ begin
   Result := True;
 end;
 
-// High or Low of a builtin ordinal type, as the value `$IF` compares: a
-// number, a character (`High(Char) = #65535`) or a Boolean (`High(Boolean)`).
-// dcc64 37.0, local/probe-b59 P1, P2. False for any other name.
-function PasBuiltinOrdinalBound(const AName: string;
-  const ATarget: TPasBuiltinTarget; AHigh: Boolean;
-  out AValue: TPasCondValue): Boolean;
+function PasBuiltinOrdinalRange(const AName: string;
+  const ATarget: TPasBuiltinTarget; out ALo, AHi: Double;
+  out AKind: TPasCondKind): Boolean;
 var
-  LLo, LHi: Double;
-  LKind: TPasCondKind;
   LBits: Integer;
 begin
   Result := True;
-  LKind := cvNum;
-  LLo := 0;
+  AKind := cvNum;
+  ALo := 0;
+  AHi := 0;
   if SameText(AName, 'Byte') or SameText(AName, 'UInt8') then
-    LHi := 255
+    AHi := 255
   else if SameText(AName, 'ShortInt') or SameText(AName, 'Int8') then
   begin
-    LLo := -128;
-    LHi := 127;
+    ALo := -128;
+    AHi := 127;
   end
   else if SameText(AName, 'Word') or SameText(AName, 'UInt16') then
-    LHi := 65535
+    AHi := 65535
   else if SameText(AName, 'SmallInt') or SameText(AName, 'Int16') then
   begin
-    LLo := -32768;
-    LHi := 32767;
+    ALo := -32768;
+    AHi := 32767;
   end
   else if SameText(AName, 'Integer') or SameText(AName, 'Int32') or
           SameText(AName, 'FixedInt') then
   begin
-    LLo := -2147483648.0;
-    LHi := 2147483647;
+    ALo := -2147483648.0;
+    AHi := 2147483647;
   end
   else if SameText(AName, 'Cardinal') or SameText(AName, 'UInt32') or
           SameText(AName, 'FixedUInt') then
-    LHi := 4294967295.0
+    AHi := 4294967295.0
   else if SameText(AName, 'Int64') then
   begin
-    LLo := -9223372036854775808.0;
-    LHi := 9223372036854775807.0;
+    ALo := -9223372036854775808.0;
+    AHi := 9223372036854775807.0;
   end
   else if SameText(AName, 'UInt64') then
-    LHi := 18446744073709551615.0
+    AHi := 18446744073709551615.0
   else if SameText(AName, 'LongInt') or SameText(AName, 'NativeInt') or
           SameText(AName, 'LongWord') or SameText(AName, 'NativeUInt') then
   begin
@@ -743,29 +748,44 @@ begin
       LBits := ATarget.PointerBytes * 8;
     if SameText(AName, 'LongInt') or SameText(AName, 'NativeInt') then
     begin
-      LHi := Power(2, LBits - 1) - 1;
-      LLo := -Power(2, LBits - 1);
+      AHi := Power(2, LBits - 1) - 1;
+      ALo := -Power(2, LBits - 1);
     end
     else
-      LHi := Power(2, LBits) - 1;
+      AHi := Power(2, LBits) - 1;
   end
-  else if SameText(AName, 'Boolean') then
+  else if SameText(AName, 'Boolean') or SameText(AName, 'ByteBool') then
   begin
-    LKind := cvBool;
-    LHi := 1;
+    AKind := cvBool;
+    AHi := 1;
   end
   else if SameText(AName, 'Char') or SameText(AName, 'WideChar') then
   begin
-    LKind := cvStr;
-    LHi := 65535;
+    AKind := cvStr;
+    AHi := 65535;
   end
   else if SameText(AName, 'AnsiChar') then
   begin
-    LKind := cvStr;
-    LHi := 255;
+    AKind := cvStr;
+    AHi := 255;
   end
   else
-    Exit(False);
+    Result := False;
+end;
+
+// High or Low of a builtin ordinal type, as the value `$IF` compares: a
+// number, a character (`High(Char) = #65535`) or a Boolean (`High(Boolean)`).
+// dcc64 37.0, local/probe-b59 P1, P2. False for any other name.
+function PasBuiltinOrdinalBound(const AName: string;
+  const ATarget: TPasBuiltinTarget; AHigh: Boolean;
+  out AValue: TPasCondValue): Boolean;
+var
+  LLo, LHi: Double;
+  LKind: TPasCondKind;
+begin
+  Result := PasBuiltinOrdinalRange(AName, ATarget, LLo, LHi, LKind);
+  if not Result then
+    Exit;
   if not AHigh then
     LHi := LLo;
   case LKind of
@@ -993,6 +1013,32 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
         // A user type's size: the oracle's question; guessed 0 (like the
         // old evaluator) when nobody answers.
         LArgName := ATree.DottedText(LArg);
+        // An instantiation, `TPair<Byte, Int64>`, goes to the oracle as its
+        // text: the head and each actual a name (audit E2-25).
+        if (LArgName = '') and (ATree.Nodes[LArg].Kind = nkTypeArgs) then
+        begin
+          var LPart := ATree.Nodes[LArg].FirstChild;
+          if LPart <> NIL_NODE then
+            LArgName := ATree.DottedText(LPart);
+          var LArgs := '';
+          if LArgName <> '' then
+            LPart := ATree.Nodes[LPart].NextSibling;
+          while (LArgName <> '') and (LPart <> NIL_NODE) do
+          begin
+            var LOne := ATree.DottedText(LPart);
+            if LOne = '' then
+              LArgName := ''
+            else if LArgs = '' then
+              LArgs := LOne
+            else
+              LArgs := LArgs + ',' + LOne;
+            LPart := ATree.Nodes[LPart].NextSibling;
+          end;
+          if (LArgName <> '') and (LArgs <> '') then
+            LArgName := LArgName + '<' + LArgs + '>'
+          else
+            LArgName := '';
+        end;
         if LArgName <> '' then
           Result := AskSymbol(sqSizeOfType, LArgName, MkNum(0))
         else

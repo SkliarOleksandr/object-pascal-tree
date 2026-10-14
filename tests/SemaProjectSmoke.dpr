@@ -4594,6 +4594,99 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// B60 (A2-04, B3-15, B3-17, B3-18, E2-25, E2-26, D2-02; dcc64 37.0,
+// local/probe-b60 P1-P3): the layout oracle behind `$IF SizeOf`. A character
+// subrange is 2 bytes (aligned 1 when written with literals); a set of
+// characters is 32; a hinted field in a variant part is laid out; a field's
+// type resolves where the record is declared, a declaration before a
+// builtin of the same name; an instantiation named in the `$IF` is sized; the
+// `$A` cap is the one just after `record`; an index of ShortInt is 256.
+procedure TestLayoutOracle;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+
+  function Has(const AName: string): Boolean;
+  begin
+    Result := (LM <> nil) and (SymCountOf(LM, AName, skType) = 1);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_layout_oracle');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LayX.pas'),
+    'unit LayX;'#10'interface'#10'type TFoo = Byte;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LayT.pas'),
+    'unit LayT;'#10'interface'#10'uses LayX;'#10 +
+    'type TRS = record A: Byte; F: TFoo; end;'#10 +
+    'implementation'#10'type TFoo = Int64;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'LayUse.pas'),
+    'unit LayUse;'#10'interface'#10'uses LayT;'#10 +
+    'type'#10 +
+    '  TLow = ''a''..''z'';'#10 +
+    '  TRC = record B: Byte; L: TLow; end;'#10 +
+    '  TChAnsi = #0..#127;'#10 +
+    '  TRW = record B: Byte; L: Low(Char)..High(Char); end;'#10 +
+    '  TSC = set of ''a''..''c'';'#10 +
+    '  TR7 = record A: Byte; case Integer of 0: (X: Int64 platform);'#10 +
+    '    1: (Y: Byte); end;'#10 +
+    '  Text = Byte;'#10 +
+    '  Single = Word;'#10 +
+    '  TRT = record A: Byte; T: Text; end;'#10 +
+    '  TRS2 = record A: Byte; S: Single; end;'#10 +
+    '  TPair<K, V> = record Key: K; Value: V; end;'#10 +
+    '  TA = array[ShortInt] of Byte;'#10 +
+    '{$A8}'#10 +
+    '  R3 = record {$A1} A: Byte; B: Integer; end;'#10 +
+    '{$A8}'#10 +
+    '  R15 = record A: Byte; {$A1} B: Integer; end;'#10 +
+    'const C4 = SizeOf(TPair<Byte, Byte>);'#10 +
+    '{$IF SizeOf(TLow) = 2} type TY1 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TRC) = 3} type TY2 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TChAnsi) = 2} type TY3 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TRW) = 4} type TY4 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TSC) = 32} type TY5 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TR7) = 16} type TY6 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TRS) = 2} type TY7 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TRT) = 2} type TY8 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TRS2) = 4} type TY9 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TPair<Byte, Int64>) = 16} type TY10 = class end; {$IFEND}'#10 +
+    '{$IF C4 = 2} type TY11 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TA) = 256} type TY12 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(R3) = 5} type TY13 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(R15) = 8} type TY14 = class end; {$IFEND}'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LM := ModelByName('layuse');
+    Ok('layout: LayUse has a model', LM <> nil);
+    Ok('layout: a character subrange is 2 bytes, aligned 1 from literals',
+      Has('ty1') and Has('ty2') and Has('ty3'));
+    Ok('layout: ...aligned 2 from Low(Char)..High(Char)', Has('ty4'));
+    Ok('layout: a set of characters is 32 bytes', Has('ty5'));
+    Ok('layout: a hinted field in a variant part', Has('ty6'));
+    Ok('layout: an interface field type is not the implementation''s',
+      Has('ty7'));
+    Ok('layout: a declaration hides a builtin of the same name',
+      Has('ty8') and Has('ty9'));
+    Ok('layout: SizeOf of an instantiation, direct and through a constant',
+      Has('ty10') and Has('ty11'));
+    Ok('layout: an index of ShortInt', Has('ty12'));
+    Ok('layout: the $A cap just after record, not later in the body',
+      Has('ty13') and Has('ty14'));
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // Depth that is not the source's nesting, through the project's passes
 // (audit A1-01, A1-07): 10,000-term operator chains - a constant typed from
 // its operands (UntypedInitTypeX), an inline var inferred from them (the
@@ -13595,6 +13688,7 @@ begin
   TestOracleDepth;
   TestQualifiedIfNames;
   TestIfEvaluatorSemantics;
+  TestLayoutOracle;
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;

@@ -47,7 +47,9 @@ type
   // TypeInstanceSize over a generic declaration - no actual at all: one
   // constrained to a class or an interface is a reference whatever it
   // becomes, any other is laid out as 0 bytes aligned 1, the minimum.
-  TPasSubstKind = (pskNode, pskOpenRef, pskOpenMin);
+  // pskSymbol: Node is a type SYMBOL of model Mid, not a type node - an
+  // actual named by text (OracleInstanceSize).
+  TPasSubstKind = (pskNode, pskOpenRef, pskOpenMin, pskSymbol);
   TPasSubstEntry = record
     Name: string;     // lower-case parameter name
     Mid: Integer;     // model the argument node lives in
@@ -878,6 +880,11 @@ type
       out AMid, ASym: Integer): Boolean;
     function DottedPrefixUnknown(AId: Integer;
       const ANameLower: string): Boolean;
+    function OracleResolveFrom(AMid, ANode: Integer; const ANameLower: string;
+      out ARMid, ARSym: Integer): Boolean;
+    function OracleInstanceSize(AId: Integer; const AName: string;
+      out ABytes: Double): Boolean;
+    function OracleGenericParamNames(AGMid, AGSym: Integer): TArray<string>;
     function OracleHighLow(AMid, ASym, ADepth: Integer; AHigh: Boolean;
       out ANum: Double): Boolean;
     function OracleSizeOf(AMid, ASym, ADepth: Integer;
@@ -896,6 +903,8 @@ type
     function OracleArrayLayout(AMid, ADefNode, ADepth: Integer;
       const ASubst: TPasSubst; out ABytes: Double;
       out AAlign: Integer): Boolean;
+    function OracleBoundIsChar(AMid, ANode, ADepth: Integer): Boolean;
+    function OracleIsCharOrdinal(AMid, ANode, ADepth: Integer): Boolean;
     function OracleConstExpr(AMid, ANode, ADepth: Integer;
       out ANum: Double): Boolean;
     function OracleOrdinalCount(AMid, ANode, ADepth: Integer;
@@ -3081,6 +3090,38 @@ begin
     (ATree.Nodes[ATree.Nodes[LNext].NextSibling].Kind <> nkDirective);
 end;
 
+{ OracleResolve from where ANode is written: a type named in the interface
+  resolves from the interface scope, so an implementation declaration of the
+  same name - which dcc does not see there - cannot capture it (an interface
+  record's `F: TFoo` with a used unit's `TFoo = Byte` and an implementation
+  `TFoo = Int64` is 2 bytes; dcc64 37.0, local/probe-b60 P1, audit B3-17).
+  Below `implementation` it is OracleResolve's scope. }
+function TPasSemaProject.OracleResolveFrom(AMid, ANode: Integer;
+  const ANameLower: string; out ARMid, ARSym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LImpl: Integer;
+begin
+  LM := FModels[AMid];
+  LImpl := NIL_NODE;
+  if Length(LM.Tree.Nodes) > 0 then
+  begin
+    LImpl := LM.Tree.Nodes[0].FirstChild;
+    while (LImpl <> NIL_NODE) and
+          (LM.Tree.Nodes[LImpl].Kind <> nkImplementationSec) do
+      LImpl := LM.Tree.Nodes[LImpl].NextSibling;
+  end;
+  if (LImpl = NIL_NODE) or (LM.InterfaceScope = NIL_SCOPE) or
+     (LM.Tree.Nodes[ANode].FirstToken >= LM.Tree.Nodes[LImpl].FirstToken) then
+    Exit(OracleResolve(AMid, ANameLower, ARMid, ARSym));
+  ARMid := AMid;
+  ARSym := LM.Resolve(LM.InterfaceScope, ANameLower);
+  if ARSym <> NIL_SYM then
+    Exit(True);
+  Result := ResolveRealDecl(AMid, ANameLower, ARMid, ARSym) and
+    OracleReadable(ARMid);
+end;
+
 // The recursive const-evaluation context: resolves further plain names in
 // AMid as constants (GenericVariants = GenericVarUtils = False chains),
 // depth-capped like every other walk in this file.
@@ -3914,6 +3955,35 @@ begin
     AOffset := (AOffset div AAlign) * AAlign;
 end;
 
+{ A field declaration's shape: how many fields it declares - the children
+  before its type, attribute groups not counted (`[unsafe] FListObj:
+  TObject`, TList<T>, counted as one placed FListObj twice) - and its type
+  node, the last child before any hint directive (`FHandle: THandle
+  platform;`, System.Classes' THandleStream). The one reading for a record's
+  fields and a variant part's: the variant walk took the last child, so a
+  hinted field there was sized as its directive and refused (audit B3-15;
+  three copies, D1-19). }
+function FieldDeclShape(const ATree: TPasTree; ADecl: Integer;
+  out ACount, AType: Integer): Boolean;
+var
+  LSub: Integer;
+begin
+  ACount := 0;
+  AType := NIL_NODE;
+  LSub := ATree.Nodes[ADecl].FirstChild;
+  if LSub = NIL_NODE then
+    Exit(False);
+  while (ATree.Nodes[LSub].NextSibling <> NIL_NODE) and
+        (ATree.Nodes[ATree.Nodes[LSub].NextSibling].Kind <> nkDirective) do
+  begin
+    if ATree.Nodes[LSub].Kind <> nkAttrGroup then
+      Inc(ACount);
+    LSub := ATree.Nodes[LSub].NextSibling;
+  end;
+  AType := LSub;
+  Result := ACount > 0;
+end;
+
 function TPasSemaProject.OracleRecordLayout(AMid, ADefNode, ADepth: Integer;
   const ASubst: TPasSubst; AStart, AStartAlign: Integer;
   out ABytes: Double; out AAlign: Integer): Boolean;
@@ -3929,24 +3999,7 @@ var
     LSub, LCount, LUse, LOneAlign: Integer;
     LOneSize: Double;
   begin
-    // Children: name idents then ONE type node (records carry no
-    // initializers/absolute), then any hint directives - `FHandle: THandle
-    // platform;` (System.Classes' THandleStream) ends in an nkDirective.
-    // An attribute group may sit among the names - `[unsafe] FListObj:
-    // TObject` (TList<T>) - and is no field: counted as one it placed
-    // FListObj twice, 8 bytes over dcc.
-    LCount := 0;
-    LSub := LM.Tree.Nodes[ADecl].FirstChild;
-    if LSub = NIL_NODE then
-      Exit(False);
-    while (LM.Tree.Nodes[LSub].NextSibling <> NIL_NODE) and
-          (LM.Tree.Nodes[LM.Tree.Nodes[LSub].NextSibling].Kind <> nkDirective) do
-    begin
-      if LM.Tree.Nodes[LSub].Kind <> nkAttrGroup then
-        Inc(LCount);
-      LSub := LM.Tree.Nodes[LSub].NextSibling;
-    end;
-    if (LCount = 0) or
+    if not FieldDeclShape(LM.Tree, ADecl, LCount, LSub) or
        not OracleFieldLayout(AMid, LSub, ADepth, ASubst, LOneSize, LOneAlign) then
       Exit(False);
     LUse := Min(LOneAlign, LCap);
@@ -3984,7 +4037,15 @@ begin
   ABytes := 0;
   AAlign := 1;
   LM := FModels[AMid];
-  LCap := LM.Tree.Source.AlignAt(LM.Tree.Nodes[ADefNode].FirstToken);
+  // The cap in effect just AFTER `record`: dcc64 37.0 lays `record {$A1} A:
+  // Byte; B: Integer; end` out under $A1 (5 bytes) and `{$A1} record` too,
+  // while a directive further into the body - before the second field,
+  // after a method - changes nothing (local/probe-b60 P1; audit E2-26).
+  if LM.Tree.Nodes[ADefNode].FirstToken + 1 <=
+     LM.Tree.Nodes[ADefNode].LastToken then
+    LCap := LM.Tree.Source.AlignAt(LM.Tree.Nodes[ADefNode].FirstToken + 1)
+  else
+    LCap := LM.Tree.Source.AlignAt(LM.Tree.Nodes[ADefNode].FirstToken);
   // `packed record` / `packed object` (nfPacked).
   if nfPacked in LM.Tree.Nodes[ADefNode].Flags then
     LCap := 1;
@@ -4081,7 +4142,7 @@ var
   // The fields declared DIRECTLY in a branch (a nested variant's are not).
   function LevelAlignOf: Integer;
   var
-    LB, LF, LT: Integer;
+    LB, LF, LT, LN: Integer;
     LS: Double;
     LA: Integer;
   begin
@@ -4096,19 +4157,12 @@ var
         begin
           if LM.Tree.Nodes[LF].Kind = nkVarDecl then
           begin
-            LT := LM.Tree.Nodes[LF].FirstChild;
-            if LT <> NIL_NODE then
-            begin
-              while LM.Tree.Nodes[LT].NextSibling <> NIL_NODE do
-                LT := LM.Tree.Nodes[LT].NextSibling;
-              if OracleFieldLayout(AMid, LT, ADepth, ASubst, LS, LA) then
-              begin
-                if Min(LA, ACap) > Result then
-                  Result := Min(LA, ACap);
-              end
-              else
-                Exit(-1);   // a field we cannot size: refuse the whole part
-            end;
+            // A field we cannot size refuses the whole part.
+            if not FieldDeclShape(LM.Tree, LF, LN, LT) or
+               not OracleFieldLayout(AMid, LT, ADepth, ASubst, LS, LA) then
+              Exit(-1);
+            if Min(LA, ACap) > Result then
+              Result := Min(LA, ACap);
           end;
           LF := LM.Tree.Nodes[LF].NextSibling;
         end;
@@ -4163,16 +4217,7 @@ begin
         case LM.Tree.Nodes[LSub].Kind of
           nkVarDecl:
             begin
-              LCount := 0;
-              LNested := LM.Tree.Nodes[LSub].FirstChild;
-              if LNested = NIL_NODE then
-                Exit;
-              while LM.Tree.Nodes[LNested].NextSibling <> NIL_NODE do
-              begin
-                Inc(LCount);
-                LNested := LM.Tree.Nodes[LNested].NextSibling;
-              end;
-              if (LCount = 0) or
+              if not FieldDeclShape(LM.Tree, LSub, LCount, LNested) or
                  not OracleFieldLayout(AMid, LNested, ADepth, ASubst, LSize,
                    LOneAlign) then
                 Exit;
@@ -4355,8 +4400,9 @@ end;
 
 { The ordinal values an enum spans. Explicit values are honoured, and so is
   the rule that an implicit one continues from the last explicit: `(g1,
-  g2 = 300)` is 0..300, not 0..1. A negative value is not something dcc
-  accepts here, so it refuses rather than inventing a signed range. }
+  g2 = 300)` is 0..300, not 0..1. A negative value is legal and dcc sizes
+  the enum by the signed range (spec 2.2.4: `(z1 = -1, z2)` is 1 byte); the
+  signed sizing is not modelled, so it refuses (docs/coverage.md 2.2.4). }
 function TPasSemaProject.OracleEnumRange(AMid, ADefNode, ADepth: Integer;
   out ALo, AHi: Double): Boolean;
 var
@@ -4473,61 +4519,24 @@ begin
     Exit(False);
   end;
   LName := LM.Tree.NodeText(ANode);
-  // The ordinal builtins that actually appear as an index or a set base.
-  if SameText(LName, 'Byte') or SameText(LName, 'AnsiChar') then
-  begin
-    AHi := 255;
-    Exit(True);
-  end;
-  if SameText(LName, 'Char') or SameText(LName, 'WideChar') or
-     SameText(LName, 'Word') then
-  begin
-    AHi := 65535;
-    Exit(True);
-  end;
-  if SameText(LName, 'Boolean') or SameText(LName, 'ByteBool') then
-  begin
-    AHi := 1;
-    Exit(True);
-  end;
-  // The signed and 32-bit integers, for `Low(Integer)..High(Integer)`
-  // (OracleBound); as a set base or an index they are out of range anyway.
-  if SameText(LName, 'ShortInt') then
-  begin
-    ALo := -128;
-    AHi := 127;
-    Exit(True);
-  end;
-  if SameText(LName, 'SmallInt') then
-  begin
-    ALo := -32768;
-    AHi := 32767;
-    Exit(True);
-  end;
-  if SameText(LName, 'Integer') or SameText(LName, 'LongInt') or
-     SameText(LName, 'Int32') or
-     (SameText(LName, 'NativeInt') and (FInfo.PointerBytes = 4)) then
-  begin
-    ALo := -2147483648.0;
-    AHi := 2147483647;
-    Exit(True);
-  end;
-  if SameText(LName, 'Cardinal') or SameText(LName, 'UInt32') or
-     (SameText(LName, 'NativeUInt') and (FInfo.PointerBytes = 4)) then
-  begin
-    AHi := 4294967295.0;
-    Exit(True);
-  end;
   // A named enum or subrange type - one nested in the enclosing class or
-  // record first (TStringList's `set of TOverriddenItem`).
+  // record first (TStringList's `set of TOverriddenItem`), then what the name
+  // resolves to where it is written (OracleResolveFrom). A declaration hides
+  // a builtin of the same name; a builtin answers from the one table
+  // (PasBuiltinOrdinalRange, audit D2-02).
   LDef := OracleNestedTypeDef(AMid, ANode, LM.Tree.NodeNameLower(ANode));
   if LDef <> NIL_NODE then
     LMid2 := AMid
   else
   begin
-    if not OracleResolve(AMid, LM.Tree.NodeNameLower(ANode), LMid2, LSym) then
-      Exit(False);
-    LDef := TypeDefNodeOf(LMid2, LSym);
+    if OracleResolveFrom(AMid, ANode, LM.Tree.NodeNameLower(ANode), LMid2,
+         LSym) and (FModels[LMid2].Symbols[LSym].DeclNode <> NIL_NODE) then
+      LDef := TypeDefNodeOf(LMid2, LSym)
+    else
+    begin
+      var LKind: TPasCondKind;
+      Exit(PasBuiltinOrdinalRange(LName, FTarget, ALo, AHi, LKind));
+    end;
   end;
   if LDef = NIL_NODE then
     Exit(False);
@@ -4540,6 +4549,59 @@ begin
   end;
 end;
 
+// Is the ordinal type ANode names a CHARACTER one - Char, WideChar,
+// AnsiChar, a subrange of characters, an alias of one?
+function TPasSemaProject.OracleIsCharOrdinal(AMid, ANode,
+  ADepth: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LLo, LDef, LRMid, LRSym: Integer;
+begin
+  Result := False;
+  if ADepth > 8 then
+    Exit;
+  LM := FModels[AMid];
+  case LM.Tree.Nodes[ANode].Kind of
+    nkSubrange:
+      begin
+        LLo := LM.Tree.Nodes[ANode].FirstChild;
+        Result := (LLo <> NIL_NODE) and OracleBoundIsChar(AMid, LLo, ADepth);
+      end;
+    nkIdent:
+      begin
+        LDef := OracleNestedTypeDef(AMid, ANode, LM.Tree.NodeNameLower(ANode));
+        if LDef <> NIL_NODE then
+          Exit(OracleIsCharOrdinal(AMid, LDef, ADepth + 1));
+        if OracleResolveFrom(AMid, ANode, LM.Tree.NodeNameLower(ANode), LRMid,
+             LRSym) and (FModels[LRMid].Symbols[LRSym].DeclNode <> NIL_NODE) then
+        begin
+          LDef := TypeDefNodeOf(LRMid, LRSym);
+          Result := (LDef <> NIL_NODE) and
+            OracleIsCharOrdinal(LRMid, LDef, ADepth + 1);
+        end
+        else
+          Result := LM.Tree.NodeTextEquals(ANode, 'Char') or
+            LM.Tree.NodeTextEquals(ANode, 'WideChar') or
+            LM.Tree.NodeTextEquals(ANode, 'AnsiChar');
+      end;
+  end;
+end;
+
+// Is ANode, a subrange bound, a CHARACTER - `'a'`, `#0`, `High(Char)`?
+function TPasSemaProject.OracleBoundIsChar(AMid, ANode,
+  ADepth: Integer): Boolean;
+var
+  LCtx: TPasCondContext;
+  LVal: TPasCondValue;
+begin
+  Result := False;
+  if ADepth > 8 then
+    Exit;
+  LCtx := OracleCondCtx(AMid, ADepth);
+  LVal := EvalCondNode(FModels[AMid].Tree, ANode, LCtx);
+  Result := not LVal.Guessed and (LVal.Kind = cvStr) and
+    (Length(LVal.Str) = 1);
+end;
 { A constant EXPRESSION in a type position (an array bound, a `string[N]`
   length), folded with the same recursive oracle a const initializer gets. A
   one-character literal counts as its ordinal, which is what makes
@@ -4647,6 +4709,21 @@ begin
            not OracleBound(AMid, LLo, ADepth, LNum) or
            not OracleBound(AMid, LHi, ADepth, LNum2) then
           Exit(False);
+        // A CHARACTER subrange is a WideChar's 2 bytes whatever its range -
+        // `#0..#127` too; written with character literals it aligns to 1
+        // (`record B: Byte; L: 'a'..'z' end` is 3), with `Low(Char)..
+        // High(Char)` to 2 (dcc64 37.0, local/probe-b60 P2; audit A2-04).
+        if OracleBoundIsChar(AMid, LLo, ADepth) or
+           OracleBoundIsChar(AMid, LHi, ADepth) then
+        begin
+          ABytes := 2;
+          if (LM.Tree.Nodes[LLo].Kind = nkStrLit) and
+             (LM.Tree.Nodes[LHi].Kind = nkStrLit) then
+            AAlign := 1
+          else
+            AAlign := 2;
+          Exit(True);
+        end;
         if ((LNum >= 0) and (LNum2 <= 255)) or
            ((LNum >= -128) and (LNum2 <= 127)) then
           ABytes := 1
@@ -4684,8 +4761,18 @@ begin
         // 5, 6 and 7 are 5, 6 and 7 on Win32 but all 8 on Win64. Always
         // byte-aligned, whatever the size.
         LLo := LM.Tree.Nodes[ATypeNode].FirstChild;
-        if (LLo = NIL_NODE) or
-           not OracleOrdinalRange(AMid, LLo, ADepth, LNum, LNum2) then
+        if LLo = NIL_NODE then
+          Exit(False);
+        // A CHARACTER base is reduced to a byte char (W1050), whatever its
+        // range: `set of 'a'..'c'`, `set of Char` and `set of TLow` are all
+        // 32 bytes (dcc64 37.0, local/probe-b60 P3).
+        if OracleIsCharOrdinal(AMid, LLo, ADepth) then
+        begin
+          ABytes := 32;
+          AAlign := 1;
+          Exit(True);
+        end;
+        if not OracleOrdinalRange(AMid, LLo, ADepth, LNum, LNum2) then
           Exit(False);
         // dcc caps a set base at 0..255; anything else is an error there, not
         // a size we should invent.
@@ -4743,6 +4830,11 @@ begin
             FOracleMinimum := True;
             Exit(True);
           end;
+        pskSymbol:
+          // An actual named by text (`$IF SizeOf(TPair<Byte, Int64>)`):
+          // Node is the type SYMBOL it resolved to.
+          Exit(OracleLayout(ASubst[LSIdx].Mid, ASubst[LSIdx].Node,
+            ADepth + 1, nil, ABytes, AAlign));
       else
         if ASubst[LSIdx].Outer <> nil then
           Exit(OracleFieldLayout(ASubst[LSIdx].Mid, ASubst[LSIdx].Node,
@@ -4757,6 +4849,19 @@ begin
     if LRSym <> NIL_NODE then
       Exit(OracleFieldLayout(AMid, LRSym, ADepth + 1, ASubst, ABytes, AAlign));
   end;
+  // A declaration the name resolves to where it is written hides a builtin
+  // of the same name - `Text = Byte`, `Single = Word` in the unit make
+  // `record A: Byte; T: Text end` 2 bytes (dcc64 37.0, local/probe-b60 P1;
+  // audit B3-18) - and a type named in the interface never sees the
+  // implementation's (OracleResolveFrom, B3-17). A seeded builtin has no
+  // declaration and falls through to the table, and so does a declaration
+  // the walk cannot lay out.
+  if (LM.Tree.Nodes[ATypeNode].Kind = nkIdent) and
+     OracleResolveFrom(AMid, ATypeNode, LowerCase(LName), LRMid, LRSym) and
+     (FModels[LRMid].Symbols[LRSym].DeclNode <> NIL_NODE) and
+     (FModels[LRMid].Symbols[LRSym].Kind = skType) and
+     OracleLayout(LRMid, LRSym, ADepth + 1, nil, ABytes, AAlign) then
+    Exit(True);
   // `Text` is a compiler intrinsic and `TextFile` System's alias for it: both
   // are that unit's TTextRec - looked up first, for the same reason TFileRec
   // is (spec 9.2.x: the RTL declares the size the compiler generates); the
@@ -4913,6 +5018,99 @@ begin
     OracleLayout(LGMid, LGSym, ADepth + 1, LInner, ABytes, AAlign);
 end;
 
+{ The parameter NAMES of the generic type (AGMid, AGSym), from its
+  declaration's <...> list, lower-case and in order; nil for a shape the
+  walk does not read. }
+function TPasSemaProject.OracleGenericParamNames(AGMid,
+  AGSym: Integer): TArray<string>;
+var
+  LT: TPasTree;
+  LDecl, LParams, LP, LName: Integer;
+begin
+  Result := nil;
+  LT := FModels[AGMid].Tree;
+  LDecl := FModels[AGMid].Symbols[AGSym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LDecl := LT.Nodes[LDecl].Parent;
+  if LDecl = NIL_NODE then
+    Exit;
+  LParams := LT.Nodes[LDecl].FirstChild;
+  while LParams <> NIL_NODE do
+  begin
+    if LT.Nodes[LParams].Kind = nkGenericParams then
+    begin
+      LP := LT.Nodes[LParams].FirstChild;
+      while LP <> NIL_NODE do
+      begin
+        if LT.Nodes[LP].Kind = nkGenericParam then
+        begin
+          // `<T, U>` is ONE group carrying BOTH names (the `;` is what
+          // separates groups), so every ident child is a parameter. The
+          // nkConstraint children that may follow are not.
+          LName := PasSkipAttrGroups(LT, LT.Nodes[LP].FirstChild);
+          if (LName = NIL_NODE) or (LT.Nodes[LName].Kind <> nkIdent) then
+            Exit(nil);
+          while (LName <> NIL_NODE) and (LT.Nodes[LName].Kind = nkIdent) do
+          begin
+            Result := Result + [LT.NodeNameLower(LName)];
+            LName := PasSkipAttrGroups(LT, LT.Nodes[LName].NextSibling);
+          end;
+        end;
+        LP := LT.Nodes[LP].NextSibling;
+      end;
+      Exit;
+    end;
+    LParams := LT.Nodes[LParams].NextSibling;
+  end;
+end;
+
+{ SizeOf of an instantiation a `$IF` names by text - `TPair<Byte, Int64>`,
+  the question CondEval sends for an nkTypeArgs argument (`SizeOf(TPair<Byte,
+  Int64>) = 16`, and a constant `C4 = SizeOf(TPair<Byte, Byte>)` that a guard
+  reads; dcc64 37.0, local/probe-b60 P1, audit E2-25). The head is a bare
+  generic name, each actual a name resolved from unit AId; the generic is
+  laid out with its parameters bound to those symbols (pskSymbol). A nested
+  instantiation among the actuals refuses. }
+function TPasSemaProject.OracleInstanceSize(AId: Integer; const AName: string;
+  out ABytes: Double): Boolean;
+var
+  LLt, LGMid, LGSym, LAMid, LASym, LAlign: Integer;
+  LHead: string;
+  LArgs, LNames: TArray<string>;
+  LSubst: TPasSubst;
+  LEntry: TPasSubstEntry;
+begin
+  Result := False;
+  ABytes := 0;
+  LLt := AName.IndexOf('<');
+  if (LLt <= 0) or not AName.EndsWith('>') then
+    Exit;
+  LHead := Copy(AName, 1, LLt);
+  if LHead.Contains('.') then
+    Exit;
+  LArgs := Copy(AName, LLt + 2, Length(AName) - LLt - 2).Split([',']);
+  if not OracleGenericDecl(AId, LHead, LGMid, LGSym) then
+    Exit;
+  LNames := OracleGenericParamNames(LGMid, LGSym);
+  if (LNames = nil) or (Length(LNames) <> Length(LArgs)) then
+    Exit;
+  LSubst := nil;
+  for var LI := 0 to High(LArgs) do
+  begin
+    if (LArgs[LI].Trim = '') or LArgs[LI].Contains('<') or
+       not OracleQualified(AId, LArgs[LI].Trim, LAMid, LASym) then
+      Exit;
+    LEntry := Default(TPasSubstEntry);
+    LEntry.Name := LNames[LI];
+    LEntry.Mid := LAMid;
+    LEntry.Node := LASym;
+    LEntry.Kind := pskSymbol;
+    LSubst := LSubst + [LEntry];
+  end;
+  Result := OracleLayout(LGMid, LGSym, 1, LSubst, ABytes, LAlign);
+end;
+
 { The binding half of OracleGenericLayout, shared with a generic class
   ancestor (OracleClassLayout): AArgsNode's generic declaration (AGMid,
   AGSym) and its parameters bound to the actuals. A bare enclosing parameter
@@ -4945,7 +5143,7 @@ var
 
 var
   LM: TPasSemaModel;
-  LBase, LArg, LGMid, LGSym, LDecl, LParams, LP, LName: Integer;
+  LBase, LArg, LGMid, LGSym: Integer;
   LInner: TPasSubst;
   LNames: TArray<string>;
 begin
@@ -4966,46 +5164,7 @@ begin
     Exit(False);
   if not OracleGenericDecl(AMid, LM.Tree.NodeText(LBase), LGMid, LGSym) then
     Exit(False);
-  // The parameter NAMES come from the declaration's <...> list.
-  LDecl := FModels[LGMid].Symbols[LGSym].DeclNode;
-  if LDecl = NIL_NODE then
-    Exit(False);
-  LDecl := FModels[LGMid].Tree.Nodes[LDecl].Parent;
-  if LDecl = NIL_NODE then
-    Exit(False);
-  LParams := FModels[LGMid].Tree.Nodes[LDecl].FirstChild;
-  LNames := nil;
-  while LParams <> NIL_NODE do
-  begin
-    if FModels[LGMid].Tree.Nodes[LParams].Kind = nkGenericParams then
-    begin
-      LP := FModels[LGMid].Tree.Nodes[LParams].FirstChild;
-      while LP <> NIL_NODE do
-      begin
-        if FModels[LGMid].Tree.Nodes[LP].Kind = nkGenericParam then
-        begin
-          // `<T, U>` is ONE group carrying BOTH names (the `;` is what
-          // separates groups), so every ident child is a parameter. The
-          // nkConstraint children that may follow are not.
-          LName := PasSkipAttrGroups(FModels[LGMid].Tree,
-            FModels[LGMid].Tree.Nodes[LP].FirstChild);
-          if (LName = NIL_NODE) or
-             (FModels[LGMid].Tree.Nodes[LName].Kind <> nkIdent) then
-            Exit(False);
-          while (LName <> NIL_NODE) and
-                (FModels[LGMid].Tree.Nodes[LName].Kind = nkIdent) do
-          begin
-            LNames := LNames + [FModels[LGMid].Tree.NodeNameLower(LName)];
-            LName := PasSkipAttrGroups(FModels[LGMid].Tree,
-              FModels[LGMid].Tree.Nodes[LName].NextSibling);
-          end;
-        end;
-        LP := FModels[LGMid].Tree.Nodes[LP].NextSibling;
-      end;
-      Break;
-    end;
-    LParams := FModels[LGMid].Tree.Nodes[LParams].NextSibling;
-  end;
+  LNames := OracleGenericParamNames(LGMid, LGSym);
   if LNames = nil then
     Exit(False);
   // Bind them positionally to the actuals.
@@ -5149,6 +5308,9 @@ begin
     begin
       Result := False;
       AValue := Default(TPasSymbolValue);
+      // An instantiation named by text is a question of its own.
+      if (AQuery = sqSizeOfType) and AName.Contains('<') then
+        Exit(OracleInstanceSize(AId, AName, AValue.Num));
       LLower := LowerCase(AName);
       // A plain name at a placed directive: the unit's own declarations
       // answer by position, as dcc reads them (OwnSymbolAt) - the one above
@@ -5288,6 +5450,8 @@ begin
       LRMid, LRSym: Integer;
     begin
       AV := Default(TPasSymbolValue);
+      if (AQuery = sqSizeOfType) and AName.Contains('<') then
+        Exit(OracleInstanceSize(AMid, AName, AV.Num));
       Result := OracleQualified(AMid, AName, LRMid, LRSym) and
         OracleAnswer(AQuery, LRMid, LRSym, ADepth + 1, AV);
     end;
