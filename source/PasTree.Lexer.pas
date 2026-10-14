@@ -64,6 +64,9 @@ type
     procedure Diag(ACode: TPasDiagCode; AStart, ALen: Integer);
     function CharAt(AIndex: Integer): Char; inline;
     function IsIdentRun(AIndex: Integer): Boolean;
+    function ScanDigitRun(ARadix: Integer; var AFlags: TPasTokenFlags): Boolean;
+    function SignificantKindBefore(AIndex: Integer): TPasTokenKind;
+    function TypeArgsCloseAt(AIndex: Integer): Boolean;
     procedure LexWhitespace;
     procedure LexLineComment;
     procedure LexBraceCommentOrDirective;
@@ -120,18 +123,15 @@ begin
   Result := (ACh = '0') or (ACh = '1');
 end;
 
+// PasTree.Types' rule (spec B.3): every non-surrogate unit from $80 up.
 function IsIdentStart(ACh: Char): Boolean; inline;
 begin
-  Result := ((ACh >= 'a') and (ACh <= 'z')) or
-    ((ACh >= 'A') and (ACh <= 'Z')) or (ACh = '_') or
-    ((ACh > #127) and ACh.IsLetter);
+  Result := PasIsIdentStart(ACh);
 end;
 
 function IsIdentChar(ACh: Char): Boolean; inline;
 begin
-  Result := ((ACh >= 'a') and (ACh <= 'z')) or
-    ((ACh >= 'A') and (ACh <= 'Z')) or (ACh = '_') or IsDigit(ACh) or
-    ((ACh > #127) and ACh.IsLetterOrDigit);
+  Result := PasIsIdentChar(ACh);
 end;
 
 function IsWhitespace(ACh: Char): Boolean; inline;
@@ -290,9 +290,28 @@ begin
        (LIdx > 0) and (FTokens[LIdx - 1].Kind = tkCaret) and
        (FTokens[LIdx - 1].Start + 1 = FTokens[LIdx].Start) then
       Dec(LIdx, 2)
+    else if FTokens[LIdx].Kind in [tkNil, tkInherited, tkString] then
+      Exit(True)
+    // A reserved word after a dot is a member name (spec B.8) and ends an
+    // operand: `TC.Array^[0]` dereferences (dcc64 37.0, local/probe-b57 C1).
+    else if IsKeyword(FTokens[LIdx].Kind) then
+      Exit(SignificantKindBefore(LIdx) = tkDot)
+    // `default` and `name` after what ends an operand are the directives
+    // that take a constant, and a caret after them is a character:
+    // `property Esc: Char read FEsc default ^[;` (spec B.6.2, C1). The same
+    // words as an operand (`:= Default^`, `X.Name^`) still dereference.
+    else if (FTokens[LIdx].Kind = tkIdentifier) and
+            (SliceEqualsWord(FBase + FTokens[LIdx].Start, FTokens[LIdx].Len,
+               'default') or
+             SliceEqualsWord(FBase + FTokens[LIdx].Start, FTokens[LIdx].Len,
+               'name')) and
+            (SignificantKindBefore(LIdx) in [tkIdentifier, tkRParen,
+               tkRBracket, tkStringLiteral, tkIntLiteral, tkRealLiteral,
+               tkControlChar, tkCaretChar]) then
+      Exit(False)
     else
       Exit(FTokens[LIdx].Kind in [tkIdentifier, tkRParen, tkRBracket,
-        tkCaret, tkNil, tkInherited, tkString, tkIntLiteral, tkRealLiteral]);
+        tkCaret, tkIntLiteral, tkRealLiteral]);
   until False;
 end;
 
@@ -324,7 +343,50 @@ begin
      (FTokens[FTokenCount - 1].Kind = tkGreater) and
      (FTokens[FTokenCount - 1].Start = FPos - 2) then
     Exit(False);
+  // `TH.GetA<Integer>^[1]` the same (dcc64 37.0, local/probe-b57 C1) - but
+  // `C >^[` compares with ESC, so here the `>` must close a type-argument
+  // list after a name (TypeArgsCloseAt).
+  if (LCh = '[') and (FTokenCount > 0) and
+     (FTokens[FTokenCount - 1].Kind = tkGreater) and
+     (FTokens[FTokenCount - 1].Start = FPos - 2) and
+     TypeArgsCloseAt(FTokenCount - 1) then
+    Exit(False);
   Result := not PrevEndsOperand;
+end;
+
+{ Whether the `>` at token AIndex closes a type-argument list written after a
+  name: back to its `<` over names, dots, commas, `string` and nested lists
+  only, the `<` right after an identifier. Bounded - a type-argument list is
+  short, and the answer only decides a caret's reading. }
+function TPasLexer.TypeArgsCloseAt(AIndex: Integer): Boolean;
+var
+  LIdx, LDepth, LSeen: Integer;
+begin
+  Result := False;
+  LDepth := 1;
+  LIdx := AIndex - 1;
+  LSeen := 0;
+  while (LIdx >= 0) and (LSeen < 64) do
+  begin
+    case FTokens[LIdx].Kind of
+      tkWhitespace, tkCommentLine, tkCommentBrace, tkCommentParen,
+      tkDirective:
+        ;
+      tkIdentifier, tkDot, tkComma, tkString:
+        Inc(LSeen);
+      tkGreater:
+        Inc(LDepth);
+      tkLess:
+        begin
+          Dec(LDepth);
+          if LDepth = 0 then
+            Exit(SignificantKindBefore(LIdx) = tkIdentifier);
+        end;
+    else
+      Exit;
+    end;
+    Dec(LIdx);
+  end;
 end;
 
 procedure TPasLexer.Diag(ACode: TPasDiagCode; AStart, ALen: Integer);
@@ -697,6 +759,35 @@ begin
   Diag(dcUnterminatedMultilineString, LStart, FPos - LStart);
 end;
 
+{ The digits of one radix (10, 16 or 2) at FPos and every `_` among them -
+  leading, trailing and doubled ones too: `1__0`, `1_`, `$_FF`, `$FF_`, `%_1`,
+  `#_65`, `1e1__0_` compile (spec B.5.1, dcc64 37.0, local/probe-b57 N1); a
+  separator sets tfHasSeparator. True when a digit was read. }
+function TPasLexer.ScanDigitRun(ARadix: Integer;
+  var AFlags: TPasTokenFlags): Boolean;
+var
+  LCh: Char;
+  LDigit: Boolean;
+begin
+  Result := False;
+  repeat
+    LCh := CharAt(FPos);
+    case ARadix of
+      16: LDigit := IsHexDigit(LCh);
+      2: LDigit := IsBinDigit(LCh);
+    else
+      LDigit := IsDigit(LCh);
+    end;
+    if LDigit then
+      Result := True
+    else if LCh = '_' then
+      Include(AFlags, tfHasSeparator)
+    else
+      Exit;
+    Inc(FPos);
+  until False;
+end;
+
 procedure TPasLexer.LexControlChar;
 var
   LStart: Integer;
@@ -706,37 +797,21 @@ begin
   LStart := FPos;
   LFlags := [];
   Inc(FPos); // '#'
-  LOk := False;
   case CharAt(FPos) of
     '$':
       begin
         Include(LFlags, tfHex);
         Inc(FPos);
-        while IsHexDigit(CharAt(FPos)) or (CharAt(FPos) = '_') do
-        begin
-          if FBase[FPos] <> '_' then
-            LOk := True;
-          Inc(FPos);
-        end;
+        LOk := ScanDigitRun(16, LFlags);
       end;
     '%':
       begin
         Include(LFlags, tfBinary);
         Inc(FPos);
-        while IsBinDigit(CharAt(FPos)) or (CharAt(FPos) = '_') do
-        begin
-          if FBase[FPos] <> '_' then
-            LOk := True;
-          Inc(FPos);
-        end;
+        LOk := ScanDigitRun(2, LFlags);
       end;
   else
-    while IsDigit(CharAt(FPos)) or (CharAt(FPos) = '_') do
-    begin
-      if FBase[FPos] <> '_' then
-        LOk := True;
-      Inc(FPos);
-    end;
+    LOk := ScanDigitRun(10, LFlags);
   end;
   Emit(tkControlChar, LStart, LFlags);
   if not LOk then
@@ -756,32 +831,25 @@ begin
     LStart := FPos;
   LFlags := AExtraFlags;
   LIsReal := False;
-  while IsDigit(CharAt(FPos)) or (CharAt(FPos) = '_') do
-  begin
-    if FBase[FPos] = '_' then
-      Include(LFlags, tfHasSeparator);
-    Inc(FPos);
-  end;
+  ScanDigitRun(10, LFlags);
   // Fraction: '.' followed by a digit, or by nothing that could start a
   // different token - guards '..' ranges and member access on literals
   // (42.ToString; dcc reads `100.e2` as member access too, not as a real).
   // The fraction may be EMPTY: `100. - X` and `1.;` are real literals for
-  // dcc (probed 2026-09-16), and the spec's B.5.2 grammar is narrower than
-  // the compiler here.
+  // dcc (probed 2026-09-16) - but not before a `)`: `.)` is the legacy `]`
+  // (spec B.5.2, B.7), so `A(.1.)` is `A(.1 .)` (dcc64 37.0,
+  // local/probe-b57 N1). A digit after the dot is a fraction all the same.
   if (CharAt(FPos) = '.') and
      (IsDigit(CharAt(FPos + 1)) or
-      ((CharAt(FPos + 1) <> '.') and not IsIdentStart(CharAt(FPos + 1)))) then
+      ((CharAt(FPos + 1) <> '.') and (CharAt(FPos + 1) <> ')') and
+       not IsIdentStart(CharAt(FPos + 1)))) then
   begin
     LIsReal := True;
     Inc(FPos); // '.'
-    while IsDigit(CharAt(FPos)) or (CharAt(FPos) = '_') do
-    begin
-      if FBase[FPos] = '_' then
-        Include(LFlags, tfHasSeparator);
-      Inc(FPos);
-    end;
+    ScanDigitRun(10, LFlags);
   end;
-  // Exponent.
+  // Exponent: a digit first (`1e_1` is E2053), then separators as anywhere
+  // else (`1e1_0`, `2E-0_1`; dcc64 37.0, local/probe-b57 N1, N2).
   if (CharAt(FPos) = 'e') or (CharAt(FPos) = 'E') then
   begin
     LProbe := FPos + 1;
@@ -791,8 +859,7 @@ begin
     begin
       LIsReal := True;
       FPos := LProbe;
-      while IsDigit(CharAt(FPos)) do
-        Inc(FPos);
+      ScanDigitRun(10, LFlags);
     end;
   end;
   if LIsReal then
@@ -810,15 +877,7 @@ begin
   LStart := FPos;
   LFlags := [tfHex];
   Inc(FPos); // '$'
-  LOk := False;
-  while IsHexDigit(CharAt(FPos)) or (CharAt(FPos) = '_') do
-  begin
-    if FBase[FPos] = '_' then
-      Include(LFlags, tfHasSeparator)
-    else
-      LOk := True;
-    Inc(FPos);
-  end;
+  LOk := ScanDigitRun(16, LFlags);
   Emit(tkIntLiteral, LStart, LFlags);
   if not LOk then
     Diag(dcMissingHexDigits, LStart, FPos - LStart);
@@ -833,15 +892,7 @@ begin
   LStart := FPos;
   LFlags := [tfBinary];
   Inc(FPos); // '%'
-  LOk := False;
-  while IsBinDigit(CharAt(FPos)) or (CharAt(FPos) = '_') do
-  begin
-    if FBase[FPos] = '_' then
-      Include(LFlags, tfHasSeparator)
-    else
-      LOk := True;
-    Inc(FPos);
-  end;
+  LOk := ScanDigitRun(2, LFlags);
   Emit(tkIntLiteral, LStart, LFlags);
   if not LOk then
     Diag(dcMissingBinDigits, LStart, FPos - LStart);
@@ -872,11 +923,30 @@ begin
   end;
   LKind := KeywordKind(FBase + LNameStart, FPos - LNameStart);
   Emit(LKind, LStart);
-  if LKind = tkAsm then
+  // A member named Asm after a dot (`TLang.Asm`, spec B.8; dcc64 37.0,
+  // local/probe-b57 L1) opens no BASM block - it swallowed the code up to the
+  // next `end`. The preprocessor's live-asm test says the same.
+  if (LKind = tkAsm) and (SignificantKindBefore(FTokenCount - 1) <> tkDot) then
   begin
     FInAsm := True;
     FAsmCondDepth := FCondDepth;
   end;
+end;
+
+// The kind of the last token before index AIndex that is no trivia;
+// tkEndOfFile when there is none.
+function TPasLexer.SignificantKindBefore(AIndex: Integer): TPasTokenKind;
+var
+  LIdx: Integer;
+begin
+  LIdx := AIndex - 1;
+  while (LIdx >= 0) and (FTokens[LIdx].Kind in [tkWhitespace,
+    tkCommentLine, tkCommentBrace, tkCommentParen, tkDirective]) do
+    Dec(LIdx);
+  if LIdx < 0 then
+    Result := tkEndOfFile
+  else
+    Result := FTokens[LIdx].Kind;
 end;
 
 procedure TPasLexer.LexAsmToken;

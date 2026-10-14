@@ -592,6 +592,18 @@ begin
       '{$DEFINE JUNK_SYM}{$UNDEF JUNK_SYM)}{$IFDEF JUNK_SYM}A := 1;{$ELSE}A := 2;'
       + '{$ENDIF}',
       'Block(Assign(Ident''A'' IntLit''2''))', False),
+    // B57 (dcc64 37.0, local/probe-b57 D1): a symbol name is dcc's identifier
+    // - one starting with A-umlaut was read as the empty name, and every
+    // other non-ASCII IFDEF was then true; one with it inside was cut there.
+    IfBranchCase('B57 a non-ASCII symbol is not every non-ASCII symbol',
+      '{$DEFINE '#$C4'X}{$IFDEF '#$D6'X}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', False),
+    IfBranchCase('B57 ...and the defined one is defined',
+      '{$DEFINE '#$C4'X}{$IFDEF '#$C4'X}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''1''))', False),
+    IfBranchCase('B57 a non-ASCII letter inside a symbol does not end it',
+      '{$DEFINE A'#$C4'X}{$IFDEF A'#$D6'X}A := 1;{$ELSE}A := 2;{$ENDIF}',
+      'Block(Assign(Ident''A'' IntLit''2''))', False),
     // ---- Code audit 2026-08-31, findings 2.7.1 / 2.7.2 / 3.2. Each of these
     // is a shape that used to CRASH the whole preprocess run of the unit
     // (Trunc outside Int64 raises EInvalidOp, against this unit's "never

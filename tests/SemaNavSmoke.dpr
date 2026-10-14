@@ -4568,6 +4568,20 @@ begin
         not IsValidRenameName('Foo.Bar'));
       Ok('IsValidRenameName: reserved word rejected',
         not IsValidRenameName('begin'));
+      // B57 (spec B.3, dcc64 37.0, local/probe-b57 U1): dcc's identifier
+      // characters - every non-surrogate unit from $80 up.
+      Ok('IsValidRenameName: a non-ASCII name accepted (B57)',
+        IsValidRenameName('Gr'#$F6#$DF'e') and
+        IsValidRenameName(#$2014'Q') and IsValidRenameName('A'#$0301'B'));
+      Ok('IsValidRenameName: a surrogate pair rejected (B57)',
+        not IsValidRenameName('Q'#$D840#$DC00));
+      // B1-31: the project outline's type spans take the same rule - a type
+      // name with A-umlaut inside is one span, not three.
+      var LSpans := PasIdentSpans(': TList<T'#$C4'nderung>', 1);
+      Ok('PasIdentSpans: a non-ASCII type name is one span (B57)',
+        (Length(LSpans) = 2) and (LSpans[0].Start = 3) and
+        (LSpans[0].Len = 5) and (LSpans[1].Start = 9) and
+        (LSpans[1].Len = 9));
       // Back to an ordinary symbol - the builtin probe above left LRSym on a
       // seeded one, which refuses for its OWN reason.
       GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavRenP.pas')), 7, 10,

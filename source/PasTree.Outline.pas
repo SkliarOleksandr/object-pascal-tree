@@ -481,11 +481,12 @@ begin
   LIdx := AFrom;
   while LIdx <= Length(AText) do
   begin
-    if CharInSet(AText[LIdx], ['A'..'Z', 'a'..'z', '_']) then
+    // dcc's identifier rule (PasIsIdentStart, spec B.3): a name with a
+    // non-ASCII letter is one span, as the module outline's token spans are.
+    if PasIsIdentStart(AText[LIdx]) then
     begin
       LStart := LIdx;
-      while (LIdx <= Length(AText)) and
-            CharInSet(AText[LIdx], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+      while (LIdx <= Length(AText)) and PasIsIdentChar(AText[LIdx]) do
         Inc(LIdx);
       LSpan.Start := LStart;
       LSpan.Len := LIdx - LStart;

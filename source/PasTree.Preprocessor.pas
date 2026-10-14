@@ -415,6 +415,9 @@ type
     // Inside a live asm body: the lexing mode ProcessFile wants for live
     // text, across include boundaries (F26).
     FLiveAsm: Boolean;
+    // The kind of the last live visible token: an `asm` after a dot is a
+    // member name, not a block (spec B.8, the lexer's rule).
+    FLastVisKind: TPasTokenKind;
     FVisible: TList<TPasVisibleToken>;
     FSkipped: TObjectList<TList<TPasSkippedRegion>>;
     FDeadDirectives: TObjectList<TList<TPasSkippedRegion>>;
@@ -1129,6 +1132,7 @@ begin
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
   FLiveAsm := False;
+  FLastVisKind := tkEndOfFile;
 
   LStream := TPasLexer.Tokenize(ASource);
   // Visible tokens <= the main file's raw tokens (trivia and skipped regions
@@ -1260,7 +1264,8 @@ begin
           if FLiveAsm then
             FLiveAsm := LTok.Kind <> tkEnd
           else
-            FLiveAsm := LTok.Kind = tkAsm;
+            FLiveAsm := (LTok.Kind = tkAsm) and (FLastVisKind <> tkDot);
+          FLastVisKind := LTok.Kind;
         end;
       end
       else if LSkipStart < 0 then
@@ -1346,9 +1351,11 @@ var
       Inc(LP);
       Dec(LN);
     end;
+    // dcc's identifier characters (PasIsIdentChar): a name starting with
+    // A-umlaut is that name, where the ASCII scan read the empty name and
+    // every non-ASCII IFDEF was true (dcc64 37.0, local/probe-b57 D1).
     LIdent := 0;
-    while (LIdent < LN) and
-          CharInSet(LP[LIdent], ['A'..'Z', 'a'..'z', '0'..'9', '_']) do
+    while (LIdent < LN) and PasIsIdentChar(LP[LIdent]) do
       Inc(LIdent);
     LArgStart := LP - PChar(Pointer(FFiles[AFileId].Source));
     LSymLen := LIdent;

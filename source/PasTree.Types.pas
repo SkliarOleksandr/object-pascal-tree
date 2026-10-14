@@ -231,6 +231,15 @@ function IsTrivia(AKind: TPasTokenKind): Boolean; inline;
 { True for reserved-word kinds. }
 function IsKeyword(AKind: TPasTokenKind): Boolean; inline;
 
+{ dcc's identifier characters (spec B.3; dcc64 37.0, local/probe-b57 U1): an
+  ASCII letter, `_`, or ANY UTF-16 unit from $80 up that is no surrogate -
+  letters, but also a combining mark, U+00B2, the euro sign, an em dash,
+  U+3000, NBSP, NEL, U+2028 and U+FEFF; a supplementary-plane character is
+  E2038. The one rule for the lexer, the define-name scan, rename's check,
+  the outline's spans and lint. PasIsIdentChar adds the ASCII digits. }
+function PasIsIdentStart(ACh: Char): Boolean; inline;
+function PasIsIdentChar(ACh: Char): Boolean; inline;
+
 { Case-insensitive reserved-word lookup over a raw character slice.
   Returns tkIdentifier when the slice is not a reserved word.
   ASCII-only folding is correct here: all keywords are ASCII. }
@@ -373,6 +382,20 @@ end;
 function IsKeyword(AKind: TPasTokenKind): Boolean;
 begin
   Result := AKind >= tkAnd;
+end;
+
+function PasIsIdentStart(ACh: Char): Boolean;
+begin
+  if ACh <= #127 then
+    Result := ((ACh >= 'a') and (ACh <= 'z')) or
+      ((ACh >= 'A') and (ACh <= 'Z')) or (ACh = '_')
+  else
+    Result := (ACh < #$D800) or (ACh > #$DFFF);
+end;
+
+function PasIsIdentChar(ACh: Char): Boolean;
+begin
+  Result := PasIsIdentStart(ACh) or ((ACh >= '0') and (ACh <= '9'));
 end;
 
 { Keyword recognition, bucketed by FOLDED FIRST LETTER.

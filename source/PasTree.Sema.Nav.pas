@@ -6548,10 +6548,13 @@ begin
   Result := False;
   if AName = '' then
     Exit;
-  if not CharInSet(AName[1], ['A'..'Z', 'a'..'z', '_']) then
+  // dcc's identifier rule (PasIsIdentStart, spec B.3): German "Groesse"
+  // spelled with o-umlaut and sharp s is a name - the ASCII sets refused it
+  // (audit B3-06).
+  if not PasIsIdentStart(AName[1]) then
     Exit;
   for LIdx := 2 to Length(AName) do
-    if not CharInSet(AName[LIdx], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then
+    if not PasIsIdentChar(AName[LIdx]) then
       Exit;
   // A reserved word would not parse as a name here, and `&`-escaping one is
   // a deliberate act - never something a rename should do behind the user.

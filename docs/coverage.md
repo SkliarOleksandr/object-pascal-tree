@@ -497,6 +497,13 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 
 ## B-lexical-grammar.md
 
+### B.3 Identifiers & case rules
+- identifier characters are dcc's (every non-surrogate unit from $80 up), in
+  the lexer, the conditional-symbol scan, rename's name check, the outline's
+  spans and lint; case folding is still ASCII only, so a define tested with
+  another case of a non-ASCII letter (`{$IFDEF` a-umlaut X after
+  `{$DEFINE` A-umlaut X) is not defined, where dcc folds it (audit B65).
+
 ### B.6.1 Quoted string & character literals
 - the lexer emits adjacent string elements as separate
   tokens by design (full-fidelity contract); folding them into one literal is
@@ -506,7 +513,11 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 - `^` + a letter (`^M`) is two raw tokens, caret and identifier; the parser
   decides caret char vs pointer type vs dereference positionally. `^` + a
   printable non-letter (`^[ ^^ ^? ^1`) is one `tkCaretChar` token when the
-  caret cannot be a postfix dereference.
+  caret cannot be a postfix dereference. The lexer judges that from the
+  tokens before it, not the position: a reserved-word member (`TC.Array^[0]`)
+  and a generic call's closing `>` (`GetA<Integer>^[1]`, a bounded scan back
+  to its `<`) end an operand; of the directive words that take a constant
+  only `default` and `name` make the caret a character (`default ^[`).
 - dcc also takes whitespace after the caret (`^ ` is chr 96, `^` + CR is
   `M`); PasTree reports "control character expected" instead - a token
   spanning a newline would break every line-based consumer, and no real

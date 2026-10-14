@@ -30,7 +30,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..137] of TPasCaseRow = (
+  STMT_CASES: array[0..145] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -733,6 +733,49 @@ const
      Source: 'B := ^[.IsControl;';
      Expected: 'Block(Assign(Ident''B'' Member(CaretChar''^['' ' +
        'Ident''IsControl'')))'; ExpectDiags: 0),
+    // B57 (dcc64 37.0 probes in local/probe-b57): separators anywhere after
+    // the first digit, the exponent's too (N1); `.)` after an integer is the
+    // legacy `]` (N1); a member named Asm opens no asm block (L1); a caret
+    // after a reserved-word member or a generic call's `>` dereferences, after
+    // a comparison's `>` it is a character (C1); identifier characters are
+    // every non-surrogate unit from $80 up (U1).
+    (Section: 'B.5.2'; Name: 'B57 separators in a real exponent';
+     Source: 'D := 1e1_0; D := 2E-0_1; D := 1e1__0_;';
+     Expected: 'Block(Assign(Ident''D'' RealLit''1e1_0'') ' +
+       'Assign(Ident''D'' RealLit''2E-0_1'') ' +
+       'Assign(Ident''D'' RealLit''1e1__0_''))'; ExpectDiags: 0),
+    (Section: 'B.5.1'; Name: 'B57 leading, trailing and doubled separators';
+     Source: 'F(1__0, 1_, $_FF, $FF_, %_1, 1_.5);';
+     Expected: 'Block(ExprStmt(Call(Ident''F'' IntLit''1__0'' IntLit''1_'' ' +
+       'IntLit''$_FF'' IntLit''$FF_'' IntLit''%_1'' RealLit''1_.5'')))';
+     ExpectDiags: 0),
+    (Section: 'B.5.2'; Name: 'B57 legacy brackets around an integer';
+     Source: 'A(.1.) := A(.2.);';
+     Expected: 'Block(Assign(Index(Ident''A'' IntLit''1'') ' +
+       'Index(Ident''A'' IntLit''2'')))'; ExpectDiags: 0),
+    (Section: 'B.8'; Name: 'B57 a member named Asm opens no asm block';
+     Source: 'L := TLang.Asm; L := TLang.End;';
+     Expected: 'Block(Assign(Ident''L'' Member(Ident''TLang'' ' +
+       'Ident''Asm'')) Assign(Ident''L'' Member(Ident''TLang'' ' +
+       'Ident''End'')))'; ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'B57 a reserved-word member dereferences';
+     Source: 'X := TC.Array^[0];';
+     Expected: 'Block(Assign(Ident''X'' Index(Deref(Member(Ident''TC'' ' +
+       'Ident''Array'')) IntLit''0'')))'; ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'B57 a generic call''s > then ^[ dereferences';
+     Source: 'TH.GetA<Integer>^[1] := 6;';
+     Expected: 'Block(Assign(Index(Deref(TypeArgs(Member(Ident''TH'' ' +
+       'Ident''GetA'') Ident''Integer'')) IntLit''1'') IntLit''6''))';
+     ExpectDiags: 0),
+    (Section: 'B.6.2'; Name: 'B57 a comparison''s > then ^[ is a character';
+     Source: 'if C >^[ then;';
+     Expected: 'Block(IfStmt(BinaryOp''>''(Ident''C'' CaretChar''^['') ' +
+       'EmptyStmt))'; ExpectDiags: 0),
+    (Section: 'B.3'; Name: 'B57 identifier characters beyond letters';
+     Source: #$2014'Q := '#$20AC'R + A'#$0301'B + '#$00B2'Q + X'#$00A0'Y;';
+     Expected: 'Block(Assign(Ident'''#$2014'Q'' BinaryOp''+''(BinaryOp''+''(' +
+       'BinaryOp''+''(Ident'''#$20AC'R'' Ident''A'#$0301'B'') ' +
+       'Ident'''#$00B2'Q'') Ident''X'#$00A0'Y'')))'; ExpectDiags: 0),
     // B.5.2: dcc takes an EMPTY fraction - `100.` is a real literal when the
     // dot is followed by nothing that could start another token (a report
     // builder in the client writes `100. - ARightPadding`). `100.e2` stays
@@ -828,7 +871,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..249] of TPasCaseRow = (
+  DECL_CASES: array[0..250] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1707,6 +1750,16 @@ const
        'PropertyDecl(Ident''Y'' Ident''Integer'' PropSpec''read''(' +
        'Ident''FY'') PropSpec''write''(Ident''FY'') PropSpec''stored''(' +
        'Ident''False'')))))'; ExpectDiags: 0),
+    // B57 (dcc64 37.0, local/probe-b57 C1): a caret after the directive word
+    // `default` is a character, not a dereference of a name `default`.
+    (Section: 'B.6.2'; Name: 'B57 default ^[ is a caret character';
+     Source: 'type TC = class property Esc: Char read FEsc default ^[; ' +
+       'property Del: Char read FDel default ^?; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(PropertyDecl(' +
+       'Ident''Esc'' Ident''Char'' PropSpec''read''(Ident''FEsc'') ' +
+       'PropSpec''default''(CaretChar''^['')) PropertyDecl(Ident''Del'' ' +
+       'Ident''Char'' PropSpec''read''(Ident''FDel'') ' +
+       'PropSpec''default''(CaretChar''^?'')))))'; ExpectDiags: 0),
     (Section: '13.3.1'; Name: 'event (method-pointer) property';
      Source: 'type TC = class'#13#10 +
        '    property OnClick: TNotifyEvent read FOnClick write FOnClick;'#13#10 +

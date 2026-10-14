@@ -186,8 +186,7 @@ type
 
 function IsIdentChar(ACh: Char): Boolean;
 begin
-  Result := CharInSet(ACh, ['a'..'z', 'A'..'Z', '0'..'9', '_']) or
-    ((ACh > #127) and ACh.IsLetterOrDigit);
+  Result := PasIsIdentChar(ACh);
 end;
 
 // 'a, b and 2 more'.

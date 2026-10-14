@@ -130,7 +130,8 @@ const
       'after generic parameters (`TFoo<T>= class`), are the `>` closing them ' +
       'and the `=`: the lexer fused two tokens the grammar reads apart',
     'N3 keyword case: a regenerated keyword, directive word or punctuation ' +
-      'matches its token case-insensitively (dcc reads them so); leaves and ' +
+      'matches its token case-insensitively (dcc reads them so), and a ' +
+      'regenerated `[` / `]` the legacy `(.` / `.)` (spec B.7); leaves and ' +
       'tokens read as written match exactly',
     'N4 the <eof> sentinel a root span ends on is no token of the source',
     'N5 text after the final `end.` is ignored by dcc; the root owns its ' +
@@ -2416,7 +2417,9 @@ var
       // N3; and the token must be the printing node's own - but the `>`
       // half of a fused `>=`, which the operator or the type declaration
       // owns (N2).
-      Result := SameText(AItem.Text, AOrig.Text) and
+      Result := (SameText(AItem.Text, AOrig.Text) or
+                 ((AItem.Text = '[') and (AOrig.Text = '(.')) or
+                 ((AItem.Text = ']') and (AOrig.Text = '.)'))) and
         ((AOrig.Owner = AItem.Node) or
          ((AOrig.Split = 1) and
           (ATree.Nodes[AItem.Node].Kind in [nkTypeArgs, nkGenericParams])));
