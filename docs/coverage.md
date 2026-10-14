@@ -394,11 +394,15 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 
 ### 14.1.1 The GUID clause
 - whether the first bracket after `interface` is the GUID or the first
-  member's attribute group is dcc's call by the expression's TYPE (a
-  string or TGUID constant is the GUID, an attribute class an attribute);
-  PasTree decides by syntax: a bracket that starts with a string or `(`,
-  or an identifier followed by `]` or `+`, is the GUID - so `[TAttr]`
-  reads as a GUID and `[Unit.SID]` as an attribute.
+  member's attribute group is dcc's call by what its name binds to (a true
+  constant is the GUID, an attribute class an attribute). The tree keeps
+  one shape: a bracket that starts with a string or `(`, or a name, dotted
+  or not, followed by `]` or `+`, is an nkGuid; the resolver binds the name
+  as an attribute's, suffix first, as dcc does - so `[Mark]` is a reference
+  to MarkAttribute and `[Unit.SID]` to the constant - but the node stays an
+  nkGuid, not an attribute group of the first member. Not modelled: a typed
+  TGUID constant (`[GT]`) is dropped by dcc (W1074, no GUID), and a comma
+  list in that bracket (`[GT, S]`, S's GUID) is read as an attribute group.
 
 ### 14.2.1 Classes implementing interfaces
 - heritage walks (member lookup, descent checks) follow
@@ -471,6 +475,11 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   that starts with an undeclared identifier nor in the arguments of one
   naming no type (`[C(Undeclared)]`); a unit qualifier's missing member is
   E2003 (`[System.Undeclared]`), within the limits of 1.2.3.
+- a target before an attribute is read for any word followed by `:`
+  (`[Result: Tag]`; dcc drops one with another word, and PasTree binds no
+  name in it); dcc's E2289 for `Result:` before anything but a function is
+  not reported, nor its `E2029 ':' expected` for `[Result]` alone, and an
+  expression before the colon (`[1: Tag]`, W1074 for dcc) is a parse error.
 - `[X]` binds `XAttribute` first, in the unit, the used units and System,
   as dcc does - except on a parameter of a method's implementation header,
   where a name the unit does not declare goes to the inherited pass, which

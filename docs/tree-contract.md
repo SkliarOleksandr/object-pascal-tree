@@ -89,7 +89,7 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkObjectType | [`packed` - nfPacked, see 5] `object` [`abstract` - nfAbstract] [`sealed` - nfSealed] [(ancestor)] members `end` [hints] |
 | nkInterfaceType | `interface`, `dispinterface` when Aux bit 1 is set, [(ancestor)] [nkGuid] members `end` [hints]; Aux bit 2: forward, the head alone |
 | nkHelperType | `class helper` (`record helper` when Aux is 1) [(ancestor)] `for` the last leading type reference, members `end` [hints] |
-| nkGuid | `[ c0 ]` - c0 the GUID's constant expression: a literal, a constant, a concatenation |
+| nkGuid | `[ c0 ]` - c0 the GUID's constant expression: a literal, a constant, a concatenation; a name, dotted or not, may be the first member's attribute instead - the resolver binds it as an attribute's (spec 14.1.1) |
 | nkVisibility | [`strict` - nfNegated] the word Aux 1..5 names: private, protected, public, published, automated |
 | nkRoutine | the head word (see 3), the name segments (nfName) each with its [nkGenericParams], `.` between, [nkParams], [`:` result type] `;`, each nkDirective followed by `;`, [nkRoutineBody `;`] |
 | nkParams | `( c0; ... )` - `[ ... ]` for a property's index parameters |
@@ -98,11 +98,11 @@ type reference" is an nkIdent, nkMember or nkTypeArgs.
 | nkPropertyDecl | `property` name [nkParams] [`:` type] specifiers [hints] `;` [the trailing `default;`] |
 | nkPropSpec | the word (see 3), its values `, ...`; `default` with no value is the trailing `default;` of an array property and owns its `;` |
 | nkMethodResolution | the head word, the segments `.` between, `=` the last child `;` |
-| nkVariantPart | `case` [tag `:`] type `of` branches `;` each - the tag when two children come before the branches |
-| nkVariantBranch | labels `, ... : (` fields - each nkVarDecl followed by `;` - [nkVariantPart] `)` |
-| nkGenericParams, nkGenericParam | `< c0; ... >`; names `, ...` [`:` nkConstraint `, ...`] |
+| nkVariantPart | `case` [attributes] [tag `:`] type `of` branches `;` each - the tag when two children after the attributes come before the branches |
+| nkVariantBranch | labels `, ... : (` fields - each nkVarDecl followed by `;`, attributes before any of them - [nkVariantPart] `)` |
+| nkGenericParams, nkGenericParam | `< c0; ... >`; names `, ...` (attributes may stand before each) [`:` nkConstraint `, ...`] |
 | nkConstraint | its child, or its head word (see 3) |
-| nkAttrGroup, nkAttribute | `[ c0, ... ]`; `c0 [( args, ... )]` when c0 is a type reference, else c0 alone - any one expression, which dcc drops (W1074) |
+| nkAttrGroup, nkAttribute | `[ c0, ... ]`; [target `:` - nfAttrTarget, see 5] `c0 [( args, ... )]` when c0 is a type reference, else c0 alone - any one expression, which dcc drops (W1074) |
 | nkRoutineBody | local declarations, then the nkBlock (`begin ... end`) or the nkAsmStmt |
 
 A member with Aux 1 - a routine, a property, a struct body's var section -
@@ -177,6 +177,10 @@ same program, and T3 counts the losses per finding.
 - An `exports` item's `index` and `name` stand right before their value, outside
   its span, the value carrying nfExtIndex / nfExtName; `resident` is the
   item's last token, nfResident on the item.
+- An attribute's target (`[Result: Tag]`, spec 19.3.2) is the nkAttribute's
+  first two tokens, the word and the `:`, outside every child; the node
+  carries nfAttrTarget. dcc knows the one word `Result` - an attribute with
+  another word is dropped (W1074), and PasAttrIsName says so.
 - `packed` lies outside the span of the type it packs (nfPacked): the
   token of that type's parent - a declaration, or the array or file
   whose element it is.

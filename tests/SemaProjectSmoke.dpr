@@ -6059,6 +6059,90 @@ begin
   end;
 end;
 
+// B56 (B2-03, E1-02, E2-03, E2-06, E2-09, E2-10; dcc64 37.0, local/probe-b56):
+// a name in an interface's first bracket is read as an attribute's, suffix
+// first - an attribute class is the first member's attribute, a true
+// constant the GUID, an undeclared name E2003 (14.1.1); `[Result: Tag]`
+// binds Tag, `[Foo: Other]` is dropped unchecked (19.3.2); attributes on a
+// generic parameter, a variant field and a variant tag bind their names.
+procedure TestAttributeGuidAndPositions;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_attrpos');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10'  TObject = class end;'#10 +
+    '  TCustomAttribute = class(TObject) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UG.pas'),
+    'unit UG;'#10'interface'#10 +
+    'const SID = ''{AAAAAAAA-2222-3333-4444-555555555555}'';'#10 +
+    'type'#10 +
+    '  MkAttribute = class(TCustomAttribute) end;'#10 +
+    '  QAttribute = class(TCustomAttribute) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'GP.dpr'),
+    'program GP;'#10'uses UG;'#10'type'#10 +
+    '  MarkAttribute = class(TCustomAttribute) end;'#10 +
+    '  TagAttribute = class(TCustomAttribute) end;'#10 +
+    '  OtherAttribute = class(TCustomAttribute) end;'#10 +
+    'const'#10 +
+    '  Q = ''{22222222-2222-3333-4444-555555555555}'';'#10 +
+    '  S = ''{11111111-2222-3333-4444-555555555555}'';'#10 +
+    'type'#10 +
+    '  IA = interface [Mark] procedure A; end;'#10 +
+    '  IB = interface [UG.SID] procedure B; end;'#10 +
+    '  IC = interface [UG.Mk] procedure C; end;'#10 +
+    '  ID = interface [Q] procedure D; end;'#10 +
+    '  IE = interface [S] procedure E; end;'#10 +
+    '  IZ = interface [NoSuchX] procedure Z; end;'#10 +
+    '  TX = class'#10 +
+    '    [Result: Tag] function F: Integer;'#10 +
+    '    [Foo: Other(Undecl1)] function G: Integer;'#10 +
+    '  end;'#10 +
+    '  TG<[Tag] T; K, [Mark] V: class> = class FX: T; FV: V; end;'#10 +
+    '  TR = record'#10 +
+    '    case [Tag] Kd: Integer of'#10 +
+    '      0: ([Mark] I: Integer; [Tag] J: Byte);'#10 +
+    '  end;'#10 +
+    'var GV: TG<Integer, TObject, TObject>;'#10 +
+    'function TX.F: Integer; begin Result := 0; end;'#10 +
+    'function TX.G: Integer; begin Result := 0; end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'GP.dpr'));
+    LM := ModelByName('gp');
+    Ok('attrpos: [Mark] opening an interface is MarkAttribute, and so is ' +
+      'a variant field''s and a generic parameter''s',
+      CrossRefCountInUnit(LM, 'Mark', 'MarkAttribute', 'gp') = 3);
+    Ok('attrpos: [UG.SID] is the GUID constant',
+      CrossRefCountInUnit(LM, 'SID', 'SID', 'ug') = 1);
+    Ok('attrpos: [UG.Mk] is UG.MkAttribute',
+      CrossRefCountInUnit(LM, 'Mk', 'MkAttribute', 'ug') = 1);
+    Ok('attrpos: [Q] is the used unit''s QAttribute, not the local constant',
+      (CrossRefCountInUnit(LM, 'Q', 'QAttribute', 'ug') = 1) and
+      (LocalRefCount(LM, 'Q') = 0));
+    Ok('attrpos: [S] is the constant S',
+      CrossRefCountInUnit(LM, 'S', 'S', 'gp') = 1);
+    Ok('attrpos: [Result: Tag], a generic parameter''s, a variant tag''s ' +
+      'and a variant field''s [Tag] are TagAttribute',
+      CrossRefCountInUnit(LM, 'Tag', 'TagAttribute', 'gp') = 4);
+    Ok('attrpos: [Foo: Other(..)] is dropped, its names unchecked',
+      CrossRefCountInUnit(LM, 'Other', 'OtherAttribute', 'gp') = 0);
+    Ok('attrpos: an undeclared name in the GUID bracket is E2003, and the ' +
+      'only one', (DiagCount(LM, 'E2003') = 1) and
+      DiagHasText(LM, 'E2003', 'NoSuchX'));
+    Ok('attrpos: the attributed generic keeps its three parameters',
+      (DiagCount(LM, 'E2029') = 0) and (RefCountByGeneric(LM, 'TG', True) = 1));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // A3-14, E2-29: which helper applies is the referring unit's question - an
 // implementation-section helper is its unit's own, and of two helpers for
 // one type only the later is active, a name it lacks being the type's own
@@ -13263,6 +13347,7 @@ begin
   TestSystemQualifiedUnit;
   TestSystemOverloadJoins;
   TestAttributeSuffixFirst;
+  TestAttributeGuidAndPositions;
   TestHelperVisibility;
   TestBuiltinIdentity;
   TestHelperIdentity;

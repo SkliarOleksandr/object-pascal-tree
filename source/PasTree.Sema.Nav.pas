@@ -5416,11 +5416,11 @@ begin
     begin
       if LM.Tree.Nodes[LParam].Kind = nkGenericParam then
       begin
-        LP := LM.Tree.Nodes[LParam].FirstChild;
+        LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LParam].FirstChild);
         while (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIdent) do
         begin
           Inc(Result);
-          LP := LM.Tree.Nodes[LP].NextSibling;
+          LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LP].NextSibling);
         end;
       end;
       LParam := LM.Tree.Nodes[LParam].NextSibling;

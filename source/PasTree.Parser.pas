@@ -168,6 +168,7 @@ type
     function ParseUsesClause: Integer;
     function ParseProgramParams(ALibrary: Boolean): Integer;
     function AttrIsName: Boolean;
+    function GuidNameAhead: Boolean;
     function ParseAttrGroups: Integer;
     procedure ParseHintsOpt(ANode: Integer);
     function ParseTypeExpr: Integer;
@@ -2094,6 +2095,21 @@ begin
   Result := not (PeekKind(LOff) in EXPR_GOES_ON);
 end;
 
+{ 14.1.1: at the `[` opening an interface body, a name - `[SID]`,
+  `[Unit.SID]`, `[Mark]` - followed by `]` or `+`: the shapes read as the
+  GUID clause (ParseClassLike). Pure lookahead. }
+function TPasParser.GuidNameAhead: Boolean;
+var
+  LOff: Integer;
+begin
+  if PeekKind(1) <> tkIdentifier then
+    Exit(False);
+  LOff := 2;
+  while (PeekKind(LOff) = tkDot) and (PeekKind(LOff + 1) = tkIdentifier) do
+    Inc(LOff, 2);
+  Result := PeekKind(LOff) in [tkRBracket, tkPlus];
+end;
+
 function TPasParser.ParseAttrGroups: Integer;
 var
   LAttr, LExpr, LRange: Integer;
@@ -2109,6 +2125,16 @@ begin
     while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
     begin
       LAttr := FB.AddNode(nkAttribute, NIL_NODE, FPos);
+      // A target before the attribute, `[Result: Tag] function F` - one
+      // attribute's, not the group's (`[Tag, Result: Other]`, dcc64 37.0,
+      // local/probe-b56 R1, R2). dcc takes any word there and drops an
+      // attribute with a target other than Result (W1074, PasAttrIsName).
+      if (CurKind = tkIdentifier) and (PeekKind(1) = tkColon) then
+      begin
+        FB.AddFlag(LAttr, nfAttrTarget);
+        Next;
+        Next;
+      end;
       if AttrIsName then
       begin
         // 19.3.3: captured BEFORE ParseTypeRef consumes it -- simple-name
@@ -2664,15 +2690,15 @@ begin
   // concatenation and a parenthesized expression there (x-f15 G01-G14); a
   // second expression is E2029. Whether `[X]` IS the GUID is dcc's call by
   // X's type: a string or GUID constant is, an attribute class is the first
-  // member's attribute group (x-f15 R1). Syntax alone decides it here - a
-  // bracket that starts with a string or a `(`, or an identifier followed by
-  // `]` or `+`, is the GUID; anything else stays an attribute group (so
-  // `[Unit.SID]` reads as an attribute, and `[TAttr]` as a GUID).
+  // member's attribute group (x-f15 R1). The parser cannot tell - a bracket
+  // that starts with a string or a `(`, or a name, dotted or not, followed
+  // by `]` or `+`, is an nkGuid; anything else is an attribute group. The
+  // resolver decides a NAME under nkGuid the way dcc does, as an attribute's
+  // (19.3.2, suffix first: IsAttributeTypeRef): `[Mark]` binds MarkAttribute,
+  // `[Unit.SID]` the constant (local/probe-b56 G1, G2).
   if (AHeadKind in [tkInterface, tkDispinterface]) and
      (CurKind = tkLBracket) and
-     ((PeekKind(1) in [tkStringLiteral, tkLParen]) or
-      ((PeekKind(1) = tkIdentifier) and
-       (PeekKind(2) in [tkRBracket, tkPlus]))) then
+     ((PeekKind(1) in [tkStringLiteral, tkLParen]) or GuidNameAhead) then
   begin
     var LGuid := FB.AddNode(nkGuid, NIL_NODE, FPos);
     FB.Adopt(Result, LGuid);
@@ -2941,6 +2967,10 @@ begin
     FB.Adopt(AOwner, LPart);
     Exit;
   end;
+  // An attribute group before the tag, `case [A] Tag: Integer of`, is the
+  // part's first child (19.3.2, dcc64 37.0 local/probe-b56 V2).
+  if CurKind = tkLBracket then
+    FB.Adopt(LPart, ParseAttrGroups);
   if (CurKind = tkIdentifier) and (PeekKind(1) = tkColon) then
   begin
     FB.Adopt(LPart, FB.AddNode(nkIdent, NIL_NODE, FPos));
@@ -2999,11 +3029,16 @@ begin
     end;
     // tkEnd too: an unclosed branch (`0: (` typed) must not eat the record's
     // `end` looking for its `)`.
+    // An attribute group before a field, or before a nested `case`, is the
+    // branch's child before it, as in a member list (19.3.2, dcc64 37.0
+    // local/probe-b56 V: `0: ([A] I: Integer; [A] [B] J: Byte)`).
     while not (CurKind in [tkRParen, tkEnd, tkEndOfFile]) do
       if CurKind = tkCase then
         ParseVariantPart(LBranch)
       else if CurKind = tkIdentifier then
         ParseFieldList(LBranch, [tkRParen, tkCase])
+      else if CurKind = tkLBracket then
+        FB.Adopt(LBranch, ParseAttrGroups)
       else
       begin
         Error('field expected');
@@ -3043,11 +3078,18 @@ begin
     // A "parameter" here is a TypeRef, not a bare ident: implementation
     // headers of closed generics use type arguments - e.g. the method
     // resolution `function IEnumerator<string>.GetCurrent = ...`
-    // (System.IOUtils.pas) - and TypeRef also covers plain T.
+    // (System.IOUtils.pas) - and TypeRef also covers plain T. An attribute
+    // group may stand before each name (`TGen<[A] T; K, [B] V: class>`,
+    // 19.3.2, dcc64 37.0 local/probe-b56 GP): a child of the parameter
+    // group between its names, as a routine parameter's is.
+    if CurKind = tkLBracket then
+      FB.Adopt(LParam, ParseAttrGroups);
     FB.Adopt(LParam, ParseTypeRef);
     while CurKind = tkComma do
     begin
       Next;
+      if CurKind = tkLBracket then
+        FB.Adopt(LParam, ParseAttrGroups);
       FB.Adopt(LParam, ParseTypeRef);
     end;
     if CurKind = tkColon then

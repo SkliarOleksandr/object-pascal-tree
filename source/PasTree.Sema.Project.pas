@@ -3446,7 +3446,7 @@ begin
             LKind := pskOpenRef;
         LCon := LM.Tree.Nodes[LCon].NextSibling;
       end;
-      LName := LM.Tree.Nodes[LP].FirstChild;
+      LName := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LP].FirstChild);
       while (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkIdent) do
       begin
         LEntry := Default(TPasSubstEntry);
@@ -3455,7 +3455,7 @@ begin
         LEntry.Node := LName;
         LEntry.Kind := LKind;
         ASubst := ASubst + [LEntry];
-        LName := LM.Tree.Nodes[LName].NextSibling;
+        LName := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LName].NextSibling);
       end;
     end;
     LP := LM.Tree.Nodes[LP].NextSibling;
@@ -4097,11 +4097,11 @@ begin
   if ADepth > 16 then
     Exit;
   LM := FModels[AMid];
-  LChild := LM.Tree.Nodes[APartNode].FirstChild;
+  LChild := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[APartNode].FirstChild);
   if LChild = NIL_NODE then
     Exit;
-  // Children are [tag name] tag-type branch... - the name is there only when
-  // the SECOND child is not already a branch.
+  // Children are [attributes] [tag name] tag-type branch... - the name is
+  // there only when the SECOND child is not already a branch.
   if (LM.Tree.Nodes[LChild].Kind = nkIdent) and
      (LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE) and
      (LM.Tree.Nodes[LM.Tree.Nodes[LChild].NextSibling].Kind <>
@@ -4966,7 +4966,8 @@ begin
           // `<T, U>` is ONE group carrying BOTH names (the `;` is what
           // separates groups), so every ident child is a parameter. The
           // nkConstraint children that may follow are not.
-          LName := FModels[LGMid].Tree.Nodes[LP].FirstChild;
+          LName := PasSkipAttrGroups(FModels[LGMid].Tree,
+            FModels[LGMid].Tree.Nodes[LP].FirstChild);
           if (LName = NIL_NODE) or
              (FModels[LGMid].Tree.Nodes[LName].Kind <> nkIdent) then
             Exit(False);
@@ -4974,7 +4975,8 @@ begin
                 (FModels[LGMid].Tree.Nodes[LName].Kind = nkIdent) do
           begin
             LNames := LNames + [FModels[LGMid].Tree.NodeNameLower(LName)];
-            LName := FModels[LGMid].Tree.Nodes[LName].NextSibling;
+            LName := PasSkipAttrGroups(FModels[LGMid].Tree,
+              FModels[LGMid].Tree.Nodes[LName].NextSibling);
           end;
         end;
         LP := FModels[LGMid].Tree.Nodes[LP].NextSibling;
@@ -6753,7 +6755,7 @@ begin
       LArg := AModel.Tree.Nodes[LGroup].FirstChild;
       while LArg <> NIL_NODE do
       begin
-        if AModel.Tree.Nodes[LArg].Kind <> nkConstraint then
+        if not (AModel.Tree.Nodes[LArg].Kind in [nkConstraint, nkAttrGroup]) then
           Inc(Result);
         LArg := AModel.Tree.Nodes[LArg].NextSibling;
       end;
@@ -6961,6 +6963,12 @@ end;
 // site (`[Weak]` names `WeakAttribute`), and dcc looks the SUFFIXED name up
 // first, through every scope and unit, the bare one only when it is found
 // nowhere (dcc64 37.0, local/probe-b27).
+// 14.1.1: so is a NAME in an interface's first bracket, the parser's nkGuid
+// (`[Mark]`, `[Unit.SID]`): dcc reads it as an attribute's - an attribute
+// class makes it the first member's attribute and the interface has no GUID,
+// a true constant makes it the GUID, a local `S` loses to a used unit's
+// SAttribute (dcc64 37.0, local/probe-b56 G1). A longer expression
+// (`[S + '']`) is the GUID's: no suffix there.
 function TPasSemaProject.IsAttributeTypeRef(AModel: TPasSemaModel;
   ANode: Integer): Boolean;
 var
@@ -6968,7 +6976,9 @@ var
 begin
   LParent := AModel.Tree.Nodes[ANode].Parent;
   Result := (LParent <> NIL_NODE) and
-    (AModel.Tree.Nodes[LParent].Kind = nkAttribute) and
+    ((AModel.Tree.Nodes[LParent].Kind = nkAttribute) or
+     ((AModel.Tree.Nodes[LParent].Kind = nkGuid) and
+      (AModel.Tree.Nodes[ANode].Kind in [nkIdent, nkMember]))) and
     (AModel.Tree.Nodes[LParent].FirstChild = ANode);
 end;
 
@@ -6983,6 +6993,7 @@ function TPasSemaProject.IsMagicAttributeRef(AModel: TPasSemaModel;
   ANode: Integer): Boolean;
 begin
   Result := IsAttributeTypeRef(AModel, ANode) and
+    (AModel.Tree.Nodes[AModel.Tree.Nodes[ANode].Parent].Kind = nkAttribute) and
     (AModel.Tree.Nodes[AModel.Tree.Nodes[ANode].Parent].Aux <> amaNone);
 end;
 
@@ -8077,11 +8088,12 @@ begin
     if LM.Tree.Nodes[LParam].Kind = nkGenericParam then
     begin
       // Leading idents are the names; a trailing nkConstraint ends them.
-      LP := LM.Tree.Nodes[LParam].FirstChild;
+      // Attribute groups may stand between them (`<[A] K, [B] V>`).
+      LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LParam].FirstChild);
       while (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIdent) do
       begin
         Result := Result + [LP];
-        LP := LM.Tree.Nodes[LP].NextSibling;
+        LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LP].NextSibling);
       end;
     end;
     LParam := LM.Tree.Nodes[LParam].NextSibling;
@@ -8122,11 +8134,11 @@ begin
       // Leading idents are the names; the nkConstraint nodes follow them.
       LGroup := nil;
       LCount := 0;
-      LP := LM.Tree.Nodes[LParam].FirstChild;
+      LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LParam].FirstChild);
       while (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIdent) do
       begin
         Inc(LCount);
-        LP := LM.Tree.Nodes[LP].NextSibling;
+        LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LP].NextSibling);
       end;
       while LP <> NIL_NODE do
       begin

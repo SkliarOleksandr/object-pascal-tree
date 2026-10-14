@@ -370,14 +370,17 @@ end;
 // position (FirstChild) rather than among its `(...)` argument expressions.
 // See PasTree.Sema.Project.IsAttributeTypeRef (same check, project-level
 // tree) for why this matters: 19.3.1 lets the `Attribute` suffix be omitted
-// at the use site.
+// at the use site. The name an interface's nkGuid holds is looked up the
+// same way (14.1.1).
 function TPasSemaResolver.IsAttributeTypeRef(ANode: Integer): Boolean;
 var
   LParent: Integer;
 begin
   LParent := FTree.Nodes[ANode].Parent;
-  Result := (LParent <> NIL_NODE) and (KindOf(LParent) = nkAttribute) and
-    (FirstChild(LParent) = ANode);
+  Result := (LParent <> NIL_NODE) and
+    ((KindOf(LParent) = nkAttribute) or
+     ((KindOf(LParent) = nkGuid) and (KindOf(ANode) in [nkIdent, nkMember])))
+    and (FirstChild(LParent) = ANode);
 end;
 
 { True when ANode is a name written WITHOUT type arguments - i.e. not the head of
@@ -1521,7 +1524,7 @@ begin
       LP := FirstChild(LParam);
       while LP <> NIL_NODE do
       begin
-        if KindOf(LP) <> nkConstraint then
+        if not (KindOf(LP) in [nkConstraint, nkAttrGroup]) then
           Inc(Result);
         LP := NextSib(LP);
       end;
@@ -1557,11 +1560,12 @@ begin
   begin
     if KindOf(LParam) = nkGenericParam then
     begin
-      LP := FirstChild(LParam);
+      // Attribute groups may stand between the names (`<[A] K, [B] V>`).
+      LP := SkipAttr(FirstChild(LParam));
       while (LP <> NIL_NODE) and (KindOf(LP) = nkIdent) do
       begin
         Inc(Result);
-        LP := NextSib(LP);
+        LP := SkipAttr(NextSib(LP));
       end;
     end;
     LParam := NextSib(LParam);
@@ -1570,29 +1574,11 @@ end;
 
 // Number of type parameters an nkTypeDecl declares; 0 for a plain type.
 function TPasSemaResolver.GenericArityOfDecl(ATypeDeclNode: Integer): Integer;
-var
-  LGen, LParam, LP: Integer;
 begin
-  Result := 0;
   if ATypeDeclNode = NIL_NODE then
-    Exit;
-  LGen := FindChildKind(ATypeDeclNode, nkGenericParams);
-  if LGen = NIL_NODE then
-    Exit;
-  LParam := FirstChild(LGen);
-  while LParam <> NIL_NODE do
-  begin
-    if KindOf(LParam) = nkGenericParam then
-    begin
-      LP := FirstChild(LParam);
-      while (LP <> NIL_NODE) and (KindOf(LP) = nkIdent) do
-      begin
-        Inc(Result);
-        LP := NextSib(LP);
-      end;
-    end;
-    LParam := NextSib(LParam);
-  end;
+    Exit(0);
+  Result := GenericArityOfParamsNode(
+    FindChildKind(ATypeDeclNode, nkGenericParams));
 end;
 
 // Same, for an already-declared type symbol (via its declaration's nkTypeDecl).
@@ -2100,6 +2086,12 @@ var
   LKind: TSemaSymbolKind;
 begin
   LChild := FirstChild(ANode);
+  // `case [A] Tag: Integer of` - the group's names are references.
+  while (LChild <> NIL_NODE) and (KindOf(LChild) = nkAttrGroup) do
+  begin
+    Collect(LChild, AScope);
+    LChild := NextSib(LChild);
+  end;
   if (LChild <> NIL_NODE) and (KindOf(LChild) = nkIdent) and
      (SepKindAfter(LChild) = tkColon) then
   begin
@@ -2910,11 +2902,16 @@ begin
         begin
           if KindOf(LChild) = nkGenericParam then
           begin
-            // leading idents = parameter names; a trailing nkConstraint refs types
+            // leading idents = parameter names; a trailing nkConstraint refs
+            // types. An attribute group may stand before each name
+            // (`<[A] K, [B] V>`, 19.3.2): its names are references.
             var LP := FirstChild(LChild);
-            while (LP <> NIL_NODE) and (KindOf(LP) = nkIdent) do
+            while (LP <> NIL_NODE) and (KindOf(LP) in [nkIdent, nkAttrGroup]) do
             begin
-              DeclareSym(AScope, skGenericParam, LP);
+              if KindOf(LP) = nkIdent then
+                DeclareSym(AScope, skGenericParam, LP)
+              else
+                Collect(LP, AScope);
               LP := NextSib(LP);
             end;
             while LP <> NIL_NODE do

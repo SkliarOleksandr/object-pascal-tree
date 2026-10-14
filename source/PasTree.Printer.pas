@@ -1492,6 +1492,12 @@ var
 begin
   Kw('case', ANode);
   LChild := T.Nodes[ANode].FirstChild;
+  // `case [A] Tag: Integer of`: the group before the tag.
+  if (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) then
+  begin
+    Child(ANode, LChild);
+    LChild := Next(LChild);
+  end;
   if LChild <> NIL_NODE then
   begin
     LAfter := Next(LChild);
@@ -1520,7 +1526,7 @@ var
 begin
   LChild := T.Nodes[ANode].FirstChild;
   while (LChild <> NIL_NODE) and
-        not (Kind(LChild) in [nkVarDecl, nkVariantPart]) do
+        not (Kind(LChild) in [nkVarDecl, nkVariantPart, nkAttrGroup]) do
   begin
     if LChild <> T.Nodes[ANode].FirstChild then
       Kw(',', ANode);
@@ -1533,20 +1539,21 @@ begin
   Kw(')', ANode);
 end;
 
-// names , ... [: constraints , ...]
+// names , ... [: constraints , ...] - an attribute group before a name
+// (`<T, [A] U>`) comes after the comma.
 procedure TPrinter.GenericParam(ANode: Integer);
 var
   LChild: Integer;
-  LFirst: Boolean;
+  LComma: Boolean;
 begin
   LChild := T.Nodes[ANode].FirstChild;
-  LFirst := True;
+  LComma := False;
   while (LChild <> NIL_NODE) and (Kind(LChild) <> nkConstraint) do
   begin
-    if not LFirst then
+    if LComma then
       Kw(',', ANode);
     Child(ANode, LChild);
-    LFirst := False;
+    LComma := Kind(LChild) <> nkAttrGroup;
     LChild := Next(LChild);
   end;
   if LChild <> NIL_NODE then
@@ -2156,6 +2163,12 @@ begin
       end;
     nkAttribute:
       begin
+        // `[Result: Tag]`: the target word and its colon (nfAttrTarget).
+        if nfAttrTarget in T.Nodes[ANode].Flags then
+        begin
+          Head(ANode);
+          Kw(':', ANode);
+        end;
         Child(ANode, C0);
         if C1 <> NIL_NODE then
         begin

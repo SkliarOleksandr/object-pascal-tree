@@ -3120,6 +3120,70 @@ begin
   end;
 end;
 
+// B56 (local/probe-b56): `[Mark]` opening a GUID-less interface is the first
+// method's attribute, not the GUID (dcc64 37.0: RTTI shows MarkAttribute on
+// A, a null GUID) - Find References of the attribute class has the use, as it
+// has the result-targeted one and a generic parameter's (19.3.2).
+procedure TestAttributeNav;
+const
+  UNIT_ATTR =
+    'unit NavAttr;'#10 +                              // 1
+    'interface'#10 +                                  // 2
+    'type'#10 +                                       // 3
+    '  TCustomAttribute = class end;'#10 +            // 4
+    '  MarkAttribute = class(TCustomAttribute) end;'#10 + // 5 MarkAttribute col 3
+    '  IA = interface [Mark] procedure A; end;'#10 +  // 6 Mark col 19
+    '  TX = class'#10 +                               // 7
+    '    [Result: Mark] function F: Integer;'#10 +    // 8 Mark col 14
+    '  end;'#10 +                                     // 9
+    '  TG<[Mark] T> = class end;'#10 +                // 10 Mark col 7
+    'implementation'#10 +                             // 11
+    'function TX.F: Integer; begin Result := 0; end;'#10 + // 12
+    'end.'#10;                                        // 13
+var
+  LDir: string;
+  LMid, LT, LS: Integer;
+  LName: string;
+  LHits: TArray<TPasRefHit>;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_attr');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavAttr.pas'), UNIT_ATTR);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      LMid := GNav.ModelIdOf(TPath.Combine(LDir, 'NavAttr.pas'));
+      Ok('attrnav: model found', LMid >= 0);
+      Ok('attrnav: [Mark] opening an interface goes to MarkAttribute',
+        GNav.SymbolAt(LMid, 6, 19, LT, LS, LName) and
+        SameText(LName, 'MarkAttribute'));
+      Ok('attrnav: ...and so does a result-targeted [Result: Mark]',
+        GNav.SymbolAt(LMid, 8, 14, LT, LS, LName) and
+        SameText(LName, 'MarkAttribute'));
+      if GNav.SymbolAt(LMid, 5, 3, LT, LS, LName) then
+        LHits := GNav.FindReferences(LT, LS)
+      else
+        LHits := nil;
+      Ok('attrnav: Find References of MarkAttribute has the interface''s, ' +
+        'the result''s and the generic parameter''s use',
+        HasHitAt(LHits, 'NavAttr.pas', 6, 19) and
+        HasHitAt(LHits, 'NavAttr.pas', 8, 14) and
+        HasHitAt(LHits, 'NavAttr.pas', 10, 7));
+    finally
+      FreeAndNil(GNav);
+    end;
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestReleasedModels;
 const
   UNIT_REL =
@@ -6150,6 +6214,7 @@ begin
   end;
   TestReleasedModels;
   TestCaretEdges;
+  TestAttributeNav;
   TestOverrideIndex;
   TestInheritedTargets;
   TestRoutinePairs;

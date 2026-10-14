@@ -325,7 +325,7 @@ const
     method is an nkDirective child, and the initializer after a procedural
     type's directives is its declaration's. A new finding of the kind is
     filed here as a `loss:F<n>` row, until the tree holds it. }
-  OWN_RULE_TEXT: array[0..228] of string = (
+  OWN_RULE_TEXT: array[0..230] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -647,7 +647,10 @@ const
       '`[A()]`, leaves no child: = `[A]` (normalization list)',
     'Attribute | ( | opt | derived | the argument children after the name',
     'Attribute | ) | opt | derived | closes the (',
-    'Attribute | , | - | derived | between the arguments'
+    'Attribute | , | - | derived | between the arguments',
+    'Attribute | <ident> | head opt | contract | nfAttrTarget: the target ' +
+      'word, `[Result: Tag]`',
+    'Attribute | : | opt | derived | nfAttrTarget: after the target word'
   );
 
 { TPasCheckReport }
@@ -1809,6 +1812,22 @@ var
         AReport.Add(ccFlags, ANode, Site(ANode),
           'the external clause flags disagree with the word before the value');
     end;
+    // nfAttrTarget (19.3.2): on an attribute, exactly when a word and a `:`
+    // are its first two tokens, before its first child.
+    if Kind(ANode) = nkAttribute then
+    begin
+      LKid := ATree.Nodes[ANode].FirstChild;
+      LFound := not LEmpty[ANode] and (TokKind(LLo[ANode]) = tkIdentifier) and
+        (LLo[ANode] + 1 <= LHi[ANode]) and
+        (TokKind(LLo[ANode] + 1) = tkColon) and
+        ((LKid = NIL_NODE) or LEmpty[LKid] or (LLo[LKid] > LLo[ANode] + 1));
+      if LFound <> (nfAttrTarget in ATree.Nodes[ANode].Flags) then
+        AReport.Add(ccFlags, ANode, Site(ANode),
+          'nfAttrTarget disagrees with a word and `:` before the attribute');
+    end
+    else if nfAttrTarget in ATree.Nodes[ANode].Flags then
+      AReport.Add(ccFlags, ANode, Site(ANode), Format(
+        '%s carries nfAttrTarget', [KName(ANode)]));
     // nfDelayed (an external directive) and nfResident (an exports item):
     // exactly when the word stands in the node's clause outside every
     // value's span.

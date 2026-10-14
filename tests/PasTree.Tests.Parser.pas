@@ -828,7 +828,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..245] of TPasCaseRow = (
+  DECL_CASES: array[0..249] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -2115,6 +2115,62 @@ const
        'StrLit''''9F80-112233445566}'''')))) TypeDecl(Ident''C'' InterfaceType(Guid(' +
        'Paren(Ident''S'')))) TypeDecl(Ident''D'' InterfaceType#disp(Guid(' +
        'BinaryOp''+''(Ident''S'' StrLit'''''''')))))'; ExpectDiags: 0),
+    // B56 (dcc64 37.0 probes in local/probe-b56): a dotted name in the first
+    // bracket is the nkGuid too - `[Unit.SID]` was an invented attribute
+    // (B2-03). Whether a name there is the GUID or the first member's
+    // attribute is the resolver's call, by what it binds to.
+    (Section: '14.1.1'; Name: 'B56 a qualified GUID constant';
+     Source: 'type IA = interface [U.SID] procedure A; end; ' +
+       'IB = interface [Mark] procedure B; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''IA'' InterfaceType(Guid(' +
+       'Member(Ident''U'' Ident''SID'')) Routine''procedure''(' +
+       'Ident''A''#name))) TypeDecl(Ident''IB'' InterfaceType(Guid(' +
+       'Ident''Mark'') Routine''procedure''(Ident''B''#name))))';
+     ExpectDiags: 0),
+    // B56: a target before an attribute (19.3.2, E2-03), one attribute's -
+    // it invented the fields Tag and Other. dcc drops an attribute with a
+    // target other than Result (W1074); the tree keeps it, flagged.
+    (Section: '19.3.2'; Name: 'B56 a result-targeted attribute';
+     Source: 'type TX = class [Result: Tag] function F: Integer; ' +
+       '[Tag, Result: Other] function G: Integer; ' +
+       '[Foo: Tag(1)] procedure P; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TX'' ClassType(AttrGroup(' +
+       'Attribute#target(Ident''Tag'')) Routine''function''(' +
+       'Ident''F''#name Ident''Integer'') AttrGroup(Attribute(' +
+       'Ident''Tag'') Attribute#target(Ident''Other'')) ' +
+       'Routine''function''(Ident''G''#name Ident''Integer'') ' +
+       'AttrGroup(Attribute#target(Ident''Tag'' IntLit''1'')) ' +
+       'Routine''procedure''(Ident''P''#name))))'; ExpectDiags: 0),
+    // B56: an attribute group before a generic parameter (E2-09), a child of
+    // the parameter group before its name - it was a cascade of errors.
+    (Section: '19.3.2'; Name: 'B56 attributes on generic parameters';
+     Source: 'type TG<[A] T; K, [B] [C] V: class> = class ' +
+       'procedure M<[A] U>(X: U); end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TG'' GenericParams(GenericParam(' +
+       'AttrGroup(Attribute(Ident''A'')) Ident''T'') GenericParam(' +
+       'Ident''K'' AttrGroup(Attribute(Ident''B'') Attribute(Ident''C'')) ' +
+       'Ident''V'' Constraint''class'')) ClassType(Routine''procedure''(' +
+       'Ident''M''#name GenericParams(GenericParam(AttrGroup(Attribute(' +
+       'Ident''A'')) Ident''U'')) Params(Param(Ident''X''#name ' +
+       'Ident''U''))))))'; ExpectDiags: 0),
+    // B56: attribute groups in a variant part (E2-10) - before a branch's
+    // field, before a nested `case`, before the tag.
+    (Section: '19.3.2'; Name: 'B56 attributes in a variant part';
+     Source: 'type TR = record case Integer of ' +
+       '0: ([A] I: Integer; [A] [B] J: Byte); ' +
+       '1: ([B] case Byte of 0: (Q: Integer)); end; ' +
+       'TS = record case [A] T: Integer of 0: (U: Integer); end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(VariantPart(' +
+       'Ident''Integer'' VariantBranch(IntLit''0'' AttrGroup(Attribute(' +
+       'Ident''A'')) VarDecl(Ident''I''#name Ident''Integer'') ' +
+       'AttrGroup(Attribute(Ident''A'') Attribute(Ident''B'')) ' +
+       'VarDecl(Ident''J''#name Ident''Byte'')) VariantBranch(IntLit''1'' ' +
+       'AttrGroup(Attribute(Ident''B'')) VariantPart(Ident''Byte'' ' +
+       'VariantBranch(IntLit''0'' VarDecl(Ident''Q''#name ' +
+       'Ident''Integer''))))))) TypeDecl(Ident''TS'' RecordType(' +
+       'VariantPart(AttrGroup(Attribute(Ident''A'')) Ident''T'' ' +
+       'Ident''Integer'' VariantBranch(IntLit''0'' VarDecl(' +
+       'Ident''U''#name Ident''Integer''))))))'; ExpectDiags: 0),
     // 2.2.5: an IDENT-headed subrange bound may carry arithmetic. Only
     // selector continuations were allowed after an identifier head, so both
     // of these - dcc64-valid - were hard parse errors.

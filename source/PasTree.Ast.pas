@@ -255,7 +255,13 @@ type
     // The same for an `exports` item (1.1.3): nfExtIndex and nfExtName on the
     // value after `index` / `name`, nfResident on the nkExportsItem for the
     // trailing `resident`. dcc takes them in that order only, each once.
-    nfResident
+    nfResident,
+    // A target before an attribute (19.3.2): `[Result: Tag] function F`
+    // annotates F's result. On the nkAttribute; the target word and the `:`
+    // after it are the node's first two tokens, outside every child. dcc
+    // knows the one target `Result` - any other word (`[Foo: Tag]`) is W1074
+    // and the attribute dropped, its names unchecked (PasAttrIsName).
+    nfAttrTarget
   );
   TPasNodeFlags = set of TPasNodeFlag;
 
@@ -427,8 +433,16 @@ type
     an nkIdent, nkMember or nkTypeArgs, the arguments after it - or ONE
     expression of any other kind, `['abc']`, `[1 + 2]`, `[C + 1]`, `[(TA)]`,
     which dcc drops with W1074 "Unknown custom attribute", looking up no name
-    in it. True for the first. }
+    in it. True for the first - unless a target other than `Result` stands
+    before it (nfAttrTarget, `[Foo: Tag]`): dcc drops that one the same way
+    (dcc64 37.0, local/probe-b56 RT2, RT5). }
   function PasAttrIsName(const ATree: TPasTree; AAttr: Integer): Boolean;
+
+  { ANode, or the first sibling after it that is no nkAttrGroup; NIL_NODE when
+    none is. The names of a list that attribute groups may stand between - a
+    routine parameter's (`const [Ref] A, [Ref] B`), a generic parameter
+    group's (`<[A] K, [B] V: class>`, 19.3.2) - are read through it. }
+  function PasSkipAttrGroups(const ATree: TPasTree; ANode: Integer): Integer;
 
   { The ANCESTOR reference of a class, interface or object definition node:
     its FIRST child when that is a type reference (nkIdent, nkMember,
@@ -492,7 +506,16 @@ var
 begin
   LName := ATree.Nodes[AAttr].FirstChild;
   Result := (LName <> NIL_NODE) and
-    (ATree.Nodes[LName].Kind in [nkIdent, nkMember, nkTypeArgs]);
+    (ATree.Nodes[LName].Kind in [nkIdent, nkMember, nkTypeArgs]) and
+    (not (nfAttrTarget in ATree.Nodes[AAttr].Flags) or
+     ATree.NodeTextEquals(AAttr, 'result'));
+end;
+
+function PasSkipAttrGroups(const ATree: TPasTree; ANode: Integer): Integer;
+begin
+  Result := ANode;
+  while (Result <> NIL_NODE) and (ATree.Nodes[Result].Kind = nkAttrGroup) do
+    Result := ATree.Nodes[Result].NextSibling;
 end;
 
 function PasHeritageRef(const ATree: TPasTree; ADef: Integer): Integer;
@@ -1183,6 +1206,8 @@ begin
     Result := Result + '#delayed';
   if nfResident in Nodes[AIndex].Flags then
     Result := Result + '#resident';
+  if nfAttrTarget in Nodes[AIndex].Flags then
+    Result := Result + '#target';
 end;
 
 { TPasTreeBuilder }
