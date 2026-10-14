@@ -59,7 +59,8 @@ type
                               // on a conditional its includer opened
   );
 
-  TPasSymbolQuery = (sqConstValue, sqSizeOfType, sqLengthOf, sqDeclared);
+  TPasSymbolQuery = (sqConstValue, sqSizeOfType, sqLengthOf, sqDeclared,
+    sqHighOf, sqLowOf);   // High(T) / Low(T) of an ordinal type
 
   // A symbol question nobody could answer - recorded (deduplicated, source
   // order) exactly like UnresolvedDeclared, and consumed by the same second
@@ -220,8 +221,14 @@ type
     // PasTree.CondEval's abort rules), the second is a genuine open question
     // and the only one worth reporting. Only meaningful when the query
     // returned False, and only trustworthy when the asking unit's imports all
-    // resolved -- a missing `uses` can hide a declaration.
+    // resolved -- a missing `uses` can hide a declaration. Also set for a
+    // name that exists but is no constant to a `$IF` - a variable, a typed
+    // constant - which dcc reads exactly like one declared nowhere (1.3.2).
     NoSymbol: Boolean;
+    // Set when a DOTTED name's prefix names nothing at all - no unit, no
+    // declaration: dcc's error token that reads False in every shape and
+    // never aborts (1.3.2). Same trust condition as NoSymbol.
+    UnknownPrefix: Boolean;
   end;
 
   { Answers symbol questions from a `$IF` expression - the widened sibling of
@@ -2163,7 +2170,16 @@ begin
   begin
     for LName in LCtx.UnknownDeclared do
     begin
-      if FUnresolvedDeclared.IndexOf(LName) < 0 then
+      // Case-insensitively, like UnresolvedSymbols below: `Declared(Foo)`
+      // and `Declared(foo)` are one name (audit B2-11).
+      LSeen := False;
+      for LIdx := 0 to FUnresolvedDeclared.Count - 1 do
+        if SameText(FUnresolvedDeclared[LIdx], LName) then
+        begin
+          LSeen := True;
+          Break;
+        end;
+      if not LSeen then
         FUnresolvedDeclared.Add(LName);
       LAsk.Name := LName;
       LAsk.FileId := AFileId;

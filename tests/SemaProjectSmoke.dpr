@@ -4499,6 +4499,101 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// B59 (A1-12, E2-18, E2-19, E2-21, E2-22, E2-23, E2-24; dcc64 37.0,
+// local/probe-b59 P1, P2): the `$IF` verdicts the second pass decides with a
+// symbol table. A concatenated string constant compares as the string; a
+// name declared nowhere stays the error token under `not` and aborts True
+// under unary plus, a cast and an intrinsic; a variable and a typed constant
+// read like it; a bitwise constant, `in` over enum values, Ord/Pred/High/Low
+// of an enum or a subrange fold; a dotted name whose prefix names nothing is
+// False in every shape. Each guard declares a type; dcc's branch is the
+// comment beside it.
+procedure TestIfEvaluatorSemantics;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+
+  function Has(const AName: string): Boolean;
+  begin
+    Result := (LM <> nil) and (SymCountOf(LM, AName, skType) = 1);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_if_semantics');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IfBase.pas'),
+    'unit IfBase;'#10'interface'#10 +
+    'const UC = 7;'#10 +
+    'type'#10'  TE = (e1, e2, e3);'#10'  TSub = 2..9;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IfSem.pas'),
+    'unit IfSem;'#10'interface'#10'uses IfBase;'#10 +
+    'const'#10'  cVer = ''10.'' + ''5'';'#10'  TC: Integer = 7;'#10 +
+    '  M = $10 or $01;'#10 +
+    'var V: Integer;'#10 +
+    '{$IF cVer = ''10.5''} type TS1 = class end; {$IFEND}'#10 +        // THEN
+    '{$IF cVer >= ''10.6''} type TS2 = class end; {$IFEND}'#10 +       // ELSE
+    '{$IF not not NOWHERE} type TN1 = class end; {$IFEND}'#10 +        // ELSE
+    '{$IF not (NOWHERE >= ''1.0'')} type TN2 = class end; {$IFEND}'#10 + // ELSE
+    '{$IF (not NOWHERE) = False} type TN3 = class end; {$IFEND}'#10 +  // ELSE
+    '{$IF +NOWHERE = 1} type TN4 = class end; {$IFEND}'#10 +           // THEN
+    '{$IF Byte(NOWHERE) = 1} type TC1 = class end; {$IFEND}'#10 +      // THEN
+    '{$IF Ord(NOWHERE) = 1} type TC2 = class end; {$IFEND}'#10 +       // THEN
+    '{$IF Odd(NOWHERE)} type TC3 = class end; {$IFEND}'#10 +           // THEN
+    '{$IF High(NOWHERE) > 1} type TC4 = class end; {$IFEND}'#10 +      // THEN
+    '{$IF 1 in [NOWHERE]} type TC5 = class end; {$IFEND}'#10 +         // THEN
+    '{$IF V > 1} type TV1 = class end; {$IFEND}'#10 +                  // THEN
+    '{$IF TC <> 7} type TV2 = class end; {$IFEND}'#10 +                // THEN
+    '{$IF UC <> 7} type TV3 = class end; {$IFEND}'#10 +                // ELSE
+    '{$IF M = $11} type TB1 = class end; {$IFEND}'#10 +                // THEN
+    '{$IF e2 in [e1, e2]} type TI1 = class end; {$IFEND}'#10 +         // THEN
+    '{$IF Ord(e3) = 2} type TO1 = class end; {$IFEND}'#10 +            // THEN
+    '{$IF Ord(High(TE)) = 2} type TO2 = class end; {$IFEND}'#10 +      // THEN
+    '{$IF High(TSub) = 9} type TO3 = class end; {$IFEND}'#10 +         // THEN
+    '{$IF Low(TE) = e1} type TO4 = class end; {$IFEND}'#10 +           // THEN
+    '{$IF Pred(e2) = e1} type TO5 = class end; {$IFEND}'#10 +          // THEN
+    '{$IF MaxInt > 100} type TO6 = class end; {$IFEND}'#10 +           // THEN
+    '{$IF Foo.Bar < 5} type TD1 = class end; {$IFEND}'#10 +            // ELSE
+    '{$IF Foo.Bar + 1 = 1} type TD2 = class end; {$IFEND}'#10 +        // ELSE
+    '{$IF not Foo.Bar} type TD3 = class end; {$IFEND}'#10 +            // ELSE
+    '{$IF Foo.Bar in [1]} type TD4 = class end; {$IFEND}'#10 +         // ELSE
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LM := ModelByName('ifsem');
+    Ok('if semantics: IfSem has a model', LM <> nil);
+    Ok('if semantics: a concatenated constant compares as the string',
+      Has('ts1') and not Has('ts2'));
+    Ok('if semantics: not keeps the error token of a name declared nowhere',
+      not Has('tn1') and not Has('tn2') and not Has('tn3'));
+    Ok('if semantics: unary plus over it aborts True', Has('tn4'));
+    Ok('if semantics: a cast or an intrinsic over it aborts True',
+      Has('tc1') and Has('tc2') and Has('tc3') and Has('tc4'));
+    Ok('if semantics: an element of in over it aborts True', Has('tc5'));
+    Ok('if semantics: a variable and a typed constant abort True',
+      Has('tv1') and Has('tv2'));
+    Ok('if semantics: ...an untyped constant does not', not Has('tv3'));
+    Ok('if semantics: a bitwise constant', Has('tb1'));
+    Ok('if semantics: in over enum values', Has('ti1'));
+    Ok('if semantics: Ord, High, Low and Pred of an enum or a subrange',
+      Has('to1') and Has('to2') and Has('to3') and Has('to4') and
+      Has('to5'));
+    Ok('if semantics: MaxInt', Has('to6'));
+    Ok('if semantics: an unknown dotted prefix is False in every shape',
+      not Has('td1') and not Has('td2') and not Has('td3') and
+      not Has('td4'));
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // Depth that is not the source's nesting, through the project's passes
 // (audit A1-01, A1-07): 10,000-term operator chains - a constant typed from
 // its operands (UntypedInitTypeX), an inline var inferred from them (the
@@ -11277,17 +11372,15 @@ begin
       SymCountOf(LAb, 'tdotno', skType) = 0);
     Ok('1.3.2 abort: SHORT-CIRCUIT wins -- dcc never reaches the name, so no '
       + 'abort happens', SymCountOf(LAb, 'tshortno', skType) = 0);
-    // A copied dcc verdict is parity, not a finding: eight of the nine guards
-    // above go silent. The DOTTED one is the deliberate exception. dcc's own
-    // answer there is either False (unknown prefix) or a hard E2003 (known
-    // unit, missing member), so we could copy False -- but only if our
-    // qualified-name resolution is right, and when it is wrong the cost is a
-    // silently mis-taken branch instead of a visible question. Reporting is
-    // the safer half of that trade, so the dot stays a finding on purpose.
-    Ok('1.3.2 abort: copied verdicts are silent -- only the dotted name, kept '
-      + 'as an honest unknown, still reports',
-      (DiagCount(LAb, 'PPIF') = 1) and
-      DiagHasText(LAb, 'PPIF', 'NOWHERE.Member'));
+    // A copied dcc verdict is parity, not a finding: all nine guards above go
+    // silent. The DOTTED one was kept a finding until 0.105.2, for fear that
+    // a wrong qualified lookup would copy a wrong False; it is copied now only
+    // when the name's head resolves to nothing at all and no prefix names a
+    // unit (DottedPrefixUnknown) - dcc's error token that reads False in
+    // every shape (audit E2-24). A known unit with a missing member stays a
+    // question.
+    Ok('1.3.2 abort: copied verdicts are silent, the dotted error token too',
+      DiagCount(LAb, 'PPIF') = 0);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
@@ -13501,6 +13594,7 @@ begin
   TestTargetFacts;
   TestOracleDepth;
   TestQualifiedIfNames;
+  TestIfEvaluatorSemantics;
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;

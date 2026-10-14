@@ -82,6 +82,11 @@ type
     // guess: dcc's verdict for it is determined, and the two flags below carry
     // it. See the dcc abort rules in the unit comment.
     Undef: Boolean;
+    // With Undef: the error token of a DOTTED name whose prefix names nothing
+    // (`Foo.Bar`) - it reads False through every operator, arithmetic and
+    // `not` included, and never aborts (1.3.2: `Foo.Bar + 1 = 1` and
+    // `not Foo.Bar` are both False).
+    NoAbort: Boolean;
     // dcc abandoned the whole expression with True. Propagates to the top
     // through every operator, `not` and parens included.
     AbortTrue: Boolean;
@@ -219,6 +224,35 @@ begin
   Result.AbortTrue := True;
 end;
 
+// The dotted error token (TPasCondValue.NoAbort).
+function MkNoAbortErr: TPasCondValue;
+begin
+  Result := MkUndef;
+  Result.NoAbort := True;
+end;
+
+function MkStr(const AValue: string): TPasCondValue;
+begin
+  Result := Default(TPasCondValue);
+  Result.Kind := cvStr;
+  Result.Str := AValue;
+end;
+
+// An operand in a NUMERIC position - arithmetic, `in`, a cast, an
+// intrinsic's argument: a name declared nowhere (or a variable, a typed
+// constant) aborts the whole `$IF` to True there, the dotted error token
+// stays False (1.3.2). True when AValue is such an operand; AResult is then
+// the verdict to hand on.
+function CondNumericPosition(const AValue: TPasCondValue;
+  out AResult: TPasCondValue): Boolean;
+begin
+  Result := AValue.AbortTrue or AValue.Undef;
+  if AValue.AbortTrue or (AValue.Undef and not AValue.NoAbort) then
+    AResult := MkAbortTrue
+  else if AValue.Undef then
+    AResult := MkNoAbortErr;
+end;
+
 function CondAsBool(const AValue: TPasCondValue): Boolean;
 begin
   if AValue.AbortTrue then
@@ -248,50 +282,45 @@ end;
 function CondNumOfText(const AText: string; out ANum: Double): Boolean;
 var
   LClean: string;
-  L64: Int64;
+  LU: UInt64;
   LIdx: Integer;
 begin
   ANum := 0;
-  LClean := AText.Replace('_', '');
+  LClean := PasNumLiteralText(AText);
   if LClean = '' then
     Exit(False);
   case LClean[1] of
     '$':
       begin
-        Result := TryStrToInt64(LClean, L64);
+        // UInt64: a hex literal above High(Int64) is unsigned for dcc -
+        // `$FFFFFFFFFFFFFFFF > 0` is True, `= -1` False (audit B1-08).
+        Result := TryStrToUInt64(LClean, LU);
         if Result then
-          ANum := L64;
+          ANum := LU;
       end;
     '%':
       begin
         if Length(LClean) < 2 then
           Exit(False);
-        // The magnitude is checked BEFORE each doubling: past 63 significant
-        // bits the multiplication below overflows Int64 - a silent wrap with
-        // overflow checking off, an EIntOverflow with it on - where the hex
-        // path beside it uses TryStrToInt64 and simply fails. Rejecting the
-        // literal is the behaviour both builds must have, so neither is left
-        // to decide it.
-        //
-        // Until 0.15.2 this said the suites were built with the check ON. They
-        // were not: the -Q in tests\build.bat is the compiler's QUIET switch,
-        // not $Q, so the claim guarded nothing for as long as it stood. They
-        // are now, which is what makes the sentence above true.
-        L64 := 0;
+        // The magnitude is checked BEFORE each doubling: past 64 significant
+        // bits the shift overflows - a silent wrap with overflow checking
+        // off, an EIntOverflow with it on. Rejecting the literal is the
+        // behaviour both builds must have, so neither is left to decide it.
+        LU := 0;
         for LIdx := 2 to Length(LClean) do
           case LClean[LIdx] of
             '0', '1':
               begin
-                if (L64 < 0) or ((L64 shr 62) <> 0) then
+                if LU > (High(UInt64) shr 1) then
                   Exit(False);
-                L64 := L64 * 2;
+                LU := LU shl 1;
                 if LClean[LIdx] = '1' then
-                  L64 := L64 + 1;
+                  LU := LU or 1;
               end;
           else
             Exit(False);
           end;
-        ANum := L64;
+        ANum := LU;
         Result := True;
       end;
   else
@@ -299,35 +328,95 @@ begin
   end;
 end;
 
-// Token text -> string value: strip the outer quotes, un-double the inner
-// ones. #-char forms come back as written (the old evaluator had no support
-// for them either; nothing in a real `$IF` compares control characters).
-function CondStrOfText(const AText: string): string;
+// Token text -> string value: quoted runs with their inner quotes un-doubled,
+// and `#65` / `#$41` characters between them - one token, `'a'#66'c'` is
+// 'aBc' and `#66 = 'B'` holds for dcc (1.3.2, local/probe-b59 P2). False for
+// any other spelling (a caret character): the caller guesses.
+function CondStrOfText(const AText: string; out AStr: string): Boolean;
 var
-  LIdx: Integer;
+  LIdx, LStart: Integer;
+  LCode: Integer;
+  LDigits: string;
 begin
-  if (AText = '') or (AText[1] <> '''') then
-    Exit(AText);
-  Result := '';
-  LIdx := 2;
+  AStr := '';
+  Result := False;
+  if AText = '' then
+    Exit;
+  LIdx := 1;
   while LIdx <= Length(AText) do
-  begin
-    if AText[LIdx] = '''' then
-    begin
-      if (LIdx < Length(AText)) and (AText[LIdx + 1] = '''') then
-      begin
-        Result := Result + '''';
-        Inc(LIdx, 2);
-      end
-      else
-        Break;
-    end
+    case AText[LIdx] of
+      '''':
+        begin
+          Inc(LIdx);
+          while True do
+          begin
+            if LIdx > Length(AText) then
+              Exit;   // unterminated
+            if AText[LIdx] = '''' then
+            begin
+              if (LIdx < Length(AText)) and (AText[LIdx + 1] = '''') then
+              begin
+                AStr := AStr + '''';
+                Inc(LIdx, 2);
+              end
+              else
+              begin
+                Inc(LIdx);
+                Break;
+              end;
+            end
+            else
+            begin
+              AStr := AStr + AText[LIdx];
+              Inc(LIdx);
+            end;
+          end;
+        end;
+      '#':
+        begin
+          Inc(LIdx);
+          LStart := LIdx;
+          if (LIdx <= Length(AText)) and (AText[LIdx] = '$') then
+            Inc(LIdx);
+          while (LIdx <= Length(AText)) and
+                CharInSet(AText[LIdx], ['0'..'9', 'a'..'f', 'A'..'F', '_']) do
+            Inc(LIdx);
+          LDigits := PasNumLiteralText(Copy(AText, LStart, LIdx - LStart));
+          if not TryStrToInt(LDigits, LCode) or (LCode < 0) or
+             (LCode > $FFFF) then
+            Exit;
+          AStr := AStr + Char(LCode);
+        end;
     else
-    begin
-      Result := Result + AText[LIdx];
-      Inc(LIdx);
+      Exit;
     end;
+  Result := True;
+end;
+
+// An nkStrLit's value: its adjacent elements - one token each, `'a'#66'c'`
+// is three - concatenated (B.6.1).
+function CondStrOfNode(const ATree: TPasTree; ANode: Integer;
+  out AStr: string): Boolean;
+var
+  LTok: Integer;
+  LP: PChar;
+  LLen: Integer;
+  LText, LPart: string;
+begin
+  AStr := '';
+  Result := False;
+  if (ATree.Nodes[ANode].FirstToken < 0) or
+     (ATree.Nodes[ANode].LastToken > High(ATree.Source.Visible)) then
+    Exit;
+  for LTok := ATree.Nodes[ANode].FirstToken to ATree.Nodes[ANode].LastToken do
+  begin
+    ATree.Source.VisibleSlice(LTok, LP, LLen);
+    SetString(LText, LP, LLen);
+    if not CondStrOfText(LText, LPart) then
+      Exit;
+    AStr := AStr + LPart;
   end;
+  Result := True;
 end;
 
 function PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
@@ -601,6 +690,192 @@ begin
   Result := True;
 end;
 
+// High or Low of a builtin ordinal type, as the value `$IF` compares: a
+// number, a character (`High(Char) = #65535`) or a Boolean (`High(Boolean)`).
+// dcc64 37.0, local/probe-b59 P1, P2. False for any other name.
+function PasBuiltinOrdinalBound(const AName: string;
+  const ATarget: TPasBuiltinTarget; AHigh: Boolean;
+  out AValue: TPasCondValue): Boolean;
+var
+  LLo, LHi: Double;
+  LKind: TPasCondKind;
+  LBits: Integer;
+begin
+  Result := True;
+  LKind := cvNum;
+  LLo := 0;
+  if SameText(AName, 'Byte') or SameText(AName, 'UInt8') then
+    LHi := 255
+  else if SameText(AName, 'ShortInt') or SameText(AName, 'Int8') then
+  begin
+    LLo := -128;
+    LHi := 127;
+  end
+  else if SameText(AName, 'Word') or SameText(AName, 'UInt16') then
+    LHi := 65535
+  else if SameText(AName, 'SmallInt') or SameText(AName, 'Int16') then
+  begin
+    LLo := -32768;
+    LHi := 32767;
+  end
+  else if SameText(AName, 'Integer') or SameText(AName, 'Int32') or
+          SameText(AName, 'FixedInt') then
+  begin
+    LLo := -2147483648.0;
+    LHi := 2147483647;
+  end
+  else if SameText(AName, 'Cardinal') or SameText(AName, 'UInt32') or
+          SameText(AName, 'FixedUInt') then
+    LHi := 4294967295.0
+  else if SameText(AName, 'Int64') then
+  begin
+    LLo := -9223372036854775808.0;
+    LHi := 9223372036854775807.0;
+  end
+  else if SameText(AName, 'UInt64') then
+    LHi := 18446744073709551615.0
+  else if SameText(AName, 'LongInt') or SameText(AName, 'NativeInt') or
+          SameText(AName, 'LongWord') or SameText(AName, 'NativeUInt') then
+  begin
+    if SameText(AName, 'LongInt') or SameText(AName, 'LongWord') then
+      LBits := ATarget.LongBytes * 8
+    else
+      LBits := ATarget.PointerBytes * 8;
+    if SameText(AName, 'LongInt') or SameText(AName, 'NativeInt') then
+    begin
+      LHi := Power(2, LBits - 1) - 1;
+      LLo := -Power(2, LBits - 1);
+    end
+    else
+      LHi := Power(2, LBits) - 1;
+  end
+  else if SameText(AName, 'Boolean') then
+  begin
+    LKind := cvBool;
+    LHi := 1;
+  end
+  else if SameText(AName, 'Char') or SameText(AName, 'WideChar') then
+  begin
+    LKind := cvStr;
+    LHi := 65535;
+  end
+  else if SameText(AName, 'AnsiChar') then
+  begin
+    LKind := cvStr;
+    LHi := 255;
+  end
+  else
+    Exit(False);
+  if not AHigh then
+    LHi := LLo;
+  case LKind of
+    cvBool: AValue := MkBool(LHi <> 0);
+    cvStr: AValue := MkStr(Char(Trunc(LHi)));
+  else
+    AValue := MkNum(LHi);
+  end;
+end;
+
+// The ordinal of a clean value: an integer, a Boolean, one character.
+function CondOrdinal(const AValue: TPasCondValue; out AOrd: Int64): Boolean;
+begin
+  AOrd := 0;
+  case AValue.Kind of
+    cvNum: Result := (Frac(AValue.Num) = 0) and CondTryTrunc(AValue.Num, AOrd);
+    cvBool:
+      begin
+        AOrd := Ord(AValue.Bool);
+        Result := True;
+      end;
+  else
+    begin
+      Result := Length(AValue.Str) = 1;
+      if Result then
+        AOrd := Ord(AValue.Str[1]);
+    end;
+  end;
+end;
+
+// Ord, Chr, Succ, Pred, Abs and Odd over a CLEAN argument, as dcc folds
+// them in `$IF` (1.3.2, local/probe-b59 P1, P2). False when AName is none of
+// them or the argument has no such value.
+function CondFoldIntrinsic(const AName: string; const AArg: TPasCondValue;
+  out AValue: TPasCondValue): Boolean;
+var
+  LOrd: Int64;
+begin
+  Result := False;
+  if SameText(AName, 'Ord') then
+  begin
+    if CondOrdinal(AArg, LOrd) then
+    begin
+      AValue := MkNum(LOrd);
+      Result := True;
+    end;
+  end
+  else if SameText(AName, 'Chr') then
+  begin
+    if (AArg.Kind = cvNum) and CondOrdinal(AArg, LOrd) and (LOrd >= 0) and
+       (LOrd <= $FFFF) then
+    begin
+      AValue := MkStr(Char(LOrd));
+      Result := True;
+    end;
+  end
+  else if SameText(AName, 'Succ') or SameText(AName, 'Pred') then
+  begin
+    if not CondOrdinal(AArg, LOrd) then
+      Exit;
+    if SameText(AName, 'Succ') then
+      Inc(LOrd)
+    else
+      Dec(LOrd);
+    case AArg.Kind of
+      cvNum: AValue := MkNum(LOrd);
+      cvBool:
+        if (LOrd < 0) or (LOrd > 1) then
+          Exit
+        else
+          AValue := MkBool(LOrd = 1);
+    else
+      if (LOrd < 0) or (LOrd > $FFFF) then
+        Exit
+      else
+        AValue := MkStr(Char(LOrd));
+    end;
+    Result := True;
+  end
+  else if SameText(AName, 'Abs') then
+  begin
+    if AArg.Kind = cvNum then
+    begin
+      AValue := MkNum(Abs(AArg.Num));
+      Result := True;
+    end;
+  end
+  else if SameText(AName, 'Odd') then
+  begin
+    if (AArg.Kind = cvNum) and CondOrdinal(AArg, LOrd) then
+    begin
+      AValue := MkBool(Odd(LOrd));
+      Result := True;
+    end;
+  end;
+end;
+
+// The names a cast or an intrinsic folds under - the operand of each sits in
+// a numeric position (CondNumericPosition).
+function CondIsFoldingCallee(const AName: string;
+  const ATarget: TPasBuiltinTarget): Boolean;
+var
+  LDummy: Double;
+begin
+  Result := SameText(AName, 'Ord') or SameText(AName, 'Chr') or
+    SameText(AName, 'Succ') or SameText(AName, 'Pred') or
+    SameText(AName, 'Abs') or SameText(AName, 'Odd') or
+    PasBuiltinCast(AName, ATarget, MkNum(0), LDummy);
+end;
+
 function EvalCondNode(const ATree: TPasTree; ANode: Integer;
   var ACtx: TPasCondContext): TPasCondValue;
 
@@ -643,6 +918,14 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       // missing name is still a question.
       if LAns.NoSymbol and (AQuery = sqConstValue) then
         Exit(MkUndef);
+      // A dotted name whose prefix names nothing: dcc's error token that
+      // never aborts (`Foo.Bar < 5` is False, audit E2-24).
+      if LAns.UnknownPrefix and (AQuery = sqConstValue) then
+        Exit(MkNoAbortErr);
+      // High / Low of a name declared nowhere sits in a numeric position:
+      // `High(UNDX) > 1` aborts True (local/probe-b59 P2).
+      if LAns.NoSymbol and (AQuery in [sqHighOf, sqLowOf]) then
+        Exit(MkAbortTrue);
       // SizeOf of a type that exists NOWHERE is 4 for dcc (spec 1.3.2) - a
       // determined answer, not a question. Left as a guessed 0, the wrong
       // branch survived the second pass and the unit stayed a candidate for
@@ -728,28 +1011,49 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
         Result := AskSymbol(sqLengthOf, LArgName, MkNum(0))
       else if ATree.Nodes[LArg].Kind = nkStrLit then
       begin
-        // `Length('xy')` folds (dcc64 37.0, local/probe-b58 P2) - a plain
-        // quoted literal only: CondStrOfText keeps a `#13` form as written.
-        LArgName := ATree.NodeText(LArg);
-        if (Length(LArgName) >= 2) and (LArgName[1] = '''') and
-           (LArgName[Length(LArgName)] = '''') and
-           (Pos('#', LArgName) = 0) then
-          Result := MkNum(Length(CondStrOfText(LArgName)));
+        // `Length('xy')` and `Length('a'#66'c')` fold (dcc64 37.0,
+        // local/probe-b58 P2, local/probe-b59 P2).
+        if CondStrOfNode(ATree, LArg, LArgName) then
+          Result := MkNum(Length(LArgName));
       end;
+    end
+    else if SameText(LName, 'High') or SameText(LName, 'Low') then
+    begin
+      // A builtin ordinal answers from the table; an enum or a subrange is
+      // the oracle's question (`High(TE) = e3`, local/probe-b59 P1).
+      if (ATree.Nodes[LArg].Kind = nkIdent) and
+         PasBuiltinOrdinalBound(ATree.NodeText(LArg), ACtx.Target,
+           SameText(LName, 'High'), Result) then
+        Exit;
+      LArgName := ATree.DottedText(LArg);
+      if LArgName = '' then
+        Exit;
+      if SameText(LName, 'High') then
+        Result := AskSymbol(sqHighOf, LArgName, MkNum(0))
+      else
+        Result := AskSymbol(sqLowOf, LArgName, MkNum(0));
     end
     else
     begin
-      // An ordinal type-cast folds like dcc does - but ONLY when its operand
-      // is clean. A cast wrapped around a guess would turn the guess into a
-      // confident-looking number and hide the open question.
+      // An ordinal type-cast or intrinsic folds like dcc does - but ONLY
+      // when its operand is clean. A cast wrapped around a guess would turn
+      // the guess into a confident-looking number and hide the open
+      // question.
       LArgVal := EvalCondNode(ATree, LArg, ACtx);
-      // CondIsClean, not just "not Guessed": an Undef or abort-True operand
-      // folded to a confident number too (`{$IF Byte(UNDECL) = 1}` came out a
-      // clean False where dcc aborts True), which is exactly the hiding of an
-      // open question the comment above forbids.
-      if CondIsClean(LArgVal) and
-         PasBuiltinCast(LName, ACtx.Target, LArgVal, LSize) then
-        Exit(MkNum(LSize));
+      // Its operand sits in a numeric position: a name declared nowhere
+      // aborts the `$IF` to True (`Byte(UNDECL) = 1`, `Ord(UNDECL) = 1`,
+      // `Odd(UNDECL)` - audit E2-19), the dotted error token stays False.
+      if CondIsFoldingCallee(LName, ACtx.Target) and
+         CondNumericPosition(LArgVal, Result) then
+        Exit;
+      if CondIsClean(LArgVal) then
+      begin
+        if CondFoldIntrinsic(LName, LArgVal, Result) then
+          Exit;
+        if PasBuiltinCast(LName, ACtx.Target, LArgVal, LSize) then
+          Exit(MkNum(LSize));
+      end;
+      Result := MkGuess;
       // Anything else (Ord(x), a unit function, ...) stays a guess - but the
       // CALLEE is recorded so a reporter can say what it choked on. Without
       // this the guess carries no question at all, and a filter that trusts
@@ -771,17 +1075,31 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Exit(MkAbortTrue);
     if L.Undef or R.Undef then
     begin
-      if (L.Undef or (L.Kind = cvNum)) and (R.Undef or (R.Kind = cvNum)) then
-        Exit(MkAbortTrue);
-      // The error-token exit, but it must NOT launder the other side's guess:
-      // an Undef against a GUESSED Boolean left as a clean False also left
-      // EvalIfExpression with nothing to copy, so no UnknownSymbols reached
-      // the stream, no ppIfNeedsSemantics was emitted, and the second-pass
-      // question simply vanished.
-      Result := MkBool(False);
+      // The dotted error token never aborts (`Foo.Bar < 5` is False).
+      if (L.Undef and L.NoAbort) or (R.Undef and R.NoAbort) then
+        Result := MkNoAbortErr
+      else if (L.Undef or (L.Kind = cvNum)) and
+              (R.Undef or (R.Kind = cvNum)) then
+        Exit(MkAbortTrue)
+      else
+        // The error token survives the comparison: an enclosing `not` must
+        // not invert it - `not (UNDECL >= '1.0')` and `(not UNDECL) = False`
+        // are False for dcc (audit E2-18).
+        Result := MkUndef;
+      // ...and it must NOT launder the other side's guess: an Undef against
+      // a GUESSED Boolean left clean also left EvalIfExpression with nothing
+      // to copy, so no UnknownSymbols reached the stream, no
+      // ppIfNeedsSemantics was emitted, and the second-pass question simply
+      // vanished.
       Result.Guessed := L.Guessed or R.Guessed;
       Exit;
     end;
+    // A string against a number or a Boolean is dcc's E2008, no ordering:
+    // two clean such operands compare as nothing. A guessed side keeps the
+    // numeric reading the first pass was calibrated on.
+    if ((L.Kind = cvStr) <> (R.Kind = cvStr)) and not L.Guessed and
+       not R.Guessed then
+      Exit(MkGuess);
     if (L.Kind = cvStr) and (R.Kind = cvStr) then
     begin
       // dcc-probed, and both of these used to be wrong: string comparison is
@@ -875,6 +1193,58 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     Result := L;
   end;
 
+  // `X in [...]` over a set constructor of numbers, ranges, characters and
+  // enum values (`3 in [1..5]`, `'b' in ['a'..'c']`, `e2 in [e1, e2]` -
+  // audit E2-23). An element in a numeric position aborts like an operand
+  // (`1 in [UNDECL]` is True); one with no clean ordinal leaves a miss a
+  // guess.
+  function EvalIn(ABinNode: Integer; const L: TPasCondValue): TPasCondValue;
+  var
+    LLeftNode, LSetNode, LElem, LLoNode: Integer;
+    LWanted, LLo, LHi: Int64;
+    LLoVal, LHiVal: TPasCondValue;
+    LOpen, LFound: Boolean;
+  begin
+    Result := MkGuess;
+    if not BinaryShape(ABinNode, LLeftNode, LSetNode) or
+       (ATree.Nodes[LSetNode].Kind <> nkSetCtor) then
+      Exit;
+    LOpen := not CondIsClean(L) or not CondOrdinal(L, LWanted);
+    LFound := False;
+    LElem := ATree.Nodes[LSetNode].FirstChild;
+    while LElem <> NIL_NODE do
+    begin
+      if ATree.Nodes[LElem].Kind in [nkRange, nkSubrange] then
+      begin
+        LLoNode := ATree.Nodes[LElem].FirstChild;
+        LLoVal := EvalCondNode(ATree, LLoNode, ACtx);
+        if LLoNode <> NIL_NODE then
+          LHiVal := EvalCondNode(ATree, ATree.Nodes[LLoNode].NextSibling, ACtx)
+        else
+          LHiVal := MkGuess;
+      end
+      else
+      begin
+        LLoVal := EvalCondNode(ATree, LElem, ACtx);
+        LHiVal := LLoVal;
+      end;
+      if CondNumericPosition(LLoVal, Result) or
+         CondNumericPosition(LHiVal, Result) then
+        Exit;
+      if CondIsClean(LLoVal) and CondIsClean(LHiVal) and
+         CondOrdinal(LLoVal, LLo) and CondOrdinal(LHiVal, LHi) then
+      begin
+        if not LOpen and (LWanted >= LLo) and (LWanted <= LHi) then
+          LFound := True;
+      end
+      else
+        LOpen := True;
+      LElem := ATree.Nodes[LElem].NextSibling;
+    end;
+    Result := MkBool(LFound);
+    Result.Guessed := not LFound and LOpen;
+  end;
+
   function CombineBinary(ABinNode: Integer;
     const L, R: TPasCondValue): TPasCondValue;
   var
@@ -886,6 +1256,22 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     // The operator's token KIND - every operator here is a reserved word or
     // punctuation with a dedicated kind, so no text is built to dispatch.
     LOp := ATree.Source.VisibleToken(ATree.Nodes[ABinNode].Aux).Kind;
+
+    // and/or/xor of two integers are BITWISE in a constant expression:
+    // `(6 and 1) <> 0` is False, `(1 or 2) = 3` True (audit E2-22).
+    if (LOp in [tkAnd, tkOr, tkXor]) and (L.Kind = cvNum) and
+       (R.Kind = cvNum) and (Frac(L.Num) = 0) and (Frac(R.Num) = 0) and
+       CondTryTrunc(L.Num, LLeft) and CondTryTrunc(R.Num, LRight) then
+    begin
+      case LOp of
+        tkAnd: Result := MkNum(LLeft and LRight);
+        tkOr: Result := MkNum(LLeft or LRight);
+      else
+        Result := MkNum(LLeft xor LRight);
+      end;
+      Result.Guessed := L.Guessed or R.Guessed;
+      Exit;
+    end;
 
     // and/or: a CLEAN side that settles the verdict alone drops the other
     // side's taint - the verdict cannot change no matter what the guessed
@@ -938,9 +1324,27 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       Exit(EvalRel(LOp, L, R));
 
     // Arithmetic on a name that exists nowhere is the other half of the abort
-    // rule: `UNDECL + 1 = 1` and `1 shl UNDECL = 2` both take the TRUE branch.
-    if L.Undef or R.Undef or L.AbortTrue or R.AbortTrue then
-      Exit(MkAbortTrue);
+    // rule: `UNDECL + 1 = 1` and `1 shl UNDECL = 2` both take the TRUE branch;
+    // the dotted error token stays False (`Foo.Bar + 1 = 1`). Left first, as
+    // dcc reads it.
+    if CondNumericPosition(L, Result) or CondNumericPosition(R, Result) then
+      Exit;
+
+    if LOp = tkIn then
+      Exit(EvalIn(ABinNode, L));
+
+    // Strings concatenate (`'ab' + 'cd' = 'abcd'`, a constant `'10.' + '5'`);
+    // any other arithmetic on a string is dcc's E2008 - a guess, never the
+    // number 0 that compared equal to every string (audit A1-12).
+    if (L.Kind = cvStr) or (R.Kind = cvStr) then
+    begin
+      if (LOp = tkPlus) and (L.Kind = cvStr) and (R.Kind = cvStr) then
+      begin
+        Result := MkStr(L.Str + R.Str);
+        Result.Guessed := L.Guessed or R.Guessed;
+      end;
+      Exit;
+    end;
 
     if LOp = tkPlus then
       Result := MkNum(CondAsNum(L) + CondAsNum(R))
@@ -963,8 +1367,8 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
             CondTryTrunc(CondAsNum(L), LLeft) then
       Result := MkNum(LLeft shr LShift)
     else
-      // `in`, division by zero, an out-of-range shift count, an operand too
-      // big to be an integer at all - a guess, never a crash.
+      // Division by zero, an out-of-range shift count, an operand too big to
+      // be an integer at all - a guess, never a crash.
       Exit;
     Result.Guessed := L.Guessed or R.Guessed;
   end;
@@ -983,11 +1387,8 @@ begin
       if CondNumOfText(ATree.NodeText(ANode), LNum) then
         Result := MkNum(LNum);
     nkStrLit:
-      begin
-        Result := Default(TPasCondValue);
-        Result.Kind := cvStr;
-        Result.Str := CondStrOfText(ATree.NodeText(ANode));
-      end;
+      if CondStrOfNode(ATree, ANode, LText) then
+        Result := MkStr(LText);
     nkIdent:
       begin
         LText := ATree.NodeText(ANode);
@@ -1035,20 +1436,38 @@ begin
           ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind;
         LVal := EvalCondNode(ATree, LChild, ACtx);
         // An abort ignores the operator entirely - `not (UNDECL > 3)` is True,
-        // not False. A bare unresolvable name under `not` stays False (dcc's
-        // boolean-position verdict), but under unary minus it is arithmetic,
-        // so it aborts.
-        if LVal.AbortTrue or (LVal.Undef and (LOpKind = tkMinus)) then
+        // not False. An unresolvable name under `not` stays the error token
+        // that reads False - `not not UNDECL` is False too (audit E2-18) -
+        // while under unary minus or plus it is arithmetic, so it aborts; the
+        // dotted error token stays False under every operator.
+        if LVal.AbortTrue then
           Exit(MkAbortTrue);
         if LVal.Undef then
-          Exit(MkBool(False));
-        if LOpKind = tkNot then
+        begin
+          if LVal.NoAbort then
+            Exit(MkNoAbortErr);
+          if LOpKind = tkNot then
+          begin
+            Result := MkUndef;
+            Result.Guessed := LVal.Guessed;
+            Exit;
+          end;
+          Exit(MkAbortTrue);
+        end;
+        if (LOpKind = tkNot) and (LVal.Kind = cvNum) then
+        begin
+          // Bitwise on an integer: `not 0 = -1` (audit E2-22).
+          var LInt: Int64;
+          if (Frac(LVal.Num) = 0) and CondTryTrunc(LVal.Num, LInt) then
+            Result := MkNum(not LInt);
+        end
+        else if LOpKind = tkNot then
           Result := MkBool(not CondAsBool(LVal))
         else if LOpKind = tkMinus then
           Result := MkNum(-CondAsNum(LVal))
         else if LOpKind = tkPlus then
           Result := LVal;
-        Result.Guessed := LVal.Guessed;
+        Result.Guessed := Result.Guessed or LVal.Guessed;
       end;
     nkBinaryOp:
       Result := EvalBinary(ANode);

@@ -63,6 +63,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 - `Length` in a `$IF` refuses an array whose index type is written
   qualified (`array[UC.TE]`): the ordinal walk takes a bare type name, and
   the first-pass guess (0) stands.
+- a `$IF` computes in Double: integers past 2^53 compare by their nearest
+  Double, so `$8000000000000000 > $7FFFFFFFFFFFFFFF` reads False where dcc
+  says True (both round to 2^63). No such guard is known in a corpus.
+- `High` / `Low` in a `$IF` fold for a builtin ordinal, an enum, a subrange
+  and an alias of one; of an array or a value they stay a guess, and a
+  character subrange answers its ordinals, which compare with nothing.
 
 ### 1.3.3 Include files
 - the `{$I %ENV%}` / `{$I %DATE%}` insertion forms are

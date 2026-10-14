@@ -1328,8 +1328,7 @@ begin
   case ATree.Nodes[ANode].Kind of
     nkIntLit:
       begin
-        LTxt := StringReplace(ATree.NodeText(ANode), '_', '',
-          [rfReplaceAll]);
+        LTxt := PasNumLiteralText(ATree.NodeText(ANode));
         if LTxt = '' then
           Exit;
         if LTxt[1] = '%' then
@@ -1859,8 +1858,9 @@ begin
   case Kind(ANode) of
     nkIntLit:
       begin
-        // Digit separators are legal in a literal (B.5.1) and carry no value.
-        LTxt := StringReplace(LTxt, '_', '', [rfReplaceAll]);
+        // Digit separators are legal in a literal (B.5.1) and carry no value,
+        // and neither does a leading `&` (B.3).
+        LTxt := PasNumLiteralText(LTxt);
         if LTxt.StartsWith('%') then
         begin
           // Binary (B.5.1): `set of 0..%111111111` is E2028 like 0..511.

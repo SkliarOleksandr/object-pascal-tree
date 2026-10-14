@@ -240,6 +240,13 @@ function IsKeyword(AKind: TPasTokenKind): Boolean; inline;
 function PasIsIdentStart(ACh: Char): Boolean; inline;
 function PasIsIdentChar(ACh: Char): Boolean; inline;
 
+{ A numeric literal's text as a number reader takes it: the digit
+  separators dropped (B.5.1) and a leading `&` too - an `&` before a number
+  is accepted and ignored (B.3; `&1` is 1, dcc64 37.0). The one reading for
+  the `$IF` evaluator, the literal typer and the intra-unit ordinal folder,
+  which each left `&1` without a value (audit B4-02). }
+function PasNumLiteralText(const AText: string): string;
+
 { Case-insensitive reserved-word lookup over a raw character slice.
   Returns tkIdentifier when the slice is not a reserved word.
   ASCII-only folding is correct here: all keywords are ASCII. }
@@ -396,6 +403,15 @@ end;
 function PasIsIdentChar(ACh: Char): Boolean;
 begin
   Result := PasIsIdentStart(ACh) or ((ACh >= '0') and (ACh <= '9'));
+end;
+
+function PasNumLiteralText(const AText: string): string;
+begin
+  Result := AText;
+  if (Result <> '') and (Result[1] = '&') then
+    Delete(Result, 1, 1);
+  if Pos('_', Result) > 0 then
+    Result := StringReplace(Result, '_', '', [rfReplaceAll]);
 end;
 
 { Keyword recognition, bucketed by FOLDED FIRST LETTER.

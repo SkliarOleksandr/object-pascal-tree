@@ -876,6 +876,10 @@ type
       out AMid, ASym: Integer): Boolean;
     function VisibleQualified(AId: Integer; const AName: string;
       out AMid, ASym: Integer): Boolean;
+    function DottedPrefixUnknown(AId: Integer;
+      const ANameLower: string): Boolean;
+    function OracleHighLow(AMid, ASym, ADepth: Integer; AHigh: Boolean;
+      out ANum: Double): Boolean;
     function OracleSizeOf(AMid, ASym, ADepth: Integer;
       out ABytes: Double): Boolean;
     function OracleReadable(AMid: Integer): Boolean;
@@ -3059,6 +3063,24 @@ begin
     OracleReadable(AMid);
 end;
 
+// Is the constant named by ANameNode (an nkConstDecl's name) a TYPED one,
+// `const TC: Integer = 7`? The type is the first of two children after the
+// name, the value the second; an untyped constant has the value alone, then
+// at most its hints.
+function ConstDeclIsTyped(const ATree: TPasTree; ANameNode: Integer): Boolean;
+var
+  LNext: Integer;
+begin
+  Result := False;
+  if (ANameNode = NIL_NODE) or (ATree.Nodes[ANameNode].Parent = NIL_NODE) or
+     (ATree.Nodes[ATree.Nodes[ANameNode].Parent].Kind <> nkConstDecl) then
+    Exit;
+  LNext := ATree.Nodes[ANameNode].NextSibling;
+  Result := (LNext <> NIL_NODE) and
+    (ATree.Nodes[LNext].NextSibling <> NIL_NODE) and
+    (ATree.Nodes[ATree.Nodes[LNext].NextSibling].Kind <> nkDirective);
+end;
+
 // The recursive const-evaluation context: resolves further plain names in
 // AMid as constants (GenericVariants = GenericVarUtils = False chains),
 // depth-capped like every other walk in this file.
@@ -5167,12 +5189,50 @@ begin
         // hole in its symbol table exactly where a declaration could be
         // hiding, and a DOTTED name is dcc's own fallback-to-False shape
         // rather than an abort, so neither earns the flag.
-        AValue.NoSymbol := FModels[AId].AllUsesResolved and
-          not AName.Contains('.');
+        AValue.NoSymbol := FModels[AId].AllUsesResolved and (LDot < 0);
+        // A dotted name whose prefix names nothing - no unit, no declaration
+        // of its head - is dcc's error token that reads False in every shape
+        // (`Foo.Bar < 5`, `not Foo.Bar`; audit E2-24).
+        AValue.UnknownPrefix := FModels[AId].AllUsesResolved and
+          (LDot >= 0) and DottedPrefixUnknown(AId, LLower);
+        Exit;
+      end;
+      // A variable or a typed constant is no constant to `$IF`: dcc reads
+      // it like a name declared nowhere - `V > 1`, `TC <> 7` and `TC = 7`
+      // abort True (1.3.2, audit E2-21). Determined, whatever the imports.
+      if (AQuery = sqConstValue) and
+         ((FModels[LMid].Symbols[LSym].Kind = skVar) or
+          ((FModels[LMid].Symbols[LSym].Kind = skConst) and
+           ConstDeclIsTyped(FModels[LMid].Tree,
+             FModels[LMid].Symbols[LSym].DeclNode))) then
+      begin
+        AValue.NoSymbol := True;
         Exit;
       end;
       Result := OracleAnswer(AQuery, LMid, LSym, 0, AValue);
     end;
+end;
+
+// No prefix of the dotted ANameLower names a unit unit AId sees, and its
+// first segment resolves to nothing there either.
+function TPasSemaProject.DottedPrefixUnknown(AId: Integer;
+  const ANameLower: string): Boolean;
+var
+  LIdx, LMid, LSym: Integer;
+begin
+  Result := False;
+  LIdx := ANameLower.IndexOf('.');
+  if LIdx <= 0 then
+    Exit;
+  if OracleResolve(AId, Copy(ANameLower, 1, LIdx), LMid, LSym) then
+    Exit;
+  while LIdx > 0 do
+  begin
+    if UnitNamedBy(AId, Copy(ANameLower, 1, LIdx)) >= 0 then
+      Exit;
+    LIdx := ANameLower.IndexOf('.', LIdx + 1);
+  end;
+  Result := True;
 end;
 
 function TPasSemaProject.OracleAnswer(AQuery: TPasSymbolQuery; AMid, ASym,
@@ -5183,9 +5243,37 @@ begin
     sqConstValue: Result := OracleConstVal(AMid, ASym, ADepth, AV);
     sqSizeOfType: Result := OracleSizeOf(AMid, ASym, ADepth, AV.Num);
     sqLengthOf: Result := OracleLength(AMid, ASym, ADepth, AV.Num);
+    sqHighOf, sqLowOf:
+      Result := OracleHighLow(AMid, ASym, ADepth, AQuery = sqHighOf, AV.Num);
   else
     Result := False;
   end;
+end;
+
+{ High(T) / Low(T) in a `$IF` for a type the oracle sees: an enum, a
+  subrange or an alias of a builtin ordinal - its OracleOrdinalRange
+  (`High(TE) = e3`, `High(TSub) = 9`; dcc64 37.0, local/probe-b59). A
+  builtin type name CondEval answers itself; anything else - an array
+  variable, a value - refuses. }
+function TPasSemaProject.OracleHighLow(AMid, ASym, ADepth: Integer;
+  AHigh: Boolean; out ANum: Double): Boolean;
+var
+  LDef: Integer;
+  LLo, LHi: Double;
+begin
+  Result := False;
+  ANum := 0;
+  if FModels[AMid].Symbols[ASym].Kind <> skType then
+    Exit;
+  LDef := TypeDefNodeOf(AMid, ASym);
+  if (LDef = NIL_NODE) or
+     not OracleOrdinalRange(AMid, LDef, ADepth + 1, LLo, LHi) then
+    Exit;
+  if AHigh then
+    ANum := LHi
+  else
+    ANum := LLo;
+  Result := True;
 end;
 
 function TPasSemaProject.OracleCondCtx(AMid, ADepth: Integer): TPasCondContext;
@@ -5596,6 +5684,8 @@ begin
             case LM.Tree.Source.Diagnostics[LDIdx].Unanswered[LQIdx].Query of
               sqSizeOfType: LOpen := LOpen + ['SizeOf(' + LName + ')'];
               sqLengthOf: LOpen := LOpen + ['Length(' + LName + ')'];
+              sqHighOf: LOpen := LOpen + ['High(' + LName + ')'];
+              sqLowOf: LOpen := LOpen + ['Low(' + LName + ')'];
             else
               LOpen := LOpen + [LName];
             end;
