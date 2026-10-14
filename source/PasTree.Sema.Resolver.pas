@@ -118,7 +118,6 @@ type
     // Part of a declared name (nfName): a name of a var, field, parameter or
     // inline var list, a segment of a routine's name - not its type.
     function IsDeclName(ANode: Integer): Boolean; inline;
-    function QualifiedNameText(ANode: Integer): string;
     procedure CollectRoot(ARoot: Integer);
     function FindChildKind(ANode: Integer; AKind: TPasNodeKind): Integer;
     function CountImplParamNames(ARoutineNode: Integer): Integer;
@@ -2151,7 +2150,7 @@ begin
     LSym := NIL_SYM;
     for var LIdx := 0 to FUsesCount - 1 do
       if SameText(FModel.UsesList[LIdx].NameFull,
-           QualifiedNameText(LNameNode)) then
+           FTree.DottedText(LNameNode)) then
       begin
         LSym := FModel.UsesList[LIdx].Sym;
         Break;
@@ -2190,7 +2189,7 @@ begin
         [rfReplaceAll]);
   end;
 
-  LU.NameFull := QualifiedNameText(LNameNode);
+  LU.NameFull := FTree.DottedText(LNameNode);
   LU.InPath := LIn;
   LU.NameNode := LNameNode;
   LU.Sym := LSym;
@@ -4582,43 +4581,6 @@ begin
       ResolveOneWithStmt(LIdx);
 end;
 
-function TPasSemaResolver.QualifiedNameText(ANode: Integer): string;
-var
-  LNode, LLen, LAt, LSegLen: Integer;
-  LSeg: PChar;
-  LOut: PChar;
-begin
-  // ONE allocation for the whole dotted name: the segments' token slices are
-  // measured, then copied in from the right. The recursive concatenation paid
-  // two strings per segment, per `uses` item. The nkMember chain nests to the
-  // left - its last child is the rightmost segment.
-  LLen := 0;
-  LNode := ANode;
-  while (LNode <> NIL_NODE) and (KindOf(LNode) = nkMember) do
-  begin
-    FTree.NodeSlice(NextSib(FirstChild(LNode)), LSeg, LSegLen);
-    Inc(LLen, LSegLen + 1);
-    LNode := FirstChild(LNode);
-  end;
-  FTree.NodeSlice(LNode, LSeg, LSegLen);
-  Inc(LLen, LSegLen);
-  SetLength(Result, LLen);
-  LOut := Pointer(Result);
-  LAt := LLen;
-  LNode := ANode;
-  while (LNode <> NIL_NODE) and (KindOf(LNode) = nkMember) do
-  begin
-    FTree.NodeSlice(NextSib(FirstChild(LNode)), LSeg, LSegLen);
-    Dec(LAt, LSegLen);
-    Move(LSeg^, LOut[LAt], LSegLen * SizeOf(Char));
-    Dec(LAt);
-    LOut[LAt] := '.';
-    LNode := FirstChild(LNode);
-  end;
-  FTree.NodeSlice(LNode, LSeg, LSegLen);
-  Move(LSeg^, LOut[0], LSegLen * SizeOf(Char));
-end;
-
 procedure TPasSemaResolver.CollectRoot(ARoot: Integer);
 var
   LChild, LNameNode, LIdx: Integer;
@@ -4634,7 +4596,7 @@ begin
   LNameNode := FirstChild(ARoot);
   if (LNameNode <> NIL_NODE) and (KindOf(LNameNode) in [nkIdent, nkMember]) then
   begin
-    FModel.UnitNameLower := LowerCase(QualifiedNameText(LNameNode));
+    FModel.UnitNameLower := LowerCase(FTree.DottedText(LNameNode));
     FIsDeclName[LNameNode] := True;
     // Only an undotted name is declared in the module's own scope.
     if KindOf(LNameNode) = nkIdent then

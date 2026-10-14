@@ -386,6 +386,15 @@ type
       (valid while this tree's token layer lives). Nil and 0 exactly where
       NodeText answers ''. For keys see PasTree.Sema.Model.PasNodeKey. }
     procedure NodeSlice(AIndex: Integer; out AText: PChar; out ALen: Integer);
+    { The dotted spelling of a name designator as WRITTEN: an nkIdent's text,
+      or `A.B.C` for nkMember(nkMember(A, B), C) - the member nests to the
+      LEFT, its last child the rightmost segment. '' for any other shape: a
+      segment that is not an nkIdent (a call, an index, type arguments), a
+      member with other than two children. The one walk for every qualified
+      question - a `$IF` designator, a unit qualifier, a `uses` item; four
+      copies of it drifted, and two of them read the binary member as a flat
+      list and lost every name of three parts (audit A2-03, B1-09). }
+    function DottedText(AIndex: Integer): string;
     { Compact S-expression dump for golden tests:
       Kind or Kind'text' or Kind(children...). }
     function Dump(AIndex: Integer): string;
@@ -685,6 +694,52 @@ begin
   end
   else
     Source.VisibleSlice(Nodes[AIndex].FirstToken, AText, ALen);
+end;
+
+function TPasTree.DottedText(AIndex: Integer): string;
+var
+  LNode, LLeft, LRight, LLen, LAt, LSegLen: Integer;
+  LSeg, LOut: PChar;
+begin
+  // Measured, then filled from the right: one allocation for the whole name.
+  Result := '';
+  LLen := 0;
+  LNode := AIndex;
+  while (LNode >= 0) and (LNode <= High(Nodes)) and
+        (Nodes[LNode].Kind = nkMember) do
+  begin
+    LLeft := Nodes[LNode].FirstChild;
+    if LLeft = NIL_NODE then
+      Exit;
+    LRight := Nodes[LLeft].NextSibling;
+    if (LRight = NIL_NODE) or (Nodes[LRight].Kind <> nkIdent) or
+       (Nodes[LRight].NextSibling <> NIL_NODE) then
+      Exit;
+    NodeSlice(LRight, LSeg, LSegLen);
+    Inc(LLen, LSegLen + 1);
+    LNode := LLeft;
+  end;
+  if (LNode < 0) or (LNode > High(Nodes)) or (Nodes[LNode].Kind <> nkIdent) then
+    Exit;
+  NodeSlice(LNode, LSeg, LSegLen);
+  Inc(LLen, LSegLen);
+  SetLength(Result, LLen);
+  LOut := Pointer(Result);
+  LAt := LLen;
+  LNode := AIndex;
+  while Nodes[LNode].Kind = nkMember do
+  begin
+    NodeSlice(Nodes[Nodes[LNode].FirstChild].NextSibling, LSeg, LSegLen);
+    Dec(LAt, LSegLen);
+    if LSegLen > 0 then
+      Move(LSeg^, LOut[LAt], LSegLen * SizeOf(Char));
+    Dec(LAt);
+    LOut[LAt] := '.';
+    LNode := Nodes[LNode].FirstChild;
+  end;
+  NodeSlice(LNode, LSeg, LSegLen);
+  if LSegLen > 0 then
+    Move(LSeg^, LOut[0], LSegLen * SizeOf(Char));
 end;
 
 function TPasTree.NodeText(AIndex: Integer): string;

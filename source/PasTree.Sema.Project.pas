@@ -838,8 +838,8 @@ type
       AId: Integer): Boolean;
     function UsesUnitOf(AId, ASym: Integer): Integer;
     function LocalHead(AModel: TPasSemaModel; ANode: Integer): Integer;
-    function QualifiedText(AId, ANode: Integer): string;
     function UnitNameOf(AId, ANode: Integer): Integer;
+    function UnitNamedBy(AId: Integer; const AText: string): Integer;
     function UsesNamed(AM: TPasSemaModel; const AText: string): Integer;
     procedure EmitE2003(AModel: TPasSemaModel; ANode: Integer;
       AId: Integer = -1);
@@ -874,6 +874,8 @@ type
       out AValue: TPasSymbolValue): Boolean;
     function OracleQualified(AId: Integer; const AName: string;
       out AMid, ASym: Integer): Boolean;
+    function VisibleQualified(AId: Integer; const AName: string;
+      out AMid, ASym: Integer): Boolean;
     function OracleSizeOf(AMid, ASym, ADepth: Integer;
       out ABytes: Double): Boolean;
     function OracleReadable(AMid: Integer): Boolean;
@@ -907,7 +909,6 @@ type
       const ASubst: TPasSubst; out ABytes: Double;
       out AAlign: Integer): Boolean;
     function OracleObjectHasVmt(AMid, ADefNode, ADepth: Integer): Boolean;
-    function OracleDottedName(AMid, ANode: Integer): string;
     function OracleBindGeneric(AMid, AArgsNode, ADepth: Integer;
       AOuter: PPasSubst; out AGMid, AGSym: Integer;
       out AInner: TPasSubst): Boolean;
@@ -2755,17 +2756,37 @@ begin
       out ADeclared: Boolean): Boolean
     var
       LLower: string;
-      LUid, LSym: Integer;
+      LUid, LSym, LDot: Integer;
+      LOwnQualified: Boolean;
       LAnswer: TPasOwnAnswer;
     begin
       LLower := LowerCase(AName);
-      ADeclared :=
-        (FindInUses(AId, LLower, LUid, LSym) and (LUid <> AId)) or
-        (FindInSystemUnit(LLower, LUid, LSym) and (LUid <> AId)) or
-        (FindInSysInitUnit(LLower, LUid, LSym) and (LUid <> AId)) or
-        ((FModels[AId].SystemScope <> NIL_SCOPE) and
-         (FModels[AId].Resolve(FModels[AId].SystemScope, LLower) <> NIL_SYM));
-      if not ADeclared then
+      LDot := LLower.LastIndexOf('.');
+      if LDot >= 0 then
+      begin
+        // A designator (1.3.2): a unit's name declares (`System.SysUtils`),
+        // a qualified name what VisibleQualified finds - a used unit's
+        // interface, System's, SysInit's, a type's member (`UC.TE.e1`).
+        // The unit's own name qualifies by position, below; dcc64 37.0,
+        // local/probe-b58 P1 and UQ.
+        LUid := UnitNamedBy(AId, Copy(LLower, 1, LDot));
+        LOwnQualified := LUid = AId;
+        ADeclared := not LOwnQualified and
+          ((UnitNamedBy(AId, LLower) >= 0) or
+           (VisibleQualified(AId, LLower, LUid, LSym) and (LUid <> AId)));
+      end
+      else
+      begin
+        LOwnQualified := False;
+        ADeclared :=
+          (FindInUses(AId, LLower, LUid, LSym) and (LUid <> AId)) or
+          (FindInSystemUnit(LLower, LUid, LSym) and (LUid <> AId)) or
+          (FindInSysInitUnit(LLower, LUid, LSym) and (LUid <> AId)) or
+          ((FModels[AId].SystemScope <> NIL_SCOPE) and
+           (FModels[AId].Resolve(FModels[AId].SystemScope, LLower) <> NIL_SYM));
+      end;
+      if not ADeclared and ((LDot < 0) or LOwnQualified or
+         SameText(LLower, FModels[AId].UnitNameLower)) then
       begin
         if AOwn <> nil then
           ADeclared := OwnDeclaredBefore(AOwn, LLower, APos)
@@ -2839,13 +2860,21 @@ end;
 
 { OwnDeclaredBefore's positional lookup, with the symbol found: the result
   says whether the position could be placed at all, ASym is the declaration
-  above the directive and in scope there (NIL_SYM for none). }
+  above the directive and in scope there (NIL_SYM for none).
+
+  A name qualified by the unit's own name (`UQ.IC` in unit UQ) answers the
+  same way from the UNIT's declarations only: dcc64 37.0 takes one written
+  above the directive, in the interface or the implementation, and not one
+  below it, nor a local of the routine the directive stands in - `P3.Loc`
+  is not declared where the bare `Loc` is (local/probe-b58 UQ, P3). Any
+  other dotted name is not the unit's own to answer: False. }
 function TPasSemaProject.OwnSymbolAt(AM: TPasSemaModel;
   const ANameLower: string; const APos: TPasCondPos; out ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
   LFile, LIdx, LVis, LLastOfFile, LNode, LChild, LScope, LSym, LDecl: Integer;
   LDeeper: Boolean;
+  LMember: string;
 
   // A type completed BELOW whose forward declaration (`TFoo = class;`)
   // stands above: the completion moved DeclNode to itself, the forward's
@@ -2878,6 +2907,17 @@ begin
   if (LM = nil) or (LM.NodeScope = nil) or (APos.FileName = '') or
      (Length(LM.Tree.Nodes) = 0) then
     Exit;
+  LMember := '';
+  LIdx := ANameLower.LastIndexOf('.');
+  if LIdx >= 0 then
+  begin
+    if (LM.UnitNameLower = '') or
+       not SameText(Copy(ANameLower, 1, LIdx), LM.UnitNameLower) then
+      Exit;
+    LMember := Copy(ANameLower, LIdx + 2, MaxInt);
+    if LMember = '' then
+      Exit;
+  end;
   LFile := -1;
   for LIdx := 0 to High(LM.Tree.Source.FileNames) do
     if SameText(LM.Tree.Source.FileNames[LIdx], APos.FileName) then
@@ -2934,6 +2974,13 @@ begin
     LNode := LM.Tree.Nodes[LNode].Parent;
   end;
   Result := True;
+  if LMember <> '' then
+  begin
+    // The unit's own declarations above the directive, its locals left out.
+    if LScope <> NIL_SCOPE then
+      ASym := LM.UnitDeclBefore(LScope, SemaKey(LMember), LVis - 1);
+    Exit;
+  end;
   // Out through the scopes, each declaration checked for its position.
   while LScope <> NIL_SCOPE do
   begin
@@ -3092,85 +3139,75 @@ end;
   real, and a known unit with an unknown member is a hard E2003, not a
   fallback), and the version-guard idiom in the wild writes it that way -
   `$IF IdGlobal.gsIdVersion > '10.6.2'`. Refusing dots turned every such guard
-  into a residual guess.
-
-  Only the LAST dot is split: the prefix is a unit name, which may itself be
-  dotted (`Winapi.Windows.SomeConst`). The prefix is matched against the
-  asking unit's imports, so an unrelated unit's constant cannot leak in. }
+  into a residual guess. A plain name resolves as OracleResolve does, a dotted
+  one through VisibleQualified. }
 function TPasSemaProject.OracleQualified(AId: Integer; const AName: string;
   out AMid, ASym: Integer): Boolean;
-
-  // `Winapi.Windows` is also referred to as `Windows`; match either spelling.
-  function UnitNameMatches(const AFullLower, AWantedLower: string): Boolean;
-  var
-    LDot: Integer;
-  begin
-    if AFullLower = AWantedLower then
-      Exit(True);
-    LDot := AFullLower.LastIndexOf('.');
-    Result := (LDot >= 0) and
-      (Copy(AFullLower, LDot + 2, MaxInt) = AWantedLower);
-  end;
-
-var
-  LDot, LIdx, LUid: Integer;
-  LUnit, LMember: string;
 begin
-  LDot := AName.LastIndexOf('.');
-  if LDot < 0 then
+  if not AName.Contains('.') then
     Exit(OracleResolve(AId, LowerCase(AName), AMid, ASym));
-  LUnit := Copy(AName, 1, LDot);
-  LMember := Copy(AName, LDot + 2, MaxInt);
-  if (LUnit = '') or (LMember = '') then
-    Exit(False);
-  LUnit := LowerCase(LUnit);
-  LMember := LowerCase(LMember);
+  Result := VisibleQualified(AId, AName, AMid, ASym) and
+    OracleReadable(AMid);
+end;
+
+{ What a dotted name designates for unit AId - the one rule for every
+  qualified question the `$IF` oracle answers: a constant's value, SizeOf,
+  Length, a type a layout names, and Declared(). Only the LAST dot is split.
+  The prefix qualifies as a unit by the name WRITTEN in the `uses` clause,
+  System and SysInit, or the unit's own name (UnitNamedBy, spec 1.2.3) - not
+  by a dotted name's last segment: with `uses System.SysUtils`,
+  `Declared(SysUtils.Exception)` is False (dcc64 37.0, local/probe-b58 P1).
+  A used unit answers from its interface; the unit's own name from its
+  unit-level declarations, the implementation's included (`$IF UQ.IC > 1`
+  over an implementation constant is True), here without a position - the
+  placed question goes through OwnSymbolAt first. A prefix that names no
+  unit may name a type: `TAlignment.taLeftJustify`, an enum value qualified
+  by its type (VCL's `TLeftRight = TAlignment.taLeftJustify..`), a type or
+  constant declared inside a type (System.Generics.Collections' `FNotify:
+  TListHelper.TInternalNotifyProc`, which refused TList<T>), and
+  `UC.TE.e1`. }
+function TPasSemaProject.VisibleQualified(AId: Integer; const AName: string;
+  out AMid, ASym: Integer): Boolean;
+var
+  LDot, LUid, LScope, LIdx: Integer;
+  LUnit, LMember: string;
+  LTMid, LTSym: Integer;
+begin
+  Result := False;
   AMid := NIL_SYM;
   ASym := NIL_SYM;
-  // The asking unit may qualify with its OWN name.
-  if SameText(FModels[AId].UnitNameLower, LUnit) then
+  LDot := AName.LastIndexOf('.');
+  if LDot < 0 then
+    Exit;
+  LUnit := LowerCase(Copy(AName, 1, LDot));
+  LMember := LowerCase(Copy(AName, LDot + 2, MaxInt));
+  if (LUnit = '') or (LMember = '') then
+    Exit;
+  LUid := UnitNamedBy(AId, LUnit);
+  if LUid = AId then
   begin
+    LScope := NIL_SCOPE;
+    for LIdx := 0 to FModels[AId].Scopes.Count - 1 do
+      if FModels[AId].Scopes[LIdx].Kind = sckImplementation then
+      begin
+        LScope := LIdx;
+        Break;
+      end;
+    if LScope = NIL_SCOPE then
+      LScope := FModels[AId].InterfaceScope;
+    if LScope <> NIL_SCOPE then
+      ASym := FModels[AId].UnitDeclBefore(LScope, SemaKey(LMember), MaxInt);
     AMid := AId;
-    ASym := FModels[AId].Resolve(FModels[AId].InterfaceScope, LMember);
     Exit(ASym <> NIL_SYM);
   end;
-  for LIdx := High(FModels[AId].UsesList) downto 0 do
+  if LUid >= 0 then
   begin
-    LUid := FModels[AId].UsesList[LIdx].UnitId;
-    if (LUid < 0) or (FModels[LUid].InterfaceScope = NIL_SCOPE) then
-      Continue;
-    // Match on the unit's OWN name, not on the text of the `uses` clause: a
-    // unit imported unqualified through a scope-name prefix (`uses Windows`
-    // reaching Winapi.Windows) is still referred to by either spelling.
-    if not UnitNameMatches(FModels[LUid].UnitNameLower, LUnit) then
-      Continue;
-    ASym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope, LMember);
-    if ASym <> NIL_SYM then
-    begin
-      AMid := LUid;
-      Exit(OracleReadable(LUid));
-    end;
-  end;
-  // `System.X`: System is in no unit's `uses` - Winapi.Windows' `THandle =
-  // System.THandle` refused every field typed THandle.
-  if LUnit = 'system' then
-  begin
-    LUid := EnsureSystemUnit;
-    if (LUid >= 0) and (FModels[LUid].InterfaceScope <> NIL_SCOPE) then
-    begin
+    // A known unit with no such member is dcc's E2003, not a type's member.
+    if FModels[LUid].InterfaceScope <> NIL_SCOPE then
       ASym := FModels[LUid].Resolve(FModels[LUid].InterfaceScope, LMember);
-      if ASym <> NIL_SYM then
-      begin
-        AMid := LUid;
-        Exit(OracleReadable(LUid));
-      end;
-    end;
+    AMid := LUid;
+    Exit(ASym <> NIL_SYM);
   end;
-  // `TAlignment.taLeftJustify`: an enum value qualified by its type - VCL's
-  // `TLeftRight = TAlignment.taLeftJustify..TAlignment.taRightJustify`; and
-  // a type or constant declared inside a type - System.Generics.Collections'
-  // `FNotify: TListHelper.TInternalNotifyProc`, which refused TList<T>.
-  var LTMid, LTSym: Integer;
   if OracleQualified(AId, Copy(AName, 1, LDot), LTMid, LTSym) and
      (FModels[LTMid].Symbols[LTSym].Kind = skType) and
      (FModels[LTMid].Symbols[LTSym].MemberScope <> NIL_SCOPE) then
@@ -3188,7 +3225,6 @@ begin
     end;
   end;
   ASym := NIL_SYM;
-  Result := False;
 end;
 
 { The GENERIC type AName names from AMid - arity is part of a type's
@@ -3513,37 +3549,6 @@ begin
   end;
 end;
 
-{ A type reference's name as written - `TFoo`, `Winapi.Windows.DWORD` - or ''
-  for anything else. A dotted name is LEFT-nested, one nkMember per dot
-  (`(System.Types).TDuplicates`), so a name of three segments or more has an
-  nkMember inside; walking the children flat refused System.Classes'
-  `TDuplicates = System.Types.TDuplicates` and every record holding one. }
-function TPasSemaProject.OracleDottedName(AMid, ANode: Integer): string;
-var
-  LM: TPasSemaModel;
-  LLeft, LRight: Integer;
-begin
-  Result := '';
-  LM := FModels[AMid];
-  case LM.Tree.Nodes[ANode].Kind of
-    nkIdent:
-      Result := LM.Tree.NodeText(ANode);
-    nkMember:
-      begin
-        LLeft := LM.Tree.Nodes[ANode].FirstChild;
-        if LLeft = NIL_NODE then
-          Exit;
-        LRight := LM.Tree.Nodes[LLeft].NextSibling;
-        if (LRight = NIL_NODE) or (LM.Tree.Nodes[LRight].Kind <> nkIdent) or
-           (LM.Tree.Nodes[LRight].NextSibling <> NIL_NODE) then
-          Exit;
-        Result := OracleDottedName(AMid, LLeft);
-        if Result <> '' then
-          Result := Result + '.' + LM.Tree.NodeText(LRight);
-      end;
-  end;
-end;
-
 { The definition a heritage entry or an alias names: ARefNode (an nkIdent or
   a dotted nkMember) resolved from AMid, then through `TA = TB` aliases to
   the type-expression node that defines it. A generic (nkTypeArgs) or a
@@ -3559,7 +3564,7 @@ begin
   ADefNode := NIL_NODE;
   if ADepth > 16 then
     Exit;
-  LName := OracleDottedName(AMid, ARefNode);
+  LName := FModels[AMid].Tree.DottedText(ARefNode);
   if (LName = '') or not OracleQualified(AMid, LName, LRMid, LRSym) then
     Exit;
   ADefNode := TypeDefNodeOf(LRMid, LRSym);
@@ -4547,15 +4552,6 @@ end;
   callers cannot drift: a field and an alias must size identically. }
 function TPasSemaProject.OracleFieldLayout(AMid, ATypeNode, ADepth: Integer;
   const ASubst: TPasSubst; out ABytes: Double; out AAlign: Integer): Boolean;
-
-  // `System.ShortInt`, `Winapi.Windows.DWORD` - a type name written with its
-  // unit. FastMM4 aliases one (TSynchronizationVariable), and refusing the dot
-  // stopped the whole record it appears in.
-  function DottedText(ANode: Integer): string;
-  begin
-    Result := OracleDottedName(AMid, ANode);
-  end;
-
 var
   LM: TPasSemaModel;
   LRMid, LRSym, LDot, LLen, LLo, LHi: Integer;
@@ -4569,7 +4565,10 @@ begin
     Exit(False);
   case LM.Tree.Nodes[ATypeNode].Kind of
     nkIdent: LName := LM.Tree.NodeText(ATypeNode);
-    nkMember: LName := DottedText(ATypeNode);
+    // `System.ShortInt`, `Winapi.Windows.DWORD` - a type name written with
+    // its unit. FastMM4 aliases one (TSynchronizationVariable), and refusing
+    // the dot stopped the whole record it appears in.
+    nkMember: LName := LM.Tree.DottedText(ATypeNode);
     nkRecordType:
       Exit(OracleRecordLayout(AMid, ATypeNode, ADepth + 1, ASubst, 0, 1, ABytes, AAlign));
     nkArrayType:
@@ -5024,13 +5023,20 @@ begin
   Result := True;
 end;
 
+{ Length(X) in a `$IF`: the first dimension's element count of a static
+  array variable or typed constant - an index of any ordinal shape
+  (`array[0..2]`, `array[TE]`, `array[Byte]`, `array[Boolean]`,
+  `array['a'..'e']`, OracleOrdinalCount), its array type written inline or
+  named (`const A: TArr`) - or the length of an untyped string constant
+  (`const S = 'abc'`). dcc64 37.0 folds all of them (local/probe-b58 P2;
+  a multidimensional array answers its first dimension). A dynamic array's
+  Length is runtime state, not a bound, and refuses. }
 function TPasSemaProject.OracleLength(AMid, ASym, ADepth: Integer;
   out ALen: Double): Boolean;
 var
   LM: TPasSemaModel;
-  LDecl, LParent, LChild, LArr, LSub, LLo, LHi: Integer;
-  LCtx: TPasCondContext;
-  LLoVal, LHiVal: TPasCondValue;
+  LDecl, LParent, LType, LArrMid, LIdx, LElem: Integer;
+  LVal: TPasSymbolValue;
 begin
   Result := False;
   ALen := 0;
@@ -5047,45 +5053,62 @@ begin
   if LDecl = NIL_NODE then
     Exit;
   LParent := LM.Tree.Nodes[LDecl].Parent;
-  if (LParent = NIL_NODE) or
-     not (LM.Tree.Nodes[LParent].Kind in [nkVarDecl, nkConstDecl]) then
+  if LParent = NIL_NODE then
     Exit;
-  // The first nkArrayType child is the declared type; its FIRST dimension is
-  // what Length answers (dcc's rule for multidimensional arrays too).
-  LArr := NIL_NODE;
-  LChild := LM.Tree.Nodes[LParent].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    if LM.Tree.Nodes[LChild].Kind = nkArrayType then
-    begin
-      LArr := LChild;
-      Break;
-    end;
-    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  // The declared type: a variable's follows its names; a typed constant's
+  // is the first of two children after its name, the value the second.
+  LType := NIL_NODE;
+  case LM.Tree.Nodes[LParent].Kind of
+    nkVarDecl:
+      begin
+        LType := LM.Tree.Nodes[LParent].FirstChild;
+        while (LType <> NIL_NODE) and
+              ((LM.Tree.Nodes[LType].Kind = nkAttrGroup) or
+               (nfName in LM.Tree.Nodes[LType].Flags)) do
+          LType := LM.Tree.Nodes[LType].NextSibling;
+      end;
+    nkConstDecl:
+      begin
+        LType := LM.Tree.Nodes[LDecl].NextSibling;
+        if (LType <> NIL_NODE) and
+           ((LM.Tree.Nodes[LType].NextSibling = NIL_NODE) or
+            (LM.Tree.Nodes[LM.Tree.Nodes[LType].NextSibling].Kind =
+             nkDirective)) then
+          LType := NIL_NODE;   // `= value` alone: an untyped constant
+        if LType = NIL_NODE then
+        begin
+          if OracleConstVal(AMid, ASym, ADepth + 1, LVal) and LVal.IsStr then
+          begin
+            ALen := Length(LVal.Str);
+            Result := True;
+          end;
+          Exit;
+        end;
+      end;
+  else
+    Exit;
   end;
-  if LArr = NIL_NODE then
+  if LType = NIL_NODE then
     Exit;
-  LSub := LM.Tree.Nodes[LArr].FirstChild;
-  if (LSub = NIL_NODE) or (LM.Tree.Nodes[LSub].Kind <> nkSubrange) then
-    Exit;   // a dynamic array's Length is runtime state, not a bound
-  LLo := LM.Tree.Nodes[LSub].FirstChild;
-  if LLo = NIL_NODE then
+  LArrMid := AMid;
+  if LM.Tree.Nodes[LType].Kind in [nkIdent, nkMember] then
+    if not OracleTypeDef(AMid, LType, ADepth + 1, LArrMid, LType) then
+      Exit;
+  if (FModels[LArrMid].Tree.Nodes[LType].Kind <> nkArrayType) or
+     (FModels[LArrMid].Tree.Nodes[LType].Aux = 1) then
     Exit;
-  LHi := LM.Tree.Nodes[LLo].NextSibling;
-  if LHi = NIL_NODE then
+  // The LAST child is the element type, every one before it a dimension;
+  // none before it is a dynamic array.
+  LIdx := FModels[LArrMid].Tree.Nodes[LType].FirstChild;
+  if LIdx = NIL_NODE then
     Exit;
-  // Bounds are constant expressions like any other - a constant, a SizeOf, a
-  // Length (`array[0..SizeOf(TR) - 1]`, `array[0..Length(VS) - 1]`: dcc64
-  // 37.0 answers Length of both exactly, local/probe-b03 P1). A string
-  // constant is no bound: the cvNum test below refuses it.
-  LCtx := OracleCondCtx(AMid, ADepth);
-  LLoVal := EvalCondNode(LM.Tree, LLo, LCtx);
-  LHiVal := EvalCondNode(LM.Tree, LHi, LCtx);
-  if LLoVal.Guessed or LHiVal.Guessed or (LLoVal.Kind <> cvNum) or
-     (LHiVal.Kind <> cvNum) then
+  LElem := LIdx;
+  while FModels[LArrMid].Tree.Nodes[LElem].NextSibling <> NIL_NODE do
+    LElem := FModels[LArrMid].Tree.Nodes[LElem].NextSibling;
+  if LElem = LIdx then
     Exit;
-  ALen := LHiVal.Num - LLoVal.Num + 1;
-  Result := True;
+  Result := OracleOrdinalCount(LArrMid, LIdx, ADepth + 1, ALen) and
+    (ALen > 0);
 end;
 
 { ALog, when given, collects which own declaration answered each placed
@@ -5097,7 +5120,7 @@ begin
     function(AQuery: TPasSymbolQuery; const AName: string;
       const APos: TPasCondPos; out AValue: TPasSymbolValue): Boolean
     var
-      LMid, LSym: Integer;
+      LMid, LSym, LDot: Integer;
       LLower: string;
       LFound: Boolean;
       LAnswer: TPasOwnSymAnswer;
@@ -5111,7 +5134,11 @@ begin
       // own declaration below it or in a branch this pass does not take.
       // Otherwise - a dotted name, a question with no directive to place -
       // the whole own scope first, then the imports (OracleQualified).
-      if not AName.Contains('.') and
+      // A name qualified by the unit's own (`$IF UQ.IC > 1`) is the same
+      // question about the unit-level declarations (OwnSymbolAt).
+      LDot := LLower.LastIndexOf('.');
+      if ((LDot < 0) or
+          (UnitNamedBy(AId, Copy(LLower, 1, LDot)) = AId)) and
          OwnSymbolAt(FModels[AId], LLower, APos, LSym) then
       begin
         LMid := AId;
@@ -5124,7 +5151,7 @@ begin
             LAnswer.DeclOffset);
           ALog.Add(LAnswer);
         end;
-        if not LFound then
+        if not LFound and (LDot < 0) then
           LFound := ResolveRealDecl(AId, LLower, LMid, LSym) and (LMid <> AId);
       end
       else
@@ -6270,7 +6297,7 @@ begin
   LNameNode := FModels[AId].Tree.Nodes[0].FirstChild;
   if LNameNode = NIL_NODE then
     Exit;
-  LName := LowerCase(QualifiedText(AId, LNameNode));
+  LName := LowerCase(FModels[AId].Tree.DottedText(LNameNode));
   if (LName <> '') and not FByUnitName.ContainsKey(LName) then
     FByUnitName.Add(LName, AId);
 end;
@@ -7082,66 +7109,19 @@ begin
   end;
 end;
 
-// The dotted spelling of a name designator (nkIdent or nested nkMember), as
-// WRITTEN - e.g. "System.SysUtils" for the nkMember(nkMember(System,
-// SysUtils)) shape. Used to recognize a qualified-expression prefix as a
-// UNIT name (System.sLineBreak, System.SysUtils.TBytes) - distinct from
-// PasTree.Sema.Resolver's private QualifiedNameText, which serves the same
-// purpose but isn't reachable from this unit.
-function TPasSemaProject.QualifiedText(AId, ANode: Integer): string;
-var
-  LT: TPasTree;
-  LNode, LLen, LAt, LSegLen: Integer;
-  LSeg, LOut: PChar;
-begin
-  // One allocation, measured then filled from the right - the same shape as
-  // the resolver's QualifiedNameText; the concatenation paid two strings per
-  // segment, per namespace-qualifier probe.
-  LT := FModels[AId].Tree;
-  LLen := 0;
-  LNode := ANode;
-  while LT.Nodes[LNode].Kind = nkMember do
-  begin
-    LT.NodeSlice(LT.Nodes[LT.Nodes[LNode].FirstChild].NextSibling, LSeg,
-      LSegLen);
-    Inc(LLen, LSegLen + 1);
-    LNode := LT.Nodes[LNode].FirstChild;
-  end;
-  LT.NodeSlice(LNode, LSeg, LSegLen);
-  Inc(LLen, LSegLen);
-  SetLength(Result, LLen);
-  LOut := Pointer(Result);
-  LAt := LLen;
-  LNode := ANode;
-  while LT.Nodes[LNode].Kind = nkMember do
-  begin
-    LT.NodeSlice(LT.Nodes[LT.Nodes[LNode].FirstChild].NextSibling, LSeg,
-      LSegLen);
-    Dec(LAt, LSegLen);
-    Move(LSeg^, LOut[LAt], LSegLen * SizeOf(Char));
-    Dec(LAt);
-    LOut[LAt] := '.';
-    LNode := LT.Nodes[LNode].FirstChild;
-  end;
-  LT.NodeSlice(LNode, LSeg, LSegLen);
-  Move(LSeg^, LOut[0], LSegLen * SizeOf(Char));
-end;
-
 // The model id ANode's qualified text names as a UNIT - literally 'System'
 // (the implicit unit; see EnsureSystemUnit), or a match against AId's OWN
 // `uses` list by the name as WRITTEN there. Not by a dotted name's last
 // segment: with `uses System.SysUtils`, `SysUtils.IntToStr` is E2003 in dcc
 // (and with `uses B.C` resolved by `-NS A`, `A.B.C.T` is E2003 too - only the
-// written name qualifies; dcc64 37.0, probed 2026-10-01). -1 when the text doesn't name any unit reachable from AId. This is what
-// lets `System.sLineBreak` / `System.SysUtils.TBytes` resolve even though
+// written name qualifies; dcc64 37.0, probed 2026-10-01). -1 when the text
+// doesn't name any unit reachable from AId. This is what lets `System.sLineBreak` / `System.SysUtils.TBytes` resolve even though
 // neither `System` nor a `System.SysUtils`-as-a-whole ever gets a skUnitRef
 // symbol anywhere (System is implicit; SysUtils here is a sub-expression of
 // a bigger nkMember, never itself collected as a uses item).
 function TPasSemaProject.UnitNameOf(AId, ANode: Integer): Integer;
 var
   LM: TPasSemaModel;
-  LText: string;
-  LIdx: Integer;
 begin
   Result := -1;
   LM := FModels[AId];
@@ -7169,7 +7149,21 @@ begin
       end;
     end;
   end;
-  LText := QualifiedText(AId, ANode);
+  Result := UnitNamedBy(AId, LM.Tree.DottedText(ANode));
+end;
+
+// UnitNameOf for a name already spelled out - a `$IF` designator's prefix,
+// which reaches the oracle as text.
+function TPasSemaProject.UnitNamedBy(AId: Integer; const AText: string): Integer;
+var
+  LM: TPasSemaModel;
+  LText: string;
+  LIdx: Integer;
+begin
+  LM := FModels[AId];
+  LText := AText;
+  if LText = '' then
+    Exit(-1);
   // A unit may qualify with its OWN name - Winapi.Windows.pas calls
   // `Winapi.Windows.DrawText(...)` from an overload of DrawText to reach the
   // other one unambiguously. It is not in its own UsesList, so the loop below

@@ -4361,6 +4361,144 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// B58 (A2-03, A2-05 = B1-10 = E2-20 = B3-13, A2-06 = B3-14, B1-09, A2-07;
+// dcc64 37.0, local/probe-b58): a qualified name in a `$IF` is resolved by
+// one rule. Declared() of a designator - a used unit's member by the name the
+// `uses` clause WROTE (`QBase.QC` with `uses Ns.QBase` is False), three
+// parts, System and SysInit, a unit's name, a type's member; the unit's own
+// name qualifies its unit-level declarations by position (implementation
+// ones included, not a routine's locals); `System.RTLVersion` and
+// `System.CompilerVersion` fold. Length answers every ordinal index, a named
+// array type, a string constant and a string literal. Each guard declares a
+// type the first pass's guesses (Declared False, Length 0, an unknown
+// constant False) decide the other way.
+procedure TestQualifiedIfNames;
+var
+  LDir: string;
+  LUse, LLen: TPasSemaModel;
+
+  function Has(AM: TPasSemaModel; const AName: string): Boolean;
+  begin
+    Result := (AM <> nil) and (SymCountOf(AM, AName, skType) = 1);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_qualified_if');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'const RTLVersion = 37.0;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SysInit.pas'),
+    'unit SysInit;'#10'interface'#10'var HInstance: Integer;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'Ns.QBase.pas'),
+    'unit Ns.QBase;'#10'interface'#10 +
+    'const QC = 5;'#10'  S = ''abc'';'#10 +
+    'type'#10'  TE = (e1, e2, e3);'#10'  TArr = array[1..4] of Byte;'#10 +
+    '  TQW = Cardinal;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'QUse.pas'),
+    'unit QUse;'#10'interface'#10'uses Ns.QBase;'#10 +
+    '{$IF Declared(Ns.QBase.QC)} type TD1 = class end; {$IFEND}'#10 +
+    '{$IF Declared(QBase.QC)} type TD2 = class end; {$IFEND}'#10 +
+    '{$IF Declared(System.TObject)} type TD3 = class end; {$IFEND}'#10 +
+    '{$IF Declared(SysInit.HInstance)} type TD4 = class end; {$IFEND}'#10 +
+    '{$IF Declared(Ns.QBase)} type TD5 = class end; {$IFEND}'#10 +
+    '{$IF Declared(Ns.QBase.Missing)} type TD6 = class end; {$IFEND}'#10 +
+    '{$IF Declared(Ns.QBase.TE.e2)} type TD7 = class end; {$IFEND}'#10 +
+    '{$IF Declared(QUse.Later)} type TD8 = class end; {$IFEND}'#10 +
+    '{$IF System.RTLVersion >= 36} type TC1 = class end; {$IFEND}'#10 +
+    '{$IF System.CompilerVersion >= 36} type TC2 = class end; {$IFEND}'#10 +
+    '{$IF Ns.QBase.QC = 5} type TC3 = class end; {$IFEND}'#10 +
+    'const Later = 1;'#10'  OwnA = 2;'#10 +
+    '{$IF QUse.OwnA = 2} type TC4 = class end; {$IFEND}'#10 +
+    'type TR = record F: Ns.QBase.TQW; end;'#10 +
+    '{$IF SizeOf(TR) = 4} type TS1 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(Ns.QBase.TQW) = 4} type TS2 = class end; {$IFEND}'#10 +
+    'implementation'#10 +
+    'const IC = 5;'#10 +
+    '{$IF QUse.IC = 5} type TC5 = class end; {$IFEND}'#10 +
+    '{$IF Declared(QUse.IC)} type TD9 = class end; {$IFEND}'#10 +
+    'procedure R;'#10'const Loc = 3;'#10'begin'#10 +
+    '  {$IF Declared(QUse.Loc)} var SawQLoc := Loc; {$IFEND}'#10 +
+    '  {$IF Declared(Loc)} var SawLoc := Loc; {$IFEND}'#10 +
+    'end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'QLen.pas'),
+    'unit QLen;'#10'interface'#10'uses Ns.QBase;'#10 +
+    'type TLE = (l1, l2, l3);'#10 +
+    'const'#10 +
+    '  A1: array[TLE] of Integer = (1, 2, 3);'#10 +
+    '  A2: array[''a''..''e''] of Integer = (1, 2, 3, 4, 5);'#10 +
+    '  A3: TArr = (1, 2, 3, 4);'#10 +
+    '  A4: array[Boolean] of Integer = (1, 2);'#10 +
+    '  LS = ''abcd'';'#10 +
+    'var'#10'  V5: array[Byte] of Byte;'#10 +
+    '  V6: array[TLE, 0..9] of Byte;'#10 +
+    '{$IF Length(A1) = 3} type TL1 = class end; {$IFEND}'#10 +
+    '{$IF Length(A2) = 5} type TL2 = class end; {$IFEND}'#10 +
+    '{$IF Length(A3) = 4} type TL3 = class end; {$IFEND}'#10 +
+    '{$IF Length(A4) = 2} type TL4 = class end; {$IFEND}'#10 +
+    '{$IF Length(V5) = 256} type TL5 = class end; {$IFEND}'#10 +
+    '{$IF Length(V6) = 3} type TL6 = class end; {$IFEND}'#10 +
+    '{$IF Length(LS) = 4} type TL7 = class end; {$IFEND}'#10 +
+    '{$IF Length(Ns.QBase.S) = 3} type TL8 = class end; {$IFEND}'#10 +
+    '{$IF Length(''xy'') = 2} type TL9 = class end; {$IFEND}'#10 +
+    'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    LUse := ModelByName('quse');
+    LLen := ModelByName('qlen');
+    Ok('qualified $IF: both units have a model', (LUse <> nil) and
+      (LLen <> nil));
+    Ok('qualified $IF: Declared of a three-part name', Has(LUse, 'td1'));
+    Ok('qualified $IF: a dotted unit qualifies by its whole written name',
+      not Has(LUse, 'td2'));
+    Ok('qualified $IF: Declared(System.TObject)', Has(LUse, 'td3'));
+    Ok('qualified $IF: Declared(SysInit.HInstance)', Has(LUse, 'td4'));
+    Ok('qualified $IF: Declared of a used unit''s name', Has(LUse, 'td5'));
+    Ok('qualified $IF: a known unit''s missing member is not declared',
+      not Has(LUse, 'td6'));
+    Ok('qualified $IF: Declared of an enum value qualified by unit and type',
+      Has(LUse, 'td7'));
+    Ok('qualified $IF: the own unit''s name qualifies by position',
+      not Has(LUse, 'td8'));
+    Ok('qualified $IF: System.RTLVersion and System.CompilerVersion fold',
+      Has(LUse, 'tc1') and Has(LUse, 'tc2'));
+    Ok('qualified $IF: a three-part constant''s value', Has(LUse, 'tc3'));
+    Ok('qualified $IF: the own unit''s constant above',
+      Has(LUse, 'tc4'));
+    Ok('qualified $IF: the own unit''s implementation constant',
+      Has(LUse, 'tc5'));
+    Ok('qualified $IF: Declared of the own implementation constant',
+      Has(LUse, 'td9'));
+    Ok('qualified $IF: a field typed with a three-part name is sized',
+      Has(LUse, 'ts1') and Has(LUse, 'ts2'));
+    Ok('qualified $IF: the own unit''s name does not reach a local',
+      (LUse <> nil) and (SymCountOf(LUse, 'sawqloc', skVar) = 0) and
+      (SymCountOf(LUse, 'sawloc', skVar) = 1));
+    Ok('qualified $IF: Length of an enum-indexed array', Has(LLen, 'tl1'));
+    Ok('qualified $IF: Length of a char-indexed array', Has(LLen, 'tl2'));
+    Ok('qualified $IF: Length of a named array type', Has(LLen, 'tl3'));
+    Ok('qualified $IF: Length of a Boolean- and Byte-indexed array',
+      Has(LLen, 'tl4') and Has(LLen, 'tl5'));
+    Ok('qualified $IF: Length of a 2-D array is its first dimension',
+      Has(LLen, 'tl6'));
+    Ok('qualified $IF: Length of a string constant, own and qualified',
+      Has(LLen, 'tl7') and Has(LLen, 'tl8'));
+    Ok('qualified $IF: Length of a string literal', Has(LLen, 'tl9'));
+    if LUse <> nil then
+      Ok('qualified $IF: QUse has no diagnostics (' +
+        IntToStr(Length(LUse.Diags)) + ')', Length(LUse.Diags) = 0);
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // Depth that is not the source's nesting, through the project's passes
 // (audit A1-01, A1-07): 10,000-term operator chains - a constant typed from
 // its operands (UntypedInitTypeX), an inline var inferred from them (the
@@ -13362,6 +13500,7 @@ begin
   TestOperatorTable;
   TestTargetFacts;
   TestOracleDepth;
+  TestQualifiedIfNames;
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;

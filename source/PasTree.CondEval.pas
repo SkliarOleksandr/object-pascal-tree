@@ -330,35 +330,6 @@ begin
   end;
 end;
 
-// A Declared() argument is a DESIGNATOR, not a bare identifier - the RTL
-// writes `Declared(System.Embedded)`. '' = a shape we cannot name (and the
-// caller guesses).
-function DottedNameOf(const ATree: TPasTree; ANode: Integer): string;
-var
-  LChild: Integer;
-begin
-  case ATree.Nodes[ANode].Kind of
-    nkIdent:
-      Result := ATree.NodeText(ANode);
-    nkMember:
-      begin
-        Result := '';
-        LChild := ATree.Nodes[ANode].FirstChild;
-        while LChild <> NIL_NODE do
-        begin
-          if ATree.Nodes[LChild].Kind <> nkIdent then
-            Exit('');
-          if Result <> '' then
-            Result := Result + '.';
-          Result := Result + ATree.NodeText(LChild);
-          LChild := ATree.Nodes[LChild].NextSibling;
-        end;
-      end;
-  else
-    Result := '';
-  end;
-end;
-
 function PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
   ALongBytes: Integer): TPasBuiltinTarget;
 begin
@@ -708,7 +679,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     end
     else if SameText(LName, 'Declared') then
     begin
-      LArgName := DottedNameOf(ATree, LArg);
+      LArgName := ATree.DottedText(LArg);
       if LArgName = '' then
         Exit;
       if Assigned(ACtx.OnDeclared) and
@@ -738,7 +709,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
       begin
         // A user type's size: the oracle's question; guessed 0 (like the
         // old evaluator) when nobody answers.
-        LArgName := DottedNameOf(ATree, LArg);
+        LArgName := ATree.DottedText(LArg);
         if LArgName <> '' then
           Result := AskSymbol(sqSizeOfType, LArgName, MkNum(0))
         else
@@ -752,9 +723,19 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     begin
       // Length(X) of an array constant/variable - System.pas guards on
       // `Length(RegisteredTypeInfoTable)`. Guess 0 when unanswered.
-      LArgName := DottedNameOf(ATree, LArg);
+      LArgName := ATree.DottedText(LArg);
       if LArgName <> '' then
-        Result := AskSymbol(sqLengthOf, LArgName, MkNum(0));
+        Result := AskSymbol(sqLengthOf, LArgName, MkNum(0))
+      else if ATree.Nodes[LArg].Kind = nkStrLit then
+      begin
+        // `Length('xy')` folds (dcc64 37.0, local/probe-b58 P2) - a plain
+        // quoted literal only: CondStrOfText keeps a `#13` form as written.
+        LArgName := ATree.NodeText(LArg);
+        if (Length(LArgName) >= 2) and (LArgName[1] = '''') and
+           (LArgName[Length(LArgName)] = '''') and
+           (Pos('#', LArgName) = 0) then
+          Result := MkNum(Length(CondStrOfText(LArgName)));
+      end;
     end
     else
     begin
@@ -1029,8 +1010,14 @@ begin
       begin
         // A dotted constant reference (`Unit.Const`) - same oracle question
         // with the dotted name; a shape we cannot name stays a guess.
-        LText := DottedNameOf(ATree, ANode);
-        if LText <> '' then
+        LText := ATree.DottedText(ANode);
+        // `System.CompilerVersion` is the compiler's value like the bare
+        // name: System.pas declares it 0.0 and dcc assigns it (dcc64 37.0
+        // takes `$IF System.CompilerVersion >= 36`, local/probe-b58 P1).
+        if SameText(LText, 'System.CompilerVersion') or
+           SameText(LText, 'System.RTLVersion') then
+          Result := MkNum(ACtx.CompilerVersion)
+        else if LText <> '' then
           Result := AskSymbol(sqConstValue, LText, MkBool(False));
       end;
     nkParen:

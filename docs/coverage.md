@@ -55,6 +55,14 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   own `.dcu` was built with. No corpus shows a difference: the one case that
   looked like it (`CPP_ABI_ADJUST`, 24 on Win64) is defined by System.pas
   itself, and PasTree's wrong value there was a stale read, fixed (F25).
+- `Declared(TE.e2)` over a type the asking unit declares itself reads False:
+  the unit's own declarations answer Declared() by position only for a bare
+  name and one its own unit name qualifies (`Declared(UQ.X)`); a type's
+  member is answered for an imported type. dcc answers it True when TE
+  stands above the guard.
+- `Length` in a `$IF` refuses an array whose index type is written
+  qualified (`array[UC.TE]`): the ordinal walk takes a bare type name, and
+  the first-pass guess (0) stands.
 
 ### 1.3.3 Include files
 - the `{$I %ENV%}` / `{$I %DATE%}` insertion forms are
