@@ -4687,6 +4687,84 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// The Declared pass's reach (audit A2-02, B3-12). UC's `Declared(KFlag)`
+// guard newly imports UNew, which imports UDep: the pass loaded UNew flat -
+// UDep never loaded, UNew's `uses` never linked (which silenced its E2003),
+// the inherited DepMethod unbound in UC. U2 asks `Declared(Foo)` right
+// above `{$I DpFoo.inc}`, which declares Foo: the include's text is below
+// the guard, so the guard is False and Bar is declared; U3 is the
+// `not Declared` form of the same shape. dcc64 37.0: only the planted
+// E2003s (local/probe-b61 sub2, sub2b, inc2, inc1).
+procedure TestDeclaredPassReach;
+var
+  LDir: string;
+  LUC, LNew, LU2, LU3: TPasSemaModel;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_declared_reach');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DpP.dpr'),
+    'program DpP;'#10'uses DpK, DpC, DpU2, DpU3;'#10'begin'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DpK.pas'),
+    'unit DpK;'#10'interface'#10'const KFlag = 1;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DpC.pas'),
+    'unit DpC;'#10'interface'#10'uses DpK;'#10'implementation'#10 +
+    '{$IF Declared(KFlag)}'#10'uses DpNew;'#10'{$IFEND}'#10 +
+    'type'#10'  TCC = class(TN)'#10'    procedure Go;'#10'  end;'#10 +
+    'procedure TCC.Go;'#10'begin'#10'  DepMethod;'#10 +
+    '  ControlUndeclared := 1;'#10'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DpNew.pas'),
+    'unit DpNew;'#10'interface'#10'uses DpDep;'#10 +
+    'type'#10'  TN = class(TDep) end;'#10'implementation'#10 +
+    'procedure Q;'#10'begin'#10'  NewUndeclared := 1;'#10'end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DpDep.pas'),
+    'unit DpDep;'#10'interface'#10'type'#10'  TDep = class'#10 +
+    '    procedure DepMethod;'#10'  end;'#10'implementation'#10 +
+    'procedure TDep.DepMethod; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DpFoo.inc'), 'const Foo = 1;'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DpU2.pas'),
+    'unit DpU2;'#10'interface'#10'{$IF Declared(Foo)}'#10 +
+    '{$DEFINE HAS_FOO}'#10'{$IFEND}'#10'{$I DpFoo.inc}'#10 +
+    '{$IFNDEF HAS_FOO}'#10'const Bar = 1;'#10'{$ENDIF}'#10 +
+    'const Baz = Bar + 1;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'DpU3.pas'),
+    'unit DpU3;'#10'interface'#10'{$IF not Declared(Foo)}'#10 +
+    'const Bar = 1;'#10'{$IFEND}'#10'{$I DpFoo.inc}'#10 +
+    'const Baz = Bar + 1;'#10'implementation'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'DpP.dpr'));
+    LUC := ModelByName('dpc');
+    LNew := ModelByName('dpnew');
+    LU2 := ModelByName('dpu2');
+    LU3 := ModelByName('dpu3');
+    Ok('declared reach: the newly imported unit''s own import is loaded',
+      ModelByName('dpdep') <> nil);
+    Ok('declared reach: the newcomer''s uses are linked, its E2003 reported',
+      (LNew <> nil) and LNew.AllUsesResolved and
+      (DiagCount(LNew, 'E2003') = 1) and
+      DiagHasText(LNew, 'E2003', 'NewUndeclared'));
+    Ok('declared reach: the inherited member through it binds',
+      (LUC <> nil) and CrossRefTo(LUC, 'DepMethod', 'DepMethod') and
+      (DiagCount(LUC, 'E2003') = 1) and
+      DiagHasText(LUC, 'E2003', 'ControlUndeclared'));
+    Ok('declared reach: a guard above an $I does not see the include',
+      (LU2 <> nil) and (SymCountOf(LU2, 'bar', skConst) = 1) and
+      (DiagCount(LU2, 'E2003') = 0));
+    Ok('declared reach: ...nor in its not-Declared form',
+      (LU3 <> nil) and (SymCountOf(LU3, 'bar', skConst) = 1) and
+      (DiagCount(LU3, 'E2003') = 0));
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // Depth that is not the source's nesting, through the project's passes
 // (audit A1-01, A1-07): 10,000-term operator chains - a constant typed from
 // its operands (UntypedInitTypeX), an inline var inferred from them (the
@@ -13689,6 +13767,7 @@ begin
   TestQualifiedIfNames;
   TestIfEvaluatorSemantics;
   TestLayoutOracle;
+  TestDeclaredPassReach;
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;

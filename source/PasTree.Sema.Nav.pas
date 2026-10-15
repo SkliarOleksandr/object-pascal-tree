@@ -3486,7 +3486,8 @@ function TPasNavigator.DefinesAt(AMid, ALine,
 var
   LM: TPasSemaModel;
   LTS: TPasTokenStream;
-  LOffset, LIdx: Integer;
+  LOffset, LIdx, LAt: Integer;
+  LAnchor: TArray<Integer>;
   // name -> index of the last live $DEFINE in effect; a name in LUndone
   // had a live $UNDEF after its last definition (which also cancels the
   // project / platform define of that name).
@@ -3508,12 +3509,34 @@ begin
       if not LTS.OffsetOf(ALine, ACol, LOffset) then
         LOffset := MaxInt;   // past the end: everything the unit defines
       // Processing order: an include's directives (FileId <> 0) sit between
-      // the main file's own, so the walk stops at the first MAIN-file
-      // directive past the cursor and everything before it has run.
+      // the main file's own, where its `$I` sat - so each file is placed at
+      // the main-file offset of the `$I` that pulled it in, a nested one
+      // through its includer (each inclusion has a file id of its own, and
+      // an includer's row precedes its includes'). The walk stops at the
+      // first directive placed past the cursor: an include with no main-file
+      // directive between the cursor and its `$I` was counted as run (audit
+      // A2-22).
+      SetLength(LAnchor, Length(LM.Tree.Source.FileNames));
+      for LIdx := 0 to High(LAnchor) do
+        LAnchor[LIdx] := -1;
+      for LIdx := 0 to High(LM.Tree.Source.IncludeRefs) do
+        with LM.Tree.Source.IncludeRefs[LIdx] do
+          if (IncludedFileId > 0) and (IncludedFileId <= High(LAnchor)) and
+             (FileId >= 0) and (FileId <= High(LAnchor)) then
+            if FileId = 0 then
+              LAnchor[IncludedFileId] := Start
+            else
+              LAnchor[IncludedFileId] := LAnchor[FileId];
       for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
         with LM.Tree.Source.DefineRefs[LIdx] do
         begin
-          if (FileId = 0) and (Start > LOffset) then
+          if FileId = 0 then
+            LAt := Start
+          else if (FileId > 0) and (FileId <= High(LAnchor)) then
+            LAt := LAnchor[FileId]
+          else
+            LAt := -1;
+          if LAt > LOffset then
             Break;
           if not Active then
             Continue;

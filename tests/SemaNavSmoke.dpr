@@ -1709,6 +1709,25 @@ const
   INC_OUT =
     'procedure FromInc;'#10;                                     // inc 1
 
+  // DefinesAt and an `$I` below the cursor with no main-file directive
+  // between them (audit A2-22): FROMINC counts from line 7 on, not before.
+  // NavDefN.inc nests a further include, placed at NavDefL's line 7 too.
+  UNIT_DEFL =
+    'unit NavDefL;'#10 +                                   // 1
+    'interface'#10 +                                       // 2
+    '{$DEFINE EARLY}'#10 +                                 // 3
+    ''#10 +                                                // 4
+    'const C1 = 1;'#10 +                                   // 5
+    ''#10 +                                                // 6
+    '{$I NavDefL.inc}'#10 +                                // 7
+    'implementation'#10 +                                  // 8
+    'end.'#10;                                             // 9
+  INC_DEFL =
+    '{$DEFINE FROMINC}'#10 +                               // inc 1
+    '{$I NavDefN.inc}'#10;                                 // inc 2
+  INC_DEFN =
+    '{$DEFINE NESTED}'#10;                                 // inc 1
+
 var
   GProj: TPasSemaProject;
   GNav: TPasNavigator;
@@ -3576,7 +3595,7 @@ var
   LFamily: TArray<TPasRenameFamilyMember>;
   LMidRen, LMidFam, LIdx: Integer;
   LErr, LFileName: string;
-  LDefMid, LRaw: Integer;
+  LDefMid, LMidDefL, LRaw: Integer;
   LDefRefs: TArray<TPasDefineRef>;
   LDefHits: TArray<TPasDefineHit>;
   LSites: TArray<TPasDefineSite>;
@@ -3618,6 +3637,9 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavIfdU.pas'), UNIT_IFDU);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.pas'), UNIT_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.inc'), INC_DEF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavDefL.pas'), UNIT_DEFL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavDefL.inc'), INC_DEFL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavDefN.inc'), INC_DEFN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavIfn.pas'), UNIT_IFN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.pas'), UNIT_OUT);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDpA.pas'), UNIT_DPA);
@@ -4248,6 +4270,17 @@ begin
       Ok('DefinesAt line 19: $UNDEF took NAVFOO out, NAVINC stays',
         (SiteCount(LSites, 'NAVFOO') = 0) and
         HasSite(LSites, 'NAVINC', doUnit, True, 'NavDef.inc', 2, 10));
+      LMidDefL := GNav.ModelIdOf(TPath.Combine(LDir, 'NavDefL.pas'));
+      LSites := GNav.DefinesAt(LMidDefL, 5, 3);
+      Ok('DefinesAt: an $I below the cursor has not run yet (A2-22)',
+        HasSite(LSites, 'EARLY', doUnit, True, 'NavDefL.pas', 3, 10) and
+        (SiteCount(LSites, 'FROMINC') = 0) and
+        (SiteCount(LSites, 'NESTED') = 0));
+      LSites := GNav.DefinesAt(LMidDefL, 8, 1);
+      Ok('DefinesAt: ...and has below its $I, a nested include too',
+        HasSite(LSites, 'EARLY', doUnit, True, 'NavDefL.pas', 3, 10) and
+        HasSite(LSites, 'FROMINC', doUnit, True, 'NavDefL.inc', 1, 10) and
+        HasSite(LSites, 'NESTED', doUnit, True, 'NavDefN.inc', 1, 10));
       Ok('DefinesAt: no model (-1) -> the base set alone',
         (SiteCount(GNav.DefinesAt(-1, 0, 0), 'NAVFOO') = 0) and
         HasSite(GNav.DefinesAt(-1, 0, 0), 'WIN32', doPlatform, True));

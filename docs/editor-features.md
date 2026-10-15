@@ -925,7 +925,7 @@ base set alone, so a host can offer the command in every editor.
 | # | Shape | Row | Status |
 |---|-------|-----|--------|
 | 1 | `{$DEFINE X}` in a unit | `FindDefines`: a row per site; `DefinesAt`: the last one before the cursor | OK |
-| 2 | `{$DEFINE X}` in an include | row in the `.inc`, once however many units include it | OK |
+| 2 | `{$DEFINE X}` in an include | row in the `.inc`, once however many units include it; `DefinesAt` counts it from its `$I` on (a nested include from the outermost `$I`), wherever the main file's own directives stand | OK |
 | 3 | `{$DEFINE X}` in a dead branch | `FindDefines` lists it `Active = False` (demo: `[inactive]`); `DefinesAt` never | OK |
 | 4 | `{$UNDEF X}` before the cursor | not a row anywhere; takes X out of `DefinesAt`, a project define too | OK |
 | 5 | A `.dproj` / command-line define | `doProject` row, main-module header, once | OK |

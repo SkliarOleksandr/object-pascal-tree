@@ -501,6 +501,7 @@ type
       const APos: TPasCondPos; out ASym: Integer): Boolean;
     function OwnSymbolSite(AM: TPasSemaModel; const ANameLower: string;
       const APos: TPasCondPos; out AFile: string; out AOffset: Integer): Boolean;
+    function DeclaredCandidate(AIdx: Integer): Boolean;
     procedure RunDeclaredPass(ACount: Integer);
     procedure InjectGuessedIfDiags(ACount: Integer);
     procedure InjectGuessedIfDiagsOne(AId: Integer);
@@ -2962,6 +2963,17 @@ begin
       Exit;
     LVis := LLastOfFile + 1;
   end;
+  // An `$I` of that file between the directive and that token spliced its
+  // text in front of the token, below the directive: the directive stands
+  // where the first such include's text begins. Placed by the file's own
+  // tokens alone, a guard right above `{$I foo.inc}` counted foo.inc's
+  // declarations as above it, so `Declared(Foo)` was True for the `Foo`
+  // the include declares below (audit B3-12).
+  for LIdx := 0 to High(LM.Tree.Source.IncludeRefs) do
+    if (LM.Tree.Source.IncludeRefs[LIdx].FileId = LFile) and
+       (LM.Tree.Source.IncludeRefs[LIdx].Start >= APos.Offset) and
+       (LM.Tree.Source.IncludeRefs[LIdx].VisIndex < LVis) then
+      LVis := LM.Tree.Source.IncludeRefs[LIdx].VisIndex;
   // The innermost node over that token, then the scope in effect there.
   LNode := 0;
   repeat
@@ -5473,22 +5485,67 @@ end;
   nobody writes (the guards ask about RTL names, not about each other). A
   unit's answers from its OWN declarations are settled, though: Declared by
   the rounds inside each worker, symbol values by the iterations. Units the new
-  branch newly imports ARE loaded, though - otherwise the unit would end up
-  with an unresolved `uses`, which gates its diagnostics entirely. }
-procedure TPasSemaProject.RunDeclaredPass(ACount: Integer);
+  branch newly imports ARE loaded, though, with their own imports, linked and
+  asked their own questions - otherwise a unit would end up with an
+  unresolved `uses`, which gates its diagnostics entirely. }
+function TPasSemaProject.DeclaredCandidate(AIdx: Integer): Boolean;
 var
-  LCand: TArray<Integer>;
-  LDone: TArray<TPasSemaModel>;
-  LIdx, LU: Integer;
-  LPaths: TArray<string>;
-  LPath: string;
   LQuery: TPasDeclaredQuery;
   LSymQuery: TPasCondSymbolQuery;
   LUnsym: TPasUnresolvedSymbol;
   LAsk: TPasDeclaredAsk;
   LPos: TPasCondPos;
-  LAnswer, LIsCand: Boolean;
+  LAnswer: Boolean;
   LNum: TPasSymbolValue;
+begin
+  Result := False;
+  // One unit's questions, on the driver: an exception there (an oracle
+  // defect, say) used to escape the Analyze* call and abort the whole
+  // build. It is that unit's internal error now, and the unit keeps its
+  // first-pass stream (audit A2-01).
+  try
+    // Every ask at its own position: the unit's own names answer by where
+    // the guard stands (OwnDeclaredBefore).
+    if Length(FModels[AIdx].Tree.Source.DeclaredAsks) > 0 then
+    begin
+      LQuery := DeclaredQueryFor(AIdx);
+      for LAsk in FModels[AIdx].Tree.Source.DeclaredAsks do
+      begin
+        LPos.FileName := FModels[AIdx].Tree.Source.FileNames[LAsk.FileId];
+        LPos.Offset := LAsk.Offset;
+        if LQuery(LAsk.Name, LPos, LAnswer) and LAnswer then
+          Exit(True);
+      end;
+    end;
+    if Length(FModels[AIdx].Tree.Source.UnresolvedSymbols) > 0 then
+    begin
+      LSymQuery := SymbolQueryFor(AIdx);
+      for LUnsym in FModels[AIdx].Tree.Source.UnresolvedSymbols do
+        // Either kind of answer earns the re-run. "Here is the value" is the
+        // obvious one; "this name exists NOWHERE" is the other, because that
+        // is what lets CondEval apply dcc's abort rules instead of leaving the
+        // first pass's False guess standing - a different verdict, not a
+        // byte-identical one.
+        if LSymQuery(LUnsym.Query, LUnsym.Name, Default(TPasCondPos), LNum) or
+           LNum.NoSymbol then
+          Exit(True);
+    end;
+  except
+    on E: Exception do
+    begin
+      NoteInternalError(AIdx, 'declared-candidates', E);
+      Result := False;
+    end;
+  end;
+end;
+
+procedure TPasSemaProject.RunDeclaredPass(ACount: Integer);
+var
+  LCand: TArray<Integer>;
+  LDone: TArray<TPasSemaModel>;
+  LIdx, LU, LLoaded: Integer;
+  LPaths: TArray<string>;
+  LPath: string;
   LIter, LSiteOff: Integer;
   LNext: TArray<Integer>;
   LSymLogs: TArray<TArray<TPasOwnSymAnswer>>;
@@ -5510,56 +5567,9 @@ begin
   // rare the questions are (a dozen units on the whole RTL).
   LCand := nil;
   for LIdx := 0 to ACount - 1 do
-  begin
-    LIsCand := False;
-    // One unit's questions, on the driver: an exception there (an oracle
-    // defect, say) used to escape the Analyze* call and abort the whole
-    // build. It is that unit's internal error now, and the unit keeps its
-    // first-pass stream (audit A2-01).
-    try
-    // Every ask at its own position: the unit's own names answer by where
-    // the guard stands (OwnDeclaredBefore).
-    if Length(FModels[LIdx].Tree.Source.DeclaredAsks) > 0 then
-    begin
-      LQuery := DeclaredQueryFor(LIdx);
-      for LAsk in FModels[LIdx].Tree.Source.DeclaredAsks do
-      begin
-        LPos.FileName := FModels[LIdx].Tree.Source.FileNames[LAsk.FileId];
-        LPos.Offset := LAsk.Offset;
-        if LQuery(LAsk.Name, LPos, LAnswer) and LAnswer then
-        begin
-          LIsCand := True;
-          Break;
-        end;
-      end;
-    end;
-    if not LIsCand and
-       (Length(FModels[LIdx].Tree.Source.UnresolvedSymbols) > 0) then
-    begin
-      LSymQuery := SymbolQueryFor(LIdx);
-      for LUnsym in FModels[LIdx].Tree.Source.UnresolvedSymbols do
-        // Either kind of answer earns the re-run. "Here is the value" is the
-        // obvious one; "this name exists NOWHERE" is the other, because that
-        // is what lets CondEval apply dcc's abort rules instead of leaving the
-        // first pass's False guess standing - a different verdict, not a
-        // byte-identical one.
-        if LSymQuery(LUnsym.Query, LUnsym.Name, Default(TPasCondPos), LNum) or
-           LNum.NoSymbol then
-        begin
-          LIsCand := True;
-          Break;
-        end;
-    end;
-    except
-      on E: Exception do
-      begin
-        NoteInternalError(LIdx, 'declared-candidates', E);
-        LIsCand := False;
-      end;
-    end;
-    if LIsCand then
+    if DeclaredCandidate(LIdx) then
       LCand := LCand + [LIdx];
-  end;
+  LIter := 0;
   // Iterations, until the unit's own declarations that answered a SYMBOL
   // question (a const value, SizeOf, Length) are the ones the model the pass
   // produced has there. A symbol question is answered from the unit's
@@ -5571,11 +5581,11 @@ begin
   // declares it) and drops that declaration, but `CPP_ABI_ADJUST > 0` below
   // still read the dropped 0 instead of System's 24 on Win64. The next
   // iteration answers from the committed model. Rare, so a unit is re-run
-  // only when an answer moved.
-  for LIter := 1 to 3 do
+  // only when an answer moved. A newly imported unit asking a question of its
+  // own is a first-time candidate and joins whatever iteration comes next.
+  while LCand <> nil do
   begin
-    if LCand = nil then
-      Break;
+    Inc(LIter);
     // Ask first, in PARALLEL and without touching anything: a worker reads other
     // models' frozen interface scopes and writes only its own slot.
     LDone := nil;
@@ -5689,15 +5699,30 @@ begin
                FModels[LCand[LIdx]].UsesList[LU].InPath, FFiles[LCand[LIdx]],
                LPath) and not FByPath.ContainsKey(LowerCase(LPath)) then
             LPaths := LPaths + [LPath];
+    LLoaded := FModels.Count;
     if LPaths <> nil then
       LoadFilesParallel(LPaths);
     for LIdx := 0 to High(LCand) do
       if LDone[LIdx] <> nil then
         ResolveUses(LCand[LIdx]);
+    // The newcomers, transitively: LoadFilesParallel parses exactly the paths
+    // it is given, and every driver ran its ResolveUses loop before this pass,
+    // so a newcomer left alone kept unlinked `uses` (AllUsesResolved False,
+    // which silences its E2003) and its own imports unloaded - UC's new
+    // `uses UNew` loaded UNew but never UNew's UDep, and an inherited member
+    // from there stayed unbound in UC (audit A2-02). ResolveUses loads what it
+    // links, so the list grows while it is walked.
+    LIdx := LLoaded;
+    while LIdx < FModels.Count do
+    begin
+      ResolveUses(LIdx);
+      Inc(LIdx);
+    end;
     // The units whose own answers moved: again, from the model just committed.
+    // A third iteration is the last one a unit gets for that reason.
     LNext := nil;
     for LIdx := 0 to High(LCand) do
-      if LDone[LIdx] <> nil then
+      if (LDone[LIdx] <> nil) and (LIter < 3) then
         for LSymAns in LSymLogs[LIdx] do
           if not OwnSymbolSite(FModels[LCand[LIdx]], LSymAns.NameLower,
                LSymAns.Pos, LSite, LSiteOff) or
@@ -5707,6 +5732,11 @@ begin
             LNext := LNext + [LCand[LIdx]];
             Break;
           end;
+    // A newcomer's own guards were the first pass's guesses, like any unit's
+    // before this pass; its imports are linked now, so it can be asked.
+    for LIdx := LLoaded to FModels.Count - 1 do
+      if DeclaredCandidate(LIdx) then
+        LNext := LNext + [LIdx];
     LCand := LNext;
   end;
 end;
