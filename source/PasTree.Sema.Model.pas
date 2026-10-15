@@ -165,7 +165,7 @@ type
     Text: PChar;
     Len: Integer;
     Hash: Cardinal;
-    Raw: Boolean;    // Text is source spelling: fold 'A'..'Z' when comparing
+    Raw: Boolean;    // Text is source spelling: PasFoldChar when comparing
   end;
 
   { A scope's names AND its declaration order, one record. Names: NameLower
@@ -321,7 +321,7 @@ type
     procedure Grow;
   public
     function Intern(const AText: string): string;
-    // Intern of the ALen chars at AText - folded ('A'..'Z' only) when AFold -
+    // Intern of the ALen chars at AText - folded (PasFoldChar) when AFold -
     // without building the string unless the pool does not have it yet.
     function InternSlice(AText: PChar; ALen: Integer; AFold: Boolean): string;
     procedure Clear;
@@ -921,16 +921,10 @@ end;
 function FoldedSliceHash(AText: PChar; ALen: Integer): Cardinal;
 var
   LIdx: Integer;
-  LCh: Char;
 begin
   Result := 2166136261;
   for LIdx := 0 to ALen - 1 do
-  begin
-    LCh := AText[LIdx];
-    if (LCh >= 'A') and (LCh <= 'Z') then
-      Inc(LCh, 32);
-    Result := (Result xor Cardinal(Ord(LCh))) * 16777619;
-  end;
+    Result := (Result xor Cardinal(Ord(PasFoldChar(AText[LIdx])))) * 16777619;
 end;
 
 function RawSliceHash(AText: PChar; ALen: Integer): Cardinal;
@@ -976,16 +970,10 @@ end;
 function SemaRawKeyEquals(AName: PChar; const AKey: TSemaKey): Boolean;
 var
   LIdx: Integer;
-  LCh: Char;
 begin
   for LIdx := 0 to AKey.Len - 1 do
-  begin
-    LCh := AKey.Text[LIdx];
-    if (LCh >= 'A') and (LCh <= 'Z') then
-      Inc(LCh, 32);
-    if LCh <> AName[LIdx] then
+    if PasFoldChar(AKey.Text[LIdx]) <> AName[LIdx] then
       Exit(False);
-  end;
   Result := True;
 end;
 
@@ -1013,7 +1001,6 @@ end;
 function SemaKeyText(const AKey: TSemaKey): string;
 var
   LIdx: Integer;
-  LCh: Char;
   LOut: PChar;
 begin
   SetString(Result, AKey.Text, AKey.Len);
@@ -1021,11 +1008,7 @@ begin
   begin
     LOut := Pointer(Result);
     for LIdx := 0 to AKey.Len - 1 do
-    begin
-      LCh := LOut[LIdx];
-      if (LCh >= 'A') and (LCh <= 'Z') then
-        LOut[LIdx] := Char(Ord(LCh) + 32);
-    end;
+      LOut[LIdx] := PasFoldChar(LOut[LIdx]);
   end;
 end;
 
@@ -1743,12 +1726,11 @@ end;
 function PasNameKey(const AName: string): string;
 var
   LFrom, LLen, LIdx: Integer;
-  LCh: Char;
   LOut: PChar;
 begin
-  // Fast path: a name that is already a key (no '&', no ASCII uppercase) is
-  // returned as-is - a refcount bump instead of an allocation. Callers often
-  // pass names that are already lowered.
+  // Fast path: a name that is already a key (no '&', nothing PasFoldChar
+  // changes) is returned as-is - a refcount bump instead of an allocation.
+  // Callers often pass names that are already lowered.
   LLen := Length(AName);
   LFrom := 1;
   if (LLen > 0) and (AName[1] = '&') then
@@ -1759,23 +1741,16 @@ begin
   else
   begin
     LIdx := 1;
-    while (LIdx <= LLen) and not ((AName[LIdx] >= 'A') and (AName[LIdx] <= 'Z'))
-    do
+    while (LIdx <= LLen) and not PasNeedsFold(AName[LIdx]) do
       Inc(LIdx);
     if LIdx > LLen then
       Exit(AName);
   end;
-  // Single pass, one allocation - ASCII-only folding, exactly what the old
-  // Delete('&') -> LowerCase chain produced.
+  // Single pass, one allocation; PasFoldChar is dcc's fold (spec B.3).
   SetLength(Result, LLen);
   LOut := PChar(Pointer(Result));
   for LIdx := 0 to LLen - 1 do
-  begin
-    LCh := AName[LFrom + LIdx];
-    if (LCh >= 'A') and (LCh <= 'Z') then
-      Inc(LCh, 32);
-    LOut[LIdx] := LCh;
-  end;
+    LOut[LIdx] := PasFoldChar(AName[LFrom + LIdx]);
 end;
 
 function TPasSemaModel.AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
@@ -1833,7 +1808,7 @@ begin
   LIsKey := LLen = AKey.Len;
   if LIsKey then
     for LIdx := 0 to LLen - 1 do
-      if (LText[LIdx] >= 'A') and (LText[LIdx] <= 'Z') then
+      if PasNeedsFold(LText[LIdx]) then
       begin
         LIsKey := False;
         Break;

@@ -549,8 +549,9 @@ Still open, roughly in the order we're tackling it:
     rebuild - but it left the analysis holding its own ANSI reading of a file
     the editor had open, with no rebuild ever due to correct it. A host cannot
     work around this: it would have to re-decode every file the analysis reads.
-  - **"Matching dcc" bought less than it looked like.** Identifiers are ASCII,
-    so the semantic model is the same either way; the difference is confined to
+  - **"Matching dcc" bought less than it looked like.** Identifiers are almost
+    always ASCII, so the semantic model rarely differs (a non-ASCII name is
+    one identifier in any case by dcc's fold, spec B.3); the difference is confined to
     the CONTENTS of string literals and comments - where dcc, reading UTF-8
     bytes as ANSI, produces mojibake. Reproducing that faithfully is worth
     nothing to a caller, while the position skew costs correctness everywhere.

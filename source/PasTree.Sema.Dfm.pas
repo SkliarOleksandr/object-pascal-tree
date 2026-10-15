@@ -377,7 +377,8 @@ uses
 {$ENDIF}
   System.StrUtils,
   System.IOUtils,
-  System.Generics.Defaults;
+  System.Generics.Defaults,
+  PasTree.Types;   // PasFoldName: a form name's symbol key
 
 { TPasFormBinder }
 
@@ -607,7 +608,7 @@ begin
   FRootNames.Clear;
   for LIdx := 0 to FForms.Count - 1 do
   begin
-    LName := LowerCase(DocOf(FForms[LIdx]).RootName);
+    LName := PasFoldName(DocOf(FForms[LIdx]).RootName);
     if LName = '' then
       Continue;
     if not FRootNames.TryGetValue(LName, LList) then
@@ -660,7 +661,7 @@ begin
     AEntry.RootClass := XNil;
     if Length(LDoc.Objects) > 0 then
       AEntry.RootClass := TypeInUnit(AEntry.Mid,
-        LowerCase(LDoc.RootClassName));
+        PasFoldName(LDoc.RootClassName));
   end;
   Result := AEntry.RootClass;
 end;
@@ -720,7 +721,7 @@ begin
   if AEntry.ObjInline[AObj] <> 0 then
     Exit(AEntry.ObjInline[AObj] = 2);
   AEntry.ObjInline[AObj] := 1;   // "no" while it is worked out: no cycle
-  LName := LowerCase(LDoc.ObjectName(AObj));
+  LName := PasFoldName(LDoc.ObjectName(AObj));
   LOwnerObj := HeaderLookupRoot(AEntry, AObj);
   LClass := ObjClassOf(AEntry, LOwnerObj);
   // A component of the form: created by an ANCESTOR's form file - this one
@@ -807,7 +808,7 @@ begin
   AEntry.ObjFieldMid[AObj] := NIL_SYM;
   AEntry.ObjFieldSym[AObj] := NIL_SYM;
   LClassName := LDoc.ObjectClassName(AObj);
-  LName := LowerCase(LDoc.ObjectName(AObj));
+  LName := PasFoldName(LDoc.ObjectName(AObj));
   LFieldType := XNil;
   LOwner := ObjClassOf(AEntry, HeaderLookupRoot(AEntry, AObj));
   if (LName <> '') and XValid(LOwner) and
@@ -822,7 +823,7 @@ begin
     Result := LFieldType
   else
   begin
-    Result := TypeInUnit(AEntry.Mid, LowerCase(LClassName));
+    Result := TypeInUnit(AEntry.Mid, PasFoldName(LClassName));
     if not XValid(Result) then
       Result := LFieldType;
   end;
@@ -1035,7 +1036,7 @@ begin
   LId := LDoc.Idents[AIdent];
   LFirst := AIdent - LId.Seg;
   LClass := ObjClassOf(AEntry, InnerLookupRoot(AEntry, LId.Obj));
-  LName := LowerCase(LDoc.IdentText(LFirst));
+  LName := PasFoldName(LDoc.IdentText(LFirst));
   // A value inside an inline frame's block is resolved against the frame.
   if InnerLookupRoot(AEntry, LId.Obj) > 0 then
     AVia := fsvInline
@@ -1153,7 +1154,7 @@ begin
   begin
     if not XValid(LC) then
       Exit;
-    LName := LowerCase(LDoc.IdentText(AFirst + LS));
+    LName := PasFoldName(LDoc.IdentText(AFirst + LS));
     if FieldIn(AEntry.Mid, LC, LName, ATMid, ATSym) then
     begin
       if LS < ALastSeg then
@@ -1233,7 +1234,7 @@ begin
   if LId.Seg = 0 then
     Exit;
   EnsureRootNames;
-  if FRootNames.TryGetValue(LowerCase(LDoc.IdentText(LFirst)), LRoots) then
+  if FRootNames.TryGetValue(PasFoldName(LDoc.IdentText(LFirst)), LRoots) then
     for LCand in LRoots do
       if WalkPath(AEntry, LFirst, 1, LId.Seg, RootClassOf(FForms[LCand]),
          True, LTMid, LTSym) then
@@ -1300,7 +1301,7 @@ begin
     // A miss in the object's own class is a form that fails to load, not an
     // open link.
     Result := PropClassOf(AEntry.Mid, Result,
-      LowerCase(LDoc.IdentText(LDoc.Props[AProp].FirstIdent + LSeg)), LFound);
+      PasFoldName(LDoc.IdentText(LDoc.Props[AProp].FirstIdent + LSeg)), LFound);
     if not LFound and ADeclared then
       AOpen := True;
     ADeclared := True;
@@ -1332,7 +1333,7 @@ begin
   Result := XNil;
   LDoc := DocOf(AEntry);
   LP := LDoc.Props[AProp];
-  LName := LowerCase(LDoc.IdentText(LP.FirstIdent + ASeg)) + 'classname';
+  LName := PasFoldName(LDoc.IdentText(LP.FirstIdent + ASeg)) + 'classname';
   // An object's properties are read before its children, so its lines are
   // contiguous but for its collection items: walk out from AProp both ways
   // while the object is the same.
@@ -1367,7 +1368,7 @@ begin
           while (LTo <= Length(LLine)) and (LLine[LTo] <> '''') do
             Inc(LTo);
           Exit(TypeInUnit(AEntry.Mid,
-            LowerCase(Copy(LLine, LFrom + 1, LTo - LFrom - 1))));
+            PasFoldName(Copy(LLine, LFrom + 1, LTo - LFrom - 1))));
         end;
       end;
       Inc(LQ, LDir);
@@ -1395,7 +1396,7 @@ begin
   LLast := LDoc.Props[AColl].SegCount - 1;
   LHolder := PropHolder(AEntry, AColl, LLast, LDeclared, AOpen);
   Result := PropClassOf(AEntry.Mid, LHolder,
-    LowerCase(LDoc.IdentText(LDoc.Props[AColl].FirstIdent + LLast)), LFound);
+    PasFoldName(LDoc.IdentText(LDoc.Props[AColl].FirstIdent + LLast)), LFound);
   if not LFound and XValid(LHolder) and LDeclared then
     AOpen := True;
   if XValid(Result) and FProj.DefaultArrayPropX(Result, LPMid, LPSym,

@@ -348,7 +348,7 @@ begin
         LEnd := LAt;
         while (LEnd <= Length(LText)) and IsIdentChar(LText[LEnd]) do
           Inc(LEnd);
-        LWord := LowerCase(Copy(LText, LAt, LEnd - LAt));
+        LWord := PasFoldName(Copy(LText, LAt, LEnd - LAt));
         if not Result.ContainsKey(LWord) then
         begin
           LM.Tree.Source.Files[LFi].OffsetToLineCol(LR.Start + LAt - 1,
@@ -404,7 +404,7 @@ begin
     if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].FirstChild = LNode) and
        (LM.Tree.Nodes[LP].Kind in [nkNamedArg, nkAggregateField]) then
       Continue;
-    Result.TryAdd(LowerCase(LM.Tree.NodeText(LNode)), LNode);
+    Result.TryAdd(PasFoldName(LM.Tree.NodeText(LNode)), LNode);
   end;
 end;
 
@@ -1217,7 +1217,7 @@ begin
           for var LI := 0 to High(LDoc.Doc.Idents) do
             if LDoc.Doc.Idents[LI].Role = dirClassName then
               LQueue.Add(TPair<Integer, string>.Create(LX.UnitId,
-                LowerCase(LDoc.Doc.IdentText(LI))));
+                PasFoldName(LDoc.Doc.IdentText(LI))));
         end;
         if not FProj.EnsureHydrated(LX.UnitId) then
           Break;
@@ -1306,7 +1306,7 @@ begin
     begin
       if (LU.UnitId < 0) or (LU.NameNode = NIL_NODE) then
         Continue;
-      LKey := LowerCase(LU.NameFull);
+      LKey := PasFoldName(LU.NameFull);
       if LByName.ContainsKey(LKey) then
         Continue;   // listed twice (E2004): one entry
       LEntry := Default(TLintEntry);
@@ -1378,12 +1378,12 @@ begin
         for var LI := 0 to High(LDoc.Doc.Idents) do
         begin
           if LDoc.Doc.Idents[LI].Role = dirClassName then
-            LFormClasses := LFormClasses + [LowerCase(LDoc.Doc.IdentText(LI))];
+            LFormClasses := LFormClasses + [PasFoldName(LDoc.Doc.IdentText(LI))];
           if (LDoc.Doc.Idents[LI].Role = dirClassName) or
              ((LDoc.Doc.Idents[LI].Role = dirValue) and
              (LDoc.Doc.Idents[LI].Seg = 0) and
              (LDoc.Doc.Idents[LI].SegCount > 1)) then
-            LFormWords.TryAdd(LowerCase(LDoc.Doc.IdentText(LI)),
+            LFormWords.TryAdd(PasFoldName(LDoc.Doc.IdentText(LI)),
               LDoc.Doc.LineOf(LDoc.Doc.Idents[LI].Offset));
         end;
       end;
@@ -1470,7 +1470,7 @@ begin
             ExtractFileName(LText), LLine, LEntry.Name]));
         end;
       // A branch not compiled here naming the unit or a name of it.
-      LName := LowerCase(LEntry.Name);
+      LName := PasFoldName(LEntry.Name);
       if LName.Contains('.') then
         LName := Copy(LName, LName.LastIndexOf('.') + 2, MaxInt);
       for var LW in LSkipped do

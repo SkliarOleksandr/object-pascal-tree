@@ -240,6 +240,32 @@ function IsKeyword(AKind: TPasTokenKind): Boolean; inline;
 function PasIsIdentStart(ACh: Char): Boolean; inline;
 function PasIsIdentChar(ACh: Char): Boolean; inline;
 
+var
+  { PasFoldChar's table for #$80..#$FFFF, indexed by Ord - $80. Public only
+    so that PasFoldChar can inline; nothing else reads it. }
+  GPasFoldHi: array[0..$FF7F] of Char;
+
+{ dcc's identifier case fold (spec B.3; dcc64 37.0, local/probe-b65 Gen3:
+  1925 BMP pairs, no exception): two names are one exactly when Windows'
+  CharLowerBuffW lowers them to the same text. So `A`..`Z` fold to `a`..`z`,
+  A-umlaut to a-umlaut, Cyrillic and Greek capitals to their small letters -
+  but the final sigma, the Kelvin sign, the long s and a title-case digraph
+  stay themselves (none is the same name as sigma, k, s or the digraph's
+  other cases). A character from $80 up never folds into ASCII, and the
+  fold is idempotent, so a pure-ASCII key is unchanged. THE fold of every
+  name key, hash and compare: they must agree bit for bit (audit E2-27,
+  D1-11). Conditional symbols fold the same way (dcc differs on 14 of the
+  1925 pairs, all title-case digraphs and Greek or letterlike symbol
+  variants; spec 1.3.1). }
+function PasFoldChar(ACh: Char): Char; inline;
+{ True when PasFoldChar changes ACh. }
+function PasNeedsFold(ACh: Char): Boolean; inline;
+{ AName with every character through PasFoldChar - AName itself, no
+  allocation, when nothing changes. }
+function PasFoldName(const AName: string): string;
+{ PasFoldName's equality, without building either string. }
+function PasSameName(const A, B: string): Boolean;
+
 { A numeric literal's text as a number reader takes it: the digit
   separators dropped (B.5.1) and a leading `&` too - an `&` before a number
   is accepted and ignored (B.3; `&1` is 1, dcc64 37.0). The one reading for
@@ -403,6 +429,67 @@ end;
 function PasIsIdentChar(ACh: Char): Boolean;
 begin
   Result := PasIsIdentStart(ACh) or ((ACh >= '0') and (ACh <= '9'));
+end;
+
+function PasFoldChar(ACh: Char): Char;
+begin
+  if ACh <= #127 then
+  begin
+    if (ACh >= 'A') and (ACh <= 'Z') then
+      Result := Char(Ord(ACh) + 32)
+    else
+      Result := ACh;
+  end
+  else
+    Result := GPasFoldHi[Ord(ACh) - $80];
+end;
+
+function PasNeedsFold(ACh: Char): Boolean;
+begin
+  if ACh <= #127 then
+    Result := (ACh >= 'A') and (ACh <= 'Z')
+  else
+    Result := GPasFoldHi[Ord(ACh) - $80] <> ACh;
+end;
+
+function PasFoldName(const AName: string): string;
+var
+  LIdx, LLen: Integer;
+  LOut: PChar;
+begin
+  LLen := Length(AName);
+  LIdx := 1;
+  while (LIdx <= LLen) and not PasNeedsFold(AName[LIdx]) do
+    Inc(LIdx);
+  if LIdx > LLen then
+    Exit(AName);
+  SetString(Result, PChar(Pointer(AName)), LLen);
+  LOut := PChar(Pointer(Result));
+  for LIdx := LIdx - 1 to LLen - 1 do
+    LOut[LIdx] := PasFoldChar(LOut[LIdx]);
+end;
+
+function PasSameName(const A, B: string): Boolean;
+var
+  LIdx: Integer;
+begin
+  if Length(A) <> Length(B) then
+    Exit(False);
+  for LIdx := 1 to Length(A) do
+    if (A[LIdx] <> B[LIdx]) and (PasFoldChar(A[LIdx]) <> PasFoldChar(B[LIdx])) then
+      Exit(False);
+  Result := True;
+end;
+
+procedure BuildFoldTable;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to High(GPasFoldHi) do
+    GPasFoldHi[LIdx] := Char(LIdx + $80);
+  // Surrogates are no identifier characters; leave them as they are.
+  CharLowerBuffW(@GPasFoldHi[0], $D800 - $80);
+  CharLowerBuffW(@GPasFoldHi[$E000 - $80], $10000 - $E000);
 end;
 
 function PasNumLiteralText(const AText: string): string;
@@ -729,5 +816,6 @@ end;
 
 initialization
   BuildKeywordBuckets;   // see KeywordKind
+  BuildFoldTable;        // see PasFoldChar
 
 end.

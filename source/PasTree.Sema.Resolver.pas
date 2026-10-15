@@ -771,7 +771,7 @@ begin
     Exit('?');
   for LIdx := LFirst to LLast do
     Result := Result + FTree.Source.VisibleText(LIdx);
-  Result := LowerCase(Result);
+  Result := PasFoldName(Result);
 end;
 
 // One key per parameter SLOT of a routine header (`A, B: Integer` is two):
@@ -2149,7 +2149,7 @@ begin
   begin
     LSym := NIL_SYM;
     for var LIdx := 0 to FUsesCount - 1 do
-      if SameText(FModel.UsesList[LIdx].NameFull,
+      if PasSameName(FModel.UsesList[LIdx].NameFull,
            FTree.DottedText(LNameNode)) then
       begin
         LSym := FModel.UsesList[LIdx].Sym;
@@ -4596,7 +4596,7 @@ begin
   LNameNode := FirstChild(ARoot);
   if (LNameNode <> NIL_NODE) and (KindOf(LNameNode) in [nkIdent, nkMember]) then
   begin
-    FModel.UnitNameLower := LowerCase(FTree.DottedText(LNameNode));
+    FModel.UnitNameLower := PasFoldName(FTree.DottedText(LNameNode));
     FIsDeclName[LNameNode] := True;
     // Only an undotted name is declared in the module's own scope.
     if KindOf(LNameNode) = nkIdent then

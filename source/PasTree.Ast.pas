@@ -636,12 +636,11 @@ function TPasTree.NodeNameLower(AIndex: Integer): string;
 var
   LText: PChar;
   LLen, LIdx: Integer;
-  LCh: Char;
   LOut: PChar;
 begin
   // Single pass over the token slice: ONE allocation where the old
-  // NodeText -> Delete('&') -> LowerCase chain paid two or three. Folding is
-  // ASCII-only ('A'..'Z'), exactly what LowerCase did, so keys are unchanged.
+  // NodeText -> Delete('&') -> LowerCase chain paid two or three. The fold
+  // is PasFoldChar, dcc's (spec B.3), as in every other key.
   // Same bounds backstop as NodeText - see its comment.
   if (AIndex < 0) or (AIndex > High(Nodes)) then
     Exit('');
@@ -657,12 +656,7 @@ begin
   SetLength(Result, LLen);
   LOut := PChar(Pointer(Result));
   for LIdx := 0 to LLen - 1 do
-  begin
-    LCh := LText[LIdx];
-    if (LCh >= 'A') and (LCh <= 'Z') then
-      Inc(LCh, 32);
-    LOut[LIdx] := LCh;
-  end;
+    LOut[LIdx] := PasFoldChar(LText[LIdx]);
 end;
 
 function TPasTree.NodeTextEquals(AIndex: Integer; const AWord: string): Boolean;

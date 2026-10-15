@@ -4974,6 +4974,70 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// B65 (spec B.3; dcc64 37.0, local/probe-b65 F, Gen3 1925 pairs, D, U): dcc
+// takes two names as one exactly when Windows' CharLowerBuffW lowers them to
+// the same text - A-umlaut and a-umlaut, Cyrillic De and de - but not the
+// final sigma and sigma, nor the Kelvin sign and k. Conditional symbols and
+// unit names fold the same way. PasTree folded 'A'..'Z' only.
+procedure TestNonAsciiFold;
+const
+  AU = #$C4; AL = #$E4;            // A / a with diaeresis
+  DU = #$0414; DL = #$0434;        // Cyrillic De / de
+  SG = #$03A3; FS = #$03C2;        // capital sigma / final sigma
+  KV = #$212A;                     // Kelvin sign
+  UU = #$DC; UL = #$FC;            // U / u with diaeresis
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_nonascii_fold');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, UU + 'berU.pas'),
+    'unit ' + UU + 'berU;'#10'interface'#10'const K' + UU + ' = 5;'#10 +
+    'implementation'#10'end.'#10, TEncoding.UTF8);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NaP.dpr'),
+    'program NaP;'#10'uses ' + UL + 'beru;'#10 +
+    '{$DEFINE ' + AU + 'DEF}'#10 +
+    '{$IFDEF ' + AL + 'def} const DefOk = 1; {$ENDIF}'#10 +
+    'var ' + AU + 'PFEL, ' + DU + 'OM, ' + SG + 'X, ' + KV + 'X: Integer;'#10 +
+    'begin'#10 +
+    '  ' + AL + 'pfel := DefOk;'#10 +
+    '  ' + DL + 'om := ' + UL + 'BERU.K' + UL + ';'#10 +
+    '  ' + FS + 'x := 3;'#10 +
+    '  kx := 4;'#10 +
+    'end.'#10, TEncoding.UTF8);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'NaP.dpr'));
+    LM := ModelByName('nap');
+    Ok('non-ASCII fold: a used unit named in another case is found',
+      (LM <> nil) and (DiagCount(LM, 'F1027') = 0));
+    Ok('non-ASCII fold: A-umlaut, Cyrillic, a define and a qualified ' +
+      'member bind in another case - only the final sigma and Kelvin rows ' +
+      'stay E2003',
+      (LM <> nil) and (DiagCount(LM, 'E2003') = 2) and
+      DiagHasText(LM, 'E2003', FS + 'x') and DiagHasText(LM, 'E2003', 'kx'));
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+
+  // One key, one hash: the string key (PasNameKey -> SemaKey) and the slice
+  // key over source text in another case agree on both.
+  var LStr := PasNameKey(AU + DU + 'Name');
+  var LSrc: string := AL + DL + 'NAME';
+  var LKey := SemaSliceKey(PChar(LSrc), Length(LSrc));
+  Ok('non-ASCII fold: string and slice keys hash alike',
+    SemaKey(LStr).Hash = LKey.Hash);
+  Ok('non-ASCII fold: ...and compare equal', SemaKeyEquals(LStr, LKey));
+  Ok('non-ASCII fold: ...and print the same key', SemaKeyText(LKey) = LStr);
+end;
+
 // Depth that is not the source's nesting, through the project's passes
 // (audit A1-01, A1-07): 10,000-term operator chains - a constant typed from
 // its operands (UntypedInitTypeX), an inline var inferred from them (the
@@ -13981,6 +14045,7 @@ begin
   TestDeclaredPassReach;
   TestProjectSwitchState;
   TestIncludeRows;
+  TestNonAsciiFold;
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;

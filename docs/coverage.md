@@ -77,6 +77,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   gives its DCC_* switch properties (`TPasDProj.Switches`), a bare `.dpr`
   dcc's no-config state. A `dcc64.cfg` beside the project, which plain dcc
   reads and msbuild's `--no-config` does not, is not read.
+- a conditional symbol folds case as an identifier does (spec B.3,
+  PasFoldChar). dcc folds a symbol name more on 14 of 1925 probed letter
+  pairs (a title-case digraph, the final sigma, three Greek symbol
+  variants, the ohm, Angstrom and capital sharp s signs; spec 1.3.2):
+  `{$DEFINE <U+01C5>X}` then `{$IFDEF <U+01C6>X}` is true for dcc, false
+  here.
 
 ### 1.3.3 Include files
 - dcc 37.0 has no insertion form: `{$I %DATE%}` names the file

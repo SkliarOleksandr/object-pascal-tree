@@ -620,11 +620,11 @@ const
   MAX_INCLUDE_DEPTH = 32;
 
 type
-  { ASCII-fold case-insensitive comparer for the defines dictionary: hashes
-    and compares without allocating, where the previous scheme paid a
-    LowerCase(Trim(...)) copy on EVERY Define/Undefine/IsDefined - i.e. per
-    `$IFDEF` / `Defined()` evaluation across the whole closure. ASCII-only
-    folding is the same contract the old LowerCase normalization had. }
+  { Case-insensitive comparer for the defines dictionary: hashes and compares
+    without allocating, where the previous scheme paid a LowerCase(Trim(...))
+    copy on EVERY Define/Undefine/IsDefined - i.e. per `$IFDEF` / `Defined()`
+    evaluation across the whole closure. The fold is PasFoldChar, the
+    identifiers' (audit E2-27, B2-09). }
   TDefinesNameComparer = class(TEqualityComparer<string>)
   public
     function Equals(const Left, Right: string): Boolean; overload; override;
@@ -636,7 +636,7 @@ var
 
 function TDefinesNameComparer.Equals(const Left, Right: string): Boolean;
 begin
-  Result := SliceEqualsWord(PChar(Pointer(Left)), Length(Left), Right);
+  Result := PasSameName(Left, Right);
 end;
 
 { WRAPAROUND IS THE ALGORITHM, so the overflow check is turned off HERE rather
@@ -658,18 +658,13 @@ end;
 function TDefinesNameComparer.GetHashCode(const Value: string): Integer;
 var
   LIdx: Integer;
-  LCh: Char;
   LHash: Cardinal;
 begin
-  // FNV-1a over ASCII-folded UTF-16 code units.
+  // FNV-1a over PasFoldChar-folded UTF-16 code units: dcc folds a
+  // conditional symbol as an identifier (local/probe-b65 D, DF1-DF5).
   LHash := 2166136261;
   for LIdx := 1 to Length(Value) do
-  begin
-    LCh := Value[LIdx];
-    if (LCh >= 'A') and (LCh <= 'Z') then
-      Inc(LCh, 32);
-    LHash := (LHash xor Ord(LCh)) * 16777619;
-  end;
+    LHash := (LHash xor Ord(PasFoldChar(Value[LIdx]))) * 16777619;
   Result := Integer(LHash);
 end;
 {$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}

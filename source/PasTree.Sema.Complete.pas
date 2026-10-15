@@ -858,7 +858,7 @@ begin
     LPM := ProjModel(FProjMid, 'BridgeUnitMid');
     for LIdx := 0 to High(LPM.UsesList) do
       if (LPM.UsesList[LIdx].UnitId >= 0) and
-         SameText(LPM.UsesList[LIdx].NameFull, AName) then
+         PasSameName(LPM.UsesList[LIdx].NameFull, AName) then
         Exit(LPM.UsesList[LIdx].UnitId);
   end;
   // Exact full-dotted spellings last, via a lazily built basename index -

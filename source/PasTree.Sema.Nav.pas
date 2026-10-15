@@ -2894,7 +2894,7 @@ begin
         LSym := LM.RefMap[LNode];
         // Hydration after the name test - see FindUnitReferences.
         if (LSym <> NIL_SYM) and (sfBuiltin in LM.Symbols[LSym].Flags) and
-           SameText(LM.Symbols[LSym].Name, AName) and
+           PasSameName(LM.Symbols[LSym].Name, AName) and
            FProj.EnsureHydrated(LMi) and
            HitFromNode(LM, LNode, LHit) then
           LHits.Add(LHit);
@@ -3025,7 +3025,7 @@ begin
       end;
   if not Result then
     Exit;
-  LLower := LowerCase(AName);
+  LLower := PasFoldName(AName);
   // The unit's own declarations: its unit scope, then its implementation
   // scope. A hit there that is a seed (the unit scope joins System) is not
   // the unit's - it is the last resort below.
@@ -3073,7 +3073,7 @@ begin
       // The name test reads the retained DefineRefs; hydration (for the
       // snippet) only on the first match, as FindBuiltinReferences does.
       for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
-        if SameText(LM.Tree.Source.DefineRefs[LIdx].Name, AName) and
+        if PasSameName(LM.Tree.Source.DefineRefs[LIdx].Name, AName) and
            FProj.EnsureHydrated(LMi) then
         begin
           HitFromDefineRef(LM, LM.Tree.Source.DefineRefs[LIdx], LHit.Hit);
@@ -3129,7 +3129,7 @@ begin
   LName := LM.Tree.Source.DefineRefs[LIdx].Name;
   for LDef := LIdx - 1 downto 0 do
     with LM.Tree.Source.DefineRefs[LDef] do
-      if (Kind = drDefine) and Active and SameText(Name, LName) then
+      if (Kind = drDefine) and Active and PasSameName(Name, LName) then
       begin
         ATarget := Default(TPasNavTarget);
         ATarget.UnitId := AMid;
@@ -4414,7 +4414,7 @@ begin
     ASeen.Add(LKey, True);
     LRow.Kind := AKind;
     LRow.TypeName := LM.Symbols[AStructSym].Name;
-    if SameText(AViaTypeName, LRow.TypeName) then
+    if PasSameName(AViaTypeName, LRow.TypeName) then
       LRow.ViaTypeName := ''
     else
       LRow.ViaTypeName := AViaTypeName;
@@ -6539,7 +6539,7 @@ begin
               LText := LM.Tree.Source.Files[LF].TokenText(LTok);
               if LText.StartsWith('&') then
                 LText := Copy(LText, 2, MaxInt);
-              if SameText(LText, AName) then
+              if PasSameName(LText, AName) then
               begin
                 LM.Tree.Source.Files[LF].OffsetToLineCol(
                   LM.Tree.Source.Files[LF].Tokens[LTok].Start, LLine, LCol);
@@ -6804,11 +6804,11 @@ begin
         // leaf (a namespace prefix resolved it) -> keep it bare, which
         // stays correct only while the prefix itself is unchanged;
         // otherwise the full name is the safe spelling.
-        if SameText(LWritten, LOldFull) then
+        if PasSameName(LWritten, LOldFull) then
           LText := ANewName
-        else if SameText(LWritten, LOldLeaf) then
+        else if PasSameName(LWritten, LOldLeaf) then
         begin
-          if SameText(Copy(LOldFull, 1, Length(LOldFull) - Length(LOldLeaf)),
+          if PasSameName(Copy(LOldFull, 1, Length(LOldFull) - Length(LOldLeaf)),
              Copy(ANewName, 1, Length(ANewName) - Length(LNewLeaf))) then
             LText := LNewLeaf
           else
@@ -6849,11 +6849,11 @@ begin
         // As the `uses` item it follows: a leaf stays a leaf while the
         // prefix is unchanged, else the item is written in full and so is
         // the qualifier (a dotted entry qualifies whole, 1.2.3).
-        if SameText(LWritten, LOldFull) then
+        if PasSameName(LWritten, LOldFull) then
           LText := ANewName
-        else if SameText(LWritten, LOldLeaf) then
+        else if PasSameName(LWritten, LOldLeaf) then
         begin
-          if SameText(Copy(LOldFull, 1, Length(LOldFull) - Length(LOldLeaf)),
+          if PasSameName(Copy(LOldFull, 1, Length(LOldFull) - Length(LOldLeaf)),
              Copy(ANewName, 1, Length(ANewName) - Length(LNewLeaf))) then
             LText := LNewLeaf
           else

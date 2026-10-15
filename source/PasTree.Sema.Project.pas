@@ -2513,7 +2513,7 @@ begin
      (Length(ADonor.FExtraDefines) <> Length(FExtraDefines)) then
     Exit(False);
   for LIdx := 0 to High(FExtraDefines) do
-    if not SameText(ADonor.FExtraDefines[LIdx], FExtraDefines[LIdx]) then
+    if not PasSameName(ADonor.FExtraDefines[LIdx], FExtraDefines[LIdx]) then
       Exit(False);
   // The rest of what decides a stream before its first token (audit B62):
   // the switch start state and -CC. The units' CONSOLE also follows the
@@ -2793,7 +2793,7 @@ begin
     function(const AName: string; const APos: TPasCondPos;
       out ADeclared: Boolean): Boolean
     begin
-      ADeclared := FSeedModel.FindLocal(FSeedScope, LowerCase(AName)) <> NIL_SYM;
+      ADeclared := FSeedModel.FindLocal(FSeedScope, PasFoldName(AName)) <> NIL_SYM;
       Result := ADeclared;
     end;
 end;
@@ -2832,7 +2832,7 @@ begin
       LOwnQualified: Boolean;
       LAnswer: TPasOwnAnswer;
     begin
-      LLower := LowerCase(AName);
+      LLower := PasFoldName(AName);
       LDot := LLower.LastIndexOf('.');
       if LDot >= 0 then
       begin
@@ -2858,7 +2858,7 @@ begin
            (FModels[AId].Resolve(FModels[AId].SystemScope, LLower) <> NIL_SYM));
       end;
       if not ADeclared and ((LDot < 0) or LOwnQualified or
-         SameText(LLower, FModels[AId].UnitNameLower)) then
+         PasSameName(LLower, FModels[AId].UnitNameLower)) then
       begin
         if AOwn <> nil then
           ADeclared := OwnDeclaredBefore(AOwn, LLower, APos)
@@ -2984,7 +2984,7 @@ begin
   if LIdx >= 0 then
   begin
     if (LM.UnitNameLower = '') or
-       not SameText(Copy(ANameLower, 1, LIdx), LM.UnitNameLower) then
+       not PasSameName(Copy(ANameLower, 1, LIdx), LM.UnitNameLower) then
       Exit;
     LMember := Copy(ANameLower, LIdx + 2, MaxInt);
     if LMember = '' then
@@ -3278,7 +3278,7 @@ function TPasSemaProject.OracleQualified(AId: Integer; const AName: string;
   out AMid, ASym: Integer): Boolean;
 begin
   if not AName.Contains('.') then
-    Exit(OracleResolve(AId, LowerCase(AName), AMid, ASym));
+    Exit(OracleResolve(AId, PasFoldName(AName), AMid, ASym));
   Result := VisibleQualified(AId, AName, AMid, ASym) and
     OracleReadable(AMid);
 end;
@@ -3312,8 +3312,8 @@ begin
   LDot := AName.LastIndexOf('.');
   if LDot < 0 then
     Exit;
-  LUnit := LowerCase(Copy(AName, 1, LDot));
-  LMember := LowerCase(Copy(AName, LDot + 2, MaxInt));
+  LUnit := PasFoldName(Copy(AName, 1, LDot));
+  LMember := PasFoldName(Copy(AName, LDot + 2, MaxInt));
   if (LUnit = '') or (LMember = '') then
     Exit;
   LUid := UnitNamedBy(AId, LUnit);
@@ -3386,7 +3386,7 @@ begin
   AGSym := NIL_SYM;
   if Pos('.', AName) > 0 then
     Exit(OracleQualified(AMid, AName, AGMid, AGSym));
-  LKey := LowerCase(AName);
+  LKey := PasFoldName(AName);
   LM := FModels[AMid];
   // The unit's own declarations: the implementation scope's parent chain
   // covers the interface, as in OracleResolve.
@@ -4884,7 +4884,7 @@ begin
   // actual, which lives in the REFERRING model. Checked before the builtin
   // table so a parameter named like one cannot be mistaken for it.
   for var LSIdx := 0 to High(ASubst) do
-    if ASubst[LSIdx].Name = LowerCase(LName) then
+    if ASubst[LSIdx].Name = PasFoldName(LName) then
       case ASubst[LSIdx].Kind of
         pskOpenRef:
           begin
@@ -4915,7 +4915,7 @@ begin
   // A type nested in the enclosing class or record wins over the unit's.
   if LM.Tree.Nodes[ATypeNode].Kind = nkIdent then
   begin
-    LRSym := OracleNestedTypeDef(AMid, ATypeNode, LowerCase(LName));
+    LRSym := OracleNestedTypeDef(AMid, ATypeNode, PasFoldName(LName));
     if LRSym <> NIL_NODE then
       Exit(OracleFieldLayout(AMid, LRSym, ADepth + 1, ASubst, ABytes, AAlign));
   end;
@@ -4927,7 +4927,7 @@ begin
   // declaration and falls through to the table, and so does a declaration
   // the walk cannot lay out.
   if (LM.Tree.Nodes[ATypeNode].Kind = nkIdent) and
-     OracleResolveFrom(AMid, ATypeNode, LowerCase(LName), LRMid, LRSym) and
+     OracleResolveFrom(AMid, ATypeNode, PasFoldName(LName), LRMid, LRSym) and
      (FModels[LRMid].Symbols[LRSym].DeclNode <> NIL_NODE) and
      (FModels[LRMid].Symbols[LRSym].Kind = skType) and
      OracleLayout(LRMid, LRSym, ADepth + 1, nil, ABytes, AAlign) then
@@ -5381,7 +5381,7 @@ begin
       // An instantiation named by text is a question of its own.
       if (AQuery = sqSizeOfType) and AName.Contains('<') then
         Exit(OracleInstanceSize(AId, AName, AValue.Num));
-      LLower := LowerCase(AName);
+      LLower := PasFoldName(AName);
       // A plain name at a placed directive: the unit's own declarations
       // answer by position, as dcc reads them (OwnSymbolAt) - the one above
       // the directive and in scope there, else the imports, never the unit's
@@ -6742,7 +6742,7 @@ begin
   LNameNode := FModels[AId].Tree.Nodes[0].FirstChild;
   if LNameNode = NIL_NODE then
     Exit;
-  LName := LowerCase(FModels[AId].Tree.DottedText(LNameNode));
+  LName := PasFoldName(FModels[AId].Tree.DottedText(LNameNode));
   if (LName <> '') and not FByUnitName.ContainsKey(LName) then
     FByUnitName.Add(LName, AId);
 end;
@@ -6760,11 +6760,11 @@ begin
   LName := FSM.UnitAlias(AName);
   if LName = '' then
     LName := AName;
-  if FByUnitName.TryGetValue(LowerCase(LName), Result) then
+  if FByUnitName.TryGetValue(PasFoldName(LName), Result) then
     Exit;
   for LNS in FNamespaces do
     if (LNS <> '') and
-       FByUnitName.TryGetValue(LowerCase(LNS + '.' + LName), Result) then
+       FByUnitName.TryGetValue(PasFoldName(LNS + '.' + LName), Result) then
       Exit;
   Result := -1;
 end;
@@ -6838,7 +6838,7 @@ begin
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
     if LUid >= 0 then
-      LModel.UsesByName.TryAdd(LowerCase(LModel.UsesList[LIdx].NameFull),
+      LModel.UsesByName.TryAdd(PasFoldName(LModel.UsesList[LIdx].NameFull),
         LUid);
   end;
 end;
@@ -7621,7 +7621,7 @@ begin
   // other one unambiguously. It is not in its own UsesList, so the loop below
   // can never find it; checked here, before the implicit units, since a unit
   // legitimately named System would mean itself too.
-  if SameText(LText, LM.UnitNameLower) then
+  if PasSameName(LText, LM.UnitNameLower) then
     Exit(AId);
   if SameText(LText, 'system') then
     Exit(EnsureSystemUnit);
@@ -7640,7 +7640,7 @@ begin
   if (Result < 0) and LText.StartsWith('system.', True) then
   begin
     LIdx := UsesNamed(LM, LText.Substring(7));
-    if (LIdx >= 0) and SameText(FModels[LIdx].UnitNameLower, LText) then
+    if (LIdx >= 0) and PasSameName(FModels[LIdx].UnitNameLower, LText) then
       Result := LIdx;
   end;
 end;
@@ -7653,13 +7653,13 @@ var
 begin
   if AM.UsesIndexed then
   begin
-    if not AM.UsesByName.TryGet(SemaKey(LowerCase(AText)), Result) then
+    if not AM.UsesByName.TryGet(SemaKey(PasFoldName(AText)), Result) then
       Result := -1;
     Exit;
   end;
   for LIdx := 0 to High(AM.UsesList) do
     if (AM.UsesList[LIdx].UnitId >= 0) and
-       SameText(AM.UsesList[LIdx].NameFull, AText) then
+       PasSameName(AM.UsesList[LIdx].NameFull, AText) then
       Exit(AM.UsesList[LIdx].UnitId);
   Result := -1;
 end;
@@ -20708,7 +20708,7 @@ var
       if FSM.ResolveUnit(AModel.UsesList[LI].NameFull,
            AModel.UsesList[LI].InPath, AFrom, LP) and
          LNewPaths.ContainsKey(LowerCase(TPath.GetFullPath(LP))) then
-        LNames.AddOrSetValue(LowerCase(AModel.UsesList[LI].NameFull), True);
+        LNames.AddOrSetValue(PasFoldName(AModel.UsesList[LI].NameFull), True);
   end;
 
 begin
@@ -20739,7 +20739,7 @@ begin
       // LoadedUnitByName answers a bare name through a namespace prefix too.
       LNames.AddOrSetValue(LName, True);
       for LNs in FNamespaces do
-        if (LNs <> '') and LName.StartsWith(LowerCase(LNs) + '.') then
+        if (LNs <> '') and LName.StartsWith(PasFoldName(LNs) + '.') then
           LNames.AddOrSetValue(Copy(LName, Length(LNs) + 2, MaxInt), True);
     end;
     AddEntryNames(ANew, FFiles[AId]);
@@ -20754,7 +20754,7 @@ begin
         Continue;
       for LU := 0 to High(FModels[LMid].UsesList) do
         if LNames.ContainsKey(
-             LowerCase(FModels[LMid].UsesList[LU].NameFull)) then
+             PasFoldName(FModels[LMid].UsesList[LU].NameFull)) then
         begin
           AWhy := Format('new-dependency-seen(%s uses %s)',
             [FModels[LMid].UnitNameLower, FModels[LMid].UsesList[LU].NameFull]);
@@ -21395,15 +21395,13 @@ begin
     end;
     if (LLen <= 0) or (LLen > High(ANamesByLen)) or (ANamesByLen[LLen] = nil) then
       Continue;
-    // The same ASCII fold NodeNameLower applies, character by character.
+    // The fold NodeNameLower applies (PasFoldChar), character by character.
     for LCand := 0 to High(ANamesByLen[LLen]) do
     begin
       LSame := True;
       for LIdx := 0 to LLen - 1 do
       begin
-        LCh := LText[LIdx];
-        if (LCh >= 'A') and (LCh <= 'Z') then
-          LCh := Char(Ord(LCh) + 32);
+        LCh := PasFoldChar(LText[LIdx]);
         if LCh <> ANamesByLen[LLen][LCand][LIdx + 1] then
         begin
           LSame := False;
@@ -21425,7 +21423,7 @@ class function TPasSemaProject.OracleNamesOf(
   begin
     // `System.RTLVersion131` asks about RTLVersion131; `SizeOf(TR.F)` about
     // both TR and F. Every segment is a name an edit could touch.
-    for LPart in LowerCase(AName).Split(['.']) do
+    for LPart in PasFoldName(AName).Split(['.']) do
       if LPart <> '' then
         ANames := ANames + [LPart];
   end;
@@ -21820,10 +21818,10 @@ var
     LSeen := TDictionary<string, Boolean>.Create;
     try
       for LUse in LOld.UsesList do
-        LOldPaths.AddOrSetValue(LowerCase(LUse.NameFull), LUse.InPath);
+        LOldPaths.AddOrSetValue(PasFoldName(LUse.NameFull), LUse.InPath);
       for LUse in LNew.UsesList do
       begin
-        LName := LowerCase(LUse.NameFull);
+        LName := PasFoldName(LUse.NameFull);
         LSeen.AddOrSetValue(LName, True);
         if LOldPaths.TryGetValue(LName, LOldPath) then
         begin
@@ -21839,7 +21837,7 @@ var
       end;
       for LUse in LOld.UsesList do
         if (LUse.InPath <> '') and
-           not LSeen.ContainsKey(LowerCase(LUse.NameFull)) then
+           not LSeen.ContainsKey(PasFoldName(LUse.NameFull)) then
           Exit(LUse.NameFull);
     finally
       LSeen.Free;

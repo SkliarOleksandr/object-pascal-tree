@@ -531,7 +531,7 @@ begin
       Create([doOwnsValues]);
   if FDirChecked = nil then
     FDirChecked := TDictionary<string, Integer>.Create;
-  LKey := LowerCase(ADir);
+  LKey := PasFoldName(ADir);
   if FDirIndexes.TryGetValue(LKey, Result) then
   begin
     // Listed by an earlier analysis: its stamp is checked once per run, on
@@ -571,7 +571,7 @@ begin
   try
     if (ADir <> '') and TDirectory.Exists(ADir) then
       for LFile in TDirectory.GetFiles(ADir, '*.pas') do
-        Result.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+        Result.TryAdd(PasFoldName(TPath.GetFileName(LFile)), LFile);
   except
     Result.Clear;
   end;
@@ -588,7 +588,7 @@ procedure TPasSourceManager.AddUnitAlias(const AAlias, AReal: string);
 begin
   if FAliases = nil then
     FAliases := TDictionary<string, string>.Create;
-  FAliases.AddOrSetValue(LowerCase(AAlias), AReal);
+  FAliases.AddOrSetValue(PasFoldName(AAlias), AReal);
   ForgetUnitResolution;
 end;
 
@@ -598,7 +598,7 @@ begin
     Exit;
   if FPinned = nil then
     FPinned := TDictionary<string, string>.Create;
-  FPinned.TryAdd(LowerCase(AUnitName), TPath.GetFullPath(APath));
+  FPinned.TryAdd(PasFoldName(AUnitName), TPath.GetFullPath(APath));
 end;
 
 // An in-path's pin (ResolveUnit step 1): PinUnit's first-wins rule, and the
@@ -611,7 +611,7 @@ begin
     Exit;
   if FPinned = nil then
     FPinned := TDictionary<string, string>.Create;
-  LKey := LowerCase(AUnitName);
+  LKey := PasFoldName(AUnitName);
   if FPinned.TryAdd(LKey, TPath.GetFullPath(APath)) then
   begin
     if FInPathPins = nil then
@@ -707,7 +707,7 @@ begin
   // The project directory is a search path in all but name (BuildUnitMemo
   // probes it first), so it decides resolution exactly as the paths do.
   if AWithProjectDir then
-    Result := LowerCase(FProjectDir) + '|'
+    Result := PasFoldName(FProjectDir) + '|'
   else
     Result := '|';
   for LItem in FSearchPaths do
@@ -736,7 +736,7 @@ begin
     FBuffers := TDictionary<string, TBufferEntry>.Create;
   LEntry.Text := AText;
   LEntry.Version := AVersion;
-  FBuffers.AddOrSetValue(LowerCase(TPath.GetFullPath(APath)), LEntry);
+  FBuffers.AddOrSetValue(PasFoldName(TPath.GetFullPath(APath)), LEntry);
   // A buffer can be an include no file stands behind yet: the memo's
   // misses may be hits now (audit B4-39).
   TMonitor.Enter(FIncludeLock);
@@ -757,7 +757,7 @@ var
   LEntry: TBufferEntry;
 begin
   if (FBuffers <> nil) and
-     FBuffers.TryGetValue(LowerCase(TPath.GetFullPath(APath)), LEntry) then
+     FBuffers.TryGetValue(PasFoldName(TPath.GetFullPath(APath)), LEntry) then
     Result := LEntry.Version
   else
     Result := -1;
@@ -789,7 +789,7 @@ begin
   if (FBuffers = nil) or (APath = '') then
     Exit;
   try
-    Result := FBuffers.ContainsKey(LowerCase(TPath.GetFullPath(APath)));
+    Result := FBuffers.ContainsKey(PasFoldName(TPath.GetFullPath(APath)));
   except
     // A path GetFullPath rejects (an `in` string with characters no file
     // name may hold) names no buffer either.
@@ -822,10 +822,10 @@ begin
   FUnitIndex := TDictionary<string, string>.Create;
   for LFile in TDirectory.GetFiles(ARoot, '*.*', TSearchOption.soAllDirectories) do
   begin
-    LExt := LowerCase(TPath.GetExtension(LFile));
+    LExt := PasFoldName(TPath.GetExtension(LFile));
     if (LExt = '.pas') or (LExt = '.dpr') then
     begin
-      LKey := LowerCase(TPath.GetFileName(LFile));
+      LKey := PasFoldName(TPath.GetFileName(LFile));
       if not FUnitIndex.ContainsKey(LKey) then
         FUnitIndex.Add(LKey, LFile);
     end;
@@ -886,9 +886,9 @@ begin
     for LFile in FPathListings[LIdx] do
       if HasExt(LFile, '.dcu') then
         FDcuIndex.TryAdd(
-          LowerCase(TPath.GetFileNameWithoutExtension(LFile)), LFile)
+          PasFoldName(TPath.GetFileNameWithoutExtension(LFile)), LFile)
       else
-        FSearchIndex.TryAdd(LowerCase(TPath.GetFileName(LFile)), LFile);
+        FSearchIndex.TryAdd(PasFoldName(TPath.GetFileName(LFile)), LFile);
 end;
 
 // The search paths' and the project directory's stamps against the ones the
@@ -990,7 +990,7 @@ function TPasSourceManager.UnitAlias(const AName: string): string;
 begin
   Result := '';
   if FAliases <> nil then
-    FAliases.TryGetValue(LowerCase(AName), Result);
+    FAliases.TryGetValue(PasFoldName(AName), Result);
 end;
 
 // The .dcu of a unit name, exactly as spelled: no leaf tolerance and no
@@ -1000,7 +1000,7 @@ function TPasSourceManager.FindDcuFile(const AUnitName: string;
   out AResolved: string): Boolean;
 begin
   EnsureSearchIndex;
-  Result := FDcuIndex.TryGetValue(LowerCase(AUnitName), AResolved);
+  Result := FDcuIndex.TryGetValue(PasFoldName(AUnitName), AResolved);
 end;
 
 class function TPasSourceManager.IsDcuPath(const APath: string): Boolean;
@@ -1014,7 +1014,7 @@ begin
   TMonitor.Enter(FDcuLock);
   try
     if FDcuFailures <> nil then
-      FDcuFailures.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result);
+      FDcuFailures.TryGetValue(PasFoldName(TPath.GetFullPath(APath)), Result);
   finally
     TMonitor.Exit(FDcuLock);
   end;
@@ -1047,7 +1047,7 @@ var
   LKey, LMsg, LStamp, LOld: string;
   LUnit: TPasDcuUnit;
 begin
-  LKey := LowerCase(TPath.GetFullPath(APath));
+  LKey := PasFoldName(TPath.GetFullPath(APath));
   LStamp := FileStamp(APath);
   TMonitor.Enter(FDcuLock);
   try
@@ -1136,7 +1136,7 @@ begin
     LIdx := 0;
     if LProject <> nil then
       for LPath in LProject.Values do
-        if not FSearchIndex.ContainsKey(LowerCase(TPath.GetFileName(LPath))) then
+        if not FSearchIndex.ContainsKey(PasFoldName(TPath.GetFileName(LPath))) then
         begin
           FSearchNames[LIdx] := TPath.GetFileNameWithoutExtension(LPath);
           Inc(LIdx);
@@ -1150,7 +1150,7 @@ begin
     // A unit that exists only compiled is still a unit a `uses` can name.
     for LPath in FDcuIndex.Values do
       if not FSearchIndex.ContainsKey(
-           LowerCase(TPath.GetFileNameWithoutExtension(LPath)) + '.pas') then
+           PasFoldName(TPath.GetFileNameWithoutExtension(LPath)) + '.pas') then
       begin
         FSearchNames[LIdx] := TPath.GetFileNameWithoutExtension(LPath);
         Inc(LIdx);
@@ -1241,7 +1241,7 @@ begin
   // chain aliases).
   LName := AKey;
   if (FAliases <> nil) and FAliases.TryGetValue(AKey, LCand) then
-    LName := LowerCase(LCand);
+    LName := PasFoldName(LCand);
   LDot := LastDelimiter('.', LName);
   if LDot > 0 then
     LLeaf := Copy(LName, LDot + 1, MaxInt)
@@ -1265,7 +1265,7 @@ begin
   // Tried only AFTER the as-spelled lookup above, so a name that names a real
   // file (Vcl.Forms) can never be captured by a prefix.
   for LNs in FNamespaces do
-    if (LNs <> '') and Probe(LowerCase(LNs) + '.' + LName) then
+    if (LNs <> '') and Probe(PasFoldName(LNs) + '.' + LName) then
       Exit(LMemo);
 
   // 5. Leaf-name tolerance for a dotted name (System.SysUtils -> SysUtils.pas
@@ -1307,7 +1307,7 @@ var
   LFrom: TDictionary<string, string>;
   LLast: Integer;
 begin
-  LKey := LowerCase(AUnitName);
+  LKey := PasFoldName(AUnitName);
 
   // 0. A unit already LOCATED for the project (see FPinned) - the program's
   // in-path or the project file's unit list - beats every lookup below, the
@@ -1398,7 +1398,7 @@ begin
   for LFile in TDirectory.GetFiles(ARoot, '*.inc',
     TSearchOption.soAllDirectories) do
   begin
-    LKey := LowerCase(TPath.GetFileName(LFile));
+    LKey := PasFoldName(TPath.GetFileName(LFile));
     if not FIncludeIndex.ContainsKey(LKey) then
       FIncludeIndex.Add(LKey, LFile);
   end;
@@ -1427,8 +1427,8 @@ end;
     rebuild was ever due to correct it. That is not a host bug that can be
     worked around host-side: a host would have to re-decode every file the
     analysis reads.
-  - What "matching dcc" buys is smaller than it looks. Identifiers are ASCII, so
-    the semantic model is unaffected either way; the difference is confined to
+  - What "matching dcc" buys is smaller than it looks. Identifiers are almost
+    always ASCII, so the semantic model rarely differs; the difference is confined to
     the CONTENTS of string literals and comments - where dcc, reading UTF-8
     bytes as ANSI, produces mojibake. Reproducing that faithfully has no value
     to a caller, while the position skew costs correctness everywhere.
@@ -1607,7 +1607,7 @@ begin
   try
     if FRecovered = nil then
       FRecovered := TDictionary<string, string>.Create;
-    FRecovered.AddOrSetValue(LowerCase(TPath.GetFullPath(APath)), AHow);
+    FRecovered.AddOrSetValue(PasFoldName(TPath.GetFullPath(APath)), AHow);
   finally
     TMonitor.Exit(FRecoveredLock);
   end;
@@ -1620,7 +1620,7 @@ begin
     Exit;
   TMonitor.Enter(FRecoveredLock);
   try
-    FRecovered.TryGetValue(LowerCase(TPath.GetFullPath(APath)), Result);
+    FRecovered.TryGetValue(PasFoldName(TPath.GetFullPath(APath)), Result);
   finally
     TMonitor.Exit(FRecoveredLock);
   end;
@@ -1662,7 +1662,7 @@ begin
     end);
   for LIdx := 0 to High(APaths) do
     if LBytes[LIdx] <> nil then
-      FContentCache.AddOrSetValue(LowerCase(TPath.GetFullPath(APaths[LIdx])),
+      FContentCache.AddOrSetValue(PasFoldName(TPath.GetFullPath(APaths[LIdx])),
         LBytes[LIdx]);
 end;
 
@@ -1672,7 +1672,7 @@ var
   LRaw: TBytes;
   LEntry: TBufferEntry;
 begin
-  LKey := LowerCase(TPath.GetFullPath(APath));
+  LKey := PasFoldName(TPath.GetFullPath(APath));
   if FBuffers <> nil then
   begin
     if FBuffers.TryGetValue(LKey, LEntry) then
@@ -1692,7 +1692,7 @@ function TPasSourceManager.IncludeStream(const APath: string): TPasTokenStream;
 var
   LKey: string;
 begin
-  LKey := LowerCase(TPath.GetFullPath(APath));
+  LKey := PasFoldName(TPath.GetFullPath(APath));
   // An unsaved-buffer override changes per analysis - never share it.
   if (FBuffers <> nil) and FBuffers.ContainsKey(LKey) then
     Exit(TPasLexer.Tokenize(LoadText(APath)));
@@ -1819,7 +1819,7 @@ var
 
     // 5. Basename index (corpus fallback).
     if (FIncludeIndex <> nil) and
-       FIncludeIndex.TryGetValue(LowerCase(TPath.GetFileName(LName)),
+       FIncludeIndex.TryGetValue(PasFoldName(TPath.GetFileName(LName)),
          LCandidate) then
     begin
       AResolved := LCandidate;
