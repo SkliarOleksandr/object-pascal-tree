@@ -53,7 +53,8 @@ type
                               // frequently True (`{$IF not Declared(X)}` is
                               // the flagship case) - "treated as False" was
                               // never the whole story. Informational.
-    ppUnsupportedInsertion,   // {$I %VAR%}
+    ppUnsupportedInsertion,   // no longer reported: dcc reads {$I %VAR%}
+                              // as a file name (audit B63)
     ppPopWithoutPush,
     ppCrossIncludeConditional // an include's $ELSE/$ELSEIF/$ENDIF/$IFEND
                               // on a conditional its includer opened
@@ -1768,9 +1769,9 @@ begin
       if Length(LArg) > 1 then
         ApplySwitches('I' + LArg);
     end
-    else if (LArg <> '') and (LArg[1] = '%') then
-      Diag(ppUnsupportedInsertion, AFileId, AToken.Start, AToken.Len, LArg)
     else
+      // %DATE% too: dcc64 37.0 has no insertion form, {$I %DATE%} is
+      // F1026 '%DATE%.pas' (local/probe-b63 misc PI) - a file name like any.
       HandleInclude(AFileId, AToken, LArg);
   end
   else if LKind = pdPushopt then

@@ -335,7 +335,9 @@ type
       AUnitFile - the unit (or program) being compiled, whichever file names
       the include - then the project directory, then the search paths; then,
       as a tolerance where dcc finds nothing, beside AIncludingFile; then the
-      index. See ResolveIncludeIn. }
+      index. The name is PasIncludeFileName's (`.pas` added to one without an
+      extension), the bare name a tolerance after that; an unsaved buffer
+      counts as a file. See ResolveIncludeIn. }
     function ResolveInclude(const AUnitFile, AIncludingFile, AName: string;
       out AResolved: string): Boolean;
     { Indexes every *.pas/*.dpr under ARoot by basename, for unit-name
@@ -385,6 +387,13 @@ type
       out AHow: string): string; static;
     class function LoadFileTolerant(const APath: string): string; static;
   end;
+
+{ The file name dcc looks for when an include directive names AArg: trimmed,
+  its quotes dropped, and `.pas` appended when it has no extension (dcc64
+  37.0: `$I inc2` reads inc2.pas with a bare inc2 beside it, `$I inc3` with
+  only inc3.inc is F1026 'inc3.pas', the quoted form and `-I` alike; spec
+  1.3.3). The name an F1026 for it quotes. }
+function PasIncludeFileName(const AArg: string): string;
 
 implementation
 
@@ -728,6 +737,14 @@ begin
   LEntry.Text := AText;
   LEntry.Version := AVersion;
   FBuffers.AddOrSetValue(LowerCase(TPath.GetFullPath(APath)), LEntry);
+  // A buffer can be an include no file stands behind yet: the memo's
+  // misses may be hits now (audit B4-39).
+  TMonitor.Enter(FIncludeLock);
+  try
+    FreeAndNil(FIncludeMemo);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
 end;
 
 procedure TPasSourceManager.ClearBuffers;
@@ -1761,65 +1778,84 @@ end;
 // current directory (an IDE build runs in it; the .dpr's own place after -I
 // is then the same directory). Beside the naming include comes last, a
 // tolerance only: it finds a file where dcc says F1026, never another file
-// than dcc's.
+// than dcc's. The name is dcc's (PasIncludeFileName: `.pas` added to one with
+// no extension); the bare name as written is a last tolerance after the whole
+// sweep missed - again only where dcc says F1026 (audit E4-02 = E1-12). A
+// file is one on disk or a host's unsaved buffer (SourceExists, as every unit
+// gate asks; audit B4-39).
 function TPasSourceManager.ResolveIncludeIn(const AUnitFile, AIncludingFile,
   AName: string; out AResolved: string): Boolean;
 var
-  LName, LCandidate, LDir, LUnitDir, LIncDir: string;
+  LName, LBare: string;
 
   function TryDir(const ADir: string): Boolean;
-  var
-    LPath: string;
   begin
-    Result := False;
-    if not PathTextUsable(ADir) then
+    Result := TryFile(ADir, LName, AResolved);
+  end;
+
+  function Sweep: Boolean;
+  var
+    LCandidate, LDir, LUnitDir, LIncDir: string;
+  begin
+    Result := True;
+    // 1. Beside the unit.
+    LUnitDir := TPath.GetDirectoryName(AUnitFile);
+    if TryDir(LUnitDir) then
       Exit;
-    LPath := TPath.Combine(ADir, LName);
-    if TFile.Exists(LPath) then
+
+    // 2. The project directory (dcc's current directory).
+    if TryDir(FProjectDir) then
+      Exit;
+
+    // 3. Search paths.
+    for LDir in FSearchPaths do
+      if TryDir(LDir) then
+        Exit;
+
+    // 4. Beside the include that names it - where dcc finds nothing.
+    LIncDir := TPath.GetDirectoryName(AIncludingFile);
+    if not SameText(LIncDir, LUnitDir) and TryDir(LIncDir) then
+      Exit;
+
+    // 5. Basename index (corpus fallback).
+    if (FIncludeIndex <> nil) and
+       FIncludeIndex.TryGetValue(LowerCase(TPath.GetFileName(LName)),
+         LCandidate) then
     begin
-      AResolved := TPath.GetFullPath(LPath);
-      Result := True;
+      AResolved := LCandidate;
+      Exit;
     end;
+    AResolved := '';
+    Result := False;
   end;
 
 begin
   AResolved := '';
-  LName := Trim(AName);
-  if (Length(LName) >= 2) and (LName[1] = '''') and
-     (LName[Length(LName)] = '''') then
-    LName := Copy(LName, 2, Length(LName) - 2);
+  LBare := PasIncludeFileName(AName);
+  LName := LBare;
   if not PathTextUsable(LName) then
     Exit(False);   // dcc says F1026 for a name no file can have
-
-  // 1. Beside the unit.
-  LUnitDir := TPath.GetDirectoryName(AUnitFile);
-  if TryDir(LUnitDir) then
+  if Sweep then
     Exit(True);
+  LBare := Trim(AName);
+  if (Length(LBare) >= 2) and (LBare[1] = '''') and
+     (LBare[Length(LBare)] = '''') then
+    LBare := Copy(LBare, 2, Length(LBare) - 2);
+  if SameText(LBare, LName) then
+    Exit(False);
+  LName := LBare;
+  Result := Sweep;
+end;
 
-  // 2. The project directory (dcc's current directory).
-  if TryDir(FProjectDir) then
-    Exit(True);
-
-  // 3. Search paths.
-  for LDir in FSearchPaths do
-    if TryDir(LDir) then
-      Exit(True);
-
-  // 4. Beside the include that names it - where dcc finds nothing.
-  LIncDir := TPath.GetDirectoryName(AIncludingFile);
-  if not SameText(LIncDir, LUnitDir) and TryDir(LIncDir) then
-    Exit(True);
-
-  // 5. Basename index (corpus fallback).
-  if (FIncludeIndex <> nil) and
-     FIncludeIndex.TryGetValue(LowerCase(TPath.GetFileName(LName)), LCandidate)
-  then
-  begin
-    AResolved := LCandidate;
-    Exit(True);
-  end;
-
-  Result := False;
+function PasIncludeFileName(const AArg: string): string;
+begin
+  Result := Trim(AArg);
+  if (Length(Result) >= 2) and (Result[1] = '''') and
+     (Result[Length(Result)] = '''') then
+    Result := Copy(Result, 2, Length(Result) - 2);
+  if (Result <> '') and PathTextUsable(Result) and
+     (TPath.GetExtension(Result) = '') then
+    Result := Result + '.pas';
 end;
 
 end.

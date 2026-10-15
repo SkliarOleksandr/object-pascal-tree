@@ -4894,6 +4894,86 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// What happens around an `$I` (audit B63: E2-14, E4-02 = E1-12, B4-39,
+// B2-12). dcc64 37.0, local/probe-b63: a missing include is F1026 and the
+// names it would have declared are not the defect; a name with no extension
+// is read as name.pas, beside a bare `name` too; the preprocessor's other
+// rows in dcc's words; an include that is only a host's buffer is found;
+// the text after the final `end.` is ignored.
+procedure TestIncludeRows;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+
+  function Unit_(const AName: string): TPasSemaModel;
+  begin
+    Result := ModelByName(AName);
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_include_rows');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrP.dpr'),
+    'program IrP;'#10'uses IrMiss, IrExt, IrBuf, IrEnd, IrDir;'#10 +
+    'begin'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrMiss.pas'),
+    'unit IrMiss;'#10'interface'#10'{$I IrNoSuch.inc}'#10 +
+    'const C1 = FromInc;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrIncA.pas'), 'const IncAPas = 1;'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrIncA'), 'const IncABare = 1;'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrIncB'), 'const IncBBare = 1;'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrExt.pas'),
+    'unit IrExt;'#10'interface'#10'{$I IrIncA}'#10'{$I ''IrIncB''}'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrBuf.pas'),
+    'unit IrBuf;'#10'interface'#10'{$I IrNew.inc}'#10 +
+    'const C2 = FromBuf;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrEnd.pas'),
+    'unit IrEnd;'#10'interface'#10'implementation'#10'end.'#10 +
+    'Change note: don''t touch'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'IrDir.pas'),
+    'unit IrDir;'#10'interface'#10'{$ENDIF}'#10'{$POPOPT}'#10 +
+    'implementation'#10'{$IFDEF NEVERDEF}'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.SetBuffer(TPath.Combine(LDir, 'IrNew.inc'), 'const FromBuf = 1;');
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'IrP.dpr'));
+    LM := Unit_('irmiss');
+    Ok('include rows: a missing include is F1026, not E2003 after it',
+      (LM <> nil) and (DiagCount(LM, 'F1026') = 1) and
+      DiagHasText(LM, 'F1026', '''IrNoSuch.inc''') and
+      (DiagCount(LM, 'E2003') = 0));
+    LM := Unit_('irext');
+    Ok('include rows: a name without an extension reads name.pas',
+      (LM <> nil) and (SymCountOf(LM, 'incapas', skConst) = 1) and
+      (SymCountOf(LM, 'incabare', skConst) = 0));
+    Ok('include rows: ...a bare file only where dcc finds none',
+      (LM <> nil) and (SymCountOf(LM, 'incbbare', skConst) = 1));
+    LM := Unit_('irbuf');
+    Ok('include rows: an unsaved include buffer is found',
+      (LM <> nil) and (DiagCount(LM, 'F1026') = 0) and
+      (DiagCount(LM, 'E2003') = 0));
+    LM := Unit_('irend');
+    Ok('include rows: the text after the final end. is not lexed for rows',
+      (LM <> nil) and (DiagCount(LM, 'E2052') = 0));
+    LM := Unit_('irdir');
+    Ok('include rows: an $ENDIF with nothing open is E1030',
+      (LM <> nil) and DiagHasText(LM, 'E1030', '''$ENDIF'''));
+    Ok('include rows: $POPOPT without $PUSHOPT is W1078',
+      (LM <> nil) and (DiagCount(LM, 'W1078') = 1));
+    Ok('include rows: an unterminated conditional is E2280',
+      (LM <> nil) and (DiagCount(LM, 'E2280') = 1));
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // Depth that is not the source's nesting, through the project's passes
 // (audit A1-01, A1-07): 10,000-term operator chains - a constant typed from
 // its operands (UntypedInitTypeX), an inline var inferred from them (the
@@ -5221,8 +5301,10 @@ begin
       Pos('E2029@7:', LSigA) > 0);
     Ok('donor safety: the baseline reports the lexer''s row (' + LSigA + ')',
       Pos('@8:', LSigA) > 0);
+    // F1026 since B63, the E2003 after it gated like an unresolved import.
     Ok('donor safety: the baseline misses the absent include',
-      Pos('E2003@', DsfSig(LP1, 'dsfinc')) > 0);
+      (Pos('F1026@', DsfSig(LP1, 'dsfinc')) > 0) and
+      (Pos('E2003@', DsfSig(LP1, 'dsfinc')) = 0));
     Ok('donor safety: the baseline reads the search path''s include',
       Pos('E2003@', DsfSig(LP1, 'dsfshade')) > 0);
 
@@ -13898,6 +13980,7 @@ begin
   TestLayoutOracle;
   TestDeclaredPassReach;
   TestProjectSwitchState;
+  TestIncludeRows;
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;

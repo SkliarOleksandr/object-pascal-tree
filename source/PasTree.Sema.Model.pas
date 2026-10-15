@@ -518,7 +518,7 @@ type
       the member walk. Probed by key, so a bare identifier costs no string. }
     UsesByName: TSemaKeyIndex;
     UsesIndexed: Boolean;
-    AllUsesResolved: Boolean;       // gates E2003 (set by the project driver)
+    AllUsesResolved: Boolean;       // gates E2003 (set by the project driver): every import and every include loaded
     UnitNameLower: string;          // this unit's own name, lower-cased
     // nkWithStmt nodes whose target member set is NOT fully known intra-unit:
     // the target's type could not be resolved at all, OR it resolved to a
@@ -844,6 +844,8 @@ type
       and nothing once that was fixed. dcc's nearest code: E2029 is its
       "X expected but Y found". }
     procedure AddParseDiags(const ADiags: TArray<TPasParseDiag>);
+    function DirectiveWord(const ADiag: TPasPPDiagnostic): string;
+    function AfterFinalEnd: Integer;
     { What a load path put on AFrom after its Phase 1, for a model built
       again over AFrom's own tree: the parser's and the lexer's rows (through
       AddParseDiags, from AFrom.ParseDiags) and the `$IF` oracle's verdict on
@@ -893,7 +895,8 @@ function SemaKeyText(const AKey: TSemaKey): string;
 implementation
 
 uses
-  System.SysUtils;
+  System.SysUtils,
+  PasTree.SourceManager;   // PasIncludeFileName, an F1026's file name
 
 const
   // Names up to this many: an exact-length array scanned linearly. Measured
@@ -2831,9 +2834,10 @@ end;
 
 procedure TPasSemaModel.AddParseDiags(const ADiags: TArray<TPasParseDiag>);
 var
-  LIdx, LTok, LLine, LCol, LFile: Integer;
+  LIdx, LTok, LLine, LCol, LFile, LAfterEnd: Integer;
   LCode, LMsg: string;
   LVis: TPasVisibleToken;
+  LDiag: TPasPPDiagnostic;
 begin
   ParseDiags := ParseDiags + ADiags;   // for a parse-donor hit - see ParseDiags
   for LIdx := 0 to High(ADiags) do
@@ -2853,6 +2857,7 @@ begin
   // but the parser's `")" expected` one token later. Same entry point as the
   // parser's rows so every parse path - first, incremental, rehydrated -
   // carries them alike.
+  LAfterEnd := AfterFinalEnd;
   for LFile := 0 to High(Tree.Source.Files) do
     for LIdx := 0 to High(Tree.Source.Files[LFile].Diagnostics) do
     begin
@@ -2863,12 +2868,108 @@ begin
       if Tree.Source.IsSkipped(LFile,
            Tree.Source.Files[LFile].Diagnostics[LIdx].Start) then
         Continue;
+      // Nor from the text after the final `end.`, which dcc ignores (W1011):
+      // a change note there with an apostrophe was a false E2052 (audit
+      // B2-12).
+      if (LFile = 0) and (LAfterEnd >= 0) and
+         (Tree.Source.Files[0].Diagnostics[LIdx].Start >= LAfterEnd) then
+        Continue;
       Tree.Source.Files[LFile].OffsetToLineCol(
         Tree.Source.Files[LFile].Diagnostics[LIdx].Start, LLine, LCol);
       LexDiagText(Tree.Source.Files[LFile].Diagnostics[LIdx],
         Tree.Source.Files[LFile], LLine, LCode, LMsg);
       AddDiag(MakeDiag(LCode, LMsg, NIL_NODE, LFile, LLine, LCol));
     end;
+  // The PREPROCESSOR's rows a compiler reports, in dcc's words (dcc64 37.0,
+  // local/probe-b63 misc): until now only the guessed-$IF pair reached a
+  // model (InjectGuessedIfDiags, opt-in), so a missing include was silent
+  // and the E2003s after it looked like the defect (audit E2-14). The
+  // guessed-$IF pair stays the project's; an include nested too deep and a
+  // conditional crossing an include boundary are PasTree's own readings, not
+  // a dcc row each.
+  for LIdx := 0 to High(Tree.Source.Diagnostics) do
+  begin
+    LDiag := Tree.Source.Diagnostics[LIdx];
+    if (LDiag.FileId < 0) or (LDiag.FileId > High(Tree.Source.Files)) then
+      Continue;
+    case LDiag.Code of
+      ppIncludeNotFound:
+        begin
+          LCode := 'F1026';
+          LMsg := Format('F1026 File not found: ''%s''',
+            [PasIncludeFileName(LDiag.Detail)]);
+        end;
+      ppIncludeCycle:
+        begin
+          LCode := 'E2245';
+          LMsg := 'E2245 Recursive include file ' + LDiag.Detail;
+        end;
+      ppUnbalancedElse, ppUnbalancedEndif:
+        begin
+          LCode := 'E1030';
+          LMsg := Format('E1030 Invalid compiler directive: ''%s''',
+            [DirectiveWord(LDiag)]);
+        end;
+      ppUnterminatedConditional:
+        begin
+          LCode := 'E2280';
+          LMsg := 'E2280 Unterminated conditional directive';
+        end;
+      ppPopWithoutPush:
+        begin
+          LCode := 'W1078';
+          LMsg := Format('W1078 {$POPOPT} with no matching {$PUSHOPT} in %s',
+            [Tree.Source.FileNames[LDiag.FileId]]);
+        end;
+    else
+      Continue;
+    end;
+    Tree.Source.Files[LDiag.FileId].OffsetToLineCol(LDiag.Start, LLine, LCol);
+    AddDiag(MakeDiag(LCode, LMsg, NIL_NODE, LDiag.FileId, LLine, LCol));
+  end;
+end;
+
+// The directive word of a preprocessor row's token - `$ENDIF` for
+// `{$ENDIF}` or `(*$ENDIF*)` - the way dcc's E1030 quotes it.
+function TPasSemaModel.DirectiveWord(const ADiag: TPasPPDiagnostic): string;
+var
+  LSrc: string;
+  LIdx, LEnd: Integer;
+begin
+  LSrc := Tree.Source.Files[ADiag.FileId].Source;
+  LIdx := ADiag.Start + 1;   // 1-based
+  while (LIdx <= Length(LSrc)) and CharInSet(LSrc[LIdx], ['{', '(', '*']) do
+    Inc(LIdx);
+  LEnd := LIdx;
+  if (LEnd <= Length(LSrc)) and (LSrc[LEnd] = '$') then
+    Inc(LEnd);
+  while (LEnd <= Length(LSrc)) and
+        CharInSet(LSrc[LEnd], ['A'..'Z', 'a'..'z']) do
+    Inc(LEnd);
+  Result := UpperCase(Copy(LSrc, LIdx, LEnd - LIdx));
+end;
+
+// Offset in the main file just past the final `end.` - the root ends on the
+// token after that `.` (docs/tree-contract.md: the end sentinel, or the text
+// dcc ignores) - or -1 when the parse never reached it.
+function TPasSemaModel.AfterFinalEnd: Integer;
+var
+  LLast: Integer;
+  LVis: TPasVisibleToken;
+  LTok: TPasToken;
+begin
+  Result := -1;
+  if (Length(Tree.Nodes) = 0) or (Length(Tree.Source.Visible) = 0) then
+    Exit;
+  LLast := Tree.Nodes[0].LastToken - 1;   // the `.`
+  if (LLast < 1) or (LLast > High(Tree.Source.Visible)) then
+    Exit;
+  LVis := Tree.Source.Visible[LLast];
+  if (LVis.FileId <> 0) or not Tree.Source.VisibleTextEquals(LLast, '.') or
+     not Tree.Source.VisibleTextEquals(LLast - 1, 'end') then
+    Exit;
+  LTok := Tree.Source.Files[0].Tokens[LVis.TokenIndex];
+  Result := LTok.Start + LTok.Len;
 end;
 
 procedure TPasSemaModel.TrimDiags;

@@ -79,20 +79,33 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   reads and msbuild's `--no-config` does not, is not read.
 
 ### 1.3.3 Include files
-- the `{$I %ENV%}` / `{$I %DATE%}` insertion forms are
-  diagnosed (ppUnsupportedInsertion) but no value is injected.
+- dcc 37.0 has no insertion form: `{$I %DATE%}` names the file
+  `%DATE%.pas`, read as such (F1026 when it is not there).
 - an include is looked up as dcc 37.0 does (beside the unit, the project
   directory, the search paths) and then, where dcc finds nothing (F1026),
   beside the include file that names it - a tolerance: it never picks
-  another file than dcc's, but accepts a layout dcc refuses. The project
-  directory stands for dcc's current directory, and the search paths for
-  its `-I` (the IDE passes one path to both `-U` and `-I`); a project that
-  sets a separate include path is read with its unit path.
+  another file than dcc's, but accepts a layout dcc refuses. A name with no
+  extension is dcc's `name.pas`; the bare `name` is a further tolerance,
+  after that whole sweep missed. A host's unsaved buffer is a file. The
+  project directory stands for dcc's current directory, and the search
+  paths for its `-I` (the IDE passes one path to both `-U` and `-I`); a
+  project that sets a separate include path is read with its unit path.
+- a missing or recursive include is reported in dcc's words (F1026,
+  E2245), and like an unresolved import it gates the unit's E2003s - its
+  declarations are missing, not the names after it. dcc stops at the
+  F1026; the rest of the unit is still analyzed here. The preprocessor's
+  other rows are dcc's too: E1030 for an `{$ELSE}`/`{$ENDIF}` with
+  nothing open, E2280 for an unterminated conditional, W1078 for a lone
+  `{$POPOPT}`. An include nested deeper than PasTree's limit gates the
+  E2003s but has no row of its own.
+- the text after the final `end.` produces no lexer row; dcc's W1011
+  for it is not reported.
 - a conditional that crosses an include boundary - opened in an include
   and closed by its includer, or an include's `$ELSE`/`$ELSEIF`/`$ENDIF`
   on the includer's conditional - is refused by dcc 37.0 (E2280, or a
-  garbled includer) and diagnosed here (ppUnterminatedConditional at the
-  include, ppCrossIncludeConditional), but read as one stack: the tokens
+  garbled includer) and diagnosed in the preprocessor's rows
+  (ppUnterminatedConditional at the include, ppCrossIncludeConditional;
+  only the first reaches a model, as E2280), but read as one stack: the tokens
   follow what the author evidently meant, not dcc's recovery.
 
 ### 1.3.5 Compiler-version symbols

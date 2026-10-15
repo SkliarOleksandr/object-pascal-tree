@@ -6775,6 +6775,13 @@ var
 begin
   LModel := FModels[AId];
   LModel.AllUsesResolved := True;
+  // An include that did not load (not found, recursive, too deep) took its
+  // declarations with it, exactly like an unresolved import: its F1026 /
+  // E2245 is the defect, the undeclared names after it are not (audit
+  // E2-14).
+  for LIdx := 0 to High(LModel.Tree.Source.IncludeRefs) do
+    if LModel.Tree.Source.IncludeRefs[LIdx].IncludedFileId < 0 then
+      LModel.AllUsesResolved := False;
   for LIdx := 0 to High(LModel.UsesList) do
   begin
     LPath := '';
