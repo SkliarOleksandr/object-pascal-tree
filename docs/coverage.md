@@ -40,6 +40,33 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   inherited member, which only later passes decide, so the verdict is not
   given. dcc reports those too.
 
+### 1.3.1 Switch & parameter directives
+- every switch is TRACKED - the letters `A`..`Z`, groups (`{$R+,Q-}`), the
+  long forms, `{$PUSHOPT}` / `{$POPOPT}` and the host's start state - but
+  only three change what the analysis computes, each by position:
+  `{$SCOPEDENUMS}` (enum value names), `{$Z}` / `{$MINENUMSIZE}` (enum size)
+  and `{$A}` / `{$ALIGN}` (record field alignment). Every other switch is
+  read by `{$IFOPT}` alone. Not modelled, and not yet probed on dcc for what
+  each changes:
+  - `{$H-}` / `{$LONGSTRINGS OFF}`: a bare `string` is `ShortString` - its
+    size, its element type, overload choice and the type an inline `var`
+    infers;
+  - `{$T+}` / `{$TYPEDADDRESS ON}`: `@X` is a typed pointer `^T`, not
+    `Pointer` - assignment compatibility and overload choice;
+  - `{$X-}` / `{$EXTENDEDSYNTAX OFF}`: a function called as a statement,
+    `Result` and the PChar extensions are not available;
+  - `{$J+}` / `{$WRITEABLECONST ON}`: a typed constant may be assigned;
+  - `{$P+}` / `{$OPENSTRINGS ON}`: a `var` string parameter is an open
+    string;
+  - `{$V-}` / `{$VARSTRINGCHECKS OFF}`: a `var` short-string parameter
+    takes any short-string length;
+  - `{$B+}` / `{$BOOLEVAL ON}` and the code-generation and checking
+    switches (`$O`, `$R`, `$Q`, `$I`, `$C`, `$D`, `$L`, `$Y`, `$W`, `$U`,
+    `$G`, `$M`, `$S`): no effect on names or types expected, only on the
+    code dcc emits (`$M` aside: RTTI, 19.1.1).
+  The order for each is the usual one: the spec's 1.3.1 first, a dcc probe
+  for what it leaves open, then the code.
+
 ### 1.3.2 Conditional compilation
 - strict IFEND-vs-ENDIF pairing is not implemented -
   `$IFEND` and `$ENDIF` are treated as the same terminator unconditionally,
