@@ -2268,6 +2268,34 @@ begin
       Exit(AHits[LIdx].Implicit = AImplicit);
 end;
 
+// The hits as sorted `file:line:col` rows, those of AFile alone when it is
+// not empty - two searches compared row for row.
+function HitRows(const AHits: TArray<TPasRefHit>;
+  const AFile: string = ''): string;
+var
+  LRows: TArray<string>;
+  LIdx: Integer;
+begin
+  LRows := nil;
+  for LIdx := 0 to High(AHits) do
+    if (AFile = '') or
+       SameText(TPath.GetFileName(AHits[LIdx].FilePath), AFile) then
+      LRows := LRows + [Format('%s:%d:%.3d', [
+        TPath.GetFileName(AHits[LIdx].FilePath), AHits[LIdx].Line,
+        AHits[LIdx].Col])];
+  for LIdx := 1 to High(LRows) do      // insertion sort: a handful of rows
+    for var LAt := LIdx downto 1 do
+      if CompareStr(LRows[LAt - 1], LRows[LAt]) > 0 then
+      begin
+        var LSwap := LRows[LAt];
+        LRows[LAt] := LRows[LAt - 1];
+        LRows[LAt - 1] := LSwap;
+      end
+      else
+        Break;
+  Result := string.Join(',', LRows);
+end;
+
 function HasHitAt(const AHits: TArray<TPasRefHit>; const AFile: string;
   ALine, ACol: Integer): Boolean;
 var
@@ -4941,6 +4969,60 @@ begin
       Ok('stale: restored, PlanRename reaches NavB again',
         GNav.PlanRename(LRTMid, LRSym, 'TItem', {out} LEdits, {out} LErr) and
         (EditLines(LEdits, 'NavB.pas') = '4'));
+
+      // ---- One model's rows (audit P1: C1-26, C1-30) ----
+      // AOnlyMid keeps exactly the rows the whole search has in that model,
+      // the models' rows together are the whole search, and on a demoted
+      // project it rehydrates that one model.
+      var LMidB := GNav.ModelIdOf(TPath.Combine(LDir, 'NavB.pas'));
+      var LFull := GNav.FindReferences(LRTMid, LRSym, True);
+      var LJoin: TArray<TPasRefHit> := nil;
+      for var LMi := 0 to GProj.ModelCount - 1 do
+        LJoin := LJoin + GNav.FindReferences(LRTMid, LRSym, True, False, LMi);
+      Ok('only-mid: TThing - the models'' rows are the whole search',
+        (Length(LFull) > 1) and (HitRows(LJoin) = HitRows(LFull)));
+      Ok('only-mid: TThing - NavB''s rows alone',
+        (CountHitsIn(LFull, 'NavB.pas') > 0) and
+        (HitRows(GNav.FindReferences(LRTMid, LRSym, True, False, LMidB)) =
+         HitRows(LFull, 'NavB.pas')));
+      LFull := GNav.FindBuiltinReferences('Integer');
+      LJoin := nil;
+      for var LMi := 0 to GProj.ModelCount - 1 do
+        LJoin := LJoin + GNav.FindBuiltinReferences('Integer', LMi);
+      Ok('only-mid: builtin Integer - the models'' rows are the whole search',
+        (Length(LFull) > 1) and (HitRows(LJoin) = HitRows(LFull)) and
+        (HitRows(GNav.FindBuiltinReferences('Integer', LMidB)) =
+         HitRows(LFull, 'NavB.pas')));
+      LFull := GNav.FindUnitReferences(LMidA);
+      LJoin := nil;
+      for var LMi := 0 to GProj.ModelCount - 1 do
+        LJoin := LJoin + GNav.FindUnitReferences(LMidA, LMi);
+      Ok('only-mid: unit NavA - the models'' rows are the whole search',
+        (Length(LFull) > 0) and (HitRows(LJoin) = HitRows(LFull)) and
+        (HitRows(GNav.FindUnitReferences(LMidA, LMidB)) =
+         HitRows(LFull, 'NavB.pas')));
+      // A local of NavB's P (`L: Integer`, line 8): NavB's scan alone
+      // (UnitPrivate), the same three rows.
+      Ok('only-mid: SymbolAt local L',
+        GNav.SymbolAt(LMidB, 8, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'L'));
+      Ok('only-mid: local L - its uses',
+        HitRows(GNav.FindReferences(LRTMid, LRSym)) =
+        'NavB.pas:13:003,NavB.pas:15:003,NavB.pas:16:003');
+      GNav.SymbolAt(LMidA, 4, 3, {out} LRTMid, {out} LRSym, {out} LRName);
+      GProj.DemoteText([]);
+      var LWarm: TArray<Boolean>;
+      SetLength(LWarm, GProj.ModelCount);
+      for var LMi := 0 to GProj.ModelCount - 1 do
+        LWarm[LMi] := not GProj.Model(LMi).Demoted;
+      Ok('only-mid: NavB is demoted', not LWarm[LMidB]);
+      LJoin := GNav.FindReferences(LRTMid, LRSym, True, False, LMidB);
+      var LWoken := '';
+      for var LMi := 0 to GProj.ModelCount - 1 do
+        if not LWarm[LMi] and not GProj.Model(LMi).Demoted then
+          LWoken := LWoken + TPath.GetFileName(GProj.ModelFile(LMi)) + ' ';
+      Ok('only-mid: a demoted project rehydrates NavB alone, got ' + LWoken,
+        (LWoken = 'NavB.pas ') and (CountHitsIn(LJoin, 'NavB.pas') > 0));
 
       // REGRESSION: a bare call to an inherited, non-overloaded method in
       // the SAME unit must be counted ONCE, not twice (see UNIT_RQ / the

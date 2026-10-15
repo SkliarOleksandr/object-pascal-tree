@@ -160,6 +160,23 @@ buffer edit and `AnalyzeModuleOnly`, `DemoteText`, `ReleaseTransientMaps`,
   browsing paths) must NEVER add new E2003s relative to the same analysis
   without them.
 
+### 2.3 One file's references (a highlight)
+
+`FindReferences`, `FindUnitReferences` and `FindBuiltinReferences` take an
+optional `AOnlyMid`: the rows in that one model's text (its main file and
+the includes it pulls in), from a scan of that model alone. A host
+highlighting the occurrences under the caret wants one document's rows; the
+whole-closure search rehydrated every demoted unit that used the symbol -
+on `TObject.Free` or `Integer`, most of the library - only for the host to
+drop those rows. Over the flattened RTL after `DemoteText`: `TObject.Free`
+198 ms whole, under 1 ms for one unit; `Integer` 745 ms against 1 ms. The
+model's rows of the whole search and the one-model search are the same
+rows; the form-file rows belong to no model and are not in it.
+
+A symbol no other unit can name - a local, a parameter, `Result`, an
+implementation-section or program declaration - is searched in its own
+model only, whichever way it is asked.
+
 ## 3. Rename (`TPasNavigator.PlanRename`/`PlanUnitRename` + demo wiring)
 
 Status: IMPLEMENTED (PasTree 0.15.0) - `PlanRename`, `PlanUnitRename`,
@@ -757,7 +774,7 @@ Assignments`, regression-covered by `tests/SemaNavSmoke.dpr` (fixture
 `NavAsg`).
 
 Find References with the answer narrowed to WRITES: the same resolved-
-identity scan (`CollectReferencesOf`, the property redeclaration chain
+identity scan (`CollectReferencesOfAll`, the property redeclaration chain
 included), keeping only the hits that sit in an assignment-target position.
 The filter is a node-kind walk from the hit's identifier (`IsAssignTarget`,
 no text read, so it runs on demoted models): climb out of the trailing NAME

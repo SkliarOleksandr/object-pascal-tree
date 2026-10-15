@@ -517,8 +517,7 @@ type
       const ANameLower: string): Integer;
     function PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
     function HasBareInherited(AMid, ASym: Integer): Boolean;
-    procedure CollectReferencesOf(ATMid, ASym: Integer;
-      AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
+    function UnitPrivate(ATMid, ASym: Integer): Boolean;
     // Find Assignments.
     function IsAssignTarget(LM: TPasSemaModel; ANode: Integer): Boolean;
     function PropertyIsWritable(AMid, ASym: Integer): Boolean;
@@ -585,9 +584,15 @@ type
     // reference, a class in an object header (FindFormSites). Off by default
     // because it reads every form file of the project: a caller on a hot
     // path (a highlight on every caret move) must not pay for it.
+    // AOnlyMid >= 0 keeps the rows in that one model's text - its main file
+    // and the includes it pulls in - and scans and rehydrates that model
+    // alone: a highlight wants one document's rows, and the whole-closure
+    // search rehydrated every demoted unit that used the symbol to then drop
+    // them (audit C1-26). The form-file rows are in no model and stay out.
     function FindReferences(ATMid, ASym: Integer;
       AImplHeaders: Boolean = False;
-      AFormFiles: Boolean = False): TArray<TPasRefHit>;
+      AFormFiles: Boolean = False;
+      AOnlyMid: Integer = -1): TArray<TPasRefHit>;
     { The form-file half of a reference search with what each site IS - see
       PasTree.Sema.Dfm for the binding rules, which are TReader's. Sorted by
       file, line, column. }
@@ -781,7 +786,9 @@ type
       out AName: string): Boolean;
     // Every `uses` clause that resolved to ATargetMid, across the project,
     // and every place code qualifies a name with it (`OldUnit.Foo`).
-    function FindUnitReferences(ATargetMid: Integer): TArray<TPasRefHit>;
+    // AOnlyMid >= 0: that model's rows alone, as in FindReferences.
+    function FindUnitReferences(ATargetMid: Integer;
+      AOnlyMid: Integer = -1): TArray<TPasRefHit>;
     // ATargetMid's own header position - always available (see
     // TargetForUnitId's own comment: every analyzed model has one).
     function UnitDeclHit(ATargetMid: Integer;
@@ -803,8 +810,10 @@ type
     function BuiltinNameAt(AMid, ALine, ACol: Integer; out AName: string;
       out ATMid, ASym: Integer): Boolean; overload;
     // Every reference bound to a compiler-seeded builtin named AName, across
-    // every loaded model.
-    function FindBuiltinReferences(const AName: string): TArray<TPasRefHit>;
+    // every loaded model. AOnlyMid >= 0: that model's rows alone, as in
+    // FindReferences.
+    function FindBuiltinReferences(const AName: string;
+      AOnlyMid: Integer = -1): TArray<TPasRefHit>;
     { The FOURTH identity: a CONDITIONAL SYMBOL - the name in $DEFINE X,
       $UNDEF X, $IFDEF X, $IFNDEF X or `Defined(X)` inside a $IF / $ELSEIF. It has no symbol, no AST node and no unit that owns it: a
       `$DEFINE` is unit-local, a .dproj or platform define is global, and the
@@ -1012,9 +1021,12 @@ type
     // The references of several symbols - FindReferences' scan, no
     // implementation headers, form files or property chains - in one pass
     // over the models, unsorted: a family of a few hundred methods searched
-    // one by one is that many passes.
+    // one by one is that many passes. It is also the scan of one symbol:
+    // FindReferences and FindAssignments call it with a one-link list.
+    // AOnlyMid >= 0 scans and rehydrates that model alone.
     procedure CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
-      AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False);
+      AHits: TList<TPasRefHit>; AAssignOnly: Boolean = False;
+      AOnlyMid: Integer = -1);
     { Find Implementations, part one: the cursor is on an INTERFACE method -
       the counterpart of MethodAt, and the Enabled test for that command.
       ATMid/ASym come back as the interface's own method symbol.
@@ -2084,7 +2096,7 @@ end;
   though in practice the resolver never double-writes a node into both -
   CrossResolve's own guard skips a node whose RefMap entry is already set). }
 function TPasNavigator.FindReferences(ATMid, ASym: Integer;
-  AImplHeaders, AFormFiles: Boolean): TArray<TPasRefHit>;
+  AImplHeaders, AFormFiles: Boolean; AOnlyMid: Integer): TArray<TPasRefHit>;
 var
   LHits: TList<TPasRefHit>;
   LChain: TArray<TPasExtRef>;
@@ -2093,16 +2105,15 @@ var
   LM: TPasSemaModel;
   LNodes: TArray<Integer>;
   LSite: TPasFormSite;
+  LListed: TDictionary<string, Boolean>;
 
-  function HitListed(AList: TList<TPasRefHit>; const AHit: TPasRefHit): Boolean;
-  var
-    LOld: TPasRefHit;
+  // A position set over the hits so far, built once: the header nodes are
+  // tested against it one by one, and a scan of the list per node was
+  // O(headers x hits) with a managed record copy each (audit C1-34).
+  function PosKey(const AHit: TPasRefHit): string;
   begin
-    for LOld in AList do
-      if (LOld.Line = AHit.Line) and (LOld.Col = AHit.Col) and
-         SameText(LOld.FilePath, AHit.FilePath) then
-        Exit(True);
-    Result := False;
+    Result := IntToStr(AHit.Line) + ':' + IntToStr(AHit.Col) + ':' +
+      UpperCase(AHit.FilePath);
   end;
 
 begin
@@ -2118,41 +2129,60 @@ begin
     // spell the name, a rename must rewrite them, and a reader of the
     // references list wants to see where else it is declared. The clicked
     // symbol's own declaration stays out, as ever (DeclHit gives it).
+    // One pass over the closure for the whole chain: a VCL property is
+    // republished by a hundred classes, and a scan per link cost 8-10 s per
+    // question on a 4,000-unit group. A symbol with no chain is a chain of
+    // one link.
     LChain := PropertyChain(ATMid, ASym);
     if Length(LChain) <= 1 then
-      CollectReferencesOf(ATMid, ASym, LHits)
-    else
     begin
-      // One pass over the closure for the whole chain: a VCL property is
-      // republished by a hundred classes, and a scan per link cost 8-10 s
-      // per question on a 4,000-unit group.
-      CollectReferencesOfAll(LChain, LHits);
-      for LIdx := 0 to High(LChain) do
-        if ((LChain[LIdx].UnitId <> ATMid) or (LChain[LIdx].Sym <> ASym)) and
-           DeclHit(LChain[LIdx].UnitId, LChain[LIdx].Sym, LHit) then
-          LHits.Add(LHit);
+      SetLength(LChain, 1);
+      LChain[0].UnitId := ATMid;
+      LChain[0].Sym := ASym;
     end;
+    CollectReferencesOfAll(LChain, LHits, False, AOnlyMid);
+    for LIdx := 0 to High(LChain) do
+      if ((LChain[LIdx].UnitId <> ATMid) or (LChain[LIdx].Sym <> ASym)) and
+         ((AOnlyMid < 0) or (LChain[LIdx].UnitId = AOnlyMid)) and
+         DeclHit(LChain[LIdx].UnitId, LChain[LIdx].Sym, LHit) then
+        LHits.Add(LHit);
     // The implementation headers that spell the name without using it - a
     // type's in its methods' qualifiers, a routine's own in its
     // implementation. All in the declaring model. A position the scan above
     // already reported (should a future resolver bind one) is not repeated -
     // by position, not by RefMap: an unqualified routine's own header IS in
     // RefMap and was filtered out above (IsDeclSelfName).
-    if AImplHeaders and (ATMid >= 0) and (ATMid < FProj.ModelCount) then
+    if AImplHeaders and (ATMid >= 0) and (ATMid < FProj.ModelCount) and
+       ((AOnlyMid < 0) or (AOnlyMid = ATMid)) then
     begin
       LNodes := ImplQualifierNodes(ATMid, ASym);
       LNode := PeerRoutineNameNode(ATMid, ASym);
       if LNode <> NIL_NODE then
         LNodes := LNodes + [LNode];
       LM := FProj.Model(ATMid);
-      for LNode in LNodes do
-        if FProj.EnsureHydrated(ATMid) and HitFromNode(LM, LNode, LHit) and
-           not HitListed(LHits, LHit) then
-          LHits.Add(LHit);
+      LListed := nil;
+      try
+        for LNode in LNodes do
+          if FProj.EnsureHydrated(ATMid) and HitFromNode(LM, LNode, LHit) then
+          begin
+            if LListed = nil then
+            begin
+              LListed := TDictionary<string, Boolean>.Create;
+              for LIdx := 0 to LHits.Count - 1 do
+                LListed.AddOrSetValue(PosKey(LHits.List[LIdx]), True);
+            end;
+            if LListed.ContainsKey(PosKey(LHit)) then
+              Continue;
+            LListed.Add(PosKey(LHit), True);
+            LHits.Add(LHit);
+          end;
+      finally
+        LListed.Free;
+      end;
     end;
     // The form files - positions in files no model holds, so no overlap with
-    // the scans above is possible.
-    if AFormFiles then
+    // the scans above is possible. No model's rows alone include them.
+    if AFormFiles and (AOnlyMid < 0) then
       for LSite in FindFormSites(ATMid, ASym) do
       begin
         LHit.FilePath := LSite.FilePath;
@@ -2181,106 +2211,124 @@ begin
     end));
 end;
 
-// The scan itself, for ONE symbol - see FindReferences' comment for what the
-// two maps are and why RefMap is read only in the declaring model.
-// AAssignOnly keeps only the hits in an assignment-target position
-// (IsAssignTarget) - Find All Assignments is this same scan with that one
-// filter, tested BEFORE hydration since it reads node kinds only.
-procedure TPasNavigator.CollectReferencesOf(ATMid, ASym: Integer;
-  AHits: TList<TPasRefHit>; AAssignOnly: Boolean);
+{ Can ASym (of model ATMid) be named from no other unit? Its scope climbs
+  through the struct, enum and generic-parameter scopes that hold it to a
+  routine, a block or the implementation scope - a local, a parameter, the
+  implicit Result, an implementation-section declaration, anything of a
+  program or library (their declarations go to the implementation scope).
+  No other model's map can hold a use of it: includes are preprocessed per
+  model and a generic's body stays in its declaring model - over the 417
+  models of the VCL probe there were none (audit C1-30). A scope this does
+  not know (a with scope) answers False: the whole closure is scanned, as
+  before. }
+function TPasNavigator.UnitPrivate(ATMid, ASym: Integer): Boolean;
 var
-  LHits: TList<TPasRefHit>;
-  LMi, LNode: Integer;
   LM: TPasSemaModel;
-  LPair: TPair<Integer, TPasExtRef>;
-  LHit: TPasRefHit;
+  LScope, LGuard: Integer;
 begin
-  LHits := AHits;
+  Result := False;
   if (ATMid < 0) or (ATMid >= FProj.ModelCount) then
     Exit;
+  LM := FProj.Model(ATMid);
+  if (ASym < 0) or (ASym > High(LM.Symbols)) then
+    Exit;
+  LScope := LM.Symbols[ASym].Scope;
+  LGuard := 0;
+  while (LScope >= 0) and (LScope < LM.Scopes.Count) and (LGuard < 256) do
   begin
-    for LMi := 0 to FProj.ModelCount - 1 do
-    begin
-      LM := FProj.Model(LMi);
-      // EnsureHydrated sits AFTER the match tests: only a model that
-      // actually holds a hit pays a rehydration, so references to a hot RTL
-      // symbol re-preprocess the units that USE it, not the whole closure.
-      // A model that fails to rehydrate contributes no hits (HitFromNode's
-      // bounds guards) rather than wrong ones. The DECLARING model is no
-      // exception: IsDeclSelfName tells the segments of a `TFoo.Bar`
-      // implementation header apart by their nfName flags, which a demoted
-      // model keeps. (It once read the separators between them, which a
-      // demoted model reads back as tkUnknown - spurious self-name hits for
-      // methods, dropped qualifier hits for types - so that model was
-      // hydrated before the loop.)
-      if LMi = ATMid then
-        for LNode := 0 to High(LM.RefMap) do
-          if (LM.RefMap[LNode] = ASym) and
-             (not AAssignOnly or IsAssignTarget(LM, LNode)) and
-             not IsDeclSelfName(LM, ASym, LNode) and
-             FProj.EnsureHydrated(LMi) and
-             HitFromNode(LM, LNode, LHit) then
-            LHits.Add(LHit);
-      for LPair in LM.ExtRefMap do
-        if (LPair.Value.UnitId = ATMid) and (LPair.Value.Sym = ASym) and
-           (not AAssignOnly or IsAssignTarget(LM, LPair.Key)) and
-           FProj.EnsureHydrated(LMi) and
-           HitFromNode(LM, LPair.Key, LHit) then
-          LHits.Add(LHit);
+    case LM.Scopes[LScope].Kind of
+      sckRoutine, sckBlock, sckImplementation:
+        Exit(True);
+      sckStruct, sckEnum, sckGenericParams:
+        LScope := LM.Scopes[LScope].Parent;
+    else
+      Exit;
     end;
+    Inc(LGuard);
   end;
 end;
 
-// CollectReferencesOf for several symbols in one pass over the models - the
-// same two maps, the same rules, each symbol's own-model RefMap read in its
-// declaring model only.
+{ The scan - see FindReferences' comment for what the two maps are and why
+  RefMap is read only in each symbol's declaring model. One pass over the
+  models for every symbol of ASyms; FindReferences and FindAssignments call
+  it with one. AAssignOnly keeps only the hits in an assignment-target
+  position (IsAssignTarget) - Find All Assignments is this same scan with
+  that one filter, tested BEFORE hydration since it reads node kinds only.
+
+  The wanted symbols are a per-model list indexed by model id, nil for a
+  model that declares none of them: the first array read rejects nearly
+  every map entry, where a dictionary probe per entry cost 8 ms against 3 ms
+  over 292,584 ExtRefMap entries (audit C1-29). The lists are a few symbols
+  long - a property chain has one or two links per declaring unit. When
+  every symbol is UnitPrivate only the declaring models are scanned
+  (C1-30), and AOnlyMid >= 0 scans that one model (C1-26).
+
+  EnsureHydrated sits AFTER the match tests: only a model that actually
+  holds a hit pays a rehydration, so references to a hot RTL symbol
+  re-preprocess the units that USE it, not the whole closure. A model that
+  fails to rehydrate contributes no hits (HitFromNode's bounds guards)
+  rather than wrong ones. The DECLARING model is no exception:
+  IsDeclSelfName tells the segments of a `TFoo.Bar` implementation header
+  apart by their nfName flags, which a demoted model keeps. (It once read
+  the separators between them, which a demoted model reads back as
+  tkUnknown - spurious self-name hits for methods, dropped qualifier hits
+  for types - so that model was hydrated before the loop.) }
 procedure TPasNavigator.CollectReferencesOfAll(const ASyms: TArray<TPasExtRef>;
-  AHits: TList<TPasRefHit>; AAssignOnly: Boolean);
+  AHits: TList<TPasRefHit>; AAssignOnly: Boolean; AOnlyMid: Integer);
 var
-  LWanted: TDictionary<Int64, Boolean>;
-  LOwn: TDictionary<Integer, Boolean>;   // declaring models
+  LWanted: TArray<TArray<Integer>>;   // model id -> wanted symbols; nil none
+  LAllPrivate: Boolean;
   LM: TPasSemaModel;
-  LNode, LSym: Integer;
+  LMi, LNode, LSym, LCount: Integer;
   LPair: TPair<Integer, TPasExtRef>;
   LHit: TPasRefHit;
 
-  function Key(AMid, ASym: Integer): Int64;
+  function Wants(const AList: TArray<Integer>; ASym: Integer): Boolean;
+  var
+    LIdx: Integer;
   begin
-    Result := (Int64(AMid) shl 32) or Cardinal(ASym);
+    for LIdx := 0 to High(AList) do
+      if AList[LIdx] = ASym then
+        Exit(True);
+    Result := False;
   end;
 
 begin
-  LWanted := TDictionary<Int64, Boolean>.Create;
-  LOwn := TDictionary<Integer, Boolean>.Create;
-  try
-    for var LRef in ASyms do
-      if (LRef.UnitId >= 0) and (LRef.UnitId < FProj.ModelCount) then
-      begin
-        LWanted.AddOrSetValue(Key(LRef.UnitId, LRef.Sym), True);
-        LOwn.AddOrSetValue(LRef.UnitId, True);
-      end;
-    for var LMi := 0 to FProj.ModelCount - 1 do
+  LCount := FProj.ModelCount;
+  SetLength(LWanted, LCount);
+  LAllPrivate := True;
+  for var LRef in ASyms do
+    if (LRef.UnitId >= 0) and (LRef.UnitId < LCount) and
+       not Wants(LWanted[LRef.UnitId], LRef.Sym) then
     begin
-      LM := FProj.Model(LMi);
-      if LOwn.ContainsKey(LMi) then
-        for LNode := 0 to High(LM.RefMap) do
-        begin
-          LSym := LM.RefMap[LNode];
-          if (LSym <> NIL_SYM) and LWanted.ContainsKey(Key(LMi, LSym)) and
-             (not AAssignOnly or IsAssignTarget(LM, LNode)) and
-             not IsDeclSelfName(LM, LSym, LNode) and
-             FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
-            AHits.Add(LHit);
-        end;
-      for LPair in LM.ExtRefMap do
-        if LWanted.ContainsKey(Key(LPair.Value.UnitId, LPair.Value.Sym)) and
-           (not AAssignOnly or IsAssignTarget(LM, LPair.Key)) and
-           FProj.EnsureHydrated(LMi) and HitFromNode(LM, LPair.Key, LHit) then
-          AHits.Add(LHit);
+      LWanted[LRef.UnitId] := LWanted[LRef.UnitId] + [LRef.Sym];
+      if LAllPrivate and not UnitPrivate(LRef.UnitId, LRef.Sym) then
+        LAllPrivate := False;
     end;
-  finally
-    LOwn.Free;
-    LWanted.Free;
+  for LMi := 0 to LCount - 1 do
+  begin
+    if (AOnlyMid >= 0) and (LMi <> AOnlyMid) then
+      Continue;
+    if LAllPrivate and (LWanted[LMi] = nil) then
+      Continue;
+    LM := FProj.Model(LMi);
+    if LWanted[LMi] <> nil then
+      for LNode := 0 to High(LM.RefMap) do
+      begin
+        LSym := LM.RefMap[LNode];
+        if (LSym <> NIL_SYM) and Wants(LWanted[LMi], LSym) and
+           (not AAssignOnly or IsAssignTarget(LM, LNode)) and
+           not IsDeclSelfName(LM, LSym, LNode) and
+           FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
+          AHits.Add(LHit);
+      end;
+    for LPair in LM.ExtRefMap do
+      if (Cardinal(LPair.Value.UnitId) < Cardinal(LCount)) and
+         (LWanted[LPair.Value.UnitId] <> nil) and
+         Wants(LWanted[LPair.Value.UnitId], LPair.Value.Sym) and
+         (not AAssignOnly or IsAssignTarget(LM, LPair.Key)) and
+         FProj.EnsureHydrated(LMi) and HitFromNode(LM, LPair.Key, LHit) then
+        AHits.Add(LHit);
   end;
 end;
 
@@ -2434,9 +2482,12 @@ begin
     // republished across a 4,000-unit group (pastree-mcp F6.1).
     LChain := PropertyChain(ATMid, ASym);
     if Length(LChain) <= 1 then
-      CollectReferencesOf(ATMid, ASym, LHits, {AAssignOnly} True)
-    else
-      CollectReferencesOfAll(LChain, LHits, {AAssignOnly} True);
+    begin
+      SetLength(LChain, 1);
+      LChain[0].UnitId := ATMid;
+      LChain[0].Sym := ASym;
+    end;
+    CollectReferencesOfAll(LChain, LHits, {AAssignOnly} True);
     Result := LHits.ToArray;
   finally
     LHits.Free;
@@ -2757,8 +2808,8 @@ end;
 // dotted nkMember chain (CollectUsesItem stores the WHOLE name, not just
 // the leaf, unlike the symbol's own DeclNode) - HitFromNode's own leftmost
 // descent handles that shape directly.
-function TPasNavigator.FindUnitReferences(
-  ATargetMid: Integer): TArray<TPasRefHit>;
+function TPasNavigator.FindUnitReferences(ATargetMid: Integer;
+  AOnlyMid: Integer): TArray<TPasRefHit>;
 var
   LHits: TList<TPasRefHit>;
   LMi, LIdx: Integer;
@@ -2769,6 +2820,8 @@ begin
   try
     for LMi := 0 to FProj.ModelCount - 1 do
     begin
+      if (AOnlyMid >= 0) and (LMi <> AOnlyMid) then
+        Continue;
       LM := FProj.Model(LMi);
       for LIdx := 0 to High(LM.UsesList) do
         // Hydration AFTER the id test, exactly as FindReferences does it:
@@ -2876,8 +2929,8 @@ begin
   Result := True;
 end;
 
-function TPasNavigator.FindBuiltinReferences(
-  const AName: string): TArray<TPasRefHit>;
+function TPasNavigator.FindBuiltinReferences(const AName: string;
+  AOnlyMid: Integer): TArray<TPasRefHit>;
 var
   LHits: TList<TPasRefHit>;
   LMi, LNode, LSym: Integer;
@@ -2888,6 +2941,8 @@ begin
   try
     for LMi := 0 to FProj.ModelCount - 1 do
     begin
+      if (AOnlyMid >= 0) and (LMi <> AOnlyMid) then
+        Continue;
       LM := FProj.Model(LMi);
       for LNode := 0 to High(LM.RefMap) do
       begin
@@ -4913,7 +4968,7 @@ begin
     for LMi := 0 to FProj.ModelCount - 1 do
     begin
       LM := FProj.Model(LMi);
-      // Same scan shape as CollectReferencesOf: every node bound to the
+      // Same scan shape as CollectReferencesOfAll: every node bound to the
       // class - or to a type alias of it, which is why every model's RefMap
       // is read and not only the declaring one's (the alias may be declared
       // anywhere) - ExtRefMap everywhere; hydration only for a model that
