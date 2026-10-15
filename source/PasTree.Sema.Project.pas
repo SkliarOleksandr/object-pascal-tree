@@ -2354,6 +2354,9 @@ var
 begin
   Result := False;
   LM := FModels[AMid];
+  // One key for every used unit: the string Resolve rehashed the name per
+  // unit (audit C1-18).
+  var LKey := SemaKey(ANameLower);
   for LIdx := High(LM.UsesList) downto 0 do   // last uses wins, like resolution
   begin
     LUid := LM.UsesList[LIdx].UnitId;
@@ -2362,7 +2365,7 @@ begin
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope = NIL_SCOPE then
       Continue;
-    LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+    LS := LUsed.Resolve(LUsed.InterfaceScope, LKey);
     if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
     begin
       ARMid := LUid;
@@ -2377,7 +2380,7 @@ begin
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope <> NIL_SCOPE then
     begin
-      LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+      LS := LUsed.Resolve(LUsed.InterfaceScope, LKey);
       if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
       begin
         ARMid := LUid;
@@ -2393,7 +2396,7 @@ begin
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope <> NIL_SCOPE then
     begin
-      LS := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+      LS := LUsed.Resolve(LUsed.InterfaceScope, LKey);
       if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
       begin
         ARMid := LUid;
@@ -6878,6 +6881,7 @@ var
   LIdx, LUid, LSym: Integer;
 begin
   LModel := FModels[AId];
+  var LKey := SemaKey(ANameLower);   // once, not per used unit (C1-18)
   for LIdx := High(LModel.UsesList) downto 0 do
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
@@ -6888,7 +6892,7 @@ begin
       Continue;
     // Resolve (not FindLocal) so interface-visible enum values and other
     // joined-scope names are importable too.
-    LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+    LSym := LUsed.Resolve(LUsed.InterfaceScope, LKey);
     if LSym <> NIL_SYM then
     begin
       AUnit := LUid;
@@ -6940,6 +6944,7 @@ begin
   LWant := WrittenArityOfRef(LModel, ANode);
   // The interface section sees its own `uses` only (F35).
   var LIntf := InInterfaceSection(LModel, ANode);
+  var LKey := SemaKey(ANameLower);   // once, not per used unit (C1-18)
   for var LIdx := High(LModel.UsesList) downto 0 do
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
@@ -6949,7 +6954,7 @@ begin
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope = NIL_SCOPE then
       Continue;
-    LSym := LUsed.Resolve(LUsed.InterfaceScope, ANameLower);
+    LSym := LUsed.Resolve(LUsed.InterfaceScope, LKey);
     if LSym = NIL_SYM then
       Continue;
     if LUsed.Symbols[LSym].Kind = skType then
@@ -7144,6 +7149,7 @@ var
 begin
   Result := False;
   LModel := FModels[AId];
+  var LKey := SemaKey(ANameLower);   // once, not per used unit (C1-18)
   for LIdx := High(LModel.UsesList) downto 0 do
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
@@ -7158,7 +7164,7 @@ begin
     // local generic (the generic's heritage then named itself; see
     // PreferNonGeneric), and Find References on the plain class missed it.
     LSym := TypeOfArityInChain(LUid,
-      LUsed.Resolve(LUsed.InterfaceScope, ANameLower), AArity);
+      LUsed.Resolve(LUsed.InterfaceScope, LKey), AArity);
     if LSym <> NIL_SYM then
     begin
       AUnit := LUid;
@@ -17069,7 +17075,13 @@ begin
   Result := XNil;
   if (AMid < 0) or (FModels[AMid].InterfaceScope = NIL_SCOPE) then
     Exit;
-  LSym := FModels[AMid].Resolve(FModels[AMid].InterfaceScope, ANameLower);
+  // The unit's own declaration of the name hides the seed, as the whole
+  // lookup had it; past it, the seed itself - not every enum scope the
+  // interface joins on the way to it (audit C2-10).
+  var LKey := SemaKey(ANameLower);
+  LSym := FModels[AMid].FindLocal(FModels[AMid].InterfaceScope, LKey);
+  if (LSym = NIL_SYM) and (FModels[AMid].SystemScope <> NIL_SCOPE) then
+    LSym := FModels[AMid].FindLocal(FModels[AMid].SystemScope, LKey);
   if (LSym <> NIL_SYM) and (FModels[AMid].Symbols[LSym].Kind = skBuiltinType) then
     Result := XPlain(AMid, LSym);
 end;

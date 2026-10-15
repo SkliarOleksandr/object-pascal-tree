@@ -74,6 +74,9 @@ type
     // Collect-time only, for HoldsEnumValue.
     FEnumAt: TArray<Integer>;
     FEnumValues: TArray<TSemaNames>;
+    // The one scope a target scope joins for ALL its unscoped enums
+    // (EnumAggregate): FEnumAggAt[target] is 1 + that scope, 0 for none.
+    FEnumAggAt: TArray<Integer>;
     // The visible index of the first include that did not load (MaxInt for
     // none): an enum past it may be scoped by that file, and CollectEnum
     // skips its values' clash checks.
@@ -138,6 +141,7 @@ type
       ADeclNode: Integer; const AKey: TSemaKey): Boolean;
     function HoldsEnumValue(AScope: Integer; const AKey: TSemaKey): Boolean;
     procedure AddEnumValue(AScope, ASym: Integer);
+    function EnumAggregate(AScope: Integer): Integer;
     function HoldsName(AScope: Integer; const AKey: TSemaKey): Boolean;
     function RoutineHolds(ARoutine: Integer; const AKey: TSemaKey): Boolean;
     function RedeclaresBodyName(AScope, ADeclNode: Integer;
@@ -1129,6 +1133,28 @@ begin
     (FEnumValues[FEnumAt[AScope] - 1].Find(AKey, FModel.Symbols) <> NIL_SYM);
 end;
 
+{ The scope AScope joins for its unscoped enums' values - created and
+  joined at the first one. One join per target, not one per enum (audit
+  C1-07): every enum was its own Additional entry, searched before System,
+  so a lookup miss walked one scope per enum of the unit (68 in a large VCL
+  unit) and again per used unit. Each enum keeps its own scope as its
+  MemberScope (TEnum.Value, the clash checks); its values are bound here as
+  well, the later over the earlier - the order the per-enum joins were
+  searched in (the last joined first). }
+function TPasSemaResolver.EnumAggregate(AScope: Integer): Integer;
+begin
+  if AScope >= Length(FEnumAggAt) then
+    SetLength(FEnumAggAt, FModel.Scopes.Count);
+  if FEnumAggAt[AScope] = 0 then
+  begin
+    Result := FModel.AddScope(sckEnum, AScope, NIL_NODE);
+    FModel.JoinScope(AScope, Result);
+    FEnumAggAt[AScope] := Result + 1;
+  end
+  else
+    Result := FEnumAggAt[AScope] - 1;
+end;
+
 procedure TPasSemaResolver.AddEnumValue(AScope, ASym: Integer);
 begin
   if AScope >= Length(FEnumAt) then
@@ -1374,7 +1400,7 @@ begin
     FModel.AddToOrder(AScope, Result)
   else if LExisting = NIL_SYM then
   begin
-    FModel.BindName(AScope, Result);
+    FModel.BindNameH(AScope, Result, LKey.Hash);
     // No clash in its own scope, but one beyond it: an inline declaration
     // against its body, a routine's local against its implicit names.
     if not LOwnName and (RedeclaresBodyName(AScope, ADeclNode, LKey) or
@@ -2003,12 +2029,13 @@ begin
   // under SCOPEDENUMS ON names its earlier value bare (dcc64 37.0; audit
   // B4-12).
   var LValScope := LEnum;
+  var LAgg := NIL_SCOPE;
   if (ATypeSym = NIL_SYM) or
      not FTree.Source.ScopedEnumsAt(FTree.Nodes[ANode].FirstToken) then
   begin
     LValScope := AOuter;
     LOwnScope := EnumJoinTarget(AOuter);
-    FModel.JoinScope(LOwnScope, LEnum);
+    LAgg := EnumAggregate(LOwnScope);
     // Past an include that did not load, the enum may be scoped after all:
     // that file may switch SCOPEDENUMS on, and read unscoped a scoped enum
     // clashes with every same-named value around it. A component suite's
@@ -2035,6 +2062,11 @@ begin
         LSym := DeclareSym(LEnum, skEnumValue, LName);
         if ATypeSym <> NIL_SYM then
           FModel.Symbols[LSym].TypeSym := ATypeSym;
+        // Into the aggregate the name the enum's own scope holds - a
+        // duplicate in one enum stays behind its first, as it did there.
+        if (LAgg <> NIL_SCOPE) and
+           (FModel.FindLocal(LEnum, NodeKey(LName)) = LSym) then
+          FModel.BindName(LAgg, LSym);
         // Where the value counts, it clashes with the module's own name and
         // with whatever is there already - a declaration or another value
         // (HoldsName), in the implementation an interface one too

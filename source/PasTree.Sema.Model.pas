@@ -637,6 +637,10 @@ type
     procedure EndNamePool;
     // Registers NameLower -> symbol in a scope's dictionary + order list.
     procedure BindName(AScope, ASym: Integer);
+    // The same with the name's hash at hand (a TSemaKey's Hash, which is
+    // PasNameHash of the key): DeclareSym hashed it for its FindLocal
+    // already (audit C1-09).
+    procedure BindNameH(AScope, ASym: Integer; AHash: Cardinal);
     // Appends to a scope's declaration-order list WITHOUT (re)binding a name -
     // the overload/duplicate branches of DeclareSym. Honours copy-on-write on
     // a shared-container scope, same as BindName.
@@ -888,7 +892,7 @@ function SemaSliceKey(AText: PChar; ALen: Integer): TSemaKey;
 { The key of identifier node ANode of ATree, straight off its token -
   TPasTree.NodeNameLower's key, not built. Empty (Len 0) where NodeNameLower
   answers '' (no such node, no token layer). }
-function PasNodeKey(ATree: TPasTree; ANode: Integer): TSemaKey;
+function PasNodeKey(const ATree: TPasTree; ANode: Integer): TSemaKey;
 { Does the key string ANameLower equal AKey? The comparison TSemaNames uses. }
 function SemaKeyEquals(const ANameLower: string; const AKey: TSemaKey): Boolean;
   inline;
@@ -965,7 +969,7 @@ begin
   Result.Raw := True;
 end;
 
-function PasNodeKey(ATree: TPasTree; ANode: Integer): TSemaKey;
+function PasNodeKey(const ATree: TPasTree; ANode: Integer): TSemaKey;
 var
   LText: PChar;
   LLen: Integer;
@@ -1870,6 +1874,12 @@ begin
     Symbols);
 end;
 
+procedure TPasSemaModel.BindNameH(AScope, ASym: Integer; AHash: Cardinal);
+begin
+  Scopes[AScope].EnsureOwnedContainers;
+  Scopes[AScope].Names.AddOrSet(AHash, ASym, Symbols);
+end;
+
 procedure TPasSemaModel.AddToOrder(AScope, ASym: Integer);
 begin
   Scopes[AScope].EnsureOwnedContainers;
@@ -1955,7 +1965,7 @@ end;
 function TPasSemaModel.FindLocalDeep(AScope: Integer;
   const AKey: TSemaKey; ADepth: Integer): Integer;
 var
-  LAdd: TArray<Integer>;
+  LScope: PSemaScope;
   LIdx: Integer;
 begin
   // A DEPTH CAP, not a visited set: this is the hottest lookup in the
@@ -1974,10 +1984,16 @@ begin
   // `Importer` at the DERIVED importer type, and every `Importer.TagsStack`
   // in that unit needs the helper's, not the class's own. Empty for all but a
   // handful of scopes, so the common lookup pays one length test.
-  LAdd := Scopes[AScope].Shadowing;
-  for LIdx := High(LAdd) downto 0 do
+  //
+  // Read through the scope's pointer, never into a TArray local: a managed
+  // local cost a locked refcount pair per join and a finalization per
+  // call, 15-24% of Phase 1 (audit C1-06). Safe because no lookup adds a
+  // scope - every AddScope/JoinScope runs in the model's own Phase 1 or the
+  // seed (the PSemaScope rule at TSemaScope).
+  LScope := Scopes[AScope];
+  for LIdx := High(LScope.Shadowing) downto 0 do
   begin
-    Result := FindLocalDeep(LAdd[LIdx], AKey, ADepth + 1);
+    Result := FindLocalDeep(LScope.Shadowing[LIdx], AKey, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -1987,10 +2003,9 @@ begin
   // Joined scopes, most-recently-added first (uses/with priority) - each
   // recursed into the SAME way, not just FindLocal'd, so a joined scope's
   // own joins are reachable too.
-  LAdd := Scopes[AScope].Additional;
-  for LIdx := High(LAdd) downto 0 do
+  for LIdx := High(LScope.Additional) downto 0 do
   begin
-    Result := FindLocalDeep(LAdd[LIdx], AKey, ADepth + 1);
+    Result := FindLocalDeep(LScope.Additional[LIdx], AKey, ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -2000,15 +2015,15 @@ end;
 function TPasSemaModel.FindLocalNoHelpers(AScope: Integer;
   const AKey: TSemaKey): Integer;
 var
-  LAdd: TArray<Integer>;
+  LScope: PSemaScope;
 begin
   Result := FindLocal(AScope, AKey);
   if Result <> NIL_SYM then
     Exit;
-  LAdd := Scopes[AScope].Additional;
-  for var LIdx := High(LAdd) downto 0 do
+  LScope := Scopes[AScope];
+  for var LIdx := High(LScope.Additional) downto 0 do
   begin
-    Result := FindLocalDeep(LAdd[LIdx], AKey, 1);
+    Result := FindLocalDeep(LScope.Additional[LIdx], AKey, 1);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -2076,7 +2091,7 @@ end;
 function TPasSemaModel.FindByArityDeepK(AScope: Integer;
   const AKey: TSemaKey; AWantGeneric: Boolean; ADepth: Integer): Integer;
 var
-  LAdd: TArray<Integer>;
+  LScope: PSemaScope;
   LIdx, LSym, LDepth: Integer;
 
   function Wrong(ASym: Integer): Boolean;
@@ -2097,10 +2112,12 @@ begin
   // searched a DIFFERENT scope set from the lookup it corrects, so a
   // right-arity candidate reachable only through a helper's shadowing join
   // stayed invisible to the arity-corrected relookup.
-  LAdd := Scopes[AScope].Shadowing;
-  for LIdx := High(LAdd) downto 0 do
+  // Through the pointer, as FindLocalDeep (audit C1-06).
+  LScope := Scopes[AScope];
+  for LIdx := High(LScope.Shadowing) downto 0 do
   begin
-    Result := FindByArityDeepK(LAdd[LIdx], AKey, AWantGeneric, ADepth + 1);
+    Result := FindByArityDeepK(LScope.Shadowing[LIdx], AKey, AWantGeneric,
+      ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
@@ -2116,10 +2133,10 @@ begin
     LSym := Symbols[LSym].NextOverload;
     Inc(LDepth);
   end;
-  LAdd := Scopes[AScope].Additional;
-  for LIdx := High(LAdd) downto 0 do
+  for LIdx := High(LScope.Additional) downto 0 do
   begin
-    Result := FindByArityDeepK(LAdd[LIdx], AKey, AWantGeneric, ADepth + 1);
+    Result := FindByArityDeepK(LScope.Additional[LIdx], AKey, AWantGeneric,
+      ADepth + 1);
     if Result <> NIL_SYM then
       Exit;
   end;
