@@ -664,6 +664,20 @@ const
     '  public'#10 +
     '    procedure Go(const V: T);'#10 +
     '  end;'#10 +
+    '  TOwnBase<T> = class'#10 +
+    '  public'#10 +
+    '    function First: T;'#10 +
+    '    function GetItem(I: Integer): T;'#10 +
+    '    property Items[I: Integer]: T read GetItem; default;'#10 +
+    '  end;'#10 +
+    '  TOwnObjList<T: class> = class(TOwnBase<T>)'#10 +
+    '  public'#10 +
+    '    procedure Go2;'#10 +
+    '  end;'#10 +
+    '  TOwnSub = class(TOwnBase<TCfBase>)'#10 +
+    '  public'#10 +
+    '    procedure Go3;'#10 +
+    '  end;'#10 +
     '  TUseGen = class'#10 +
     '  public'#10 +
     '//DECL'#10 +
@@ -686,6 +700,10 @@ const
     'const'#10 +
     '  EarlyK = 1;'#10 +
     'procedure TOwnList<T>.Go(const V: T);'#10'begin'#10'//LIST'#10'end;'#10 +
+    'function TOwnBase<T>.First: T;'#10'begin'#10'end;'#10 +
+    'function TOwnBase<T>.GetItem(I: Integer): T;'#10'begin'#10'end;'#10 +
+    'procedure TOwnObjList<T>.Go2;'#10'begin'#10'//OBJ'#10'end;'#10 +
+    'procedure TOwnSub.Go3;'#10'begin'#10'//SUB'#10'end;'#10 +
     'procedure TOwnBox<T>.Go(const V: T);'#10'begin'#10'//BOX'#10'end;'#10 +
     'procedure TOwnU<T>.Go(const V: T);'#10'begin'#10'//U'#10'end;'#10 +
     'procedure TUseGen.Run(G: TCfGen<Integer>);'#10'begin'#10'//RUN'#10 +
@@ -1906,6 +1924,13 @@ begin
   CfCase('LIST', '  Get.|', 'Free', '');
   CfCase('BOX', '  V.|', 'BaseVirt', 'BaseProt');
   CfCase('U', '  V.|', '', 'Free');
+  // ... and through a member of a generic ancestor of the same unit, its
+  // frame applied (0.107.0 re-probe: `Self.First.` in TObjectList<T>).
+  CfCase('OBJ', '  Self.First.|', 'Free', '');
+  CfCase('OBJ', '  First.|', 'ClassName', '');
+  CfCase('OBJ', '  Items[0].|', 'Free', '');
+  CfCase('SUB', '  First.|', 'BaseVirt', '');
+  CfCase('SUB', '  Self[0].|', 'BaseVirt', '');
   // 2. A generic's plain protected is reachable from a method body only
   // (11.2.1); an own-unit descendant reaches its ancestors' protected.
   CfCase('RUN', '  G.|', 'GenProt', '');

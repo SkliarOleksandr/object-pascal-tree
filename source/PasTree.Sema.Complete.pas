@@ -1245,7 +1245,7 @@ function TPasCompletion.ResolveTypeRefNode(ANode, ADepth: Integer):
 var
   LSym, LMid, LChild, LCount, LArgNode, LNameNode: Integer;
   LKey: string;
-  LBase, LArg: TPasComplTypeRef;
+  LBase, LArg, LOvGeneric: TPasComplTypeRef;
   LArgs: TArray<TSemaXType>;
   LAllProject: Boolean;
 begin
@@ -1339,8 +1339,21 @@ begin
           LBase.X := OwnModelTypeX(LBase.OvSym);
           LBase.OvSym := NIL_SYM;
         end;
+        // An overlay GENERIC written with arguments: its last-good twin,
+        // instantiated below, carries the frame - `TObjectList<T: class> =
+        // class(TList<T>)` in one unit types TList's `First: T` as
+        // TObjectList's T, constraint and all. Only when every argument lands
+        // in project space; otherwise the overlay generic itself, whose
+        // members are enumerable but whose parameters stay open.
+        LOvGeneric := ComplNilRef;
         if LBase.OvSym <> NIL_SYM then
-          Exit(LBase);   // overlay generic: members enumerable, frame v2
+        begin
+          LOvGeneric := LBase;
+          LBase.X := OwnModelTypeX(LBase.OvSym);
+          LBase.OvSym := NIL_SYM;
+          if not XValid(LBase.X) then
+            Exit(LOvGeneric);
+        end;
         if not XValid(LBase.X) or (FProj = nil) or (FProjMid < 0) then
           Exit;
         // The declaration of the WRITTEN arity (16.1.2) - the by-name bridge
@@ -1385,6 +1398,9 @@ begin
             LAllProject := False;
           LChild := FModel.Tree.Nodes[LChild].NextSibling;
         end;
+        if (LOvGeneric.OvSym <> NIL_SYM) and
+           not (LAllProject and (Length(LArgs) > 0)) then
+          Exit(LOvGeneric);
         Result := LBase;
         if LAllProject and (Length(LArgs) > 0) then
           Result.X.Inst := FProj.Instantiate(LBase.X, LArgs);
@@ -2023,6 +2039,17 @@ begin
     if LScope <> NIL_SCOPE then
     begin
       LSym := FModel.FindLocalDeep(LScope, AKey);
+      // The deep walk follows Phase 1's join into a same-unit ancestor; a
+      // GENERIC one's member is reached through the heritage instead, whose
+      // frame types its T (`Items[0].` in TObjectList<T: class> =
+      // class(TList<T>) is TObjectList's T, not TList's open one).
+      if (LSym <> NIL_SYM) and (FModel.Symbols[LSym].Scope <> NIL_SCOPE) then
+      begin
+        var LOwner := FModel.Scopes[FModel.Symbols[LSym].Scope].StructSym;
+        if (LOwner <> NIL_SYM) and (LOwner <> LCur.OvSym) and
+           (sfGeneric in FModel.Symbols[LOwner].Flags) then
+          LSym := NIL_SYM;
+      end;
       if LSym <> NIL_SYM then
       begin
         ASym := LSym;   // AMid stays -1: an overlay symbol
@@ -2393,6 +2420,10 @@ begin
           ASym := LExt.Sym;
           Exit(True);
         end;
+        // Unbound on the overlay - an inherited member Phase 1 could not
+        // reach (`Items[0]` through a generic ancestor): the same lookup
+        // DesignatorType typed it by.
+        Result := BareNameSym(ANode, ADepth + 1, AMid, ASym, LCtx);
       end;
     nkMember:
       begin
