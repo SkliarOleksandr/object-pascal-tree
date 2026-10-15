@@ -395,6 +395,10 @@ usable.
   source redirected to its sibling `.dproj` when there is one, so naming either
   file opens the same project. The packages this analyzer is measured against
   (`BuildWinRTL/VCL/FMX.dpk`) are the reason the `.dpk` half is not decoration.
+  A `.dproj` is evaluated as MSBuild would: every environment variable and
+  the reserved `MSBuildProject*` / `MSBuildThisFile*` properties are defined
+  before its first line, property names are case-insensitive, and a
+  package's `.dcp` references are its `Requires`, not its files.
 
 ## Layout
 

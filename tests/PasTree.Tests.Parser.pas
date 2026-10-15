@@ -2760,7 +2760,7 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       begin
         LInfo := PlatformInfo(APlatform);
         LDefines := CreatePlatformDefines(APlatform);
-        LPP := TPasPreprocessor.Create(GSM, LDefines, 37.0,
+        LPP := TPasPreprocessor.Create(GSM, LDefines, DEFAULT_COMPILER_VERSION,
           LInfo.PointerBytes, LInfo.ExtendedBytes, LInfo.LongBytes,
           LInfo.ExtendedAlign);
         try
@@ -2864,7 +2864,7 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
         end;
         LExpected := 'Block(' + Trim(LExpected) + ')';
         LDefines := CreatePlatformDefines(pfWin64);
-        LPP := TPasPreprocessor.Create(GSM, LDefines, 37.0);
+        LPP := TPasPreprocessor.Create(GSM, LDefines, DEFAULT_COMPILER_VERSION);
         try
           LPre := LPP.ProcessText('test.pas', LSrc);
           LTree := TPasParser.ParseStatements(LPre, LDiags);
@@ -3099,7 +3099,7 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
         LIsDead: Boolean;
       begin
         LDefines := CreatePlatformDefines(pfWin64);
-        LPP := TPasPreprocessor.Create(GSM, LDefines, 37.0);
+        LPP := TPasPreprocessor.Create(GSM, LDefines, DEFAULT_COMPILER_VERSION);
         try
           LPre := LPP.ProcessText('test.pas', cSrc);
           LGot := '';

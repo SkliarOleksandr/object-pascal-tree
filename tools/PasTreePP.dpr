@@ -73,7 +73,7 @@ begin
     GIssueFiles := TStringList.Create;
     GSM := TPasSourceManager.Create([]);
     GDefines := CreatePlatformDefines(pfWin64);
-    GPP := TPasPreprocessor.Create(GSM, GDefines, 37.0);
+    GPP := TPasPreprocessor.Create(GSM, GDefines, DEFAULT_COMPILER_VERSION);
     try
       GSM.BuildIncludeIndex(GRoot);
       GFiles := TDirectory.GetFiles(GRoot, '*.*', TSearchOption.soAllDirectories);

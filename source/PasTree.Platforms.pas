@@ -90,8 +90,11 @@ const
      'MANAGED_RECORD', 'WEAKREF', 'WEAKINTFREF', 'WEAK_NATIVEINT');
   { The compiler the analyzer emulates when the host names none: dcc 37.0
     (RAD Studio 13), the compiler every probe in this repository was run on.
-    Also the value of CompilerVersion/RTLVersion in $IF expressions. }
-  DEFAULT_COMPILER_VERSION = 37.0;
+    Also the value of CompilerVersion/RTLVersion in $IF expressions. The
+    number is written once, in PasTree.Preprocessor (whose constructor's
+    default it is, and which cannot use this unit); this is the same
+    constant under the name the hosts reach through this unit. }
+  DEFAULT_COMPILER_VERSION = PasTree.Preprocessor.DEFAULT_COMPILER_VERSION;
 
 function PlatformInfo(APlatform: TPasPlatform): TPasPlatformInfo;
 

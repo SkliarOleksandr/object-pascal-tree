@@ -8,6 +8,7 @@ program DProjSmoke;
 {$APPTYPE CONSOLE}
 
 uses
+  Winapi.Windows,
   System.SysUtils,
   System.StrUtils,
   System.IOUtils,
@@ -44,6 +45,17 @@ begin
     if SameText(S, AItem) or SameText(ExtractFileName(S), AItem) then
       Exit(True);
   Result := False;
+end;
+
+// How many entries name AItem (whole or as the leaf), whatever the case.
+function CountOf(const AArr: TArray<string>; const AItem: string): Integer;
+var
+  S: string;
+begin
+  Result := 0;
+  for S in AArr do
+    if SameText(S, AItem) or SameText(ExtractFileName(S), AItem) then
+      Inc(Result);
 end;
 
 const
@@ -234,6 +246,44 @@ begin
       Ok('bad path: a quoted search path is the path inside the quotes',
         LLoaded and Contains(LDProj.SearchPaths, 'common') and
         not string.Join(';', LDProj.SearchPaths).Contains('"'));
+    finally
+      LDProj.Free;
+    end;
+
+    // ---- MSBuild's property sources and lists (audit B64: A1-45, B1-13,
+    // B1-14, D1-46): an environment variable and the reserved
+    // MSBuildProjectDirectory expand in a search path, a property name is
+    // case-insensitive (`$(cfg_2)` reads Cfg_2), a package's `rtl.dcp`
+    // reference is a requirement, not a file, and a list repeats no entry
+    // in another case. ----
+    SetEnvironmentVariable('PTSMOKE_LIB', PChar(TPath.Combine(LDir, 'envlib')));
+    LPath := TPath.Combine(LDir, 'Env.dproj');
+    TFile.WriteAllText(LPath, FIXTURE
+      .Replace('..\common;$(DCC_UnitSearchPath)',
+        '$(PTSMOKE_LIB);$(MSBuildProjectDirectory)\projlib;..\common;..\COMMON;'
+        + '$(DCC_UnitSearchPath)')
+      .Replace('<DCC_UnitAlias>', '<DCC_Define>Dup;DUP;$(DCC_Define)</DCC_Define><DCC_UnitAlias>')
+      .Replace('</Project>',
+        '<PropertyGroup Condition="''$(cfg_2)''!=''''"><DCC_Define>FROMCFG;'
+        + '$(dcc_define)</DCC_Define></PropertyGroup>'
+        + '<ItemGroup><DCCReference Include="rtl.dcp"/><DCCReference Include="vcl.DCP"/>'
+        + '</ItemGroup></Project>'));
+    LDProj := TPasDProj.Create;
+    try
+      Ok('env: Load succeeds', LDProj.Load(LPath));
+      Ok('env: an environment variable expands in a search path',
+        Contains(LDProj.SearchPaths, TPath.Combine(LDir, 'envlib')));
+      Ok('env: $(MSBuildProjectDirectory) expands in a search path',
+        Contains(LDProj.SearchPaths, TPath.Combine(LDir, 'projlib')));
+      Ok('env: a search path is listed once whatever its case',
+        CountOf(LDProj.SearchPaths, 'common') = 1);
+      Ok('env: a property name is case-insensitive ($(cfg_2), $(dcc_define))',
+        Contains(LDProj.Defines, 'FROMCFG') and Contains(LDProj.Defines, 'DEBUG'));
+      Ok('env: a define is listed once whatever its case',
+        CountOf(LDProj.Defines, 'dup') = 1);
+      Ok('env: .dcp references are not files', Length(LDProj.Files) = 4);
+      Ok('env: ...they are the requires',
+        string.Join(';', LDProj.Requires) = 'rtl;vcl');
     finally
       LDProj.Free;
     end;

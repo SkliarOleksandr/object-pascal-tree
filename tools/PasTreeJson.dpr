@@ -47,7 +47,7 @@ begin
     GSM := TPasSourceManager.Create(
       [TPath.GetDirectoryName(TPath.GetFullPath(ParamStr(1)))]);
     GDefines := CreatePlatformDefines(GPlatform);
-    GPP := TPasPreprocessor.Create(GSM, GDefines, 37.0,
+    GPP := TPasPreprocessor.Create(GSM, GDefines, DEFAULT_COMPILER_VERSION,
       GInfo.PointerBytes, GInfo.ExtendedBytes, GInfo.LongBytes,
       GInfo.ExtendedAlign);
     try

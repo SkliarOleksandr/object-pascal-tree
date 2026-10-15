@@ -96,6 +96,7 @@ type
 
 var
   GPlatform: TPasPlatform;
+  GPlatformGiven: Boolean;
   GProj: TPasSemaProject;
   GPath, GStudio: string;
   GExtraPaths: TArray<string>;   // -L<dir>, repeatable; see the arg loop
@@ -415,7 +416,12 @@ begin
   LSites := TDictionary<string, string>.Create;
   LLibSites := TDictionary<string, string>.Create;
   try
-    if not LD.Load(APath, PlatformName(GPlatform)) then
+    // Without -p: the project's own platform, its `'$(Platform)'==''`
+    // fallback (audit B4-43).
+    var LPlatArg := '';
+    if GPlatformGiven then
+      LPlatArg := PlatformName(GPlatform);
+    if not LD.Load(APath, LPlatArg) then
     begin
       Writeln(ErrOutput, 'Could not load .dproj: ', APath);
       ExitCode := 2;
@@ -740,6 +746,7 @@ begin
     end;
     GPath := TPath.GetFullPath(ParamStr(1));
     GPlatform := pfWin32;
+    GPlatformGiven := False;
     GSingle := False;
     GWholeProject := False;
     GDProjMode := False;
@@ -793,7 +800,8 @@ begin
       else if SameText(ParamStr(GIdx), '-CC') then
         GConsole := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then
-        TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
+        GPlatformGiven :=
+          TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then
         GStudio := Copy(ParamStr(GIdx), 9, MaxInt)
       // -L<dir>: one extra search path, repeatable. The demo folds in the IDE's

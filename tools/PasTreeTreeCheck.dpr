@@ -329,7 +329,7 @@ begin
   Writeln('Platform: ', LInfo.Name);
   LSM := TPasSourceManager.Create([]);
   LDefines := CreatePlatformDefines(APlatform);
-  LPP := TPasPreprocessor.Create(LSM, LDefines, 37.0, LInfo.PointerBytes,
+  LPP := TPasPreprocessor.Create(LSM, LDefines, DEFAULT_COMPILER_VERSION, LInfo.PointerBytes,
     LInfo.ExtendedBytes);
   try
     LSM.BuildIncludeIndex(LDir);

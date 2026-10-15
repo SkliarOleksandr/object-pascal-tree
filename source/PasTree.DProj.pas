@@ -49,7 +49,9 @@ type
     FUnitAliases: TArray<TPasUnitAlias>;
     FSwitches: TArray<string>;
     FConsoleTarget: Boolean;
+    FRequires: TArray<string>;
     function ResolvePath(const ARelOrAbs: string): string;
+    function SplitList(const AVal: string; AResolve: Boolean): TArray<string>;
   public
     { Loads and evaluates APath for the given platform/config; either left
       empty defaults to the project's own fallback (its
@@ -68,8 +70,11 @@ type
     { Target platforms enabled in the project (BorlandProject/Platforms). }
     property Platforms: TArray<TPasPlatform> read FPlatforms;
     { Absolute paths of every compiled unit: MainSource + DCCReference items,
-      de-duplicated, in file order. }
+      de-duplicated, in file order. A `.dcp` reference is not one (Requires). }
     property Files: TArray<string> read FFiles;
+    { A package's requires: the names of its `.dcp` DCCReference items
+      (`rtl`, `vcl`), in file order. }
+    property Requires: TArray<string> read FRequires;
     { Absolute directories from DCC_UnitSearchPath, for the evaluated config. }
     property SearchPaths: TArray<string> read FSearchPaths;
     { DCC_Define entries for the evaluated config. }
@@ -92,8 +97,10 @@ type
 implementation
 
 uses
+  Winapi.Windows,
   System.SysUtils,
   System.IOUtils,
+  System.Generics.Defaults,
   System.Generics.Collections;
 
 type
@@ -707,6 +714,80 @@ begin
   end;
 end;
 
+{ A `;` list property's entries: trimmed, empty ones dropped, each resolved
+  to a full path when AResolve, and each listed once - compared without case,
+  as dcc compares define and namespace names and Windows paths (audit D1-46). }
+function TPasDProj.SplitList(const AVal: string; AResolve: Boolean): TArray<string>;
+var
+  LSeen: TDictionary<string, Boolean>;
+  LOne: string;
+begin
+  Result := nil;
+  LSeen := TDictionary<string, Boolean>.Create(TIStringComparer.Ordinal);
+  try
+    for LOne in AVal.Split([';']) do
+    begin
+      var LEntry := Trim(LOne);
+      if LEntry = '' then
+        Continue;
+      if AResolve then
+        LEntry := ResolvePath(LEntry);
+      if (LEntry <> '') and LSeen.TryAdd(LEntry, True) then
+        Result := Result + [LEntry];
+    end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
+{ The properties MSBuild has before the project's first line (audit A1-45):
+  every environment variable, then the reserved properties of the project
+  file, which no variable overrides. `Platform` is not taken from the
+  environment: rsvars.bat, which every command-line build of a .dproj runs
+  under, clears it (`SET PLATFORM=`), and the IDE's own builds pass it. }
+procedure SeedMSBuildProperties(AVars: TDictionary<string, string>;
+  const AProjectPath: string);
+var
+  LBlock, LP: PChar;
+  LEntry, LDir: string;
+  LEq: Integer;
+begin
+  LBlock := GetEnvironmentStrings;
+  if LBlock <> nil then
+  try
+    LP := LBlock;
+    while LP^ <> #0 do
+    begin
+      LEntry := LP;
+      Inc(LP, Length(LEntry) + 1);
+      // `=C:=C:\dir` - the per-drive directories - start with `=`.
+      LEq := Pos('=', LEntry, 2);
+      if LEq > 1 then
+        AVars.AddOrSetValue(Copy(LEntry, 1, LEq - 1), Copy(LEntry, LEq + 1, MaxInt));
+    end;
+  finally
+    FreeEnvironmentStrings(LBlock);
+  end;
+  AVars.Remove('Platform');
+
+  LDir := TPath.GetDirectoryName(AProjectPath);
+  AVars.AddOrSetValue('MSBuildProjectFullPath', AProjectPath);
+  AVars.AddOrSetValue('MSBuildProjectDirectory', LDir);
+  AVars.AddOrSetValue('MSBuildProjectDirectoryNoRoot',
+    Copy(LDir, Length(TPath.GetPathRoot(LDir)) + 1, MaxInt));
+  AVars.AddOrSetValue('MSBuildProjectFile', TPath.GetFileName(AProjectPath));
+  AVars.AddOrSetValue('MSBuildProjectName',
+    TPath.GetFileNameWithoutExtension(AProjectPath));
+  AVars.AddOrSetValue('MSBuildProjectExtension', TPath.GetExtension(AProjectPath));
+  // This file is the project: a .dproj's imports are not read.
+  AVars.AddOrSetValue('MSBuildThisFileFullPath', AProjectPath);
+  AVars.AddOrSetValue('MSBuildThisFileDirectory', IncludeTrailingPathDelimiter(LDir));
+  AVars.AddOrSetValue('MSBuildThisFile', TPath.GetFileName(AProjectPath));
+  AVars.AddOrSetValue('MSBuildThisFileName',
+    TPath.GetFileNameWithoutExtension(AProjectPath));
+  AVars.AddOrSetValue('MSBuildThisFileExtension', TPath.GetExtension(AProjectPath));
+end;
+
 function TPasDProj.Load(const APath: string; const APlatformOverride: string;
   const AConfigOverride: string): Boolean;
 var
@@ -714,27 +795,17 @@ var
   LReader: TDProjXmlReader;
   LRoot, LGroup, LChild, LItem, LBP, LPlats, LP: TXNode;
   LVars: TDictionary<string, string>;
-  LRawFiles, LConfigs: TList<string>;
+  LRawFiles, LConfigs, LRequires: TList<string>;
   LPlatformsFound: TList<TPasPlatform>;
   LName, LVal: string;
   LPlat: TPasPlatform;
-
-  procedure SeedEnv(const AName: string);
-  var
-    LEnv: string;
-  begin
-    LEnv := GetEnvironmentVariable(AName);
-    if LEnv <> '' then
-      LVars.AddOrSetValue(AName, LEnv);
-  end;
-
 begin
   Result := False;
   FDir := ''; FProjectName := ''; FMainSource := ''; FConfig := '';
   FPlatform := pfWin32;
   FConfigurations := nil; FPlatforms := nil; FFiles := nil;
   FSearchPaths := nil; FDefines := nil; FNamespaces := nil;
-  FUnitAliases := nil;
+  FUnitAliases := nil; FRequires := nil;
 
   if not TFile.Exists(APath) then
     Exit;
@@ -763,14 +834,14 @@ begin
   end;
 
   try
-    LVars := TDictionary<string, string>.Create;
+    // MSBuild property names are case-insensitive (audit B1-13).
+    LVars := TDictionary<string, string>.Create(TIStringComparer.Ordinal);
     LRawFiles := TList<string>.Create;
     LConfigs := TList<string>.Create;
+    LRequires := TList<string>.Create;
     LPlatformsFound := TList<TPasPlatform>.Create;
     try
-      SeedEnv('BDS'); SeedEnv('BDSLIB'); SeedEnv('BDSINCLUDE');
-      SeedEnv('BDSCOMMONDIR'); SeedEnv('BDSBIN'); SeedEnv('BDSPROJECTSDIR');
-      SeedEnv('BDSAPPDATABASEDIR'); SeedEnv('PRODUCTVERSION');
+      SeedMSBuildProperties(LVars, TPath.GetFullPath(APath));
       if APlatformOverride <> '' then
         LVars.AddOrSetValue('Platform', APlatformOverride);
       if AConfigOverride <> '' then
@@ -796,7 +867,20 @@ begin
               if not EvalCondition(LItem.Attr('Condition'), LVars) then
                 Continue;
               if SameText(LItem.Tag, 'DCCReference') then
-                LRawFiles.Add(ExpandMacros(LItem.Attr('Include'), LVars))
+              begin
+                LName := ExpandMacros(LItem.Attr('Include'), LVars);
+                // A package's requires are `.dcp` references (audit B1-14).
+                // SysUtils' file-name routines: TPath raises on a character
+                // no path may hold (`Un|it.pas`, audit B08).
+                if SameText(ExtractFileExt(Trim(LName)), '.dcp') then
+                begin
+                  LName := ChangeFileExt(ExtractFileName(Trim(LName)), '');
+                  if (LName <> '') and not LRequires.Contains(LName) then
+                    LRequires.Add(LName);
+                end
+                else
+                  LRawFiles.Add(LName);
+              end
               else if SameText(LItem.Tag, 'BuildConfiguration') then
               begin
                 LName := LItem.Attr('Include');
@@ -835,21 +919,7 @@ begin
 
       // Search paths FIRST: the file list below needs them (see there).
       if LVars.TryGetValue('DCC_UnitSearchPath', LVal) then
-      begin
-        var LSP := TList<string>.Create;
-        try
-          for LName in LVal.Split([';']) do
-            if Trim(LName) <> '' then
-            begin
-              var LResolved := ResolvePath(Trim(LName));
-              if not LSP.Contains(LResolved) then
-                LSP.Add(LResolved);
-            end;
-          FSearchPaths := LSP.ToArray;
-        finally
-          LSP.Free;
-        end;
-      end;
+        FSearchPaths := SplitList(LVal, True);
 
       { A DCCReference is not always relative to the project directory. A
         package whose sources live one level up lists them by BARE NAME -
@@ -892,64 +962,25 @@ begin
         LAllFiles.Free;
       end;
 
+      // ExpandMacros has replaced every `$(X)` at store time, a property
+      // nothing set with '' as MSBuild does.
       if LVars.TryGetValue('DCC_Define', LVal) then
-      begin
-        var LDefs := TList<string>.Create;
-        try
-          for LName in LVal.Split([';']) do
-          begin
-            var LDef := Trim(LName);
-            if (LDef <> '') and (Pos('$(', LDef) = 0) and not LDefs.Contains(LDef) then
-              LDefs.Add(LDef);
-          end;
-          FDefines := LDefs.ToArray;
-        finally
-          LDefs.Free;
-        end;
-      end;
-
+        FDefines := SplitList(LVal, False);
       if LVars.TryGetValue('DCC_Namespace', LVal) then
-      begin
-        var LNS := TList<string>.Create;
-        try
-          for LName in LVal.Split([';']) do
-          begin
-            var LOne := Trim(LName);
-            // Any UNEXPANDED macro is skipped. (The '$(DCC_Namespace)'
-            // self-reference this once described cannot actually reach here:
-            // ExpandMacros already substitutes '' for an undefined property
-            // at store time. The guard is kept as a cheap invariant.)
-            if (LOne <> '') and (Pos('$(', LOne) = 0) and
-               not LNS.Contains(LOne) then
-              LNS.Add(LOne);
-          end;
-          FNamespaces := LNS.ToArray;
-        finally
-          LNS.Free;
-        end;
-      end;
-
+        FNamespaces := SplitList(LVal, False);
       if LVars.TryGetValue('DCC_UnitAlias', LVal) then
-      begin
-        var LAliases := TList<TPasUnitAlias>.Create;
-        try
-          for LName in LVal.Split([';']) do
+        for LName in SplitList(LVal, False) do
+        begin
+          var LEq := Pos('=', LName);
+          if LEq > 1 then
           begin
-            var LEq := Pos('=', LName);
-            if LEq > 1 then
-            begin
-              var LA: TPasUnitAlias;
-              LA.Alias := Trim(Copy(LName, 1, LEq - 1));
-              LA.UnitName := Trim(Copy(LName, LEq + 1, MaxInt));
-              if (LA.Alias <> '') and (LA.UnitName <> '') then
-                LAliases.Add(LA);
-            end;
+            var LA: TPasUnitAlias;
+            LA.Alias := Trim(Copy(LName, 1, LEq - 1));
+            LA.UnitName := Trim(Copy(LName, LEq + 1, MaxInt));
+            if (LA.Alias <> '') and (LA.UnitName <> '') then
+              FUnitAliases := FUnitAliases + [LA];
           end;
-          FUnitAliases := LAliases.ToArray;
-        finally
-          LAliases.Free;
         end;
-      end;
 
       // The switches, as msbuild's DCC task turns the properties into dcc's
       // command line (CodeGear.Delphi.Targets, Studio 37.0; local/probe-b62
@@ -987,11 +1018,13 @@ begin
       FConsoleTarget := LVars.TryGetValue('DCC_ConsoleTarget', LVal) and
         SameText(Trim(LVal), 'true');
 
+      FRequires := LRequires.ToArray;
       FConfigurations := LConfigs.ToArray;
       FPlatforms := LPlatformsFound.ToArray;
       Result := FMainSource <> '';
     finally
       LPlatformsFound.Free;
+      LRequires.Free;
       LConfigs.Free;
       LRawFiles.Free;
       LVars.Free;

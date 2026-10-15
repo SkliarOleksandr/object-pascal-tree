@@ -126,7 +126,7 @@ begin
     GSM := TPasSourceManager.Create([]);
     GDefines := CreatePlatformDefines(GPlatform);
     GPlatInfo := PlatformInfo(GPlatform);
-    GPP := TPasPreprocessor.Create(GSM, GDefines, 37.0,
+    GPP := TPasPreprocessor.Create(GSM, GDefines, DEFAULT_COMPILER_VERSION,
       GPlatInfo.PointerBytes, GPlatInfo.ExtendedBytes, GPlatInfo.LongBytes,
       GPlatInfo.ExtendedAlign);
     Writeln('Platform: ', GPlatInfo.Name);

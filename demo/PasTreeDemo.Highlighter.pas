@@ -374,7 +374,7 @@ begin
   FSourceManager := TPasSourceManager.Create([]);
   FDefines := CreatePlatformDefines(pfWin32);
   FPreprocessor := TPasPreprocessor.Create(FSourceManager, FDefines,
-    37.0, PlatformInfo(pfWin32).PointerBytes, PlatformInfo(pfWin32).ExtendedBytes,
+    DEFAULT_COMPILER_VERSION, PlatformInfo(pfWin32).PointerBytes, PlatformInfo(pfWin32).ExtendedBytes,
     PlatformInfo(pfWin32).LongBytes, PlatformInfo(pfWin32).ExtendedAlign);
 
   FCachedSource := #0; // guarantee the first EnsureFresh call actually tokenizes

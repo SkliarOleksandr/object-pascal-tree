@@ -330,6 +330,12 @@ type
     function AppTypeBefore(AVisIndex: Integer; out AConsole: Boolean): Boolean;
   end;
 
+const
+  { The compiler the analyzer emulates when the host names none - see
+    PasTree.Platforms, which republishes it under the same name. }
+  DEFAULT_COMPILER_VERSION = 37.0;
+
+type
   TPasDefines = class
   private
     FMap: TDictionary<string, Boolean>;
@@ -513,7 +519,7 @@ type
       (TPasPlatformInfo's fields of those names: Win32 4 / 10 / 4 / 8, Win64
       8 / 8 / 4 / 8, OSX64 8 / 16 / 8 / 16). }
     constructor Create(ASourceManager: TPasSourceManager;
-      ADefines: TPasDefines; ACompilerVersion: Double = 37.0;
+      ADefines: TPasDefines; ACompilerVersion: Double = DEFAULT_COMPILER_VERSION;
       APointerBytes: Integer = 8; AExtendedBytes: Integer = 8;
       ALongBytes: Integer = 4; AExtendedAlign: Integer = 8);
     destructor Destroy; override;

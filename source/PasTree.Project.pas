@@ -101,7 +101,8 @@ begin
         LPP: TPasPreprocessor;
         LPre: TPasPreprocessed;
       begin
-        LPP := TPasPreprocessor.Create(FSourceManager, LBaseDefines, 37.0,
+        LPP := TPasPreprocessor.Create(FSourceManager, LBaseDefines,
+          DEFAULT_COMPILER_VERSION,
           LInfo.PointerBytes, LInfo.ExtendedBytes, LInfo.LongBytes,
           LInfo.ExtendedAlign);
         try
