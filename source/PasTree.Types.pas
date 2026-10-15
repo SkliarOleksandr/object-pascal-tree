@@ -266,6 +266,13 @@ function PasFoldName(const AName: string): string;
 { PasFoldName's equality, without building either string. }
 function PasSameName(const A, B: string): Boolean;
 
+{ The ONE row order of every search result and rename plan: file
+  (CompareText), line, column. The column breaks ties because TArray.Sort
+  is not stable - two rows on one line came back in either order. The
+  comparer was written out fourteen times (audit D1-24). }
+function PasCompareHitPos(const AF1: string; AL1, AC1: Integer;
+  const AF2: string; AL2, AC2: Integer): Integer;
+
 { A numeric literal's text as a number reader takes it: the digit
   separators dropped (B.5.1) and a leading `&` too - an `&` before a number
   is accepted and ignored (B.3; `&1` is 1, dcc64 37.0). The one reading for
@@ -490,6 +497,16 @@ begin
   // Surrogates are no identifier characters; leave them as they are.
   CharLowerBuffW(@GPasFoldHi[0], $D800 - $80);
   CharLowerBuffW(@GPasFoldHi[$E000 - $80], $10000 - $E000);
+end;
+
+function PasCompareHitPos(const AF1: string; AL1, AC1: Integer;
+  const AF2: string; AL2, AC2: Integer): Integer;
+begin
+  Result := CompareText(AF1, AF2);
+  if Result = 0 then
+    Result := AL1 - AL2;
+  if Result = 0 then
+    Result := AC1 - AC2;
 end;
 
 function PasNumLiteralText(const AText: string): string;

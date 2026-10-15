@@ -53,7 +53,9 @@ set FAILED=
 for %%T in (%SUITES%) do (
   echo --- %%T
   "out\%%T.exe"
-  if errorlevel 1 set FAILED=!FAILED! %%T
+  rem Not `if errorlevel 1`: a crash exits NEGATIVE (an access violation is
+  rem -1073741819), which that test passes as success.
+  if !errorlevel! neq 0 set FAILED=!FAILED! %%T
 )
 
 echo.

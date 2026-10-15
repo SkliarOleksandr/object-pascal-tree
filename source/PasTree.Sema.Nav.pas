@@ -366,6 +366,17 @@ type
       UnitId, Sym: Integer;
       IsFirst: Boolean;
     end;
+    // The reverse-heritage index (OvBuildTypeEdges): OvKey of a type -> the
+    // edges filed under it.
+    TOvIndex = TObjectDictionary<Int64, TList<TOvEdge>>;
+    { Which edges a descendant walk follows (OvWalkDescendants): oaClass the
+      ancestor edges between classes/`object`s, oaInterface every edge into
+      an interface - an interface's heritage list is its extends list. }
+    TOvAxis = (oaClass, oaInterface);
+    { One step of OvWalkDescendants: AKid is reached from AParent, ADepth
+      below the start. True descends from AKid; False closes its branch. }
+    TOvVisit = reference to function(const AParent, AKid: TPasExtRef;
+      ADepth: Integer): Boolean;
     TNavCache = class
       // The model this cache was built from. A navigator does not survive a
       // swap of models (see Create: an address can be reused by the next
@@ -511,8 +522,10 @@ type
       const ANameLower: string): TArray<Integer>;
     function OvRefOfHeritageItem(AMid, AItemNode: Integer;
       out ABMid, ABSym: Integer): Boolean;
-    procedure OvBuildTypeEdges(
-      AIndex: TDictionary<string, TArray<TOvEdge>>);
+    function OvBuildTypeEdges(ATarget: Int64 = -1): TOvIndex;
+    procedure OvWalkDescendants(AIndex: TOvIndex; AMid, AStruct: Integer;
+      AAxis: TOvAxis; const AVisit: TOvVisit);
+    function OvAncestorClass(var AMid, AStruct: Integer): Boolean;
     function OvDirsNamed(AMid, AStructSym: Integer;
       const ANameLower: string; out ADirs: TPasOvDirs): Boolean;
     procedure OvClimbToRoot(var AMid, AStructSym: Integer;
@@ -528,7 +541,9 @@ type
     function OvImplRow(AMid, AStructSym: Integer; const ANameLower: string;
       const AViaTypeName: string; AKind: TPasImplKind;
       AHits: TList<TPasImplHit>;
-      ASeen: TDictionary<string, Boolean>): Boolean;
+      ASeen: TDictionary<Int64, Boolean>): Boolean;
+    function DescendantRow(const ARef: TPasExtRef; ADepth: Integer;
+      const AParentName: string; out ARow: TPasDescendantHit): Boolean;
     // Property redeclaration chains (see PropertyChain).
     function OvStructOfProperty(AMid, ASym: Integer;
       out AStructSym: Integer): Boolean;
@@ -544,10 +559,14 @@ type
     function NodeBinding(LM: TPasSemaModel; ANode: Integer;
       out AUid, ASym: Integer): Boolean;
     function DesignatorNameNode(LM: TPasSemaModel; ANode: Integer): Integer;
-    function DesignatorIsClass(AMid, ANode, ATMid, ASym: Integer): Boolean;
+    // AProbe: the caller's probe for AMid's nodes (WithTargetTypeX).
+    function DesignatorIsClass(AMid, ANode, ATMid, ASym: Integer;
+      AProbe: TPasXProbe): Boolean;
     // The rename plans' refusal when a model failed to rehydrate since
     // AFailsBefore (TPasSemaProject.HydrateFailures); '' when none did.
     function HydrateRefusal(AFailsBefore: Integer): string;
+    // RenameBlockReason over a plan's edits, sorted by file.
+    function PlanBlockReason(const AEdits: TArray<TPasRenameEdit>): string;
     // Where AName is written as an identifier in a conditional branch the
     // defines leave out, in one of AMids (only inside the spans of ASpans'
     // nodes for a model listed there) - the rename plans' AInactive.
@@ -1258,6 +1277,53 @@ uses
   System.Classes,
   System.IOUtils,
   System.Generics.Defaults;
+
+// One (model, symbol) as one number - the reverse-heritage index's key and
+// every walk's seen set. A Format('%d:%d') string per probe cost more than
+// the index itself (audit C1-28).
+function OvKey(AMid, ASym: Integer): Int64; inline;
+begin
+  Result := (Int64(AMid) shl 32) or Cardinal(ASym);
+end;
+
+const
+  // The step bound of every ancestor climb (TPasNavigator.OvAncestorClass).
+  OV_MAX_CLIMB = 64;
+
+// The sorts every search shares, on PasCompareHitPos's order.
+procedure SortRefHits(var AHits: TArray<TPasRefHit>);
+begin
+  TArray.Sort<TPasRefHit>(AHits, TComparer<TPasRefHit>.Construct(
+    function(const A, B: TPasRefHit): Integer
+    begin
+      Result := PasCompareHitPos(A.FilePath, A.Line, A.Col,
+        B.FilePath, B.Line, B.Col);
+    end));
+end;
+
+procedure SortRenameEdits(var AEdits: TArray<TPasRenameEdit>);
+begin
+  TArray.Sort<TPasRenameEdit>(AEdits, TComparer<TPasRenameEdit>.Construct(
+    function(const A, B: TPasRenameEdit): Integer
+    begin
+      Result := PasCompareHitPos(A.FilePath, A.Line, A.Col,
+        B.FilePath, B.Line, B.Col);
+    end));
+end;
+
+// Root rows first, then the search order - FindImplementations and
+// FindInterfaceImplementors.
+procedure SortImplHits(var AHits: TArray<TPasImplHit>);
+begin
+  TArray.Sort<TPasImplHit>(AHits, TComparer<TPasImplHit>.Construct(
+    function(const A, B: TPasImplHit): Integer
+    begin
+      Result := Ord(B.Kind = pikRoot) - Ord(A.Kind = pikRoot);
+      if Result = 0 then
+        Result := PasCompareHitPos(A.Hit.FilePath, A.Hit.Line, A.Hit.Col,
+          B.Hit.FilePath, B.Hit.Line, B.Hit.Col);
+    end));
+end;
 
 { TPasNavigator.TNavCache }
 
@@ -2217,17 +2283,7 @@ begin
   finally
     LHits.Free;
   end;
-  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
-    function(const A, B: TPasRefHit): Integer
-    begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      // Col too: TArray.Sort is unstable, so two hits on one line came back
-      // in random column order. PlanRename's own comparer already did this.
-      if Result = 0 then
-        Result := A.Col - B.Col;
-    end));
+  SortRefHits(Result);
 end;
 
 { Can ASym (of model ATMid) be named from no other unit? Its scope climbs
@@ -2476,6 +2532,11 @@ begin
       Result := True;
     skProperty:
       begin
+        // The clicked declaration's own `write` answers most clicks alone,
+        // without the chain's project-wide index (audit C1-28: this is the
+        // LSP's findAllAt gate, run on a right-click).
+        if PropertyIsWritable(ATMid, ASym) then
+          Exit(True);
         // A bare redeclaration (`property Items;`) carries no specifiers of
         // its own unless it changes them - ask the whole chain; any link with
         // a `write` makes the property writable.
@@ -2511,15 +2572,7 @@ begin
   finally
     LHits.Free;
   end;
-  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
-    function(const A, B: TPasRefHit): Integer
-    begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      if Result = 0 then
-        Result := A.Col - B.Col;
-    end));
+  SortRefHits(Result);
 end;
 
 { Is (AMid, ASym) a property declared directly inside a class/`object` body -
@@ -2564,6 +2617,15 @@ begin
   if (LScope < 0) or (LScope >= LM.Scopes.Count) or
      (LM.Scopes[LScope].Symbols.Count = 0) then
     Exit;
+  // The scope's hashed name first (audit C1-28: a linear scan per class of
+  // every descendant walk). The name's head is the first declaration of
+  // it; only a clash with another kind of member - broken source - falls
+  // back to the scan, which also sees what the name table does not hold.
+  LSym := LM.FindLocal(LScope, ANameLower);
+  if LSym = NIL_SYM then
+    Exit;
+  if LM.Symbols[LSym].Kind = skProperty then
+    Exit(LSym);
   for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
   begin
     LSym := LM.Scopes[LScope].Symbols[LIdx];
@@ -2593,14 +2655,11 @@ end;
   through. }
 function TPasNavigator.PropertyChain(ATMid, ASym: Integer): TArray<TPasExtRef>;
 var
-  LStruct, LPMid, LPSym, LIdx, LCand: Integer;
-  LNameLower, LKey: string;
-  LRoot, LCur, LLink: TPasExtRef;
-  LIndex: TDictionary<string, TArray<TOvEdge>>;
-  LSeen: TDictionary<string, Boolean>;
-  LQueue: TQueue<TPasExtRef>;
+  LStruct, LPMid, LPSym: Integer;
+  LNameLower: string;
+  LRoot: TPasExtRef;
+  LIndex: TOvIndex;
   LList: TList<TPasExtRef>;
-  LKids: TArray<TOvEdge>;
 begin
   LRoot.UnitId := ATMid;
   LRoot.Sym := ASym;
@@ -2616,52 +2675,28 @@ begin
     Exit;   // the chain climbed into something that is not a class - keep
             // the clicked symbol alone rather than half a chain
   LList := TList<TPasExtRef>.Create;
-  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
-  LSeen := TDictionary<string, Boolean>.Create;
-  LQueue := TQueue<TPasExtRef>.Create;
+  LIndex := nil;
   try
     LList.Add(LRoot);
-    OvBuildTypeEdges(LIndex);
-    LCur.UnitId := LRoot.UnitId;
-    LCur.Sym := LStruct;
-    LQueue.Enqueue(LCur);
-    LSeen.Add(Format('%d:%d', [LCur.UnitId, LCur.Sym]), True);
-    while LQueue.Count > 0 do
-    begin
-      LCur := LQueue.Dequeue;
-      if not LIndex.TryGetValue(Format('%d:%d', [LCur.UnitId, LCur.Sym]),
-        LKids) then
-        Continue;
-      for LIdx := 0 to High(LKids) do
+    LIndex := OvBuildTypeEdges;
+    OvWalkDescendants(LIndex, LRoot.UnitId, LStruct, oaClass,
+      function(const AParent, AKid: TPasExtRef; ADepth: Integer): Boolean
+      var
+        LCand: Integer;
+        LLink: TPasExtRef;
       begin
-        if not LKids[LIdx].IsFirst then
-          Continue;
-        if OvClassDefNode(LKids[LIdx].UnitId, LKids[LIdx].Sym) = NIL_NODE then
-          Continue;
-        LKey := Format('%d:%d', [LKids[LIdx].UnitId, LKids[LIdx].Sym]);
-        if LSeen.ContainsKey(LKey) then
-          Continue;
-        LSeen.Add(LKey, True);
-        LCand := OvPropertyNamed(LKids[LIdx].UnitId, LKids[LIdx].Sym,
-          LNameLower);
-        if LCand <> NIL_SYM then
-        begin
-          if FProj.Model(LKids[LIdx].UnitId).Symbols[LCand].TypeNode <>
-             NIL_NODE then
-            Continue;   // typed: hides the property, closes the branch
-          LLink.UnitId := LKids[LIdx].UnitId;
-          LLink.Sym := LCand;
-          LList.Add(LLink);
-        end;
-        LCur.UnitId := LKids[LIdx].UnitId;
-        LCur.Sym := LKids[LIdx].Sym;
-        LQueue.Enqueue(LCur);
-      end;
-    end;
+        Result := True;
+        LCand := OvPropertyNamed(AKid.UnitId, AKid.Sym, LNameLower);
+        if LCand = NIL_SYM then
+          Exit;
+        if FProj.Model(AKid.UnitId).Symbols[LCand].TypeNode <> NIL_NODE then
+          Exit(False);   // typed: hides the property, closes the branch
+        LLink.UnitId := AKid.UnitId;
+        LLink.Sym := LCand;
+        LList.Add(LLink);
+      end);
     Result := LList.ToArray;
   finally
-    LQueue.Free;
-    LSeen.Free;
     LIndex.Free;
     LList.Free;
   end;
@@ -2862,17 +2897,7 @@ begin
   finally
     LHits.Free;
   end;
-  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
-    function(const A, B: TPasRefHit): Integer
-    begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      // Col too: TArray.Sort is unstable, so two hits on one line came back
-      // in random column order. PlanRename's own comparer already did this.
-      if Result = 0 then
-        Result := A.Col - B.Col;
-    end));
+  SortRefHits(Result);
 end;
 
 function TPasNavigator.UnitDeclHit(ATargetMid: Integer;
@@ -2978,17 +3003,7 @@ begin
   finally
     LHits.Free;
   end;
-  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
-    function(const A, B: TPasRefHit): Integer
-    begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      // Col too: TArray.Sort is unstable, so two hits on one line came back
-      // in random column order. PlanRename's own comparer already did this.
-      if Result = 0 then
-        Result := A.Col - B.Col;
-    end));
+  SortRefHits(Result);
 end;
 
 { ---- Conditional symbols (the fourth identity) -------------------------- }
@@ -3338,11 +3353,8 @@ begin
   TArray.Sort<TPasDefineSite>(ASites, TComparer<TPasDefineSite>.Construct(
     function(const A, B: TPasDefineSite): Integer
     begin
-      Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
-      if Result = 0 then
-        Result := A.Hit.Line - B.Hit.Line;
-      if Result = 0 then
-        Result := A.Hit.Col - B.Hit.Col;
+      Result := PasCompareHitPos(A.Hit.FilePath, A.Hit.Line, A.Hit.Col,
+        B.Hit.FilePath, B.Hit.Line, B.Hit.Col);
     end));
   // A file included twice has a file id per inclusion - one row per site,
   // active if any copy is (CollectDefineRows' rule). DefinesAt's only use.
@@ -3928,6 +3940,24 @@ begin
   if (LScope < 0) or (LScope >= LM.Scopes.Count) or
      (LM.Scopes[LScope].Symbols.Count = 0) then
     Exit;
+  // The hashed name and its overload chain - every same-named routine of
+  // the scope chains onto the head (DeclareSym). Only a head of another
+  // kind (a clash in broken source) takes the scan below.
+  LSym := LM.FindLocal(LScope, ANameLower);
+  if LSym = NIL_SYM then
+    Exit;
+  if LM.Symbols[LSym].Kind = skRoutine then
+  begin
+    LIdx := 0;
+    while (LSym <> NIL_SYM) and (LIdx < 1024) do
+    begin
+      if LM.Symbols[LSym].Kind = skRoutine then
+        Result := Result + [LSym];
+      LSym := LM.Symbols[LSym].NextOverload;
+      Inc(LIdx);
+    end;
+    Exit;
+  end;
   LList := TList<Integer>.Create;
   try
     for LIdx := 0 to LM.Scopes[LScope].Symbols.Count - 1 do
@@ -4018,69 +4048,176 @@ end;
   Built per call: a search is a user gesture, caching would need an
   invalidation story against incremental reanalysis, and the pass is one
   symbol sweep per model that reads no text at all (measured: single-digit ms
-  over the RTL). }
-procedure TPasNavigator.OvBuildTypeEdges(
-  AIndex: TDictionary<string, TArray<TOvEdge>>);
+  over the RTL). Keyed by OvKey with one list per type: a string key per
+  edge and an array copy per append made it quadratic in a base's fan-in
+  (audit C1-28). ATarget (an OvKey) keeps only the edges filed under that
+  one type - FindImplementations and FindInterfaceImplementors read no
+  other. The caller frees the index. }
+function TPasNavigator.OvBuildTypeEdges(ATarget: Int64): TOvIndex;
 var
   LMi, LSym, LDef, LItem, LBMid, LBSym: Integer;
   LM: TPasSemaModel;
   LAnc: TSemaXType;
+  LIndex: TOvIndex;
 
   procedure AddEdge(ABMid, ABSym: Integer; AIsFirst: Boolean);
   var
-    LKey: string;
-    LEdges: TArray<TOvEdge>;
+    LKey: Int64;
+    LEdges: TList<TOvEdge>;
     LEdge: TOvEdge;
   begin
-    LKey := Format('%d:%d', [ABMid, ABSym]);
+    LKey := OvKey(ABMid, ABSym);
+    if (ATarget >= 0) and (LKey <> ATarget) then
+      Exit;
     LEdge.UnitId := LMi;
     LEdge.Sym := LSym;
     LEdge.IsFirst := AIsFirst;
-    if AIndex.TryGetValue(LKey, LEdges) then
-      AIndex[LKey] := LEdges + [LEdge]
-    else
-      AIndex.Add(LKey, [LEdge]);
+    if not LIndex.TryGetValue(LKey, LEdges) then
+    begin
+      LEdges := TList<TOvEdge>.Create;
+      LIndex.Add(LKey, LEdges);
+    end;
+    LEdges.Add(LEdge);
   end;
 
 begin
-  for LMi := 0 to FProj.ModelCount - 1 do
-  begin
-    LM := FProj.Model(LMi);
-    for LSym := 0 to LM.SymCount - 1 do
+  LIndex := TOvIndex.Create([doOwnsValues]);
+  Result := LIndex;
+  try
+    for LMi := 0 to FProj.ModelCount - 1 do
     begin
-      if LM.Symbols[LSym].Kind <> skType then
-        Continue;
-      LDef := OvStructDefNode(LMi, LSym,
-        [nkClassType, nkObjectType, nkInterfaceType]);
-      if LDef = NIL_NODE then
-        Continue;
-      // The ancestor, written or implicit (an `object` has no implicit one).
-      LAnc := FProj.AncestorOfX(XPlain(LMi, LSym));
-      if XValid(LAnc) then
+      LM := FProj.Model(LMi);
+      for LSym := 0 to LM.SymCount - 1 do
       begin
-        LBMid := LAnc.UnitId;
-        LBSym := LAnc.Sym;
-        OvUnalias(LBMid, LBSym);
-        AddEdge(LBMid, LBSym, True);
-      end
-      // The resolver's own binding of the written entry, when the step
-      // could not type it.
-      else if (PasHeritageRef(LM.Tree, LDef) <> NIL_NODE) and
-        OvRefOfHeritageItem(LMi, PasHeritageRef(LM.Tree, LDef), LBMid,
-          LBSym) then
-        AddEdge(LBMid, LBSym, True);
-      // The rest of the leading run: a class's implements list.
-      LItem := PasHeritageRef(LM.Tree, LDef);
-      if LItem <> NIL_NODE then
-        LItem := LM.Tree.Nodes[LItem].NextSibling;
-      while (LItem <> NIL_NODE) and
-            (LM.Tree.Nodes[LItem].Kind in [nkIdent, nkMember, nkTypeArgs]) do
-      begin
-        if OvRefOfHeritageItem(LMi, LItem, LBMid, LBSym) then
-          AddEdge(LBMid, LBSym, False);
-        LItem := LM.Tree.Nodes[LItem].NextSibling;
+        if LM.Symbols[LSym].Kind <> skType then
+          Continue;
+        LDef := OvStructDefNode(LMi, LSym,
+          [nkClassType, nkObjectType, nkInterfaceType]);
+        if LDef = NIL_NODE then
+          Continue;
+        // The ancestor, written or implicit (an `object` has no implicit
+        // one).
+        LAnc := FProj.AncestorOfX(XPlain(LMi, LSym));
+        if XValid(LAnc) then
+        begin
+          LBMid := LAnc.UnitId;
+          LBSym := LAnc.Sym;
+          OvUnalias(LBMid, LBSym);
+          AddEdge(LBMid, LBSym, True);
+        end
+        // The resolver's own binding of the written entry, when the step
+        // could not type it.
+        else if (PasHeritageRef(LM.Tree, LDef) <> NIL_NODE) and
+          OvRefOfHeritageItem(LMi, PasHeritageRef(LM.Tree, LDef), LBMid,
+            LBSym) then
+          AddEdge(LBMid, LBSym, True);
+        // The rest of the leading run: a class's implements list.
+        LItem := PasHeritageRef(LM.Tree, LDef);
+        if LItem <> NIL_NODE then
+          LItem := LM.Tree.Nodes[LItem].NextSibling;
+        while (LItem <> NIL_NODE) and
+              (LM.Tree.Nodes[LItem].Kind in [nkIdent, nkMember, nkTypeArgs]) do
+        begin
+          if OvRefOfHeritageItem(LMi, LItem, LBMid, LBSym) then
+            AddEdge(LBMid, LBSym, False);
+          LItem := LM.Tree.Nodes[LItem].NextSibling;
+        end;
       end;
     end;
+  except
+    LIndex.Free;
+    raise;
+  end;
+end;
+
+{ The ONE downward walk over the index (audit D1-25: PropertyChain,
+  FindOverrides, FindDescendants and RenameFamily's two walks each wrote it
+  out): breadth-first from (AMid, AStruct) along AAxis's edges, each type
+  visited once - broken source can spell a cycle or list a type twice, and
+  error tolerance is the primary mode, so the seen set guards rather than
+  assumes. AVisit sees a kid after it is marked seen; its False closes the
+  kid's branch (a typed property redeclaration, a class that starts a new
+  slot). Breadth-first is hierarchy order: all depth-1 kids, then depth-2. }
+procedure TPasNavigator.OvWalkDescendants(AIndex: TOvIndex; AMid,
+  AStruct: Integer; AAxis: TOvAxis; const AVisit: TOvVisit);
+type
+  TQueued = record
+    Ref: TPasExtRef;
+    Depth: Integer;
+  end;
+var
+  LSeen: TDictionary<Int64, Boolean>;
+  LQueue: TQueue<TQueued>;
+  LCur, LNext: TQueued;
+  LKids: TList<TOvEdge>;
+  LIdx: Integer;
+  LOk: Boolean;
+begin
+  LSeen := TDictionary<Int64, Boolean>.Create;
+  LQueue := TQueue<TQueued>.Create;
+  try
+    LCur.Ref.UnitId := AMid;
+    LCur.Ref.Sym := AStruct;
+    LCur.Depth := 0;
+    LQueue.Enqueue(LCur);
+    LSeen.Add(OvKey(AMid, AStruct), True);
+    while LQueue.Count > 0 do
+    begin
+      LCur := LQueue.Dequeue;
+      if not AIndex.TryGetValue(OvKey(LCur.Ref.UnitId, LCur.Ref.Sym),
+        LKids) then
+        Continue;
+      for LIdx := 0 to LKids.Count - 1 do
+      begin
+        LNext.Ref.UnitId := LKids.List[LIdx].UnitId;
+        LNext.Ref.Sym := LKids.List[LIdx].Sym;
+        // A class: ANCESTOR edges to classes only - a class that merely
+        // LISTS a type (its implements list) is no descendant and shares
+        // no VMT slot with it. An interface: every interface naming it.
+        if AAxis = oaClass then
+          LOk := LKids.List[LIdx].IsFirst and
+            (OvClassDefNode(LNext.Ref.UnitId, LNext.Ref.Sym) <> NIL_NODE)
+        else
+          LOk := OvInterfaceDefNode(LNext.Ref.UnitId, LNext.Ref.Sym) <>
+            NIL_NODE;
+        if not LOk or
+           not LSeen.TryAdd(OvKey(LNext.Ref.UnitId, LNext.Ref.Sym), True) then
+          Continue;
+        LNext.Depth := LCur.Depth + 1;
+        if AVisit(LCur.Ref, LNext.Ref, LNext.Depth) then
+          LQueue.Enqueue(LNext);
+      end;
+    end;
+  finally
+    LQueue.Free;
+    LSeen.Free;
+  end;
+end;
+
+{ One step of the ONE upward climb (audit D1-25: OvClimbToRoot,
+  FindImplementations and RenameFamily climbed apart, with two depth
+  bounds): the ancestor class of the class/`object` AMid/AStruct are, in
+  place. An ancestor spelled through an alias (of an instantiation, too) is
+  the class the alias names (audit A2-25). False, the pair untouched, for an
+  ancestor this closure cannot see or that is no class. A climb takes at
+  most OV_MAX_CLIMB steps - a cycle guard against broken heritage, not a
+  limit on real code. }
+function TPasNavigator.OvAncestorClass(var AMid, AStruct: Integer): Boolean;
+var
+  LX: TSemaXType;
+  LBMid, LBSym: Integer;
+begin
+  LX := FProj.AncestorOfX(XPlain(AMid, AStruct));
+  if not XValid(LX) then
+    Exit(False);
+  LBMid := LX.UnitId;
+  LBSym := LX.Sym;
+  OvUnalias(LBMid, LBSym);
+  Result := OvClassDefNode(LBMid, LBSym) <> NIL_NODE;
+  if Result then
+  begin
+    AMid := LBMid;
+    AStruct := LBSym;
   end;
 end;
 
@@ -4152,7 +4289,6 @@ const
   CHAIN_DIRS = [odVirtual, odDynamic, odOverride, odMessage];
   STARTS_SLOT = [odVirtual, odDynamic];
 var
-  LX: TSemaXType;
   LDepth, LBMid, LBSym, LDecl: Integer;
   LDirs: TPasOvDirs;
   LM: TPasSemaModel;
@@ -4176,30 +4312,21 @@ begin
     Exit;
   if (LDirs * STARTS_SLOT <> []) and not OvLinks(AMid, AStructSym, LDirs) then
     Exit;
-  LX := XPlain(AMid, AStructSym);
-  for LDepth := 1 to 64 do
+  LBMid := AMid;
+  LBSym := AStructSym;
+  for LDepth := 1 to OV_MAX_CLIMB do
   begin
-    LX := FProj.AncestorOfX(LX);
-    if not XValid(LX) then
+    if not OvAncestorClass(LBMid, LBSym) then
       Exit;
-    // An ancestor spelled through an alias (of an instantiation, too) is
-    // the class the alias names (audit A2-25).
-    LBMid := LX.UnitId;
-    LBSym := LX.Sym;
-    OvUnalias(LBMid, LBSym);
-    LX := XPlain(LBMid, LBSym);
-    if OvClassDefNode(LX.UnitId, LX.Sym) = NIL_NODE then
-      Exit;
-    if not OvDirsNamed(LX.UnitId, LX.Sym, ANameLower, LDirs) then
+    if not OvDirsNamed(LBMid, LBSym, ANameLower, LDirs) then
       Exit;   // directives unreadable there - stop rather than guess
     if LDirs = [] then
       Continue;   // does not touch the name: the slot is inherited across it
     if LDirs * CHAIN_DIRS = [] then
       Exit;   // undecorated: a hiding declaration, no chain passes through
-    AMid := LX.UnitId;
-    AStructSym := LX.Sym;
-    if (LDirs * STARTS_SLOT <> []) and
-       not OvLinks(LX.UnitId, LX.Sym, LDirs) then
+    AMid := LBMid;
+    AStructSym := LBSym;
+    if (LDirs * STARTS_SLOT <> []) and not OvLinks(LBMid, LBSym, LDirs) then
       Exit;   // the slot starts here - the root
   end;
 end;
@@ -4387,13 +4514,9 @@ function TPasNavigator.FindOverrides(ATMid,
   ASym: Integer): TArray<TPasOverrideHit>;
 var
   LHits: TList<TPasOverrideHit>;
-  LIndex: TDictionary<string, TArray<TOvEdge>>;
-  LSeen: TDictionary<string, Boolean>;
-  LQueue: TQueue<TPasExtRef>;
-  LCur: TPasExtRef;
-  LKids: TArray<TOvEdge>;
+  LIndex: TOvIndex;
   LIdx, LMid, LStruct: Integer;
-  LNameLower, LKey: string;
+  LNameLower: string;
   LChain: TArray<TPasExtRef>;
   LOv: TPasOverrideHit;
 begin
@@ -4432,55 +4555,21 @@ begin
   OvClimbToRoot(LMid, LStruct, ASym, LNameLower);
 
   LHits := TList<TPasOverrideHit>.Create;
-  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
-  LSeen := TDictionary<string, Boolean>.Create;
-  LQueue := TQueue<TPasExtRef>.Create;
+  LIndex := nil;
   try
     OvCollectFrom(LMid, LStruct, LNameLower, True, LHits);
-    OvBuildTypeEdges(LIndex);
-    LCur.UnitId := LMid;
-    LCur.Sym := LStruct;
-    LQueue.Enqueue(LCur);
-    LSeen.Add(Format('%d:%d', [LMid, LStruct]), True);
-    while LQueue.Count > 0 do
-    begin
-      LCur := LQueue.Dequeue;
-      if not LIndex.TryGetValue(Format('%d:%d', [LCur.UnitId, LCur.Sym]),
-        LKids) then
-        Continue;
-      for LIdx := 0 to High(LKids) do
+    LIndex := OvBuildTypeEdges;
+    OvWalkDescendants(LIndex, LMid, LStruct, oaClass,
+      function(const AParent, AKid: TPasExtRef; ADepth: Integer): Boolean
       begin
-        // ANCESTOR edges only, and only to a class/`object`: a class that
-        // merely LISTS this type (its implements list) shares no VMT slot
-        // with it, and neither does anything but a class.
-        if not LKids[LIdx].IsFirst then
-          Continue;
-        if OvClassDefNode(LKids[LIdx].UnitId, LKids[LIdx].Sym) = NIL_NODE then
-          Continue;
-        LKey := Format('%d:%d', [LKids[LIdx].UnitId, LKids[LIdx].Sym]);
-        // A diamond cannot happen in single inheritance, but the SAME class
-        // can be reached twice through a self-referential or duplicated
-        // heritage spelling in broken source - error tolerance is the
-        // primary mode here, so guard rather than assume.
-        if LSeen.ContainsKey(LKey) then
-          Continue;
-        LSeen.Add(LKey, True);
-        OvCollectFrom(LKids[LIdx].UnitId, LKids[LIdx].Sym, LNameLower, False,
-          LHits);
+        OvCollectFrom(AKid.UnitId, AKid.Sym, LNameLower, False, LHits);
         // A class that starts a new slot or hides this one ends the
         // branch: whatever overrides below it is another chain's
         // (OvClosesSlot). Its own reintroduce row is still reported.
-        if OvClosesSlot(LKids[LIdx].UnitId, LKids[LIdx].Sym, LNameLower) then
-          Continue;
-        LCur.UnitId := LKids[LIdx].UnitId;
-        LCur.Sym := LKids[LIdx].Sym;
-        LQueue.Enqueue(LCur);
-      end;
-    end;
+        Result := not OvClosesSlot(AKid.UnitId, AKid.Sym, LNameLower);
+      end);
     Result := LHits.ToArray;
   finally
-    LQueue.Free;
-    LSeen.Free;
     LIndex.Free;
     LHits.Free;
   end;
@@ -4492,11 +4581,8 @@ begin
     begin
       Result := Ord(B.Kind = pokRoot) - Ord(A.Kind = pokRoot);
       if Result = 0 then
-        Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
-      if Result = 0 then
-        Result := A.Hit.Line - B.Hit.Line;
-      if Result = 0 then
-        Result := A.Hit.Col - B.Hit.Col;
+        Result := PasCompareHitPos(A.Hit.FilePath, A.Hit.Line, A.Hit.Col,
+          B.Hit.FilePath, B.Hit.Line, B.Hit.Col);
     end));
 end;
 
@@ -4517,13 +4603,13 @@ end;
 function TPasNavigator.OvImplRow(AMid, AStructSym: Integer;
   const ANameLower: string; const AViaTypeName: string;
   AKind: TPasImplKind; AHits: TList<TPasImplHit>;
-  ASeen: TDictionary<string, Boolean>): Boolean;
+  ASeen: TDictionary<Int64, Boolean>): Boolean;
 var
   LM: TPasSemaModel;
   LSyms: TArray<Integer>;
   LIdx, LDeclNode: Integer;
   LRow: TPasImplHit;
-  LKey: string;
+  LKey: Int64;
 begin
   LSyms := OvMethodsNamed(AMid, AStructSym, ANameLower);
   Result := Length(LSyms) > 0;
@@ -4538,7 +4624,7 @@ begin
     LDeclNode := LM.Symbols[LSyms[LIdx]].DeclNode;
     if LDeclNode = NIL_NODE then
       Continue;
-    LKey := Format('%d:%d', [AMid, LSyms[LIdx]]);
+    LKey := OvKey(AMid, LSyms[LIdx]);
     if ASeen.ContainsKey(LKey) then
       Continue;
     if not HitFromNode(LM, LDeclNode, LRow.Hit) then
@@ -4582,13 +4668,13 @@ function TPasNavigator.FindImplementations(ATMid, ASym: Integer):
   TArray<TPasImplHit>;
 var
   LHits: TList<TPasImplHit>;
-  LIndex: TDictionary<string, TArray<TOvEdge>>;
-  LSeenRow: TDictionary<string, Boolean>;
-  LEdges: TArray<TOvEdge>;
+  LIndex: TOvIndex;
+  LSeenRow: TDictionary<Int64, Boolean>;
+  LEdges: TList<TOvEdge>;
+  LEdge: TOvEdge;
   LM: TPasSemaModel;
-  LScope, LIntfSym, LIdx, LDepth, LBMid, LBSym: Integer;
+  LScope, LIntfSym, LDepth, LBMid, LBSym: Integer;
   LNameLower, LVia: string;
-  LX: TSemaXType;
 begin
   Result := nil;
   if (ATMid < 0) or (ATMid >= FProj.ModelCount) then
@@ -4607,13 +4693,13 @@ begin
   LNameLower := LM.Symbols[ASym].NameLower;
 
   LHits := TList<TPasImplHit>.Create;
-  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
-  LSeenRow := TDictionary<string, Boolean>.Create;
+  LIndex := nil;
+  LSeenRow := TDictionary<Int64, Boolean>.Create;
   try
     // The interface's own declaration(s) first - the chain's head, like
     // FindOverrides' pokRoot.
     OvImplRow(ATMid, LIntfSym, LNameLower, '', pikRoot, LHits, LSeenRow);
-    OvBuildTypeEdges(LIndex);
+    LIndex := OvBuildTypeEdges(OvKey(ATMid, LIntfSym));
 
     // Every class/`object` listing THIS interface - the interfaces below it
     // are not walked (the declaration says why). Its own method if it
@@ -4622,38 +4708,25 @@ begin
     // _AddRef for every class that lists IInterface, to take the shape the
     // RTL repeats most). A class lists an interface once, so no per-class
     // dedup is needed; LSeenRow still keeps one row per method declaration.
-    if LIndex.TryGetValue(Format('%d:%d', [ATMid, LIntfSym]), LEdges) then
-      for LIdx := 0 to High(LEdges) do
+    if LIndex.TryGetValue(OvKey(ATMid, LIntfSym), LEdges) then
+      for LEdge in LEdges do
       begin
-        if OvClassDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
-          NIL_NODE then
+        if OvClassDefNode(LEdge.UnitId, LEdge.Sym) = NIL_NODE then
           Continue;
-        LVia := FProj.Model(LEdges[LIdx].UnitId).Symbols[
-          LEdges[LIdx].Sym].Name;
-        if OvImplRow(LEdges[LIdx].UnitId, LEdges[LIdx].Sym, LNameLower, LVia,
+        LVia := FProj.Model(LEdge.UnitId).Symbols[LEdge.Sym].Name;
+        if OvImplRow(LEdge.UnitId, LEdge.Sym, LNameLower, LVia,
           pikImplementor, LHits, LSeenRow) then
           Continue;
         // Not here - climb. Stops at the first ancestor that declares one:
         // anything above it is what THAT declaration overrides, which is
         // Find Overrides' question.
-        LX := XPlain(LEdges[LIdx].UnitId, LEdges[LIdx].Sym);
-        for LDepth := 1 to 32 do
-        begin
-          LX := FProj.AncestorOfX(LX);
-          if XValid(LX) then
-          begin
-            LBMid := LX.UnitId;
-            LBSym := LX.Sym;
-            OvUnalias(LBMid, LBSym);   // an alias-spelled ancestor
-            LX := XPlain(LBMid, LBSym);
-          end;
-          if not XValid(LX) or
-             (OvClassDefNode(LX.UnitId, LX.Sym) = NIL_NODE) then
+        LBMid := LEdge.UnitId;
+        LBSym := LEdge.Sym;
+        for LDepth := 1 to OV_MAX_CLIMB do
+          if not OvAncestorClass(LBMid, LBSym) or
+             OvImplRow(LBMid, LBSym, LNameLower, LVia, pikInherited, LHits,
+               LSeenRow) then
             Break;
-          if OvImplRow(LX.UnitId, LX.Sym, LNameLower, LVia, pikInherited,
-            LHits, LSeenRow) then
-            Break;
-        end;
       end;
     Result := LHits.ToArray;
   finally
@@ -4663,17 +4736,7 @@ begin
   end;
   // Root rows first, then by file and position - the same order a search
   // results panel groups in.
-  TArray.Sort<TPasImplHit>(Result, TComparer<TPasImplHit>.Construct(
-    function(const A, B: TPasImplHit): Integer
-    begin
-      Result := Ord(B.Kind = pikRoot) - Ord(A.Kind = pikRoot);
-      if Result = 0 then
-        Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
-      if Result = 0 then
-        Result := A.Hit.Line - B.Hit.Line;
-      if Result = 0 then
-        Result := A.Hit.Col - B.Hit.Col;
-    end));
+  SortImplHits(Result);
 end;
 
 function TPasNavigator.InterfaceAt(AMid, ALine, ACol: Integer;
@@ -4691,17 +4754,18 @@ function TPasNavigator.FindInterfaceImplementors(ATMid, ASym: Integer):
   TArray<TPasImplHit>;
 var
   LHits: TList<TPasImplHit>;
-  LIndex: TDictionary<string, TArray<TOvEdge>>;
-  LEdges: TArray<TOvEdge>;
+  LIndex: TOvIndex;
+  LEdges: TList<TOvEdge>;
+  LEdge: TOvEdge;
   LM: TPasSemaModel;
-  LIdx, LDecl: Integer;
+  LDecl: Integer;
   LRow: TPasImplHit;
 begin
   Result := nil;
   if OvInterfaceDefNode(ATMid, ASym) = NIL_NODE then
     Exit;
   LHits := TList<TPasImplHit>.Create;
-  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
+  LIndex := nil;
   try
     // The interface's own declaration first, as FindImplementations' pikRoot.
     LM := FProj.Model(ATMid);
@@ -4716,27 +4780,25 @@ begin
       LRow.Sym := ASym;
       LHits.Add(LRow);
     end;
-    OvBuildTypeEdges(LIndex);
+    LIndex := OvBuildTypeEdges(OvKey(ATMid, ASym));
     // One row per class listing THIS interface - the interfaces below it
     // are not walked (the declaration says why), so there is no "via" to
     // name and a class cannot reach here twice.
-    if LIndex.TryGetValue(Format('%d:%d', [ATMid, ASym]), LEdges) then
-      for LIdx := 0 to High(LEdges) do
+    if LIndex.TryGetValue(OvKey(ATMid, ASym), LEdges) then
+      for LEdge in LEdges do
       begin
-        if OvClassDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
-          NIL_NODE then
+        if OvClassDefNode(LEdge.UnitId, LEdge.Sym) = NIL_NODE then
           Continue;
-        LM := FProj.Model(LEdges[LIdx].UnitId);
-        LDecl := LM.Symbols[LEdges[LIdx].Sym].DeclNode;
-        if (LDecl = NIL_NODE) or
-           not FProj.EnsureHydrated(LEdges[LIdx].UnitId) or
+        LM := FProj.Model(LEdge.UnitId);
+        LDecl := LM.Symbols[LEdge.Sym].DeclNode;
+        if (LDecl = NIL_NODE) or not FProj.EnsureHydrated(LEdge.UnitId) or
            not HitFromNode(LM, LDecl, LRow.Hit) then
           Continue;
         LRow.Kind := pikImplementor;
-        LRow.TypeName := LM.Symbols[LEdges[LIdx].Sym].Name;
+        LRow.TypeName := LM.Symbols[LEdge.Sym].Name;
         LRow.ViaTypeName := '';
-        LRow.UnitId := LEdges[LIdx].UnitId;
-        LRow.Sym := LEdges[LIdx].Sym;
+        LRow.UnitId := LEdge.UnitId;
+        LRow.Sym := LEdge.Sym;
         LHits.Add(LRow);
       end;
     Result := LHits.ToArray;
@@ -4744,17 +4806,7 @@ begin
     LIndex.Free;
     LHits.Free;
   end;
-  TArray.Sort<TPasImplHit>(Result, TComparer<TPasImplHit>.Construct(
-    function(const A, B: TPasImplHit): Integer
-    begin
-      Result := Ord(B.Kind = pikRoot) - Ord(A.Kind = pikRoot);
-      if Result = 0 then
-        Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
-      if Result = 0 then
-        Result := A.Hit.Line - B.Hit.Line;
-      if Result = 0 then
-        Result := A.Hit.Col - B.Hit.Col;
-    end));
+  SortImplHits(Result);
 end;
 
 { ---- Find Descendants --------------------------------------------------
@@ -4775,113 +4827,73 @@ begin
   end;
 end;
 
+// One Find Descendants row, positioned on the type's declaration name; False
+// when the model cannot be hydrated or the symbol has no declaration node.
+function TPasNavigator.DescendantRow(const ARef: TPasExtRef; ADepth: Integer;
+  const AParentName: string; out ARow: TPasDescendantHit): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl: Integer;
+begin
+  Result := False;
+  LM := FProj.Model(ARef.UnitId);
+  LDecl := LM.Symbols[ARef.Sym].DeclNode;
+  if (LDecl = NIL_NODE) or not FProj.EnsureHydrated(ARef.UnitId) or
+     not HitFromNode(LM, LDecl, ARow.Hit) then
+    Exit;
+  if ADepth = 0 then
+    ARow.Kind := pdkRoot
+  else
+    ARow.Kind := pdkDescendant;
+  ARow.TypeName := LM.Symbols[ARef.Sym].Name;
+  ARow.ParentTypeName := AParentName;
+  ARow.Depth := ADepth;
+  ARow.UnitId := ARef.UnitId;
+  ARow.Sym := ARef.Sym;
+  Result := True;
+end;
+
 function TPasNavigator.FindDescendants(ATMid, ASym: Integer):
   TArray<TPasDescendantHit>;
-type
-  TQueued = record
-    Ref: TPasExtRef;
-    Depth: Integer;
-    ParentName: string;
-  end;
 var
   LHits: TList<TPasDescendantHit>;
-  LIndex: TDictionary<string, TArray<TOvEdge>>;
-  LSeen: TDictionary<string, Boolean>;
-  LQueue: TQueue<TQueued>;
-  LCur, LNext: TQueued;
-  LEdges: TArray<TOvEdge>;
-  LIdx: Integer;
-  LIsIntf: Boolean;
-  LKey: string;
+  LIndex: TOvIndex;
   LRow: TPasDescendantHit;
-
-  // The row for one type, positioned on its declaration name; False when the
-  // model cannot be hydrated or the symbol has no declaration node.
-  function RowFor(const AQ: TQueued; out ARow: TPasDescendantHit): Boolean;
-  var
-    M: TPasSemaModel;
-    D: Integer;
-  begin
-    Result := False;
-    M := FProj.Model(AQ.Ref.UnitId);
-    D := M.Symbols[AQ.Ref.Sym].DeclNode;
-    if (D = NIL_NODE) or not FProj.EnsureHydrated(AQ.Ref.UnitId) or
-       not HitFromNode(M, D, ARow.Hit) then
-      Exit;
-    if AQ.Depth = 0 then
-      ARow.Kind := pdkRoot
-    else
-      ARow.Kind := pdkDescendant;
-    ARow.TypeName := M.Symbols[AQ.Ref.Sym].Name;
-    ARow.ParentTypeName := AQ.ParentName;
-    ARow.Depth := AQ.Depth;
-    ARow.UnitId := AQ.Ref.UnitId;
-    ARow.Sym := AQ.Ref.Sym;
-    Result := True;
-  end;
-
+  LAxis: TOvAxis;
+  LStart: TPasExtRef;
 begin
   Result := nil;
-  LIsIntf := OvInterfaceDefNode(ATMid, ASym) <> NIL_NODE;
-  if not LIsIntf and (OvClassDefNode(ATMid, ASym) = NIL_NODE) then
+  // For a class: ANCESTOR edges to classes only - a class LISTING an
+  // interface is not its descendant. For an interface: every interface
+  // naming it (an interface's whole heritage list is extends-edges).
+  if OvInterfaceDefNode(ATMid, ASym) <> NIL_NODE then
+    LAxis := oaInterface
+  else if OvClassDefNode(ATMid, ASym) <> NIL_NODE then
+    LAxis := oaClass
+  else
     Exit;
   LHits := TList<TPasDescendantHit>.Create;
-  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
-  LSeen := TDictionary<string, Boolean>.Create;
-  LQueue := TQueue<TQueued>.Create;
+  LIndex := nil;
   try
-    OvBuildTypeEdges(LIndex);
-    LCur.Ref.UnitId := ATMid;
-    LCur.Ref.Sym := ASym;
-    LCur.Depth := 0;
-    LCur.ParentName := '';
-    LQueue.Enqueue(LCur);
-    LSeen.Add(Format('%d:%d', [ATMid, ASym]), True);
-    while LQueue.Count > 0 do
-    begin
-      LCur := LQueue.Dequeue;
-      if RowFor(LCur, LRow) then
-        LHits.Add(LRow);
-      if not LIndex.TryGetValue(Format('%d:%d',
-        [LCur.Ref.UnitId, LCur.Ref.Sym]), LEdges) then
-        Continue;
-      for LIdx := 0 to High(LEdges) do
-      begin
-        // For a class: ANCESTOR edges to classes only - a class LISTING an
-        // interface is not its descendant. For an interface: every interface
-        // naming it (an interface's whole heritage list is extends-edges).
-        if LIsIntf then
-        begin
-          if OvInterfaceDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
-            NIL_NODE then
-            Continue;
-        end
-        else
-        begin
-          if not LEdges[LIdx].IsFirst then
-            Continue;
-          if OvClassDefNode(LEdges[LIdx].UnitId, LEdges[LIdx].Sym) =
-            NIL_NODE then
-            Continue;
-        end;
-        LKey := Format('%d:%d', [LEdges[LIdx].UnitId, LEdges[LIdx].Sym]);
-        if LSeen.ContainsKey(LKey) then
-          Continue;   // broken source can spell a cycle - guard, as ever
-        LSeen.Add(LKey, True);
-        LNext.Ref.UnitId := LEdges[LIdx].UnitId;
-        LNext.Ref.Sym := LEdges[LIdx].Sym;
-        LNext.Depth := LCur.Depth + 1;
-        LNext.ParentName := FProj.Model(LCur.Ref.UnitId).Symbols[
-          LCur.Ref.Sym].Name;
-        LQueue.Enqueue(LNext);
-      end;
-    end;
+    LStart.UnitId := ATMid;
+    LStart.Sym := ASym;
+    if DescendantRow(LStart, 0, '', LRow) then
+      LHits.Add(LRow);
+    LIndex := OvBuildTypeEdges;
     // Breadth-first IS hierarchy order (all depth-1 rows, then depth-2...);
     // no sort, so a host indenting by Depth gets the tree it expects.
+    OvWalkDescendants(LIndex, ATMid, ASym, LAxis,
+      function(const AParent, AKid: TPasExtRef; ADepth: Integer): Boolean
+      var
+        LKidRow: TPasDescendantHit;
+      begin
+        if DescendantRow(AKid, ADepth,
+           FProj.Model(AParent.UnitId).Symbols[AParent.Sym].Name, LKidRow) then
+          LHits.Add(LKidRow);
+        Result := True;
+      end);
     Result := LHits.ToArray;
   finally
-    LQueue.Free;
-    LSeen.Free;
     LIndex.Free;
     LHits.Free;
   end;
@@ -4960,12 +4972,12 @@ end;
 
 // Does the designator ANode (in model AMid) have the STATIC type (ATMid,
 // ASym) - alias links followed, generic instance ignored?
-function TPasNavigator.DesignatorIsClass(AMid, ANode, ATMid,
-  ASym: Integer): Boolean;
+function TPasNavigator.DesignatorIsClass(AMid, ANode, ATMid, ASym: Integer;
+  AProbe: TPasXProbe): Boolean;
 var
   LX: TSemaXType;
 begin
-  LX := FProj.WithTargetTypeX(AMid, ANode);
+  LX := FProj.WithTargetTypeX(AMid, ANode, AProbe);
   if not XValid(LX) then
     Exit(False);
   LX := FProj.CanonTypeX(LX);
@@ -4996,7 +5008,9 @@ var
   // first, so one such level is stepped over. A qualified class name -
   // `TOuter.TInner.Create`, `UnitA.TFoo.Create` - is the MEMBER side of an
   // inner nkMember, which is the qualifier then (audit A2-26).
-  function IsCtorQualifier(ANode: Integer): Boolean;
+  // Structure only, no binding read: almost no reference passes it, so it
+  // runs first (audit C1-31). LName is the member's name node then.
+  function IsMemberBase(ANode: Integer): Boolean;
   begin
     Result := False;
     LBase := ANode;
@@ -5015,8 +5029,12 @@ var
        (LM.Tree.Nodes[LName].FirstChild <> LBase) then
       Exit;
     LName := LM.Tree.Nodes[LBase].NextSibling;
-    if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
-      Exit;
+    Result := (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkIdent);
+  end;
+
+  // The member IsMemberBase found is a constructor.
+  function MemberIsCtor: Boolean;
+  begin
     Result := NodeBinding(LM, LName, LUid, LSym) and
       FProj.IsConstructorSym(LUid, LSym) and
       not FProj.IsClassCtorDtorSym(LUid, LSym);
@@ -5024,8 +5042,9 @@ var
 
   // Is the symbol (ABMid, ABSym) a node is bound to the class - itself, or a
   // type ALIAS of it (`TCdAlias.Create` binds the qualifier to the alias)?
-  // The alias hop is paid only for a type symbol that is not the class, so
-  // the scan over every reference in the closure stays a pair of compares.
+  // The alias hop is paid only for a type symbol that is not the class, and
+  // only for a node IsMemberBase already passed - so the scan over every
+  // reference in the closure stays a handful of compares per node.
   function BoundToClass(ABMid, ABSym: Integer): Boolean;
   begin
     Result := (ABMid = ATMid) and (ABSym = ASym);
@@ -5051,13 +5070,14 @@ begin
       // anywhere) - ExtRefMap everywhere; hydration only for a model that
       // holds a row.
       for LNode := 0 to High(LM.RefMap) do
-        if (LM.RefMap[LNode] <> NIL_SYM) and
-           BoundToClass(LMi, LM.RefMap[LNode]) and IsCtorQualifier(LNode) and
+        if (LM.RefMap[LNode] <> NIL_SYM) and IsMemberBase(LNode) and
+           BoundToClass(LMi, LM.RefMap[LNode]) and MemberIsCtor and
            FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
           LHits.Add(LHit);
       for LPair in LM.ExtRefMap do
-        if BoundToClass(LPair.Value.UnitId, LPair.Value.Sym) and
-           IsCtorQualifier(LPair.Key) and FProj.EnsureHydrated(LMi) and
+        if IsMemberBase(LPair.Key) and
+           BoundToClass(LPair.Value.UnitId, LPair.Value.Sym) and
+           MemberIsCtor and FProj.EnsureHydrated(LMi) and
            HitFromNode(LM, LPair.Key, LHit) then
           LHits.Add(LHit);
     end;
@@ -5065,15 +5085,7 @@ begin
   finally
     LHits.Free;
   end;
-  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
-    function(const A, B: TPasRefHit): Integer
-    begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      if Result = 0 then
-        Result := A.Col - B.Col;
-    end));
+  SortRefHits(Result);
 end;
 
 function TPasNavigator.FindDestructions(ATMid,
@@ -5085,6 +5097,7 @@ var
   LPair: TPair<Integer, TPasExtRef>;
   LHit: TPasRefHit;
   LNameLower: string;
+  LProbe: TPasXProbe;
 
   // Is (LUid, LSym) a form's own Release - TCustomForm's in Vcl.Forms or
   // TCommonCustomForm's in FMX.Forms? A form is released that way (it frees
@@ -5117,10 +5130,13 @@ var
     LCallee: Integer;
   begin
     Result := NIL_NODE;
-    LNameLower := FProj.Model(LUid).Symbols[LSym].NameLower;
+    // Every release shape has the name under a member access or a call:
+    // the tree first, the name only then (audit C1-32).
     LParent := LM.Tree.Nodes[ANode].Parent;
-    if LParent = NIL_NODE then
+    if (LParent = NIL_NODE) or
+       not (LM.Tree.Nodes[LParent].Kind in [nkMember, nkCall]) then
       Exit;
+    LNameLower := FProj.Model(LUid).Symbols[LSym].NameLower;
     if (LNameLower = 'free') or (LNameLower = 'destroy') or
        ((LNameLower = 'release') and IsFormRelease) then
     begin
@@ -5177,12 +5193,23 @@ var
     if LTarget = NIL_NODE then
       Exit;
     if LM.Demoted and HeadUnbound(LTarget) then
+    begin
       FProj.EnsureHydrated(LMi);
-    if not DesignatorIsClass(LMi, LTarget, ATMid, ASym) then
+      // What the probe typed before the text came back is not kept.
+      FreeAndNil(LProbe);
+    end;
+    // One probe per model, not one per site (audit C1-32): its memo is
+    // the model's, and the sites share their uses heads.
+    if LProbe = nil then
+      LProbe := TPasXProbe.Create;
+    if not DesignatorIsClass(LMi, LTarget, ATMid, ASym, LProbe) then
       Exit;
     LTarget := DesignatorNameNode(LM, LTarget);
-    if (LTarget <> NIL_NODE) and FProj.EnsureHydrated(LMi) and
-       HitFromNode(LM, LTarget, LHit) then
+    if LTarget = NIL_NODE then
+      Exit;
+    if LM.Demoted then
+      FreeAndNil(LProbe);   // the hydration below brings the text back
+    if FProj.EnsureHydrated(LMi) and HitFromNode(LM, LTarget, LHit) then
       LHits.Add(LHit);
   end;
 
@@ -5191,10 +5218,12 @@ begin
   if OvClassDefNode(ATMid, ASym) = NIL_NODE then
     Exit;
   LHits := TList<TPasRefHit>.Create;
+  LProbe := nil;
   try
     for LMi := 0 to FProj.ModelCount - 1 do
     begin
       LM := FProj.Model(LMi);
+      FreeAndNil(LProbe);   // a probe types one model's nodes
       // Every bound routine name in the model, whichever map holds it - the
       // release routines live in System/SysUtils, so almost always ExtRefMap;
       // RefMap covers a project declaring its own FreeAndNil.
@@ -5218,17 +5247,10 @@ begin
     end;
     Result := LHits.ToArray;
   finally
+    LProbe.Free;
     LHits.Free;
   end;
-  TArray.Sort<TPasRefHit>(Result, TComparer<TPasRefHit>.Construct(
-    function(const A, B: TPasRefHit): Integer
-    begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      if Result = 0 then
-        Result := A.Col - B.Col;
-    end));
+  SortRefHits(Result);
 end;
 
 { Declaration <-> implementation toggle.
@@ -6537,6 +6559,27 @@ begin
   end;
 end;
 
+// RenameBlockReason over a plan's edits, sorted by file: once per distinct
+// file, not once per edit - each check is a full-path build and two stats,
+// about 90 us, and a widely used name has thousands of edits in a few
+// hundred files (audit C1-33).
+function TPasNavigator.PlanBlockReason(
+  const AEdits: TArray<TPasRenameEdit>): string;
+var
+  LIdx: Integer;
+begin
+  Result := '';
+  for LIdx := 0 to High(AEdits) do
+  begin
+    if (LIdx > 0) and
+       SameText(AEdits[LIdx].FilePath, AEdits[LIdx - 1].FilePath) then
+      Continue;
+    Result := RenameBlockReason(AEdits[LIdx].FilePath);
+    if Result <> '' then
+      Exit;
+  end;
+end;
+
 { A demoted model whose file changed on disk (or vanished) since the analysis
   cannot give its text back, and every search over the closure skips it -
   right for a list, but a rename plan built without it leaves that unit's
@@ -7006,15 +7049,7 @@ begin
     LList.Free;
   end;
 
-  TArray.Sort<TPasRenameEdit>(AEdits, TComparer<TPasRenameEdit>.Construct(
-    function(const A, B: TPasRenameEdit): Integer
-    begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      if Result = 0 then
-        Result := A.Col - B.Col;
-    end));
+  SortRenameEdits(AEdits);
   // A line with several edits - a name and its `in` path, two `uses` items -
   // gets one preview with all of them, left to right, each writing its own
   // NewText (TPasRenameEdit.Snippet's contract).
@@ -7045,14 +7080,11 @@ begin
   end;
   // Every file the plan would rewrite must be writable and the user's own -
   // one blocked file refuses the whole rename (see RenameBlockReason).
-  for LIdx := 0 to High(AEdits) do
+  AError := PlanBlockReason(AEdits);
+  if AError <> '' then
   begin
-    AError := RenameBlockReason(AEdits[LIdx].FilePath);
-    if AError <> '' then
-    begin
-      AEdits := nil;
-      Exit;
-    end;
+    AEdits := nil;
+    Exit;
   end;
   // Only a unit's name is tied to its file (E1038, spec 1.1.2): `program
   // Zed;` in Q.dpr builds Q.exe, `library Zed;` Q.dll, and `package Zed;`
@@ -7140,11 +7172,11 @@ function TPasNavigator.RenameFamily(ATMid, ASym: Integer;
   out AMembers: TArray<TPasRenameFamilyMember>;
   out AError: string): Boolean;
 var
-  LIndex: TDictionary<string, TArray<TOvEdge>>;
+  LIndex: TOvIndex;
   // class -> the interfaces it lists; interface -> the one it extends
-  LListed: TDictionary<string, TArray<TPasExtRef>>;
-  LParent: TDictionary<string, TPasExtRef>;
-  LIn: TDictionary<string, Boolean>;
+  LListed: TDictionary<Int64, TArray<TPasExtRef>>;
+  LParent: TDictionary<Int64, TPasExtRef>;
+  LIn: TDictionary<Int64, Boolean>;
   LWork: TQueue<TPasExtRef>;
   LList: TList<TPasRenameFamilyMember>;
   LName, LShown: string;
@@ -7152,15 +7184,14 @@ var
   LT, LRMid, LRoot, LOMid, LOStruct: Integer;
   LSyms, LImpl, LChain: TArray<Integer>;
   LIfaces: TArray<TPasExtRef>;
-  LEdges: TArray<TOvEdge>;
+  LEdges: TList<TOvEdge>;
   LDirs: TPasOvDirs;
   LAnc: TSemaXType;
-  LParts: TArray<string>;
   LRootHit: TPasRefHit;
 
-  function Key(AMid, ASym: Integer): string;
+  function Key(AMid, ASym: Integer): Int64;
   begin
-    Result := Format('%d:%d', [AMid, ASym]);
+    Result := OvKey(AMid, ASym);
   end;
 
   function Ref(AMid, ASym: Integer): TPasExtRef;
@@ -7251,43 +7282,26 @@ var
   function Below(AMid, AStruct: Integer; AInterfaces,
     AWithSelf: Boolean): TArray<TPasExtRef>;
   var
-    LQ: TQueue<TPasExtRef>;
-    LSeen: TDictionary<string, Boolean>;
-    LC: TPasExtRef;
-    LKids: TArray<TOvEdge>;
-    LOk: Boolean;
+    LOut: TList<TPasExtRef>;
+    LAxis: TOvAxis;
   begin
-    Result := nil;
-    if AWithSelf then
-      Result := [Ref(AMid, AStruct)];
-    LQ := TQueue<TPasExtRef>.Create;
-    LSeen := TDictionary<string, Boolean>.Create;
+    if AInterfaces then
+      LAxis := oaInterface
+    else
+      LAxis := oaClass;
+    LOut := TList<TPasExtRef>.Create;
     try
-      LQ.Enqueue(Ref(AMid, AStruct));
-      LSeen.Add(Key(AMid, AStruct), True);
-      while LQ.Count > 0 do
-      begin
-        LC := LQ.Dequeue;
-        if not LIndex.TryGetValue(Key(LC.UnitId, LC.Sym), LKids) then
-          Continue;
-        for var LE in LKids do
+      if AWithSelf then
+        LOut.Add(Ref(AMid, AStruct));
+      OvWalkDescendants(LIndex, AMid, AStruct, LAxis,
+        function(const AParent, AKid: TPasExtRef; ADepth: Integer): Boolean
         begin
-          if not LE.IsFirst then
-            Continue;
-          if AInterfaces then
-            LOk := OvInterfaceDefNode(LE.UnitId, LE.Sym) <> NIL_NODE
-          else
-            LOk := OvClassDefNode(LE.UnitId, LE.Sym) <> NIL_NODE;
-          if LOk and LSeen.TryAdd(Key(LE.UnitId, LE.Sym), True) then
-          begin
-            Result := Result + [Ref(LE.UnitId, LE.Sym)];
-            LQ.Enqueue(Ref(LE.UnitId, LE.Sym));
-          end;
-        end;
-      end;
+          LOut.Add(AKid);
+          Result := True;
+        end);
+      Result := LOut.ToArray;
     finally
-      LSeen.Free;
-      LQ.Free;
+      LOut.Free;
     end;
   end;
 
@@ -7299,52 +7313,31 @@ var
   // and dcc compiles that: TC silently moved to TA's slot (audit B24).
   function SlotBelow(AMid, AStruct: Integer): TArray<TPasExtRef>;
   var
-    LQ: TQueue<TPasExtRef>;
-    LSeen: TDictionary<string, Boolean>;
-    LC: TPasExtRef;
-    LKids: TArray<TOvEdge>;
+    LOut: TList<TPasExtRef>;
   begin
-    Result := [Ref(AMid, AStruct)];
-    LQ := TQueue<TPasExtRef>.Create;
-    LSeen := TDictionary<string, Boolean>.Create;
+    LOut := TList<TPasExtRef>.Create;
     try
-      LQ.Enqueue(Ref(AMid, AStruct));
-      LSeen.Add(Key(AMid, AStruct), True);
-      while LQ.Count > 0 do
-      begin
-        LC := LQ.Dequeue;
-        if not LIndex.TryGetValue(Key(LC.UnitId, LC.Sym), LKids) then
-          Continue;
-        for var LE in LKids do
-          if LE.IsFirst and (OvClassDefNode(LE.UnitId, LE.Sym) <> NIL_NODE) and
-             LSeen.TryAdd(Key(LE.UnitId, LE.Sym), True) then
-          begin
-            Result := Result + [Ref(LE.UnitId, LE.Sym)];
-            if not OvClosesSlot(LE.UnitId, LE.Sym, LName) then
-              LQ.Enqueue(Ref(LE.UnitId, LE.Sym));
-          end;
-      end;
+      LOut.Add(Ref(AMid, AStruct));
+      OvWalkDescendants(LIndex, AMid, AStruct, oaClass,
+        function(const AParent, AKid: TPasExtRef; ADepth: Integer): Boolean
+        begin
+          LOut.Add(AKid);
+          Result := not OvClosesSlot(AKid.UnitId, AKid.Sym, LName);
+        end);
+      Result := LOut.ToArray;
     finally
-      LSeen.Free;
-      LQ.Free;
+      LOut.Free;
     end;
   end;
 
-  // A class's ancestor class, an alias of an instantiation followed to the
-  // generic it names (audit A2-25): `class(TIntBase)` with `TIntBase =
-  // TBase<Integer>` is TBase's descendant, and the climbs below stopped at
-  // the alias, which declares no method.
+  // A class's ancestor class (OvAncestorClass), XNil past the last one this
+  // closure can see.
   function AncestorClass(AMid, AStruct: Integer): TSemaXType;
-  var
-    LBMid, LBSym: Integer;
   begin
-    Result := FProj.AncestorOfX(XPlain(AMid, AStruct));
-    if not XValid(Result) then
-      Exit;
-    LBMid := Result.UnitId;
-    LBSym := Result.Sym;
-    OvUnalias(LBMid, LBSym);
-    Result := XPlain(LBMid, LBSym);
+    if OvAncestorClass(AMid, AStruct) then
+      Result := XPlain(AMid, AStruct)
+    else
+      Result := XNil;
   end;
 
   // An interface and the ones it extends, up.
@@ -7354,7 +7347,7 @@ var
   begin
     Result := [AIface];
     LC := AIface;
-    for var LDepth := 1 to 32 do
+    for var LDepth := 1 to OV_MAX_CLIMB do
     begin
       if not LParent.TryGetValue(Key(LC.UnitId, LC.Sym), LC) then
         Break;
@@ -7374,7 +7367,7 @@ var
     AOStruct := AStruct;
     Result := OvMethodsNamed(AMid, AStruct, LName);
     LX := XPlain(AMid, AStruct);
-    for var LDepth := 1 to 32 do
+    for var LDepth := 1 to OV_MAX_CLIMB do
     begin
       if Length(Result) > 0 then
         Exit;
@@ -7398,20 +7391,19 @@ begin
   LName := FProj.Model(ATMid).Symbols[ASym].NameLower;
   LShown := FProj.Model(ATMid).Symbols[ASym].Name;
 
-  LIndex := TDictionary<string, TArray<TOvEdge>>.Create;
-  LListed := TDictionary<string, TArray<TPasExtRef>>.Create;
-  LParent := TDictionary<string, TPasExtRef>.Create;
-  LIn := TDictionary<string, Boolean>.Create;
+  LIndex := nil;
+  LListed := TDictionary<Int64, TArray<TPasExtRef>>.Create;
+  LParent := TDictionary<Int64, TPasExtRef>.Create;
+  LIn := TDictionary<Int64, Boolean>.Create;
   LWork := TQueue<TPasExtRef>.Create;
   LList := TList<TPasRenameFamilyMember>.Create;
   try
-    OvBuildTypeEdges(LIndex);
+    LIndex := OvBuildTypeEdges;
     // The forward direction of the edges into an interface: who lists it,
     // and what it extends.
     for var LPair in LIndex do
     begin
-      LParts := LPair.Key.Split([':']);
-      LRef := Ref(StrToInt(LParts[0]), StrToInt(LParts[1]));
+      LRef := Ref(Integer(LPair.Key shr 32), Integer(Cardinal(LPair.Key)));
       if OvInterfaceDefNode(LRef.UnitId, LRef.Sym) = NIL_NODE then
         Continue;
       for var LE in LPair.Value do
@@ -7916,8 +7908,10 @@ begin
       AFamily := nil;
       Exit;
     end;
+    // The form files were read by the first SitesOf above: one rename is
+    // one state of them (audit C1-41).
     LFamSites[LIdx] := FormBinder.SitesOf(AFamily[LIdx].UnitId,
-      AFamily[LIdx].Sym, True, LTogether, AError);
+      AFamily[LIdx].Sym, True, LTogether, AError, {ARefresh} False);
     if AError = '' then
       AError := FormBinder.RenameRefusal(AFamily[LIdx].UnitId,
         AFamily[LIdx].Sym, ANewName, LFamSites[LIdx]);
@@ -7949,7 +7943,8 @@ begin
       if not IsValidRenameName(LHandler.NewName) or
          (sfBuiltin in FProj.Model(LHandler.TMid).Symbols[LHandler.TSym].Flags) then
         Continue;
-      LHSites := FormBinder.SitesOf(LHandler.TMid, LHandler.TSym, True, LHError);
+      LHSites := FormBinder.SitesOf(LHandler.TMid, LHandler.TSym, True, nil,
+        LHError, {ARefresh} False);
       if LHError = '' then
         LHError := FormBinder.RenameRefusal(LHandler.TMid, LHandler.TSym,
           LHandler.NewName, LHSites);
@@ -7959,7 +7954,8 @@ begin
       AddFormEdits(LList, LHSites, LHandler.NewName);
       LCarry.OldName := FProj.Model(LHandler.TMid).Symbols[LHandler.TSym].Name;
       LCarry.NewName := LHandler.NewName;
-      LCarry.Role := FormBinder.RoleOf(LHandler.TMid, LHandler.TSym);
+      LCarry.Role := FormBinder.RoleOf(LHandler.TMid, LHandler.TSym,
+        {ARefresh} False);
       ACarried := ACarried + [LCarry];
     end;
     LArr := LList.ToArray;
@@ -7967,15 +7963,7 @@ begin
     LList.Free;
   end;
 
-  TArray.Sort<TPasRenameEdit>(LArr, TComparer<TPasRenameEdit>.Construct(
-    function(const A, B: TPasRenameEdit): Integer
-    begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      if Result = 0 then
-        Result := A.Col - B.Col;
-    end));
+  SortRenameEdits(LArr);
 
   // The declaration site can also arrive as a hit through a map the decl
   // filter does not cover (IsDeclSelfName is structural, and guards only the
@@ -7996,12 +7984,9 @@ begin
   // Same file-level gate as PlanUnitRename, on the same all-or-nothing rule:
   // a rename whose declaration or any use sits in a library tree or in a
   // read-only file is refused whole, nothing planned.
-  for LIdx := 0 to High(LArr) do
-  begin
-    AError := RenameBlockReason(LArr[LIdx].FilePath);
-    if AError <> '' then
-      Exit;
-  end;
+  AError := PlanBlockReason(LArr);
+  if AError <> '' then
+    Exit;
 
   LIdx := 0;
   while LIdx <= High(LArr) do

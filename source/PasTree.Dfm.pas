@@ -176,7 +176,13 @@ type
   nil when no such file exists. A file that exists but cannot be read, or is
   malformed, comes back as a doc with Error set - never nil - so a caller can
   tell "no form file" from "a form file whose names are unknown". Thread-safe. }
-function PasDfmLoad(const APath: string): IPasDfmDoc;
+function PasDfmLoad(const APath: string): IPasDfmDoc; overload;
+{ The same with the path's cache key precomputed (PasDfmCacheKey; '' builds
+  it) - for a caller that loads the same files query after query
+  (TPasFormBinder). }
+function PasDfmLoad(const APath, ACacheKey: string): IPasDfmDoc; overload;
+{ The key PasDfmLoad caches APath under: its full path, lower case. }
+function PasDfmCacheKey(const APath: string): string;
 
 { Reads ABytes as the form file APath, bypassing the cache - for a host that
   holds a form's text in memory. }
@@ -951,7 +957,17 @@ begin
 end;
 {$ENDIF}
 
+function PasDfmCacheKey(const APath: string): string;
+begin
+  Result := AnsiLowerCase(TPath.GetFullPath(APath));
+end;
+
 function PasDfmLoad(const APath: string): IPasDfmDoc;
+begin
+  Result := PasDfmLoad(APath, '');
+end;
+
+function PasDfmLoad(const APath, ACacheKey: string): IPasDfmDoc;
 var
   LKey: string;
   LEntry: TPasDfmCacheEntry;
@@ -963,7 +979,12 @@ begin
   Result := nil;
   if (APath = '') or not FileStamp(APath, LSize, LStamp) then
     Exit;
-  LKey := AnsiLowerCase(TPath.GetFullPath(APath));
+  // Built after the stamp, as ever: a path that names no file returns nil
+  // without the full-path build.
+  if ACacheKey <> '' then
+    LKey := ACacheKey
+  else
+    LKey := PasDfmCacheKey(APath);
   TMonitor.Enter(GCacheLock);
   try
     if GCache.TryGetValue(LKey, LEntry) and (LEntry.Size = LSize) and

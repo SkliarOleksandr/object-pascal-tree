@@ -213,6 +213,7 @@ type
     TFormEntry = class
       Mid: Integer;         // the unit the form file belongs to
       Path: string;
+      CacheKey: string;     // PasDfmCacheKey(Path), built once (audit C1-41)
       Doc: IPasDfmDoc;      // nil until loaded; replaced when the file changes
       RootDone: Boolean;
       RootClass: TSemaXType;
@@ -318,10 +319,14 @@ type
       name (PlanRename's family, ATogether): an ancestor's form line that
       binds a descendant's redeclaration and the ancestor's own method at
       once is no refusal when that ancestor method is in ATogether - the
-      line is rewritten and binds both again - but a site of this one too. }
+      line is rewritten and binds both again - but a site of this one too.
+      ARefresh False skips the re-read of the form files: for the later
+      calls of ONE operation that read them already (PlanRename asks once
+      per family member and carried handler, audit C1-41). }
     function SitesOf(ATMid, ASym: Integer; ARename: Boolean;
       const ATogether: TArray<TPasExtRef>;
-      out AError: string): TArray<TPasFormSite>; overload;
+      out AError: string; ARefresh: Boolean = True): TArray<TPasFormSite>;
+      overload;
     { The form-file refusals of a rename to ANewName, '' when there are none:
       a binary form file among ASites (positions of converted text cannot be
       edited in place), a non-ASCII name for a file without a UTF-8 BOM, and
@@ -358,7 +363,8 @@ type
       out AHandlers: TArray<TPasCarriedHandler>;
       out ACaptions: TArray<TPasFormSite>);
     { See TPasFormRole. }
-    function RoleOf(ATMid, ASym: Integer): TPasFormRole;
+    function RoleOf(ATMid, ASym: Integer;
+      ARefresh: Boolean = True): TPasFormRole;
     { One form file of the project, whole: every object with its class and
       the published field it fills, and every value that names a symbol,
       bound as SitesOf binds them - what the Object Inspector shows for the
@@ -520,6 +526,7 @@ begin
         LEntry := TFormEntry.Create;
         LEntry.Mid := LMid;
         LEntry.Path := LFound;
+        LEntry.CacheKey := PasDfmCacheKey(LFound);
         LEntry.RootClass := XNil;
         FForms.Add(LEntry);
         FFormOfMid.Add(LMid, LEntry);
@@ -558,7 +565,7 @@ begin
   LChanged := False;
   for LEntry in FForms do
   begin
-    LDoc := PasDfmLoad(LEntry.Path);
+    LDoc := PasDfmLoad(LEntry.Path, LEntry.CacheKey);
     if LDoc = nil then
       LDoc := PasDfmParse(LEntry.Path, nil);   // vanished: an empty, failed doc
     if (LEntry.Doc = nil) or (LEntry.Doc.Doc <> LDoc.Doc) then
@@ -1424,7 +1431,7 @@ end;
 
 function TPasFormBinder.SitesOf(ATMid, ASym: Integer; ARename: Boolean;
   const ATogether: TArray<TPasExtRef>;
-  out AError: string): TArray<TPasFormSite>;
+  out AError: string; ARefresh: Boolean): TArray<TPasFormSite>;
 var
   LShape: TSymShape;
   LOwner, LSelf, LClass: TSemaXType;
@@ -1480,7 +1487,8 @@ begin
   LRootSym := ASym;
   if LShape = ssProperty then
     FProj.PropertyRedeclRoot(ATMid, ASym, LRootMid, LRootSym);
-  Refresh;
+  if ARefresh or not FListed then
+    Refresh;
   LList := TList<TPasFormSite>.Create;
   try
     for LEntry in FForms do
@@ -1677,11 +1685,8 @@ begin
   TArray.Sort<TPasFormSite>(Result, TComparer<TPasFormSite>.Construct(
     function(const A, B: TPasFormSite): Integer
     begin
-      Result := CompareText(A.FilePath, B.FilePath);
-      if Result = 0 then
-        Result := A.Line - B.Line;
-      if Result = 0 then
-        Result := A.Col - B.Col;
+      Result := PasCompareHitPos(A.FilePath, A.Line, A.Col,
+        B.FilePath, B.Line, B.Col);
     end));
 end;
 
@@ -1852,7 +1857,8 @@ begin
   end;
 end;
 
-function TPasFormBinder.RoleOf(ATMid, ASym: Integer): TPasFormRole;
+function TPasFormBinder.RoleOf(ATMid, ASym: Integer;
+  ARefresh: Boolean): TPasFormRole;
 var
   LOwner, LRoot: TSemaXType;
   LEntry: TFormEntry;
@@ -1874,8 +1880,10 @@ begin
     Exit;
   Result.OwnerClass := FProj.Model(LOwner.UnitId).Symbols[LOwner.Sym].Name;
   // A public entry point (TPasNavigator.FormRoleOf): a form file written
-  // since the last query is read now, as every other query reads it (B2-43).
-  Refresh;
+  // since the last query is read now, as every other query reads it (B2-43)
+  // - unless the caller's operation read them already (SitesOf's ARefresh).
+  if ARefresh or not FListed then
+    Refresh;
   for LEntry in FForms do
   begin
     LRoot := RootClassOf(LEntry);

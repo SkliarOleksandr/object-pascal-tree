@@ -643,8 +643,13 @@ Measured on the flattened RTL corpus (342 models, 2.5 s to analyze):
 `TObject.Destroy` = 296 rows (136 before 0.96.2, which counted only classes
 writing `class(TObject)`), `TPersistent.Assign` = 8 rows, `TStream.Read` = 17.
 On the frozen client project `TObject.Destroy` went from 1 row to 104. The reverse-heritage index is rebuilt per call
-and is not what costs - so no cache, and no invalidation story to get wrong
-against incremental reanalysis.
+- so no cache, and no invalidation story to get wrong against incremental
+reanalysis. It is one symbol sweep keyed by a (model, symbol) number with one
+edge list per type; Find Implementations and Find Interface Implementors keep
+only the edges into the one type they read. A class property pays it in every
+reference search (its redeclaration chain), so Find All's assignability gate
+asks the clicked declaration's own `write` first and builds the chain only
+when that does not answer.
 
 **Cost note for hosts.** The chain of a method as universal as `Destroy`
 legitimately covers every class in the closure, and each model holding a row
