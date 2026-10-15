@@ -139,6 +139,16 @@ type
     Bytes: Integer;   // 1, 2, 4, 8 or 16
   end;
 
+  // A live `{$APPTYPE CONSOLE}` / `{$APPTYPE GUI}`, at the visible-stream
+  // position it was met. A program's last one before its `uses` clause is
+  // what decides CONSOLE for every other unit dcc compiles with it (1.3.2;
+  // TPasSemaProject.ConsoleTarget). An APPTYPE with any other argument is
+  // not recorded.
+  TPasAppTypeEvent = record
+    VisIndex: Integer;
+    Console: Boolean;
+  end;
+
   // One mention of a CONDITIONAL SYMBOL by name - the operand of $DEFINE /
   // $UNDEF / $IFDEF / $IFNDEF, or the argument of `Defined(X)` inside a $IF
   // or $ELSEIF expression. Recorded for every directive the preprocessor
@@ -282,6 +292,9 @@ type
     // {$A}/{$ALIGN} state changes, ascending by VisIndex; empty for the
     // overwhelming majority of units (the default is 8).
     AlignEvents: TArray<TPasAlignEvent>;
+    // {$APPTYPE} directives taken, ascending by VisIndex - see
+    // TPasAppTypeEvent. Retained across DemoteText (it is not text).
+    AppTypeEvents: TArray<TPasAppTypeEvent>;
     // Every conditional-symbol mention, processing order - see TPasDefineRef.
     // Retained across DemoteText (it is not text), so a project-wide define
     // search never rehydrates a unit just to test a name.
@@ -311,6 +324,9 @@ type
     function MinEnumSizeAt(AVisIndex: Integer): Integer;
     // The record field-alignment CAP in effect at AVisIndex (8 = the default).
     function AlignAt(AVisIndex: Integer): Integer;
+    // The last {$APPTYPE} taken before visible position AVisIndex: False
+    // when there is none, else AConsole says which.
+    function AppTypeBefore(AVisIndex: Integer; out AConsole: Boolean): Boolean;
   end;
 
   TPasDefines = class
@@ -389,6 +405,11 @@ type
   // Everything {$PUSHOPT} must save: the single-letter switches PLUS the
   // long-form-only options tracked individually (real dcc's PUSHOPT/POPOPT
   // covers all compiler options, SCOPEDENUMS and RTTI included).
+  // Also the state a unit STARTS in (TPasPreprocessor.StartState): the
+  // project's switches, which dcc takes from its command line (`-$D-`,
+  // `-$A4`; a .dproj's DCC_* properties become exactly those) - only
+  // Switches, MinEnumSize and Align have a command-line form, the rest start
+  // at dcc's defaults whatever the record holds.
   TPasOptState = record
     Switches: TPasSwitchState;
     ScopedEnums: Boolean;
@@ -417,6 +438,10 @@ type
     FIncludeRefs: TList<TPasIncludeRef>;
     FIfNameRefs: TList<TPasIfNameRef>;
     FSwitchStack: TStack<TPasOptState>;
+    FStartState: TPasOptState;
+    FProgramFile: string;
+    FProgramDefines: TPasDefines;   // caller-owned; nil = FBaseDefines
+    FAppTypeEvents: TList<TPasAppTypeEvent>;
     FFileNames: TList<string>;
     FFiles: TList<TPasTokenStream>;
     // Inside a live asm body: the lexing mode ProcessFile wants for live
@@ -505,6 +530,16 @@ type
       first pass, supplied by the project's second pass exactly like
       OnDeclared. See TPasCondSymbolQuery. }
     property OnSymbol: TPasCondSymbolQuery read FOnSymbol write FOnSymbol;
+    { The switch state every file starts in - dcc's no-config state unless
+      the host sets the project's (PasStartOptState). Read at the start of
+      each Process/ProcessText call. }
+    property StartState: TPasOptState read FStartState write FStartState;
+    { The define set for the one file AFile (a full path, compared without
+      case) when it differs from the set the instance was created with: a
+      program's own text sees CONSOLE only under -CC, while the units
+      compiled with it follow its APPTYPE directive (TPasSemaProject.
+      ConsoleTarget). ADefines stays the caller's; nil drops the exception. }
+    procedure SetProgramDefines(const AFile: string; ADefines: TPasDefines);
     { The single-letter switch state as of the end of the last Process/
       ProcessText call -- reset per file (like $DEFINE), so this answers
       "where did the unit leave it", exactly what $IFOPT itself reads.
@@ -535,6 +570,15 @@ type
       just the end-of-file value this accessor answers. }
     function VarPropSetterFinal: Boolean;
   end;
+
+{ The state a unit starts in under dcc's command-line switches ASwitches, in
+  order, each as dcc takes it (`-$D-`, `$O-`, `A4`, `-$YD`; the `-` and `$`
+  are optional): dcc's no-config start state (1.3.2: A C D G H I L N O P V X
+  Y on, $A8, $Z1) with each applied by the same rules as an in-file
+  switch directive. Probed dcc64 37.0: `-$D0` is D-, `-$D1`/`-$D2` D+, `-$YD`
+  Y+, `-$A4` A+, `-$A1` A-, `-$Z2` Z+. An argument the rules do not read
+  changes nothing. }
+function PasStartOptState(const ASwitches: array of string): TPasOptState;
 
 const
   PP_DIAG_MESSAGES: array[TPasPPDiagCode] of string = (
@@ -767,6 +811,21 @@ begin
   end;
 end;
 
+function TPasPreprocessed.AppTypeBefore(AVisIndex: Integer;
+  out AConsole: Boolean): Boolean;
+var
+  LIdx: Integer;
+begin
+  AConsole := False;
+  for LIdx := High(AppTypeEvents) downto 0 do
+    if AppTypeEvents[LIdx].VisIndex <= AVisIndex then
+    begin
+      AConsole := AppTypeEvents[LIdx].Console;
+      Exit(True);
+    end;
+  Result := False;
+end;
+
 function TPasPreprocessed.AlignAt(AVisIndex: Integer): Integer;
 var
   LLo, LHi, LMid: Integer;
@@ -959,7 +1018,16 @@ begin
   FCondThisActive := TList<Boolean>.Create;
   FCondSeenElse := TList<Boolean>.Create;
   FCondOpener := TList<TPasIncludeRef>.Create;
+  FAppTypeEvents := TList<TPasAppTypeEvent>.Create;
+  FStartState := PasStartOptState([]);
   ResetSwitches;
+end;
+
+procedure TPasPreprocessor.SetProgramDefines(const AFile: string;
+  ADefines: TPasDefines);
+begin
+  FProgramFile := AFile;
+  FProgramDefines := ADefines;
 end;
 
 function TPasPreprocessor.SwitchState(ASwitch: Char): Boolean;
@@ -983,27 +1051,145 @@ begin
 end;
 
 procedure TPasPreprocessor.ResetSwitches;
+begin
+  // Re-applied per processed file: switch changes are unit-local, like
+  // defines. The start is the host's (StartState), dcc's no-config state by
+  // default - see PasStartOptState.
+  FSwitches := FStartState.Switches;
+end;
+
+// dcc's no-config start state, the same on every dcc 37.0 target (probed
+// with $IFOPT over A..Z: A C D G H I L N O P V X Y on).
+function NoConfigOptState: TPasOptState;
 var
   LCh: Char;
 begin
-  // dcc's start state, the same on every dcc 37.0 target (probed with
-  // $IFOPT over A..Z, no config: A C D G H I L N O P V X Y on). Re-applied
-  // per processed file: switch changes are unit-local, like defines.
+  Result := Default(TPasOptState);
   for LCh := 'A' to 'Z' do
-    FSwitches[LCh] := False;
-  FSwitches['A'] := True;   // field alignment: the default IS {$A8}, so '+'
-  FSwitches['C'] := True;   // assertions
-  FSwitches['D'] := True;   // debug info
-  FSwitches['G'] := True;   // imported data
-  FSwitches['H'] := True;   // long strings
-  FSwitches['I'] := True;   // I/O checking
-  FSwitches['L'] := True;   // local symbols
-  FSwitches['N'] := True;   // numeric coprocessor (obsolete, still N+)
-  FSwitches['O'] := True;   // optimization
-  FSwitches['P'] := True;   // open strings
-  FSwitches['V'] := True;   // var-string checks
-  FSwitches['X'] := True;   // extended syntax
-  FSwitches['Y'] := True;   // symbol reference info
+    Result.Switches[LCh] := False;
+  Result.Switches['A'] := True;   // field alignment: the default IS {$A8}, so '+'
+  Result.Switches['C'] := True;   // assertions
+  Result.Switches['D'] := True;   // debug info
+  Result.Switches['G'] := True;   // imported data
+  Result.Switches['H'] := True;   // long strings
+  Result.Switches['I'] := True;   // I/O checking
+  Result.Switches['L'] := True;   // local symbols
+  Result.Switches['N'] := True;   // numeric coprocessor (obsolete, still N+)
+  Result.Switches['O'] := True;   // optimization
+  Result.Switches['P'] := True;   // open strings
+  Result.Switches['V'] := True;   // var-string checks
+  Result.Switches['X'] := True;   // extended syntax
+  Result.Switches['Y'] := True;   // symbol reference info
+  Result.MinEnumSize := 1;        // {$Z1}
+  Result.Align := 8;              // {$A8}
+end;
+
+// One group of single-letter switches - `X+`, `X-`, `X+,Y-`, `Zn`, `An`,
+// `Dn`, `YD` - applied to AState, the one reader of an in-file `{$...}`
+// switch and of a command-line `-$...` (PasStartOptState). Anything else
+// (`R *.res`) ends the group with no state to track.
+procedure ApplySwitchText(var AState: TPasOptState; const ABody: string);
+
+  procedure SkipSeparators(var AIdx: Integer);
+  begin
+    // Comma-separated list: {$O+,W-}
+    while (AIdx <= Length(ABody)) and CharInSet(ABody[AIdx], [',', ' ', #9]) do
+      Inc(AIdx);
+  end;
+
+var
+  LIdx: Integer;
+  LSwitch: Char;
+begin
+  LIdx := 1;
+  while LIdx < Length(ABody) do
+  begin
+    if not CharInSet(ABody[LIdx], ['A'..'Z', 'a'..'z']) then
+      Exit;
+    LSwitch := UpCase(ABody[LIdx]);
+    if CharInSet(ABody[LIdx + 1], ['+', '-']) then
+    begin
+      AState.Switches[LSwitch] := ABody[LIdx + 1] = '+';
+      // {$Z+} is {$Z4} and {$Z-} is {$Z1} - dcc's own equivalences; the
+      // boolean table above keeps its generic entry ($IFOPT Z reads it),
+      // the SIZE is what SizeOf-of-an-enum needs.
+      if LSwitch = 'Z' then
+        if ABody[LIdx + 1] = '+' then
+          AState.MinEnumSize := 4
+        else
+          AState.MinEnumSize := 1;
+      // {$A+} is {$A8} and {$A-} is {$A1}, the same shape one switch over.
+      if LSwitch = 'A' then
+        if ABody[LIdx + 1] = '+' then
+          AState.Align := 8
+        else
+          AState.Align := 1;
+      LIdx := LIdx + 2;
+      SkipSeparators(LIdx);
+    end
+    else if (LSwitch = 'Z') and CharInSet(ABody[LIdx + 1], ['1', '2', '4']) then
+    begin
+      // {$Z1/2/4}: minimum enum size, tracked positionally (see
+      // TPasMinEnumEvent). $IFOPT Z+ is any size above 1.
+      AState.MinEnumSize := Ord(ABody[LIdx + 1]) - Ord('0');
+      AState.Switches['Z'] := AState.MinEnumSize > 1;
+      LIdx := LIdx + 2;
+      SkipSeparators(LIdx);
+    end
+    else if (LSwitch = 'A') and
+            CharInSet(ABody[LIdx + 1], ['1', '2', '4', '8']) then
+    begin
+      // {$A1/2/4/8/16}: the record field-alignment cap, tracked positionally
+      // (see TPasAlignEvent). Two digits only for 16, and 16 caps nothing a
+      // builtin can exceed - it lands on the same layout as 8, but it is
+      // recorded as written rather than normalized. $IFOPT A+ is any cap
+      // above 1.
+      if (ABody[LIdx + 1] = '1') and (LIdx + 2 <= Length(ABody)) and
+         (ABody[LIdx + 2] = '6') then
+      begin
+        AState.Align := 16;
+        LIdx := LIdx + 3;
+      end
+      else
+      begin
+        AState.Align := Ord(ABody[LIdx + 1]) - Ord('0');
+        LIdx := LIdx + 2;
+      end;
+      AState.Switches['A'] := AState.Align > 1;
+      SkipSeparators(LIdx);
+    end
+    else if (LSwitch = 'D') and CharInSet(ABody[LIdx + 1], ['0', '1', '2']) then
+    begin
+      // {$D0} is D-, {$D1} and {$D2} D+ (dcc64 37.0; the .dproj's
+      // DCC_DebugInformation 0 reaches dcc as -$D0). The group goes on.
+      AState.Switches['D'] := ABody[LIdx + 1] <> '0';
+      LIdx := LIdx + 2;
+      SkipSeparators(LIdx);
+    end
+    else if (LSwitch = 'Y') and CharInSet(ABody[LIdx + 1], ['D', 'd']) then
+    begin
+      // {$YD}, definitions only, is Y+ to $IFOPT - and dcc reads nothing of
+      // the group after it: `{$R-}{$YD,R+}` leaves R- (dcc64 37.0).
+      AState.Switches['Y'] := True;
+      Exit;
+    end
+    else
+      Exit; // {$R *.res} etc. - no state to track
+  end;
+end;
+
+function PasStartOptState(const ASwitches: array of string): TPasOptState;
+var
+  LArg: string;
+begin
+  Result := NoConfigOptState;
+  for LArg in ASwitches do
+    if LArg.StartsWith('-$') then
+      ApplySwitchText(Result, Copy(LArg, 3, MaxInt))
+    else if LArg.StartsWith('$') then
+      ApplySwitchText(Result, Copy(LArg, 2, MaxInt))
+    else
+      ApplySwitchText(Result, LArg);
 end;
 
 destructor TPasPreprocessor.Destroy;
@@ -1027,6 +1213,7 @@ begin
   FScopedEnumsEvents.Free;
   FMinEnumEvents.Free;
   FAlignEvents.Free;
+  FAppTypeEvents.Free;
   FDefineRefs.Free;
   FIncludeRefs.Free;
   FIfNameRefs.Free;
@@ -1105,7 +1292,10 @@ begin
   // (System.ObjAuto.pas mis-branched when an earlier unit's define
   // survived into its X64ASM chain).
   FDefines.Free;
-  FDefines := FBaseDefines.Clone;
+  if (FProgramDefines <> nil) and SameText(AFileName, FProgramFile) then
+    FDefines := FProgramDefines.Clone
+  else
+    FDefines := FBaseDefines.Clone;
   ResetSwitches;
   FFileNames.Clear;
   FFiles.Clear;
@@ -1138,6 +1328,12 @@ begin
   FIfNameRefs.Clear;
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
+  FAppTypeEvents.Clear;
+  // The host's $A / $Z start (the project's -$A4, -$Z4): an event at the
+  // first token when it is not dcc's default, so AlignAt / MinEnumSizeAt
+  // answer it - the setters record only a change.
+  SetMinEnumSize(FStartState.MinEnumSize);
+  SetAlign(FStartState.Align);
   FLiveAsm := False;
   FLastVisKind := tkEndOfFile;
 
@@ -1180,6 +1376,7 @@ begin
   Result.UnresolvedSymbols := FUnresolvedSymbols.ToArray;
   Result.MinEnumEvents := FMinEnumEvents.ToArray;
   Result.AlignEvents := FAlignEvents.ToArray;
+  Result.AppTypeEvents := FAppTypeEvents.ToArray;
   Result.DefineRefs := FDefineRefs.ToArray;
   Result.IncludeRefs := FIncludeRefs.ToArray;
   Result.IfNameRefs := FIfNameRefs.ToArray;
@@ -1744,76 +1941,18 @@ end;
 
 procedure TPasPreprocessor.ApplySwitches(const ABody: string);
 var
-  LIdx: Integer;
-  LSwitch: Char;
+  LOpt: TPasOptState;
 begin
-  // Forms: X+  X-  X+,Y-  Zn / An (tracked, below)  X <arg> ($R res: ignored)
-  LIdx := 1;
-  while LIdx < Length(ABody) do
-  begin
-    if not CharInSet(ABody[LIdx], ['A'..'Z', 'a'..'z']) then
-      Exit;
-    LSwitch := UpCase(ABody[LIdx]);
-    if (LIdx + 1 <= Length(ABody)) and
-       CharInSet(ABody[LIdx + 1], ['+', '-']) then
-    begin
-      FSwitches[LSwitch] := ABody[LIdx + 1] = '+';
-      // {$Z+} is {$Z4} and {$Z-} is {$Z1} - dcc's own equivalences; the
-      // boolean table above keeps its generic entry ($IFOPT Z reads it),
-      // the SIZE is what SizeOf-of-an-enum needs.
-      if LSwitch = 'Z' then
-        if ABody[LIdx + 1] = '+' then
-          SetMinEnumSize(4)
-        else
-          SetMinEnumSize(1);
-      // {$A+} is {$A8} and {$A-} is {$A1}, the same shape one switch over.
-      if LSwitch = 'A' then
-        if ABody[LIdx + 1] = '+' then
-          SetAlign(8)
-        else
-          SetAlign(1);
-      LIdx := LIdx + 2;
-      // Comma-separated list: {$O+,W-}
-      while (LIdx <= Length(ABody)) and
-        CharInSet(ABody[LIdx], [',', ' ', #9]) do
-        Inc(LIdx);
-    end
-    else if (LSwitch = 'Z') and (LIdx + 1 <= Length(ABody)) and
-            CharInSet(ABody[LIdx + 1], ['1', '2', '4']) then
-    begin
-      // {$Z1/2/4}: minimum enum size, tracked positionally (see
-      // TPasMinEnumEvent). The only numeric switch with state we consume.
-      SetMinEnumSize(Ord(ABody[LIdx + 1]) - Ord('0'));
-      LIdx := LIdx + 2;
-      while (LIdx <= Length(ABody)) and
-        CharInSet(ABody[LIdx], [',', ' ', #9]) do
-        Inc(LIdx);
-    end
-    else if (LSwitch = 'A') and (LIdx + 1 <= Length(ABody)) and
-            CharInSet(ABody[LIdx + 1], ['1', '2', '4', '8']) then
-    begin
-      // {$A1/2/4/8/16}: the record field-alignment cap, tracked positionally
-      // (see TPasAlignEvent). Two digits only for 16, and 16 caps nothing a
-      // builtin can exceed - it lands on the same layout as 8, but it is
-      // recorded as written rather than normalized.
-      if (ABody[LIdx + 1] = '1') and (LIdx + 2 <= Length(ABody)) and
-         (ABody[LIdx + 2] = '6') then
-      begin
-        SetAlign(16);
-        LIdx := LIdx + 3;
-      end
-      else
-      begin
-        SetAlign(Ord(ABody[LIdx + 1]) - Ord('0'));
-        LIdx := LIdx + 2;
-      end;
-      while (LIdx <= Length(ABody)) and
-        CharInSet(ABody[LIdx], [',', ' ', #9]) do
-        Inc(LIdx);
-    end
-    else
-      Exit; // {$R *.res} etc. - no state to track
-  end;
+  // One reader for the in-file switch and the command line (ApplySwitchText);
+  // a changed $A / $Z goes through its setter, which records the event.
+  LOpt := Default(TPasOptState);
+  LOpt.Switches := FSwitches;
+  LOpt.MinEnumSize := FMinEnumSize;
+  LOpt.Align := FAlign;
+  ApplySwitchText(LOpt, ABody);
+  FSwitches := LOpt.Switches;
+  SetMinEnumSize(LOpt.MinEnumSize);
+  SetAlign(LOpt.Align);
 end;
 
 procedure TPasPreprocessor.ApplyLongSwitch(const AName, AArg: string);
@@ -1843,6 +1982,27 @@ begin
   else if AName = 'DEBUGINFO' then SetSwitch('D')
   else if AName = 'LOCALSYMBOLS' then SetSwitch('L')
   else if AName = 'REFERENCEINFO' then SetSwitch('Y')
+  // The long forms with no entry here before - dcc64 37.0 moves the letter
+  // $IFOPT reads for each (local/probe-b62 T): TYPEINFO is $M (19.1.1),
+  // DEFINITIONINFO is $YD, Y+ to $IFOPT, and its OFF is Y-; STACKCHECKS is
+  // $S. A `{$IFOPT M+}` after `{$TYPEINFO ON}` took the other branch (audit
+  // E2-17).
+  else if AName = 'TYPEINFO' then SetSwitch('M')
+  else if AName = 'DEFINITIONINFO' then SetSwitch('Y')
+  else if AName = 'STACKCHECKS' then SetSwitch('S')
+  // `{$YD}` is a two-letter word, so it is classified here, not as a
+  // switch group; it is Y+ and ends the group (ApplySwitchText's rule).
+  else if AName = 'YD' then FSwitches['Y'] := True
+  else if AName = 'APPTYPE' then
+  begin
+    if SameText(AArg, 'CONSOLE') or SameText(AArg, 'GUI') then
+    begin
+      var LApp: TPasAppTypeEvent;
+      LApp.VisIndex := FVisible.Count;
+      LApp.Console := SameText(AArg, 'CONSOLE');
+      FAppTypeEvents.Add(LApp);
+    end;
+  end
   else if AName = 'IMPORTEDDATA' then SetSwitch('G')
   else if AName = 'VARSTRINGCHECKS' then SetSwitch('V')
   else if AName = 'SCOPEDENUMS' then

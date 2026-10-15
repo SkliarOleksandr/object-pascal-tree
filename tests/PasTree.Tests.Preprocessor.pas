@@ -458,6 +458,23 @@ begin
       '{$I-,R+}', 'I', False, APP),
     SwitchCase('1.3.1', '...and the REST of the group too',
       '{$I-,R+}', 'R', True, APP),
+    // Audit E2-17 (dcc64 37.0, local/probe-b62 T, T2): the long forms with
+    // no letter before, and the digit / D forms of D and Y.
+    SwitchCase('1.3.1', '{$TYPEINFO ON} sets M', '{$M-}{$TYPEINFO ON}', 'M',
+      True, APP),
+    SwitchCase('1.3.1', '{$DEFINITIONINFO ON} sets Y',
+      '{$Y-}{$DEFINITIONINFO ON}', 'Y', True, APP),
+    SwitchCase('1.3.1', '{$DEFINITIONINFO OFF} clears it',
+      '{$DEFINITIONINFO OFF}', 'Y', False, APP),
+    SwitchCase('1.3.1', '{$STACKCHECKS ON} sets S', '{$STACKCHECKS ON}', 'S',
+      True, APP),
+    SwitchCase('1.3.1', '{$YD} sets Y', '{$Y-}{$YD}', 'Y', True, APP),
+    SwitchCase('1.3.1', '...and ends its group', '{$R-}{$YD,R+}', 'R',
+      False, APP),
+    SwitchCase('1.3.1', '{$D0} clears D', '{$D0}', 'D', False, APP),
+    SwitchCase('1.3.1', '{$D1} sets it, and the group goes on',
+      '{$D-}{$R-}{$D1,R+}', 'R', True, APP),
+    SwitchCase('1.3.1', '...D itself', '{$D-}{$D2}', 'D', True, APP),
 
     // ---- 1.3.4: $PUSHOPT/$POPOPT round-trips BOTH halves of TPasOptState
     // -- the single-letter switches and SCOPEDENUMS, tracked separately

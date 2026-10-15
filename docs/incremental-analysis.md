@@ -78,8 +78,10 @@ included; `AnalyzeModuleOnly` consumes it without using it); the donor must
 stay alive until that call returns. While it runs the host may read the donor
 and navigate it - hydration included - from its own thread, but must not
 analyze it, free it, demote it or release its maps. `False` = configuration mismatch
-(platform, extra defines, search paths, namespaces, aliases) and the run
-proceeds donor-less. `StageTimings` reports `donorhits=..;donormiss=..;`.
+(platform, extra defines, switch start state, console target, search paths,
+namespaces, aliases) and the run proceeds donor-less. The units' CONSOLE also
+follows the main program's `{$APPTYPE}`: a donor whose units saw the other
+CONSOLE is dropped once the program is loaded. `StageTimings` reports `donorhits=..;donormiss=..;`.
 
 Measured on the demo closure: 192 of 200 parses reused, interface+full waves
 1894 -> 1326 ms. On the client closure a rebuild goes 29 -> 23 s. This is a
@@ -253,6 +255,7 @@ from a slow analyzer.
 | `consumer-oracle(<unit>)` | a consumer in the reach has an oracle-built token stream: its `$IF`s may have folded this unit's constants or record sizes, and only a re-preprocess can re-decide them |
 | `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
 | `in-path-changed(<unit>)` | an `in` clause of the edited unit changed or dropped its path, or a new one names another file than the unit's pin: the pin is the project's, every importer of the unit resolves through it, and only a rebuild re-reads every `in` clause |
+| `apptype-changed` | the edited unit is the main program and its last `{$APPTYPE}` before `uses` now decides CONSOLE the other way for every unit - a re-preprocess of the closure |
 | `implicit-unit(<unit>)` | an interface edit of System or SysInit: every model binds into them with no `uses` edge, so the reach cannot be computed (the real RTL refuses earlier, `unresolved-if`) |
 
 ### What the disk did between two runs

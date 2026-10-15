@@ -4765,6 +4765,135 @@ begin
   TDirectory.Delete(LDir, True);
 end;
 
+// What dcc derives from the project before the first token (audit B62:
+// E2-15, E2-16, E2-17). The units of a program whose `$APPTYPE CONSOLE`
+// precedes its `uses` see CONSOLE, the program's own text does not; -CC
+// (ConsoleTarget) defines it everywhere unless the program says GUI. The
+// switch start state is what `$IFOPT` reads first and the layout oracle's
+// $A. dcc64 37.0: local/probe-b62 con C1-C6, T, Q.
+procedure TestProjectSwitchState;
+var
+  LDir: string;
+
+  function Analyze(const AMain: string; AConsole: Boolean;
+    const ASwitches: array of string): TPasSemaProject;
+  begin
+    Result := TPasSemaProject.Create(pfWin64, [LDir], []);
+    Result.ConsoleTarget := AConsole;
+    Result.SwitchStart := PasStartOptState(ASwitches);
+    Result.AnalyzeProject(TPath.Combine(LDir, AMain));
+  end;
+
+  function Has(AProj: TPasSemaProject; const AUnit, AType: string): Boolean;
+  begin
+    GProj := AProj;
+    Result := (ModelByName(AUnit) <> nil) and
+      (SymCountOf(ModelByName(AUnit), AType, skType) = 1);
+  end;
+
+var
+  LP: TPasSemaProject;
+  LDonor: TPasSemaProject;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_switch_state');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SwU.pas'),
+    'unit SwU;'#10'interface'#10 +
+    '{$IFDEF CONSOLE} type TCon = class end; {$ELSE}' +
+    ' type TGui = class end; {$ENDIF}'#10 +
+    '{$IFOPT D+} type TDOn = class end; {$ELSE}' +
+    ' type TDOff = class end; {$ENDIF}'#10 +
+    '{$IFOPT Y+} type TYOn = class end; {$ENDIF}'#10 +
+    'type TR = record A: Byte; B: Int64; end;'#10 +
+    '{$IF SizeOf(TR) = 12} type TA4 = class end; {$IFEND}'#10 +
+    '{$IF SizeOf(TR) = 16} type TA8 = class end; {$IFEND}'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SwCon.dpr'),
+    'program SwCon;'#10'{$APPTYPE CONSOLE}'#10'uses SwU;'#10 +
+    '{$IFDEF CONSOLE} type TPCon = class end; {$ELSE}' +
+    ' type TPGui = class end; {$ENDIF}'#10'begin'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SwGui.dpr'),
+    'program SwGui;'#10'{$APPTYPE GUI}'#10'uses SwU;'#10 +
+    '{$IFDEF CONSOLE} type TPCon = class end; {$ELSE}' +
+    ' type TPGui = class end; {$ENDIF}'#10'begin'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'SwLate.dpr'),
+    'program SwLate;'#10'uses SwU;'#10'{$APPTYPE CONSOLE}'#10 +
+    'begin'#10'end.'#10);
+  LP := Analyze('SwCon.dpr', False, []);
+  try
+    Ok('switch state: APPTYPE CONSOLE before uses gives the units CONSOLE',
+      Has(LP, 'swu', 'tcon') and not Has(LP, 'swu', 'tgui'));
+    Ok('switch state: ...and not the program''s own text',
+      Has(LP, 'swcon', 'tpgui'));
+    Ok('switch state: dcc''s start state without a host''s',
+      Has(LP, 'swu', 'tdon') and Has(LP, 'swu', 'tyon') and
+      Has(LP, 'swu', 'ta8') and not Has(LP, 'swu', 'ta4'));
+  finally
+    LP.Free;
+  end;
+  LP := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    LP.AnalyzeStaged([TPath.Combine(LDir, 'SwCon.dpr')], []);
+    Ok('switch state: the staged driver decides CONSOLE the same way',
+      Has(LP, 'swu', 'tcon') and Has(LP, 'swcon', 'tpgui'));
+  finally
+    LP.Free;
+  end;
+  LP := Analyze('SwGui.dpr', True, []);
+  try
+    Ok('switch state: -CC with APPTYPE GUI - the units have no CONSOLE',
+      Has(LP, 'swu', 'tgui'));
+    Ok('switch state: ...the program''s text has it',
+      Has(LP, 'swgui', 'tpcon'));
+  finally
+    LP.Free;
+  end;
+  LP := Analyze('SwLate.dpr', False, []);
+  try
+    Ok('switch state: APPTYPE after uses decides nothing',
+      Has(LP, 'swu', 'tgui'));
+  finally
+    LP.Free;
+  end;
+  LP := Analyze('SwLate.dpr', True, []);
+  try
+    Ok('switch state: -CC alone - CONSOLE in the units', Has(LP, 'swu', 'tcon'));
+  finally
+    LP.Free;
+  end;
+  LDonor := Analyze('SwLate.dpr', False, ['-$D0', '-$A4', '-$Y-']);
+  try
+    Ok('switch state: the host''s start state reaches $IFOPT',
+      Has(LDonor, 'swu', 'tdoff') and not Has(LDonor, 'swu', 'tyon'));
+    Ok('switch state: ...and the layout oracle''s $A',
+      Has(LDonor, 'swu', 'ta4') and not Has(LDonor, 'swu', 'ta8'));
+    LP := TPasSemaProject.Create(pfWin64, [LDir], []);
+    try
+      Ok('switch state: a donor with another start state is refused',
+        not LP.AdoptParseDonor(LDonor));
+      LP.SwitchStart := PasStartOptState(['-$D0', '-$A4', '-$Y-']);
+      LP.ConsoleTarget := True;
+      Ok('switch state: ...and one with another console target',
+        not LP.AdoptParseDonor(LDonor));
+      LP.ConsoleTarget := False;
+      Ok('switch state: ...the same settings are adopted',
+        LP.AdoptParseDonor(LDonor));
+      LP.AdoptParseDonor(nil);
+    finally
+      LP.Free;
+    end;
+  finally
+    LDonor.Free;
+  end;
+  GProj := nil;
+  TDirectory.Delete(LDir, True);
+end;
+
 // Depth that is not the source's nesting, through the project's passes
 // (audit A1-01, A1-07): 10,000-term operator chains - a constant typed from
 // its operands (UntypedInitTypeX), an inline var inferred from them (the
@@ -13768,6 +13897,7 @@ begin
   TestIfEvaluatorSemantics;
   TestLayoutOracle;
   TestDeclaredPassReach;
+  TestProjectSwitchState;
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;

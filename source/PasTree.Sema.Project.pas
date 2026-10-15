@@ -221,6 +221,18 @@ type
     // into FDefines) - kept ONLY for AdoptParseDonor's config gate, which
     // must compare what the two projects were CREATED with.
     FExtraDefines: TArray<string>;
+    // What dcc derives from the project before the first token (audit B62):
+    // the switch start state every unit is preprocessed in (SwitchStart),
+    // -CC (ConsoleTarget), and the CONSOLE the units get - the main
+    // program's last `{$APPTYPE}` before its `uses`, else ConsoleTarget
+    // (DecideConsole). FProgramDefines is the program's own set when it
+    // differs from FDefines (the program sees CONSOLE only under -CC), nil
+    // otherwise; FProgramFile is that program's full path.
+    FSwitchStart: TPasOptState;
+    FConsoleTarget: Boolean;
+    FUnitsConsole: Boolean;
+    FProgramDefines: TPasDefines;
+    FProgramFile: string;
     // Parse-reuse donor (stage A of the incremental plan): the previous
     // last-good project, adopted via AdoptParseDonor for exactly ONE Analyze*
     // run and cleared in that run's finally (see FinishDonor) - after the
@@ -446,6 +458,15 @@ type
     procedure TrimAllDiags;
     procedure ReleaseCrossWork;
     function NewPP: TPasPreprocessor;
+    // Every preprocessor this project holds (FPP and the pool), so a start
+    // state or a program define set set after they exist reaches them.
+    procedure ConfigurePPs;
+    procedure ConfigurePP(APP: TPasPreprocessor);
+    procedure SetSwitchStart(const AValue: TPasOptState);
+    procedure SetConsoleTarget(AValue: Boolean);
+    procedure SetUnitsConsole(AValue: Boolean);
+    function UnitsConsoleOf(AModel: TPasSemaModel): Boolean;
+    procedure DecideConsole(AMainId: Integer);
     function RentPP: TPasPreprocessor;
     procedure ReturnPP(APP: TPasPreprocessor);
     procedure TrimPreprocessors;
@@ -1135,6 +1156,22 @@ type
       resolution. Set BEFORE analyzing. }
     procedure SetNamespaces(const ANamespaces: TArray<string>);
     procedure AddUnitAlias(const AAlias, AReal: string);
+    { The switch state every unit starts in - dcc's command-line `-$`
+      switches, which a .dproj's DCC_* properties become (TPasDProj.Switches,
+      PasStartOptState); dcc's no-config state by default. `$IFOPT` reads it
+      before any in-file switch, and its $A / $Z start the layout oracle's
+      alignment and enum size. Set BEFORE analyzing. }
+    property SwitchStart: TPasOptState read FSwitchStart write SetSwitchStart;
+    { dcc's -CC (a .dproj's DCC_ConsoleTarget): CONSOLE is defined in the
+      main program's own text and in every unit, unless the program's last
+      APPTYPE directive before its `uses` says GUI. Without it (-CG, or
+      nothing) the units get CONSOLE only from a program's APPTYPE CONSOLE
+      before its `uses`, and the program's own text never (dcc64 37.0,
+      1.3.2).
+      AnalyzeDirectory has no program, so there it is CONSOLE everywhere or
+      nowhere. A CONSOLE among the extra defines is never touched. Set
+      BEFORE analyzing. }
+    property ConsoleTarget: Boolean read FConsoleTarget write SetConsoleTarget;
     { Where a unit LIVES for this project, ahead of every search path: the
       project file's own unit list (a .dproj's DCCReference rows, a host that
       knows them). The unit name is the file's base name. A program's
@@ -2011,6 +2048,7 @@ begin
   FExtraDefines := AExtraDefines;   // kept verbatim for AdoptParseDonor's gate
   for LName in AExtraDefines do
     FDefines.Define(LName);
+  FSwitchStart := PasStartOptState([]);
   FPP := NewPP;
   FPPPool := TList<TPasPreprocessor>.Create;
   FSeedModel := TPasSemaModel.Create(Default(TPasTree));
@@ -2079,6 +2117,7 @@ begin
   FPPPool.Free;
   FPP.Free;
   FSeedModel.Free;
+  FProgramDefines.Free;
   FDefines.Free;
   FSM.Free;
   inherited;
@@ -2439,6 +2478,17 @@ begin
     AModel := nil;
 end;
 
+// The parts of a start state a preprocessor reads (TPasOptState's comment).
+function SameOptStart(const A, B: TPasOptState): Boolean;
+var
+  LCh: Char;
+begin
+  for LCh := 'A' to 'Z' do
+    if A.Switches[LCh] <> B.Switches[LCh] then
+      Exit(False);
+  Result := (A.MinEnumSize = B.MinEnumSize) and (A.Align = B.Align);
+end;
+
 function TPasSemaProject.AdoptParseDonor(ADonor: TPasSemaProject): Boolean;
 var
   LIdx: Integer;
@@ -2463,6 +2513,12 @@ begin
   for LIdx := 0 to High(FExtraDefines) do
     if not SameText(ADonor.FExtraDefines[LIdx], FExtraDefines[LIdx]) then
       Exit(False);
+  // The rest of what decides a stream before its first token (audit B62):
+  // the switch start state and -CC. The units' CONSOLE also follows the
+  // program's text - DecideConsole drops a donor that decided otherwise.
+  if (ADonor.FConsoleTarget <> FConsoleTarget) or
+     not SameOptStart(ADonor.FSwitchStart, FSwitchStart) then
+    Exit(False);
   // Without the project directory while this project has none yet: the next
   // run defaults it from its main file, and RecheckDonorProjectDir compares
   // it then.
@@ -5947,6 +6003,109 @@ begin
   Result := TPasPreprocessor.Create(FSM, FDefines, FCompilerVersion,
     FInfo.PointerBytes, FInfo.ExtendedBytes, FInfo.LongBytes,
     FInfo.ExtendedAlign);
+  ConfigurePP(Result);
+end;
+
+procedure TPasSemaProject.ConfigurePP(APP: TPasPreprocessor);
+begin
+  APP.StartState := FSwitchStart;
+  APP.SetProgramDefines(FProgramFile, FProgramDefines);
+end;
+
+procedure TPasSemaProject.ConfigurePPs;
+var
+  LPP: TPasPreprocessor;
+begin
+  if FPP <> nil then
+    ConfigurePP(FPP);
+  TMonitor.Enter(FPPPool);
+  try
+    for LPP in FPPPool do
+      ConfigurePP(LPP);
+  finally
+    TMonitor.Exit(FPPPool);
+  end;
+end;
+
+procedure TPasSemaProject.SetSwitchStart(const AValue: TPasOptState);
+begin
+  FSwitchStart := AValue;
+  ConfigurePPs;
+end;
+
+// CONSOLE in the units' set (FDefines) - unless the host defines it itself.
+procedure TPasSemaProject.SetUnitsConsole(AValue: Boolean);
+var
+  LName: string;
+begin
+  FUnitsConsole := AValue;
+  for LName in FExtraDefines do
+    if SameText(Trim(LName), 'CONSOLE') then
+      Exit;
+  if AValue then
+    FDefines.Define('CONSOLE')
+  else
+    FDefines.Undefine('CONSOLE');
+end;
+
+procedure TPasSemaProject.SetConsoleTarget(AValue: Boolean);
+begin
+  FConsoleTarget := AValue;
+  SetUnitsConsole(AValue);
+end;
+
+// The CONSOLE the units compiled with program AModel get (dcc64 37.0,
+// local/probe-b62 con C1-C6): its last live `{$APPTYPE}` before its `uses`
+// clause - after it, the units were already compiled - else -CC. Not a
+// program: -CC.
+function TPasSemaProject.UnitsConsoleOf(AModel: TPasSemaModel): Boolean;
+var
+  LRoot, LChild, LVis: Integer;
+begin
+  Result := FConsoleTarget;
+  if (AModel = nil) or (Length(AModel.Tree.Nodes) = 0) then
+    Exit;
+  LRoot := 0;
+  if AModel.Tree.Nodes[LRoot].Kind <> nkProgram then
+    Exit;
+  LVis := MaxInt;
+  LChild := AModel.Tree.Nodes[LRoot].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LChild].Kind = nkUsesClause then
+    begin
+      LVis := AModel.Tree.Nodes[LChild].FirstToken;
+      Break;
+    end;
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+  if not AModel.Tree.Source.AppTypeBefore(LVis, Result) then
+    Result := FConsoleTarget;
+end;
+
+// Once the main program is loaded and before any unit it pulls in: the
+// units' CONSOLE follows the program (UnitsConsoleOf), its own text keeps
+// -CC's. A program that overrides -CC gets a define set of its own
+// (FProgramDefines), the units' set changes in place - every preprocessor
+// holds FDefines by reference. A donor whose units saw the other CONSOLE
+// cannot donate them.
+procedure TPasSemaProject.DecideConsole(AMainId: Integer);
+var
+  LUnits: Boolean;
+begin
+  if (AMainId < 0) or (AMainId >= FModels.Count) then
+    Exit;
+  FProgramFile := FFiles[AMainId];
+  LUnits := UnitsConsoleOf(FModels[AMainId]);
+  if LUnits <> FUnitsConsole then
+  begin
+    FreeAndNil(FProgramDefines);
+    FProgramDefines := FDefines.Clone;
+    SetUnitsConsole(LUnits);
+    ConfigurePPs;
+  end;
+  if (FDonor <> nil) and (FDonor.FUnitsConsole <> FUnitsConsole) then
+    FDonor := nil;
 end;
 
 function TPasSemaProject.RentPP: TPasPreprocessor;
@@ -19817,6 +19976,8 @@ begin
     Result := LoadFile(AMainFile);
     if Result < 0 then
       Exit;
+    // Before any unit it pulls in: their CONSOLE follows its `{$APPTYPE}`.
+    DecideConsole(Result);
     // Eagerly, like every other driver (AnalyzeProject/Directory/Staged): the
     // parallel passes below can reach EnsureSystemUnit from a worker (any
     // FindMemberX ancestry climb hops to the implicit TObject), and a
@@ -21743,6 +21904,11 @@ begin
     LWhy := InPathChange;
     if LWhy <> '' then
       Exit(Refuse('in-path-changed(' + LWhy + ')'));
+    // The main program's `{$APPTYPE}` decides CONSOLE for every unit; an
+    // edit that moves it re-preprocesses the closure (audit B62).
+    if SameText(LFull, FProgramFile) and
+       (UnitsConsoleOf(LNew) <> FUnitsConsole) then
+      Exit(Refuse('apptype-changed'));
     FStageTimings := FStageTimings +
       Format('parse=%d;', [LSW.ElapsedMilliseconds]);
     // A NEW `uses` entry - a file the closure never loaded - is TAKEN IN
@@ -22288,6 +22454,8 @@ begin
     Result := LoadFile(AMainFile);
     if Result < 0 then
       Exit;
+    // Before any unit it pulls in: their CONSOLE follows its `{$APPTYPE}`.
+    DecideConsole(Result);
     // The implicit System unit is part of every unit's closure (1.2.1) yet
     // never appears in a `uses` clause - pull it in NOW so the closure loop
     // and the cross passes below cover it too (nav inside an opened System.pas
@@ -22569,6 +22737,13 @@ begin
     // AnalyzeProject) so wave 1's BFS also walks its uses and the finalizer
     // covers it. Matches AnalyzeProject's early EnsureSystemUnit. SysInit
     // rides along the same way.
+    // A single program root first, as AnalyzeProject loads its main file:
+    // the units' CONSOLE follows its `{$APPTYPE}`, so it is decided before
+    // any of them is preprocessed. The engine discovers from it like from
+    // any model committed before it starts.
+    if (Length(ARoots) = 1) and
+       SameText(TPath.GetExtension(ARoots[0]), '.dpr') then
+      DecideConsole(LoadFile(ARoots[0]));
     EnsureSystemUnit;
     EnsureSysInitUnit;
 

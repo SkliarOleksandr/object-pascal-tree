@@ -45,6 +45,7 @@ uses
   PasTree.Types,
   PasTree.Ast,
   PasTree.Platforms,
+  PasTree.Preprocessor,
   PasTree.DProj,
   PasTree.Sema.Model,
   PasTree.Sema.Project,
@@ -615,6 +616,8 @@ begin
       [LD.Dir] + LD.SearchPaths + StudioSourcePaths(GStudio) + GExtra,
       LD.Defines);
     try
+      GProj.SwitchStart := PasStartOptState(LD.Switches);
+      GProj.ConsoleTarget := LD.ConsoleTarget;
       LNs := LD.Namespaces;
       if LNs = nil then
         LNs := PasDefaultNamespaces(LD.Platform);

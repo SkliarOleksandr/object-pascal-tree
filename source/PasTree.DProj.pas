@@ -47,6 +47,8 @@ type
     FDefines: TArray<string>;
     FNamespaces: TArray<string>;
     FUnitAliases: TArray<TPasUnitAlias>;
+    FSwitches: TArray<string>;
+    FConsoleTarget: Boolean;
     function ResolvePath(const ARelOrAbs: string): string;
   public
     { Loads and evaluates APath for the given platform/config; either left
@@ -76,6 +78,15 @@ type
     property Namespaces: TArray<string> read FNamespaces;
     { DCC_UnitAlias entries (Alias -> real unit name). }
     property UnitAliases: TArray<TPasUnitAlias> read FUnitAliases;
+    { The `-$` switches dcc gets from the evaluated config's DCC_* switch
+      properties, in the form and order msbuild's DCC task writes them
+      (`$O-`, `$A4`, `$D0`, `$YD`) - PasStartOptState reads them. A property
+      that is absent, or holds a value the task would not pass as a switch,
+      gives none. }
+    property Switches: TArray<string> read FSwitches;
+    { DCC_ConsoleTarget = true, which the DCC task passes as -CC
+      (TPasSemaProject.ConsoleTarget). }
+    property ConsoleTarget: Boolean read FConsoleTarget;
   end;
 
 implementation
@@ -84,6 +95,39 @@ uses
   System.SysUtils,
   System.IOUtils,
   System.Generics.Collections;
+
+type
+  TDccSwitchForm = (sfBool, sfNumber, sfLevel, sfRefInfo);
+  TDccSwitchProp = record
+    Prop: string;
+    Letter: Char;
+    Form: TDccSwitchForm;
+  end;
+
+const
+  // DCC_* switch properties -> dcc's `-$` letter, in the DCC task's order.
+  DCC_SWITCH_PROPS: array[0..20] of TDccSwitchProp = (
+    (Prop: 'DCC_Optimize';               Letter: 'O'; Form: sfBool),
+    (Prop: 'DCC_GenerateStackFrames';    Letter: 'W'; Form: sfBool),
+    (Prop: 'DCC_PentiumSafeDivide';      Letter: 'U'; Form: sfBool),
+    (Prop: 'DCC_Alignment';              Letter: 'A'; Form: sfNumber),
+    (Prop: 'DCC_MinimumEnumSize';        Letter: 'Z'; Form: sfNumber),
+    (Prop: 'DCC_RunTimeTypeInfo';        Letter: 'M'; Form: sfBool),
+    (Prop: 'DCC_StrictVarStrings';       Letter: 'V'; Form: sfBool),
+    (Prop: 'DCC_FullBooleanEvaluations'; Letter: 'B'; Form: sfBool),
+    (Prop: 'DCC_ExtendedSyntax';         Letter: 'X'; Form: sfBool),
+    (Prop: 'DCC_TypedAtParameter';       Letter: 'T'; Form: sfBool),
+    (Prop: 'DCC_OpenStringParams';       Letter: 'P'; Form: sfBool),
+    (Prop: 'DCC_LongStrings';            Letter: 'H'; Form: sfBool),
+    (Prop: 'DCC_WriteableConstants';     Letter: 'J'; Form: sfBool),
+    (Prop: 'DCC_RangeChecking';          Letter: 'R'; Form: sfBool),
+    (Prop: 'DCC_IOChecking';             Letter: 'I'; Form: sfBool),
+    (Prop: 'DCC_IntegerOverflowCheck';   Letter: 'Q'; Form: sfBool),
+    (Prop: 'DCC_DebugInformation';       Letter: 'D'; Form: sfLevel),
+    (Prop: 'DCC_LocalDebugSymbols';      Letter: 'L'; Form: sfBool),
+    (Prop: 'DCC_AssertionsAtRuntime';    Letter: 'C'; Form: sfBool),
+    (Prop: 'DCC_SymbolReferenceInfo';    Letter: 'Y'; Form: sfRefInfo),
+    (Prop: 'DCC_ImportedDataReferences'; Letter: 'G'; Form: sfBool));
 
 { ==== minimal XML node tree - private, scoped to the .dproj shape ==== }
 
@@ -906,6 +950,42 @@ begin
           LAliases.Free;
         end;
       end;
+
+      // The switches, as msbuild's DCC task turns the properties into dcc's
+      // command line (CodeGear.Delphi.Targets, Studio 37.0; local/probe-b62
+      // ms): a Boolean property is `-$X+` / `-$X-` from true / false, and
+      // nothing from any other value; DebugInformation 0 / 1 is -$D0 / -$D1
+      // and SymbolReferenceInfo 0 / 1 is -$Y- / -$YD (2, their default, is
+      // no switch); Alignment and MinimumEnumSize pass a number as -$A<n> /
+      // -$Z<n>. In the order the task writes them (audit E2-15).
+      FSwitches := nil;
+      for var LSw in DCC_SWITCH_PROPS do
+        if LVars.TryGetValue(LSw.Prop, LVal) then
+        begin
+          LVal := Trim(LVal);
+          case LSw.Form of
+            sfBool:
+              if SameText(LVal, 'true') then
+                FSwitches := FSwitches + ['$' + LSw.Letter + '+']
+              else if SameText(LVal, 'false') then
+                FSwitches := FSwitches + ['$' + LSw.Letter + '-'];
+            sfNumber:
+              if (LVal <> '') and (StrToIntDef(LVal, -1) >= 0) then
+                FSwitches := FSwitches + ['$' + LSw.Letter + LVal];
+            sfLevel:
+              if LVal = '0' then
+                FSwitches := FSwitches + ['$' + LSw.Letter + '0']
+              else if LVal = '1' then
+                FSwitches := FSwitches + ['$' + LSw.Letter + '1'];
+            sfRefInfo:
+              if LVal = '0' then
+                FSwitches := FSwitches + ['$Y-']
+              else if LVal = '1' then
+                FSwitches := FSwitches + ['$YD'];
+          end;
+        end;
+      FConsoleTarget := LVars.TryGetValue('DCC_ConsoleTarget', LVal) and
+        SameText(Trim(LVal), 'true');
 
       FConfigurations := LConfigs.ToArray;
       FPlatforms := LPlatformsFound.ToArray;

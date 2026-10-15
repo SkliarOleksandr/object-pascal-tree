@@ -4327,6 +4327,13 @@ begin
     // toggling it stays instant instead of costing a re-analysis.
     FSemaProject.ReportUnresolvedMembers := True;
     FSemaProject.ReportGuessedIfs := True;   // same philosophy: show the guesses
+    // The .dproj's DCC_* switches and console target, as msbuild hands them
+    // to dcc: $IFOPT and CONSOLE read them.
+    if Assigned(FDProj) then
+    begin
+      FSemaProject.SwitchStart := PasStartOptState(FDProj.Switches);
+      FSemaProject.ConsoleTarget := FDProj.ConsoleTarget;
+    end;
     FSemaProject.SetNamespaces(EffectiveNamespaces(LPlatform)); // Forms -> Vcl.Forms
     // Defaults ALWAYS, then the project's on top: the IDE prepends a project's
     // own aliases to the defaults rather than replacing them, and AddUnitAlias
@@ -4657,6 +4664,11 @@ begin
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
   FAsyncSession.SetReportUnresolvedMembers(True);   // see the synchronous path
   FAsyncSession.SetReportGuessedIfs(True);
+  if Assigned(FDProj) then   // see the synchronous path
+  begin
+    FAsyncSession.SetSwitchStart(PasStartOptState(FDProj.Switches));
+    FAsyncSession.SetConsoleTarget(FDProj.ConsoleTarget);
+  end;
   FAsyncSession.SetNamespaces(EffectiveNamespaces(LPlatform));
   for var LDef in PasDefaultUnitAliases(LPlatform) do  // defaults, then project
     FAsyncSession.AddUnitAlias(LDef.Alias, LDef.UnitName);

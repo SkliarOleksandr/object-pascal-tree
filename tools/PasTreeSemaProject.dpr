@@ -49,7 +49,12 @@ program PasTreeSemaProject;
   -members  turns ON the opt-in "unresolved member after a dot" diagnostic
          (TPasSemaProject.ReportUnresolvedMembers). Off by default because a
          FALSE E2003 on a member is worse than a missing one; this is how the
-         corpora get measured for it. }
+         corpora get measured for it.
+
+  -$<switch> (repeatable: -$D-, -$A4, -$YD) and -CC  dcc's own command-line
+         switches and console target (TPasSemaProject.SwitchStart,
+         ConsoleTarget). With -dproj they go on top of the .dproj's DCC_*
+         switch properties and DCC_ConsoleTarget, which are always read. }
 
 {$APPTYPE CONSOLE}
 {$MAXSTACKSIZE $01000000}   // 16 MB per thread: README, "The stack every host should reserve"
@@ -94,6 +99,8 @@ var
   GProj: TPasSemaProject;
   GPath, GStudio: string;
   GExtraPaths: TArray<string>;   // -L<dir>, repeatable; see the arg loop
+  GSwitches: TArray<string>;     // -$X+ / -$A4 ..., dcc's command-line switches
+  GConsole: Boolean;             // -CC, dcc's console target
   // -overrides:TClass.Method / -impls:IIntf.Method, repeatable: Find
   // Overrides / Find Implementations queries to run over the analyzed closure
   // and print (see ReportChains). The headless twin of the demo's two
@@ -455,6 +462,12 @@ begin
       GProj.ReportUnresolvedMembers := GMembers;
       GProj.ReportVisibility := GVisibility;
       GProj.ReportGuessedIfs := GIfs;
+      // The .dproj's DCC_* switches and console target, as msbuild hands them
+      // to dcc - and a command-line -$X / -CC on top, as dcc would take it.
+      GProj.SwitchStart := PasStartOptState(LD.Switches + GSwitches);
+      GProj.ConsoleTarget := LD.ConsoleTarget or GConsole;
+      if Length(LD.Switches) > 0 then
+        Writeln(ErrOutput, '    switches: ', string.Join(' ', LD.Switches));
       // No -NS list in the .dproj means we could not read the option, not that
       // the project wants zero prefixes - dcc has none built in, so zero would
       // turn every legacy unqualified import into an F1027.
@@ -775,6 +788,10 @@ begin
         GUnused := True
       else if SameText(ParamStr(GIdx), '-defines') then
         GDefines := True
+      else if ParamStr(GIdx).StartsWith('-$') then
+        GSwitches := GSwitches + [ParamStr(GIdx)]
+      else if SameText(ParamStr(GIdx), '-CC') then
+        GConsole := True
       else if ParamStr(GIdx).StartsWith('-p:', True) then
         TryParsePlatformName(Copy(ParamStr(GIdx), 4, MaxInt), GPlatform)
       else if ParamStr(GIdx).StartsWith('-studio:', True) then
@@ -826,6 +843,8 @@ begin
       GProj.ReportUnresolvedMembers := GMembers;
       GProj.ReportVisibility := GVisibility;
       GProj.ReportGuessedIfs := GIfs;
+      GProj.SwitchStart := PasStartOptState(GSwitches);
+      GProj.ConsoleTarget := GConsole;
       // Same reasoning as the -dproj driver: a directory or bare-file run has
       // no project to state its prefixes, and zero prefixes is not what the IDE
       // would use.

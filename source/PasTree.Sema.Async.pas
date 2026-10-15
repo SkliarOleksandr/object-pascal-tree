@@ -33,6 +33,7 @@ uses
   System.Classes,
   System.SyncObjs,
   PasTree.Platforms,
+  PasTree.Preprocessor,
   PasTree.Sema.Project;
 
 type
@@ -126,6 +127,11 @@ type
     procedure AddUnitAlias(const AAlias, AReal: string);
     procedure PinUnitFile(const APath: string);
     procedure SetProjectDir(const ADir: string);
+    { The project's switch start state and -CC - see TPasSemaProject.
+      SwitchStart / ConsoleTarget (a .dproj's TPasDProj.Switches /
+      ConsoleTarget). Before SetParseDonor: its gate compares them. }
+    procedure SetSwitchStart(const AState: TPasOptState);
+    procedure SetConsoleTarget(AValue: Boolean);
     { Parse reuse - forwarded to TPasSemaProject.AdoptParseDonor (see there
       for the config gate and what a hit reuses). Call BEFORE Start, after
       the other configuration calls (the gate compares namespaces/aliases):
@@ -273,6 +279,18 @@ procedure TPasAsyncSession.SetProjectDir(const ADir: string);
 begin
   CheckNotStarted('SetProjectDir');
   FProject.SetProjectDir(ADir);
+end;
+
+procedure TPasAsyncSession.SetSwitchStart(const AState: TPasOptState);
+begin
+  CheckNotStarted('SetSwitchStart');
+  FProject.SwitchStart := AState;
+end;
+
+procedure TPasAsyncSession.SetConsoleTarget(AValue: Boolean);
+begin
+  CheckNotStarted('SetConsoleTarget');
+  FProject.ConsoleTarget := AValue;
 end;
 
 procedure TPasAsyncSession.AddUnitAlias(const AAlias, AReal: string);

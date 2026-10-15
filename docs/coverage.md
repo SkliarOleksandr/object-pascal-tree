@@ -69,6 +69,14 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 - `High` / `Low` in a `$IF` fold for a builtin ordinal, an enum, a subrange
   and an alias of one; of an array or a value they stay a guess, and a
   character subrange answers its ordinals, which compare with nothing.
+- CONSOLE follows the MAIN program only: `AnalyzeDirectory` has none, so
+  there every unit and program sees CONSOLE exactly when the host's
+  `ConsoleTarget` (-CC) is set, whatever a `.dpr` in the directory says; a
+  library's or a package's `{$APPTYPE}` decides nothing.
+- the switch start state is what the host sets (`SwitchStart`): a `.dproj`
+  gives its DCC_* switch properties (`TPasDProj.Switches`), a bare `.dpr`
+  dcc's no-config state. A `dcc64.cfg` beside the project, which plain dcc
+  reads and msbuild's `--no-config` does not, is not read.
 
 ### 1.3.3 Include files
 - the `{$I %ENV%}` / `{$I %DATE%}` insertion forms are

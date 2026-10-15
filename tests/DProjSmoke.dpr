@@ -76,11 +76,18 @@ const
     '    <Cfg_1>true</Cfg_1>'#10 +
     '    <Base>true</Base>'#10 +
     '    <DCC_Define>RELEASE;$(DCC_Define)</DCC_Define>'#10 +
+    '    <DCC_DebugInformation>0</DCC_DebugInformation>'#10 +
+    '    <DCC_Optimize>true</DCC_Optimize>'#10 +
     '  </PropertyGroup>'#10 +
     '  <PropertyGroup Condition="''$(Config)''==''Debug'' or ''$(Cfg_2)''!=''''">'#10 +
     '    <Cfg_2>true</Cfg_2>'#10 +
     '    <Base>true</Base>'#10 +
     '    <DCC_Define>DEBUG;$(DCC_Define)</DCC_Define>'#10 +
+    '    <DCC_SymbolReferenceInfo>1</DCC_SymbolReferenceInfo>'#10 +
+    '    <DCC_Optimize>false</DCC_Optimize>'#10 +
+    '    <DCC_Alignment>4</DCC_Alignment>'#10 +
+    '    <DCC_RangeChecking>maybe</DCC_RangeChecking>'#10 +
+    '    <DCC_ConsoleTarget>true</DCC_ConsoleTarget>'#10 +
     '  </PropertyGroup>'#10 +
     '  <PropertyGroup Condition="''$(Base)''!=''''">'#10 +
     // A build event in CDATA, placed BEFORE the search path in the same group
@@ -165,6 +172,11 @@ begin
         (Length(LDProj.UnitAliases) > 0) and
         SameText(LDProj.UnitAliases[0].Alias, 'WinTypes') and
         SameText(LDProj.UnitAliases[0].UnitName, 'Windows'));
+      // DCC_* switch properties, as the DCC task writes them for dcc (audit
+      // E2-15/E2-16): task order, a value it would not pass gives nothing.
+      Ok('default: Debug switches in the task''s order',
+        string.Join(' ', LDProj.Switches) = '$O- $A4 $YD');
+      Ok('default: DCC_ConsoleTarget', LDProj.ConsoleTarget);
       Ok('default: 3 configurations found', Length(LDProj.Configurations) = 3);
       Ok('default: 2 platforms enabled (Win32,Win64; ARM64EC excluded)',
         Length(LDProj.Platforms) = 2);
@@ -181,6 +193,9 @@ begin
       Ok('override: DCC_Define has RELEASE', Contains(LDProj.Defines, 'RELEASE'));
       Ok('override: DCC_Define lacks DEBUG', not Contains(LDProj.Defines, 'DEBUG'));
       Ok('override: search path has Win32Only', Contains(LDProj.SearchPaths, 'Win32Only'));
+      Ok('override: Release switches',
+        string.Join(' ', LDProj.Switches) = '$O+ $D0');
+      Ok('override: no console target', not LDProj.ConsoleTarget);
       Ok('override: search path lacks Win64Only', not Contains(LDProj.SearchPaths, 'Win64Only'));
     finally
       LDProj.Free;
