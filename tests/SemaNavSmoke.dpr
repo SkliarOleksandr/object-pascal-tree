@@ -889,6 +889,15 @@ const
     'implementation'#10 +                                  // 19
     'end.'#10;                                             // 20
 
+  // A second includer of NavDef.inc (audit P2): the include's directives
+  // repeat in its model, inactive here (no NAVFOO) - one row per site.
+  UNIT_DEF2 =
+    'unit NavDef2;'#10 +                                   // 1
+    'interface'#10 +                                       // 2
+    '{$I NavDef.inc}'#10 +                                 // 3
+    'implementation'#10 +                                  // 4
+    'end.'#10;                                             // 5
+
   INC_DEF =
     '{$IFDEF NAVFOO}'#10 +                                 // 1  NAVFOO col 9
     '{$DEFINE NAVINC}'#10 +                                // 2
@@ -3767,6 +3776,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavIfdU.pas'), UNIT_IFDU);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.pas'), UNIT_DEF);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.inc'), INC_DEF);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavDef2.pas'), UNIT_DEF2);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDefL.pas'), UNIT_DEFL);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDefL.inc'), INC_DEFL);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDefN.inc'), INC_DEFN);
@@ -4414,6 +4424,30 @@ begin
       Ok('DefinesAt: no model (-1) -> the base set alone',
         (SiteCount(GNav.DefinesAt(-1, 0, 0), 'NAVFOO') = 0) and
         HasSite(GNav.DefinesAt(-1, 0, 0), 'WIN32', doPlatform, True));
+
+      // A shared include (audit P2: C1-27): NavDef.inc is read by NavDef
+      // and NavDef2, one row per site, active when one includer reached it.
+      // On a demoted project the search rehydrates ONE includer for the
+      // row, not each.
+      LDefHits := GNav.FindDefineReferences('NAVINC');
+      Ok('shared include: NAVINC - one row, active from NavDef',
+        (Length(LDefHits) = 1) and
+        HasDefHitAt(LDefHits, 'NavDef.inc', 2, 10, drDefine, True));
+      Ok('shared include: FindDefines lists NAVINC once',
+        SiteCount(GNav.FindDefines, 'NAVINC') = 1);
+      GProj.DemoteText([]);
+      var LDefWarm := 0;
+      var LMidDef2 := GNav.ModelIdOf(TPath.Combine(LDir, 'NavDef2.pas'));
+      Ok('shared include: both includers demoted',
+        GProj.Model(LDefMid).Demoted and GProj.Model(LMidDef2).Demoted);
+      LDefHits := GNav.FindDefineReferences('NAVINC');
+      if not GProj.Model(LDefMid).Demoted then
+        Inc(LDefWarm);
+      if not GProj.Model(LMidDef2).Demoted then
+        Inc(LDefWarm);
+      Ok('shared include: demoted - the same row, one includer rehydrated',
+        (Length(LDefHits) = 1) and (LDefWarm = 1) and
+        HasDefHitAt(LDefHits, 'NavDef.inc', 2, 10, drDefine, True));
 
       // TBytes: a used unit (NavC) declares it for real. Originally this
       // exercised SymbolAt's ResolveRealDecl REDIRECT (TBytes was seeded,

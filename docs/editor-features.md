@@ -862,7 +862,13 @@ never the text: `TPasPreprocessed.DefineRefs` lists every mention the
 preprocessor walked, ACTIVE OR NOT, with the name's span, its kind and
 whether the directive sat in live code. It is retained across `DemoteText`
 (it is not text), so a project-wide search tests names without rehydrating
-closed units and rehydrates only for the rows it reports.
+closed units and rehydrates only for the rows it reports. A shared include
+is preprocessed once per includer, so its mentions repeat in every
+includer's model; the search keys each mention by file and offset and
+rehydrates for the first copy of a site only - the others just OR their
+`Active` into its row. Over spring4d's sources after `DemoteText`, where
+every unit includes `Spring.inc`: 10 units rehydrated instead of 172 for
+`DELPHIXE7_UP`, 29 ms instead of 191.
 
 | # | Shape | Row / target | Status |
 |---|-------|--------------|--------|
@@ -910,7 +916,8 @@ regression-covered by `tests/SemaNavSmoke.dpr` (fixtures `NavDef` +
 
 Two inventories of the fourth identity (§9) that need NO identity at the
 caret, so both commands are always offered. Both read the preprocessor's
-retained `DefineRefs` (never the text) plus the project's base define set,
+retained `DefineRefs` (the text only for a row's snippet, once per site, as
+§9) plus the project's base define set,
 which `BaseDefineNames` splits into the `.dproj` / command-line names and
 the platform's predefined ones.
 

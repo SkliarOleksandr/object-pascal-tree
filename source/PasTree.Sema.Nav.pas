@@ -348,6 +348,13 @@ type
     // What OvStructDefNode will accept - a set literal at each call site, so
     // "a class or an `object`" and "an interface" stay readable there.
     TPasOvStructKinds = set of TPasNodeKind;
+    // One distinct site of a define search (CollectDefineRows): the row and
+    // the directive's kind.
+    TPasDefineRow = record
+      Site: TPasDefineSite;
+      Kind: TPasDefineRefKind;
+    end;
+    TPasNameTest = reference to function(const AName: string): Boolean;
     { One heritage edge, reversed: the class/`object`/interface whose
       heritage reaches the type this edge is filed under. IsFirst marks the
       ANCESTOR edge - the written first entry or the implicit TObject /
@@ -429,13 +436,25 @@ type
     // with no main module (a bare directory of units).
     function MainModuleTarget(const AName: string;
       out ATarget: TPasNavTarget): Boolean;
-    // A doProject / doPlatform row for AName: the main module header (or no
-    // position at all) with the name as its own snippet.
-    function BaseDefineSite(const AName: string;
-      AOrigin: TPasDefineOrigin): TPasDefineSite;
-    // Sorts unit sites by file/line/col and collapses a shared include's
-    // duplicate rows (active wins), in place.
+    // The first program/library/package model, -1 when there is none.
+    function MainModuleId: Integer;
+    // A doProject / doPlatform row for AName: the main module AMainMid's
+    // header (no position at all when it is -1) with the name as its own
+    // snippet.
+    function BaseDefineSite(const AName: string; AOrigin: TPasDefineOrigin;
+      AMainMid: Integer): TPasDefineSite;
+    // Appends the base defines' rows - the project's, then the platform's -
+    // except the names AExclude answers True for (nil: none).
+    procedure AppendBaseDefines(var ASites: TArray<TPasDefineSite>;
+      const AExclude: TPasNameTest);
+    // Sorts unit sites by file/line/col and collapses duplicate rows
+    // (active wins), in place.
     procedure SortAndCollapseSites(var ASites: TArray<TPasDefineSite>);
+    // The DefineRefs of every model - the `$DEFINE`s when ADefinesOnly, else
+    // those naming AName - one row per distinct site, sorted by file, line
+    // and column; see its implementation for the dedup.
+    function CollectDefineRows(const AName: string;
+      ADefinesOnly: Boolean): TArray<TPasDefineRow>;
     procedure HitFromDefineRef(LM: TPasSemaModel; const ARef: TPasDefineRef;
       out AHit: TPasRefHit);
     // Declaration<->implementation toggle helpers (all pure CST walks - no
@@ -3112,61 +3131,120 @@ begin
   end;
 end;
 
+{ A shared include (a project-wide defines .inc, jedi.inc) is preprocessed
+  once per including unit, so its DefineRefs repeat in every includer's
+  model - 180,087 `$DEFINE` refs for 2,057 sites over a 426-model VCL +
+  Indy closure. One row per SITE: a site is keyed by the file (its path
+  interned to a number, once per model and file) and the directive's offset
+  in it, and only a NEW key pays a rehydration and a row; a known one only
+  ORs its Active in - an ACTIVE copy wins, the directive was reached from at
+  least one unit. Rows were built for every copy and collapsed after a sort,
+  rehydrating every includer of a demoted project (audit C1-27: 311 models
+  for 84 rows of CBUILDER). Active is a retained fact, so a copy in a model
+  that cannot be rehydrated still counts for it; its site gets its row from
+  another includer. }
+function TPasNavigator.CollectDefineRows(const AName: string;
+  ADefinesOnly: Boolean): TArray<TPasDefineRow>;
+var
+  LRows: TList<TPasDefineRow>;
+  LFileIds: TDictionary<string, Integer>;   // upper-case path -> number
+  LSites: TDictionary<Int64, Integer>;      // (file number, start) -> row
+  LGid: TArray<Integer>;                    // the model's file id -> number
+  LM: TPasSemaModel;
+  LIdx, LFile, LAt: Integer;
+  LKey: Int64;
+  LRow: TPasDefineRow;
+  LRef: TPasDefineRef;
+begin
+  LRows := TList<TPasDefineRow>.Create;
+  LFileIds := TDictionary<string, Integer>.Create;
+  LSites := TDictionary<Int64, Integer>.Create;
+  try
+    for var LMi := 0 to FProj.ModelCount - 1 do
+    begin
+      LM := FProj.Model(LMi);
+      LGid := nil;
+      for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
+      begin
+        // A copy: EnsureHydrated below swaps the model's Source, and with it
+        // the DefineRefs array a `with` on its element would still point into.
+        LRef := LM.Tree.Source.DefineRefs[LIdx];
+        if ADefinesOnly then
+        begin
+          if LRef.Kind <> drDefine then
+            Continue;
+        end
+        else if not PasSameName(LRef.Name, AName) then
+          Continue;
+        if (LRef.FileId < 0) or
+           (LRef.FileId > High(LM.Tree.Source.FileNames)) then
+          Continue;
+        if LGid = nil then
+        begin
+          SetLength(LGid, Length(LM.Tree.Source.FileNames));
+          for LFile := 0 to High(LGid) do
+            LGid[LFile] := -1;
+        end;
+        if LGid[LRef.FileId] < 0 then
+        begin
+          if not LFileIds.TryGetValue(
+            UpperCase(LM.Tree.Source.FileNames[LRef.FileId]), LFile) then
+          begin
+            LFile := LFileIds.Count;
+            LFileIds.Add(UpperCase(LM.Tree.Source.FileNames[LRef.FileId]),
+              LFile);
+          end;
+          LGid[LRef.FileId] := LFile;
+        end;
+        LKey := (Int64(LGid[LRef.FileId]) shl 32) or Cardinal(LRef.Start);
+        if LSites.TryGetValue(LKey, LAt) then
+        begin
+          if LRef.Active then
+            LRows.List[LAt].Site.Active := True;
+          Continue;
+        end;
+        // The snippet needs the text: hydration for a new site only.
+        if not FProj.EnsureHydrated(LMi) then
+          Continue;
+        HitFromDefineRef(LM, LM.Tree.Source.DefineRefs[LIdx], LRow.Site.Hit);
+        LRow.Site.Name := LRef.Name;
+        LRow.Site.Origin := doUnit;
+        LRow.Site.Active := LRef.Active;
+        LRow.Kind := LRef.Kind;
+        LSites.Add(LKey, LRows.Count);
+        LRows.Add(LRow);
+      end;
+    end;
+    Result := LRows.ToArray;
+  finally
+    LSites.Free;
+    LFileIds.Free;
+    LRows.Free;
+  end;
+  TArray.Sort<TPasDefineRow>(Result, TComparer<TPasDefineRow>.Construct(
+    function(const A, B: TPasDefineRow): Integer
+    begin
+      Result := CompareText(A.Site.Hit.FilePath, B.Site.Hit.FilePath);
+      if Result = 0 then
+        Result := A.Site.Hit.Line - B.Site.Hit.Line;
+      if Result = 0 then
+        Result := A.Site.Hit.Col - B.Site.Hit.Col;
+    end));
+end;
+
 function TPasNavigator.FindDefineReferences(
   const AName: string): TArray<TPasDefineHit>;
 var
-  LHits: TList<TPasDefineHit>;
-  LMi, LIdx, LOut: Integer;
-  LM: TPasSemaModel;
-  LHit: TPasDefineHit;
+  LRows: TArray<TPasDefineRow>;
 begin
-  LHits := TList<TPasDefineHit>.Create;
-  try
-    for LMi := 0 to FProj.ModelCount - 1 do
-    begin
-      LM := FProj.Model(LMi);
-      // The name test reads the retained DefineRefs; hydration (for the
-      // snippet) only on the first match, as FindBuiltinReferences does.
-      for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
-        if PasSameName(LM.Tree.Source.DefineRefs[LIdx].Name, AName) and
-           FProj.EnsureHydrated(LMi) then
-        begin
-          HitFromDefineRef(LM, LM.Tree.Source.DefineRefs[LIdx], LHit.Hit);
-          LHit.Kind := LM.Tree.Source.DefineRefs[LIdx].Kind;
-          LHit.Active := LM.Tree.Source.DefineRefs[LIdx].Active;
-          LHits.Add(LHit);
-        end;
-    end;
-    Result := LHits.ToArray;
-  finally
-    LHits.Free;
+  LRows := CollectDefineRows(AName, False);
+  SetLength(Result, Length(LRows));
+  for var LIdx := 0 to High(LRows) do
+  begin
+    Result[LIdx].Hit := LRows[LIdx].Site.Hit;
+    Result[LIdx].Kind := LRows[LIdx].Kind;
+    Result[LIdx].Active := LRows[LIdx].Site.Active;
   end;
-  TArray.Sort<TPasDefineHit>(Result, TComparer<TPasDefineHit>.Construct(
-    function(const A, B: TPasDefineHit): Integer
-    begin
-      Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
-      if Result = 0 then
-        Result := A.Hit.Line - B.Hit.Line;
-      if Result = 0 then
-        Result := A.Hit.Col - B.Hit.Col;
-    end));
-  // A shared include is preprocessed once per including unit - collapse the
-  // identical rows (same file, line, col; sorted, so they are adjacent). An
-  // ACTIVE copy wins over an inactive one: the directive was reached from at
-  // least one unit.
-  LOut := 0;
-  for LIdx := 0 to High(Result) do
-    if (LOut > 0) and
-       SameText(Result[LOut - 1].Hit.FilePath, Result[LIdx].Hit.FilePath) and
-       (Result[LOut - 1].Hit.Line = Result[LIdx].Hit.Line) and
-       (Result[LOut - 1].Hit.Col = Result[LIdx].Hit.Col) then
-      Result[LOut - 1].Active := Result[LOut - 1].Active or Result[LIdx].Active
-    else
-    begin
-      Result[LOut] := Result[LIdx];
-      Inc(LOut);
-    end;
-  SetLength(Result, LOut);
 end;
 
 function TPasNavigator.GotoDefine(AMid, ALine, ACol: Integer;
@@ -3204,18 +3282,25 @@ begin
     Result := MainModuleTarget(LName, ATarget);
 end;
 
+function TPasNavigator.MainModuleId: Integer;
+var
+  LMid: Integer;
+begin
+  for LMid := 0 to FProj.ModelCount - 1 do
+    if (Length(FProj.Model(LMid).Tree.Nodes) > 0) and
+       (FProj.Model(LMid).Tree.Nodes[0].Kind in
+          [nkProgram, nkLibrary, nkPackage]) then
+      Exit(LMid);
+  Result := -1;
+end;
+
 function TPasNavigator.MainModuleTarget(const AName: string;
   out ATarget: TPasNavTarget): Boolean;
 var
   LMid: Integer;
 begin
-  Result := False;
-  for LMid := 0 to FProj.ModelCount - 1 do
-    if (Length(FProj.Model(LMid).Tree.Nodes) > 0) and
-       (FProj.Model(LMid).Tree.Nodes[0].Kind in
-          [nkProgram, nkLibrary, nkPackage]) and
-       TargetForUnitId(LMid, AName, ATarget) then
-      Exit(True);
+  LMid := MainModuleId;
+  Result := (LMid >= 0) and TargetForUnitId(LMid, AName, ATarget);
 end;
 
 function TPasNavigator.IsProjectDefined(const AName: string): Boolean;
@@ -3224,7 +3309,7 @@ begin
 end;
 
 function TPasNavigator.BaseDefineSite(const AName: string;
-  AOrigin: TPasDefineOrigin): TPasDefineSite;
+  AOrigin: TPasDefineOrigin; AMainMid: Integer): TPasDefineSite;
 var
   LTarget: TPasNavTarget;
 begin
@@ -3232,7 +3317,7 @@ begin
   Result.Name := AName;
   Result.Origin := AOrigin;
   Result.Active := True;
-  if MainModuleTarget(AName, LTarget) then
+  if (AMainMid >= 0) and TargetForUnitId(AMainMid, AName, LTarget) then
   begin
     Result.Hit.FilePath := LTarget.FilePath;
     Result.Hit.Line := LTarget.Line;
@@ -3259,9 +3344,8 @@ begin
       if Result = 0 then
         Result := A.Hit.Col - B.Hit.Col;
     end));
-  // A shared include is preprocessed once per including unit - one row per
-  // site, active if any including unit reached it (FindDefineReferences'
-  // rule).
+  // A file included twice has a file id per inclusion - one row per site,
+  // active if any copy is (CollectDefineRows' rule). DefinesAt's only use.
   LOut := 0;
   for LIdx := 0 to High(ASites) do
     if (LOut > 0) and
@@ -3279,41 +3363,37 @@ end;
 
 function TPasNavigator.FindDefines: TArray<TPasDefineSite>;
 var
-  LSites: TList<TPasDefineSite>;
-  LMi, LIdx: Integer;
-  LM: TPasSemaModel;
-  LSite: TPasDefineSite;
-  LProject, LPlatform: TArray<string>;
-  LName: string;
+  LRows: TArray<TPasDefineRow>;
 begin
+  LRows := CollectDefineRows('', True);
+  SetLength(Result, Length(LRows));
+  for var LIdx := 0 to High(LRows) do
+    Result[LIdx] := LRows[LIdx].Site;
+  AppendBaseDefines(Result, nil);
+end;
+
+procedure TPasNavigator.AppendBaseDefines(var ASites: TArray<TPasDefineSite>;
+  const AExclude: TPasNameTest);
+var
+  LProject, LPlatform: TArray<string>;
+  LSites: TList<TPasDefineSite>;
+  LMain: Integer;
+begin
+  FProj.BaseDefineNames({out} LProject, {out} LPlatform);
+  LMain := MainModuleId;   // the same landing for every name
   LSites := TList<TPasDefineSite>.Create;
   try
-    for LMi := 0 to FProj.ModelCount - 1 do
-    begin
-      LM := FProj.Model(LMi);
-      // The kind test reads the retained DefineRefs; hydration (for the
-      // snippet) only on the first `$DEFINE`, as FindDefineReferences does.
-      for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
-        if (LM.Tree.Source.DefineRefs[LIdx].Kind = drDefine) and
-           FProj.EnsureHydrated(LMi) then
-        begin
-          HitFromDefineRef(LM, LM.Tree.Source.DefineRefs[LIdx], LSite.Hit);
-          LSite.Name := LM.Tree.Source.DefineRefs[LIdx].Name;
-          LSite.Origin := doUnit;
-          LSite.Active := LM.Tree.Source.DefineRefs[LIdx].Active;
-          LSites.Add(LSite);
-        end;
-    end;
-    Result := LSites.ToArray;
+    LSites.AddRange(ASites);
+    for var LName in LProject do
+      if not Assigned(AExclude) or not AExclude(LName) then
+        LSites.Add(BaseDefineSite(LName, doProject, LMain));
+    for var LName in LPlatform do
+      if not Assigned(AExclude) or not AExclude(LName) then
+        LSites.Add(BaseDefineSite(LName, doPlatform, LMain));
+    ASites := LSites.ToArray;
   finally
     LSites.Free;
   end;
-  SortAndCollapseSites(Result);
-  FProj.BaseDefineNames({out} LProject, {out} LPlatform);
-  for LName in LProject do
-    Result := Result + [BaseDefineSite(LName, doProject)];
-  for LName in LPlatform do
-    Result := Result + [BaseDefineSite(LName, doPlatform)];
 end;
 
 function TPasNavigator.ProjectOutline(const AMids: TArray<Integer>):
@@ -3549,8 +3629,6 @@ var
   LInEffect: TDictionary<string, Integer>;
   LUndone: TDictionary<string, Boolean>;
   LSite: TPasDefineSite;
-  LProject, LPlatform: TArray<string>;
-  LName: string;
 begin
   Result := nil;
   LInEffect := TDictionary<string, Integer>.Create(TIStringComparer.Ordinal);
@@ -3608,25 +3686,24 @@ begin
               end;
           end;
         end;
+      SetLength(Result, LInEffect.Count);
+      LAt := 0;
       for LIdx in LInEffect.Values do
       begin
         HitFromDefineRef(LM, LM.Tree.Source.DefineRefs[LIdx], LSite.Hit);
         LSite.Name := LM.Tree.Source.DefineRefs[LIdx].Name;
         LSite.Origin := doUnit;
         LSite.Active := True;
-        Result := Result + [LSite];
+        Result[LAt] := LSite;
+        Inc(LAt);
       end;
       SortAndCollapseSites(Result);
     end;
-    FProj.BaseDefineNames({out} LProject, {out} LPlatform);
-    for LName in LProject do
-      if not LInEffect.ContainsKey(LName) and not LUndone.ContainsKey(LName)
-      then
-        Result := Result + [BaseDefineSite(LName, doProject)];
-    for LName in LPlatform do
-      if not LInEffect.ContainsKey(LName) and not LUndone.ContainsKey(LName)
-      then
-        Result := Result + [BaseDefineSite(LName, doPlatform)];
+    AppendBaseDefines(Result,
+      function(const AName: string): Boolean
+      begin
+        Result := LInEffect.ContainsKey(AName) or LUndone.ContainsKey(AName);
+      end);
   finally
     LUndone.Free;
     LInEffect.Free;
