@@ -3567,7 +3567,11 @@ end;
   left it deliberately unvisited (see the nkAggregateField case) rather than
   treat it as an ordinary value reference, so this pass is the only place
   that can still fill in the right answer - same two-phase shape as `with`
-  above: type binding (BindTypes) must run first, so this runs right after. }
+  above: type binding (BindTypes) must run first, so this runs right after.
+  Here only a same-unit NAMED record type's labels: TWndClass itself lives
+  in Winapi.Windows, and an array of records, an anonymous record and every
+  type from another unit are TPasSemaProject.BindAggregateLabelsX's, after
+  the cross-type walk (audit E3-05). }
 
 // ATypeSym's own struct member scope, chasing through however many alias
 // links sit in between (`TWndClass = TWndClassW = tagWNDCLASSW = record

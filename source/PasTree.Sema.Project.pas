@@ -1047,6 +1047,13 @@ type
       nothing committed - see TPasXProbe and WithTargetTypeX. }
     procedure CrossType(AId: Integer; AProbe: TPasXProbe = nil;
       ARoot: Integer = 0);
+    { The field labels of AId's typed-constant and initialized-variable
+      aggregates (spec 3.2.2) that Phase 1 left unbound: through the
+      declared type's cross-model type, one aggregate level per array
+      dimension, into a field's own type for a nested aggregate. Same-unit
+      fields go to RefMap, others to ANewExt (CrossType's overlay). }
+    procedure BindAggregateLabelsX(AId: Integer;
+      ANewExt: TDictionary<Integer, TPasExtRef>);
     procedure CommitXNewExprType(AId: Integer);
     procedure RunCrossTypePass(ACount: Integer);
   public
@@ -11763,6 +11770,141 @@ begin
     (LM.Tree.Source.VisibleToken(LTok).Kind = tkAs);
 end;
 
+{ 3.2.2 (dcc64 37.0, local/probe-b66 P1-P3): an aggregate's labels name
+  fields of the declared type - and of the ELEMENT type of an array of
+  records, one aggregate level per dimension, whatever spells the array
+  (inline, named, two indices, nested, a record field's type) and wherever
+  the record is declared. Phase 1 (TPasSemaResolver.ResolveAggregates) binds
+  a same-unit named record's; this binds the rest, through the declared
+  type's cross-model type. A label that names no field stays unbound, as in
+  Phase 1: dcc's E2003 there is not reported (docs/coverage.md 3.2.2). }
+procedure TPasSemaProject.BindAggregateLabelsX(AId: Integer;
+  ANewExt: TDictionary<Integer, TPasExtRef>);
+var
+  LM: TPasSemaModel;
+  LDone: TDictionary<Integer, Boolean>;
+
+  // AAggr against the type AT spells - a type node ATNode of model ATMid
+  // with ADims of its array dimensions still to peel (-1: not begun), or,
+  // with no node, the type AX.
+  procedure Labels(AAggr, ATMid, ATNode, ADims: Integer; AX: TSemaXType;
+    ADepth: Integer);
+  var
+    LTree: TPasTree;
+    LChild, LName, LValue, LMemMid, LMemSym, LCtx, LDef: Integer;
+    LExt: TPasExtRef;
+  begin
+    if (ADepth > 64) or (AAggr = NIL_NODE) or
+       (LM.Tree.Nodes[AAggr].Kind <> nkAggregate) then
+      Exit;
+    if ATNode <> NIL_NODE then
+    begin
+      LTree := FModels[ATMid].Tree;
+      if LTree.Nodes[ATNode].Kind = nkArrayType then
+      begin
+        if ADims < 0 then
+          ADims := PasArrayDims(LTree, ATNode);
+        LChild := LM.Tree.Nodes[AAggr].FirstChild;
+        while LChild <> NIL_NODE do
+        begin
+          if ADims > 1 then
+            Labels(LChild, ATMid, ATNode, ADims - 1, XNil, ADepth + 1)
+          else
+            Labels(LChild, ATMid, PasArrayElemNode(LTree, ATNode), -1, XNil,
+              ADepth + 1);
+          LChild := LM.Tree.Nodes[LChild].NextSibling;
+        end;
+        Exit;
+      end;
+      AX := ResolveTypeExpr(ATMid, ATNode);
+    end;
+    AX := CanonTypeX(AX);
+    if not XValid(AX) then
+      Exit;
+    // A named array type: its definition is the node to peel.
+    LDef := TypeDefNodeOf(AX.UnitId, AX.Sym);
+    if (LDef <> NIL_NODE) and
+       (FModels[AX.UnitId].Tree.Nodes[LDef].Kind = nkArrayType) then
+    begin
+      Labels(AAggr, AX.UnitId, LDef, -1, XNil, ADepth + 1);
+      Exit;
+    end;
+    LChild := LM.Tree.Nodes[AAggr].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LChild].Kind = nkAggregateField then
+      begin
+        LName := LM.Tree.Nodes[LChild].FirstChild;
+        if (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkIdent) then
+        begin
+          LMemMid := -1;
+          LMemSym := LM.RefMap[LName];
+          if LMemSym <> NIL_SYM then
+            LMemMid := AId
+          else if ANewExt.TryGetValue(LName, LExt) or
+                  LM.ExtRefMap.TryGetValue(LName, LExt) then
+          begin
+            LMemMid := LExt.UnitId;
+            LMemSym := LExt.Sym;
+          end
+          else if FindMemberX(AId, AX, PasNodeKey(LM.Tree, LName), LMemMid,
+                    LMemSym, LCtx, 0, True) and
+                  (FModels[LMemMid].Symbols[LMemSym].Kind = skField) then
+          begin
+            if LMemMid = AId then
+              LM.RefMap[LName] := LMemSym
+            else
+            begin
+              LExt.UnitId := LMemMid;
+              LExt.Sym := LMemSym;
+              ANewExt.AddOrSetValue(LName, LExt);
+            end;
+          end
+          else
+            LMemMid := -1;
+          LValue := LM.Tree.Nodes[LName].NextSibling;
+          if (LMemMid >= 0) and (LValue <> NIL_NODE) and
+             (LM.Tree.Nodes[LValue].Kind = nkAggregate) then
+          begin
+            if FModels[LMemMid].Symbols[LMemSym].TypeNode <> NIL_NODE then
+              Labels(LValue, LMemMid, FModels[LMemMid].Symbols[LMemSym].TypeNode,
+                -1, XNil, ADepth + 1)
+            else
+              Labels(LValue, -1, NIL_NODE, -1, SymDeclTypeX(LMemMid, LMemSym),
+                ADepth + 1);
+          end;
+        end;
+      end;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+  end;
+
+var
+  LSym, LType, LInit: Integer;
+begin
+  LM := FModels[AId];
+  LDone := nil;
+  try
+    for LSym := 0 to LM.SymCount - 1 do
+    begin
+      if not (LM.Symbols[LSym].Kind in [skVar, skConst, skField]) then
+        Continue;
+      LType := LM.Symbols[LSym].TypeNode;
+      if (LType = NIL_NODE) or (LType > High(LM.Tree.Nodes)) then
+        Continue;
+      LInit := LM.Tree.Nodes[LType].NextSibling;
+      if (LInit = NIL_NODE) or (LM.Tree.Nodes[LInit].Kind <> nkAggregate) then
+        Continue;
+      if LDone = nil then
+        LDone := TDictionary<Integer, Boolean>.Create;
+      if LDone.TryAdd(LInit, True) then
+        Labels(LInit, AId, LType, -1, XNil, 0);
+    end;
+  finally
+    LDone.Free;
+  end;
+end;
+
 { Two modes, one walk. AProbe = nil is the cross-type PASS: LX/LCtxOf are
   nodes-sized arrays, member discoveries go to the model's RefMap and the
   ExtRefMap overlay, call targets to CallTargetX, and the types are persisted
@@ -14380,6 +14522,7 @@ begin
   try
     if Length(LX) > 0 then
       Walk(0);
+    BindAggregateLabelsX(AId, LNewExt);
   finally
     LUsesHeads.Free;
     LAmbig.Free;

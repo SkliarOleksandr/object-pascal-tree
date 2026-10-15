@@ -219,6 +219,12 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 - a set constructor (`[1, 2]`, `[meA, meB]`) and `nil` give a constant no
   type: dcc's are anonymous, and nothing in PasTree can name them.
 
+### 3.2.2 Typed constants
+- an aggregate label that names no field of its record (`C: TRec = (A: 1;
+  Zz: 2)`) is not reported: dcc's E2003 there is left out, so a typo in a
+  label is silent. Every label that does name a field is bound - a record
+  from any unit, an array of records per dimension, an anonymous record.
+
 ## 04-expressions-operators.md
 
 ### 4.2.1 Result type of an operator expression

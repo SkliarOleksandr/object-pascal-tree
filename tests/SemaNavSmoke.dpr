@@ -3143,6 +3143,108 @@ end;
 // method's attribute, not the GUID (dcc64 37.0: RTTI shows MarkAttribute on
 // A, a null GUID) - Find References of the attribute class has the use, as it
 // has the result-targeted one and a generic parameter's (19.3.2).
+// B66 (spec 3.2.2; dcc64 37.0, local/probe-b66 P1-P3): a typed constant's
+// field labels resolve against the element type of an array of records -
+// one aggregate level per dimension, inline or named, an anonymous record,
+// a record field of array type - and against a record type from another
+// unit. Only a same-unit named record's labels were bound before.
+procedure TestAggregateLabels;
+const
+  UNIT_U =
+    'unit NavAgU;'#10 +                                     // 1
+    'interface'#10 +                                        // 2
+    'type'#10 +                                             // 3
+    '  TRec = record A, B: Integer; end;'#10 +              // 4  A col 17
+    '  TArr = array[0..1] of TRec;'#10 +                    // 5
+    'implementation'#10 +                                   // 6
+    'end.'#10;                                              // 7
+  UNIT_P =
+    'unit NavAgP;'#10 +                                     // 1
+    'interface'#10 +                                        // 2
+    'uses NavAgU;'#10 +                                     // 3
+    'type'#10 +                                             // 4
+    '  TLoc = record X: Integer; Inner: array[0..1] of TRec; end;'#10 + // 5
+    '  TLR = record M: Integer; end;'#10 +                  // 6  M col 16
+    'const'#10 +                                            // 7
+    '  C1: TRec = (A: 1; B: 2);'#10 +                       // 8  A col 15
+    '  C2: array[0..1] of TRec = ((A: 1; B: 2), (A: 3; B: 4));'#10 + // 9 A 31, 45
+    '  C3: TArr = ((A: 1; B: 2), (A: 3; B: 4));'#10 +       // 10 A 16, 30
+    '  C4: array[0..1] of record P, Q: Integer; end = ((P: 1; Q: 2), (P: 3; Q: 4));'#10 + // 11 P col 29, labels 52, 66
+    '  C5: TLoc = (X: 1; Inner: ((A: 1; B: 2), (A: 3; B: 4)));'#10 + // 12 A 30, 44
+    '  C6: array[0..1, 0..0] of TRec = (((A: 1; B: 2)), ((A: 3; B: 4)));'#10 + // 13 A 38, 54
+    '  C7: array[0..0] of TLR = ((M: 5));'#10 +             // 14 M col 30
+    'implementation'#10 +                                   // 15
+    'end.'#10;                                              // 16
+var
+  LDir: string;
+  LMid, LUid, LT, LS: Integer;
+  LName, LErr: string;
+  LHits: TArray<TPasRefHit>;
+  LEdits: TArray<TPasRenameEdit>;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_nav_aggr');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), UNIT_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavAgU.pas'), UNIT_U);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavAgP.pas'), UNIT_P);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    GNav := TPasNavigator.Create(GProj);
+    try
+      LMid := GNav.ModelIdOf(TPath.Combine(LDir, 'NavAgP.pas'));
+      LUid := GNav.ModelIdOf(TPath.Combine(LDir, 'NavAgU.pas'));
+      Ok('aggr labels: models found', (LMid >= 0) and (LUid >= 0));
+      Ok('aggr labels: a cross-unit record label goes to its field',
+        GNav.SymbolAt(LMid, 8, 15, LT, LS, LName) and (LT = LUid) and
+        SameText(LName, 'A'));
+      Ok('aggr labels: ...an array element''s label too',
+        GNav.SymbolAt(LMid, 9, 45, LT, LS, LName) and (LT = LUid) and
+        SameText(LName, 'A'));
+      if GNav.SymbolAt(LUid, 4, 17, LT, LS, LName) then
+        LHits := GNav.FindReferences(LT, LS)
+      else
+        LHits := nil;
+      Ok('aggr labels: Find References of TRec.A has every label - ' +
+        'record, inline and named arrays, a field of array type, two dims',
+        HasHitAt(LHits, 'NavAgP.pas', 8, 15) and
+        HasHitAt(LHits, 'NavAgP.pas', 9, 31) and
+        HasHitAt(LHits, 'NavAgP.pas', 9, 45) and
+        HasHitAt(LHits, 'NavAgP.pas', 10, 16) and
+        HasHitAt(LHits, 'NavAgP.pas', 10, 30) and
+        HasHitAt(LHits, 'NavAgP.pas', 12, 30) and
+        HasHitAt(LHits, 'NavAgP.pas', 12, 44) and
+        HasHitAt(LHits, 'NavAgP.pas', 13, 38) and
+        HasHitAt(LHits, 'NavAgP.pas', 13, 54));
+      if GNav.SymbolAt(LMid, 11, 29, LT, LS, LName) then
+        LHits := GNav.FindReferences(LT, LS)
+      else
+        LHits := nil;
+      Ok('aggr labels: an anonymous element record''s field has its labels',
+        HasHitAt(LHits, 'NavAgP.pas', 11, 52) and
+        HasHitAt(LHits, 'NavAgP.pas', 11, 66));
+      if GNav.SymbolAt(LMid, 6, 16, LT, LS, LName) then
+        LHits := GNav.FindReferences(LT, LS)
+      else
+        LHits := nil;
+      Ok('aggr labels: a same-unit array element''s label',
+        HasHitAt(LHits, 'NavAgP.pas', 14, 30));
+      Ok('aggr labels: renaming TRec.A rewrites the nine labels',
+        GNav.SymbolAt(LUid, 4, 17, LT, LS, LName) and
+        GNav.PlanRename(LT, LS, 'AA', LEdits, LErr) and
+        (Length(LEdits) = 10));
+    finally
+      FreeAndNil(GNav);
+    end;
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestAttributeNav;
 const
   UNIT_ATTR =
@@ -6262,6 +6364,7 @@ begin
   TestReleasedModels;
   TestCaretEdges;
   TestAttributeNav;
+  TestAggregateLabels;
   TestOverrideIndex;
   TestInheritedTargets;
   TestRoutinePairs;
