@@ -359,6 +359,13 @@ never edits. Two ways to drop it:
   state - including the few answers that used to come from its text (a
   routine's head word, `varargs`, a default array property, a generic's
   keyword constraints: see `sfVarArgs` in `PasTree.Sema.Model`).
+- A rehydration that cannot succeed - the unit's file changed on disk since
+  the analysis - is told before any preprocessing when its main file's text
+  no longer matches the fingerprint `DemoteText` kept, and a failure is
+  remembered under the buffer generation and the write time and size of
+  each of the unit's files: asked again (a completion row, a reference hit)
+  it fails at once; any change - the file restored, a `SetBuffer` - tries
+  again. `HydrateRuns` counts the re-preprocesses.
 
 Hosts pass their open files plus whatever should stay warm - typically the
 project's own units, so only the library is demoted (the library/project

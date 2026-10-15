@@ -4987,6 +4987,7 @@ begin
       Ok('stale: NavB is demoted',
         GProj.Model(GNav.ModelIdOf(LStaleB)).Demoted);
       TFile.WriteAllText(LStaleB, '{ edited }' + UNIT_B);
+      var LStaleRuns := GProj.HydrateRuns;
       try
         Ok('stale: PlanRename refused, naming NavB.pas',
           not GNav.PlanRename(LRTMid, LRSym, 'TItem', {out} LEdits,
@@ -4997,6 +4998,15 @@ begin
           not GNav.PlanUnitRename(LMidA, 'NavAX', {out} LEdits,
             {out} LStaleFile, {out} LErr) and (Length(LEdits) = 0) and
           (Pos('"NavB.pas" changed on disk', LErr) > 0));
+        // Both plans asked NavB's text again and again (a row per hit): its
+        // changed main file is told by the fingerprint, never preprocessed,
+        // and the failure is remembered (audit C1-35).
+        LStaleRuns := GProj.HydrateRuns;
+        var LStaleMid := GNav.ModelIdOf(LStaleB);
+        Ok('stale: the changed NavB.pas never re-preprocessed',
+          not GProj.EnsureHydrated(LStaleMid) and
+          not GProj.EnsureHydrated(LStaleMid) and
+          (GProj.HydrateRuns = LStaleRuns));
       finally
         TFile.WriteAllText(LStaleB, UNIT_B);
       end;

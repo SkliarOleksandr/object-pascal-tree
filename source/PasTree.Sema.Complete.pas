@@ -321,12 +321,13 @@ type
       ADepth: Integer; out AMid, ASym, ACtx: Integer): Boolean;
     // accessors' shared core (AMid = -1 means the overlay model)
     function SymModelOf(AMid: Integer; const AWhere: string;
-      out AModel: TPasSemaModel): Boolean;
+      out AModel: TPasSemaModel; AHydrate: Boolean = True): Boolean;
     function SymHeadWord(AModel: TPasSemaModel; ASym: Integer): string;
     function SymParamsNode(AModel: TPasSemaModel; ASym: Integer): Integer;
-    function SymSignature(AMid, ASym: Integer): TPasSymSignature;
+    function SymSignature(AMid, ASym: Integer;
+      ATexts: Boolean = True): TPasSymSignature;
     procedure ParamsOf(AModel: TPasSemaModel; AParams: Integer;
-      var ASig: TPasSymSignature);
+      var ASig: TPasSymSignature; ATexts: Boolean = True);
     function IsTypeSym(AMid, ASym: Integer): Boolean;
     procedure ExtendUsesPrefix(ALine: Integer; var AInfo: TPasCaretInfo);
     // CallAt internals
@@ -490,10 +491,9 @@ begin
   FOwnImplScope := -2;
   FIsProjectModel := (FProj <> nil) and (FProjMid >= 0) and
     (FProjMid < FProj.ModelCount) and (FProj.Model(FProjMid) = FModel);
-  // Pre-sized: a statement-context list runs to thousands of names, and
-  // TDictionary.Clear throws its capacity away - CompleteAt recreates with
-  // the same capacity per request instead (the review's finding #2).
-  FSeen := TDictionary<string, Integer>.Create(4096);
+  // FSeen is CompleteAt's alone, created there per request at the size its
+  // context needs (audit C1-36): CallAt, CaretAt and the hosts' probes never
+  // read it, and a 4096 table zero-fills 16K slots.
   SetLength(FVisOfRaw, Length(FModel.Tree.Source.Files[0].Tokens));
   for LIdx := 0 to High(FVisOfRaw) do
     FVisOfRaw[LIdx] := -1;
@@ -2562,6 +2562,8 @@ var
 begin
   if AName = '' then
     Exit;
+  if FSeen = nil then   // CompleteAt creates it; any other caller here
+    FSeen := TDictionary<string, Integer>.Create;
   if FSeen.TryGetValue(AKey, LIdx) then
   begin
     // First hit wins (buckets run in precedence order); a same-name routine
@@ -4077,8 +4079,14 @@ end;
 
 // The model a (Mid, Sym) identity lives in: the overlay for -1, the project
 // model otherwise. False only for a project id with no project attached.
+// AHydrate rehydrates a text-demoted model, for a caller that reads its text
+// (a parameter list, a result type, a doc comment); on failure that caller
+// degrades through its bounds guards. A caller that reads symbols and nodes
+// only passes False: a host asks the head word and has-params of EVERY row
+// (pastree-lsp's completion does), and a rehydration per row re-preprocessed
+// a changed library file once per row and accessor (audit C1-35).
 function TPasCompletion.SymModelOf(AMid: Integer; const AWhere: string;
-  out AModel: TPasSemaModel): Boolean;
+  out AModel: TPasSemaModel; AHydrate: Boolean): Boolean;
 begin
   if AMid < 0 then
   begin
@@ -4089,11 +4097,7 @@ begin
   if Result then
   begin
     AModel := ProjModel(AMid, AWhere);
-    // The callers of this accessor are the item DETAIL readers (params text,
-    // doc comment, signature help) - per selected item, not per candidate -
-    // so rehydrating a text-demoted model here is cheap and gives them the
-    // real text back. On failure they degrade through their bounds guards.
-    if (AModel <> nil) and AModel.Demoted then
+    if AHydrate and (AModel <> nil) and AModel.Demoted then
       FProj.EnsureHydrated(AMid);
   end
   else
@@ -4128,7 +4132,7 @@ begin
   if (AItem.Kind <> skRoutine) or (AItem.Sym = NIL_SYM) or
      (AItem.Bucket = cbKeyword) then
     Exit;
-  Result := SymSignature(AItem.Mid, AItem.Sym).HeadWord;
+  Result := SymSignature(AItem.Mid, AItem.Sym, {ATexts} False).HeadWord;
 end;
 
 // The nkParams child of a routine symbol's declaration; NIL_NODE when the
@@ -4185,8 +4189,11 @@ end;
   the procedural type, so a completion row and a signature-help target say
   the same (audit B2-37: a builtin row had no head word while its call
   target was a 'function'; B2-35: a procedural value showed no parameters
-  and its type's name as the result). The model is resolved once. }
-function TPasCompletion.SymSignature(AMid, ASym: Integer): TPasSymSignature;
+  and its type's name as the result). The model is resolved once. ATexts
+  False answers HeadWord and HasParams alone, from symbols and nodes, with
+  no rehydration of a text-demoted model (SymModelOf, audit C1-35). }
+function TPasCompletion.SymSignature(AMid, ASym: Integer;
+  ATexts: Boolean): TPasSymSignature;
 var
   LM, LDefM: TPasSemaModel;
   LSig: TPasBuiltinSig;
@@ -4195,7 +4202,7 @@ var
   LRef: TPasComplTypeRef;
 begin
   Result := Default(TPasSymSignature);
-  if (ASym = NIL_SYM) or not SymModelOf(AMid, 'SymSignature', LM) then
+  if (ASym = NIL_SYM) or not SymModelOf(AMid, 'SymSignature', LM, ATexts) then
     Exit;
   if sfBuiltin in LM.Symbols[ASym].Flags then
   begin
@@ -4220,7 +4227,9 @@ begin
   begin
     Result.HeadWord := SymHeadWord(LM, ASym);
     LParams := SymParamsNode(LM, ASym);
-    ParamsOf(LM, LParams, Result);
+    ParamsOf(LM, LParams, Result, ATexts);
+    if not ATexts then
+      Exit;
     if AMid >= 0 then
     begin
       LX := FProj.SymDeclTypeX(AMid, ASym);
@@ -4290,20 +4299,22 @@ begin
     end;
     LChild := LDefM.Tree.Nodes[LChild].NextSibling;
   end;
-  ParamsOf(LDefM, LParams, Result);
+  ParamsOf(LDefM, LParams, Result, ATexts);
   if LResult <> NIL_NODE then
   begin
     Result.HeadWord := 'function';
-    Result.ResultText := CollapseSpaces(LDefM.Tree.NodeSpanText(LResult));
+    if ATexts then
+      Result.ResultText := CollapseSpaces(LDefM.Tree.NodeSpanText(LResult));
   end
   else
     Result.HeadWord := 'procedure';
 end;
 
 // The display text of a parameter list node and whether it declares any
-// parameter - an empty `()` renders as '' and takes none.
+// parameter - an empty `()` renders as '' and takes none. ATexts False:
+// whether, alone (nodes only).
 procedure TPasCompletion.ParamsOf(AModel: TPasSemaModel; AParams: Integer;
-  var ASig: TPasSymSignature);
+  var ASig: TPasSymSignature; ATexts: Boolean);
 var
   LChild: Integer;
 begin
@@ -4317,7 +4328,8 @@ begin
     if AModel.Tree.Nodes[LChild].Kind = nkParam then
     begin
       ASig.HasParams := True;
-      ASig.ParamsText := CollapseSpaces(AModel.Tree.NodeSpanText(AParams));
+      if ATexts then
+        ASig.ParamsText := CollapseSpaces(AModel.Tree.NodeSpanText(AParams));
       Exit;
     end;
     LChild := AModel.Tree.Nodes[LChild].NextSibling;
@@ -4336,7 +4348,7 @@ function TPasCompletion.ItemHasParams(const AItem: TPasComplItem): Boolean;
 begin
   Result := (AItem.Kind = skRoutine) and (AItem.Sym <> NIL_SYM) and
     (AItem.Bucket <> cbKeyword) and
-    SymSignature(AItem.Mid, AItem.Sym).HasParams;
+    SymSignature(AItem.Mid, AItem.Sym, {ATexts} False).HasParams;
 end;
 
 function TPasCompletion.ItemDocComment(const AItem: TPasComplItem): string;
@@ -4356,7 +4368,7 @@ function TPasCompletion.IsTypeSym(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
 begin
-  Result := (ASym <> NIL_SYM) and SymModelOf(AMid, 'IsTypeSym', LM) and
+  Result := (ASym <> NIL_SYM) and SymModelOf(AMid, 'IsTypeSym', LM, False) and
     (LM.Symbols[ASym].Kind in [skType, skBuiltinType]);
 end;
 
@@ -4471,8 +4483,8 @@ var
   LSig: TPasSymSignature;
   LT: TPasCallTarget;
 begin
-  if not SymModelOf(AMid, 'AppendCallTarget', LM) then
-    Exit;
+  if not SymModelOf(AMid, 'AppendCallTarget', LM, False) then
+    Exit;   // SymSignature below rehydrates for the texts
   // Each identity once: the family walks below may meet a member twice.
   for var LIdx := 0 to High(AInfo.Targets) do
     if (AInfo.Targets[LIdx].Mid = AMid) and (AInfo.Targets[LIdx].Sym = ASym) then
@@ -4886,9 +4898,15 @@ begin
   FPendingOverrides := nil;
   FCount := 0;
   // Not Clear: it discards the table's capacity AND virtual-notifies every
-  // old entry - recreating at the same capacity is cheaper at list scale.
+  // old entry - recreating is cheaper at list scale. Pre-sized where the list
+  // runs to thousands of names (a statement list: 3,150 in the audit's
+  // probe); a member list is about a hundred, and growing from the default
+  // beats zero-filling 16K slots (C1-36).
   FSeen.Free;
-  FSeen := TDictionary<string, Integer>.Create(4096);
+  if FContext in [ccStatement, ccExpression, ccType, ccUses] then
+    FSeen := TDictionary<string, Integer>.Create(4096)
+  else
+    FSeen := TDictionary<string, Integer>.Create;
   FAncestryBuilt := False;
   FClassSide := False;
   FFieldsOnly := False;

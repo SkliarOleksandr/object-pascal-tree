@@ -294,6 +294,9 @@ type
     // answers "no hit there" (audit B2-23).
     FHydrateFailures: Integer;
     FLastHydrateFailure: Integer;
+    // Moved by every SetBuffer: part of EnsureHydrated's failure stamp.
+    FBufferGen: Integer;
+    FHydrateRuns: Integer;
     FFiles: TList<string>;                 // parallel to FModels (full path)
     // Parallel to FModels: each model's pipeline status. Kept in lockstep by
     // RegisterModel (the only place a model is appended). The synchronous
@@ -1783,6 +1786,11 @@ type
       - compares the count before and after its work. }
     property HydrateFailures: Integer read FHydrateFailures;
     property LastHydrateFailure: Integer read FLastHydrateFailure;
+    { How many times EnsureHydrated re-preprocessed a file - the expensive
+      step; a main file whose text no longer matches, or a failure already
+      met under the same files and buffers, fails without one. A host or a
+      test measures a path's rehydration cost with it. }
+    property HydrateRuns: Integer read FHydrateRuns;
     { True when AName is in the project's BASE define set - the platform's
       predefined symbols plus the ctor's extra defines (.dproj / command
       line) - i.e. defined before any unit's own `$DEFINE` runs. The
@@ -2242,6 +2250,7 @@ begin
      FModels[LMid].Demoted and not FTransientReleased then
     EnsureHydrated(LMid);
   FSM.SetBuffer(APath, AText, AVersion);
+  Inc(FBufferGen);   // a remembered rehydration failure is retried
 end;
 
 function TPasSemaProject.BufferVersion(const APath: string): Integer;
@@ -22500,11 +22509,64 @@ function TPasSemaProject.EnsureHydrated(AMid: Integer): Boolean;
 var
   LPP: TPasPreprocessor;
   LPre: TPasPreprocessed;
+  LModel: TPasSemaModel;
+  LStamp, LText: string;
+
+  // The buffer generation and each file's write time and size: what a
+  // failed rehydration read. Each file of the model, its includes too - one
+  // stat per file, against a full preprocess.
+  function Stamp: string;
+  var
+    LRec: TSearchRec;
+  begin
+    Result := IntToStr(FBufferGen);
+    for var LFile in LModel.Tree.Source.FileNames do
+      if FindFirst(LFile, faAnyFile, LRec) = 0 then
+      try
+        Result := Result + Format('|%.12f/%d', [Double(LRec.TimeStamp),
+          LRec.Size]);
+      finally
+        FindClose(LRec);
+      end
+      else
+        Result := Result + '|-';
+  end;
+
+  function Failed: Boolean;
+  begin
+    Inc(FHydrateFailures);
+    FLastHydrateFailure := AMid;
+    LModel.HydrateFailStamp := LStamp;
+    Result := False;
+  end;
+
 begin
   if (AMid < 0) or (AMid >= FModels.Count) then
     Exit(False);
-  if not FModels[AMid].Demoted then
+  LModel := FModels[AMid];
+  if not LModel.Demoted then
     Exit(True);
+  // A failure is remembered under what it read: the same files and buffers
+  // fail the same way, so the caller - a completion row, a reference hit -
+  // gets its answer at once instead of a re-preprocess each (audit C1-35).
+  // Any change - the file restored, a buffer set - tries again.
+  LStamp := Stamp;
+  if (LModel.HydrateFailStamp <> '') and (LModel.HydrateFailStamp = LStamp) then
+  begin
+    Inc(FHydrateFailures);
+    FLastHydrateFailure := AMid;
+    Exit(False);
+  end;
+  // The cheap test first: the main file's text against the fingerprint
+  // DemoteText kept of it. A changed main file cannot reproduce the stream,
+  // and reading it costs a fraction of preprocessing it.
+  try
+    LText := FSM.LoadText(FFiles[AMid]);
+  except
+    Exit(Failed);
+  end;
+  if not LModel.DemotedFileMatches(0, LText) then
+    Exit(Failed);
   LPP := RentPP;
   try
     // The SEED query, exactly like the load pass that produced this stream:
@@ -22514,23 +22576,21 @@ begin
     // flipping branches and failing the identity check below.
     LPP.OnDeclared := SeedDeclaredQuery();
     try
+      Inc(FHydrateRuns);
       LPre := LPP.Process(FFiles[AMid]);
     except
       // A vanished or unreadable file cannot rehydrate - the demoted model
       // keeps answering everything that needs no text.
-      Inc(FHydrateFailures);
-      FLastHydrateFailure := AMid;
-      Exit(False);
+      Exit(Failed);
     end;
   finally
     ReturnPP(LPP);
   end;
-  Result := FModels[AMid].TryRehydrate(LPre);
-  if not Result then
-  begin
-    Inc(FHydrateFailures);
-    FLastHydrateFailure := AMid;
-  end;
+  Result := LModel.TryRehydrate(LPre);
+  if Result then
+    LModel.HydrateFailStamp := ''
+  else
+    Failed;
 end;
 
 // See ReleaseTransientMaps: the freed arrays are indexed unguarded by the

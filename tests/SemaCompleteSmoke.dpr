@@ -1341,6 +1341,27 @@ begin
   GCounter.Ok('ItemHasParams: a routine with a parameter answers True',
     GComp.ItemHasParams(ItemNamed('Over')));
 
+  // A text-demoted unit (audit C1-35): a row's head word and has-params are
+  // read from symbols and nodes - asked of every row, they rehydrated it;
+  // the parameter text does rehydrate it.
+  GProj.DemoteText([TPath.Combine(GDir, 'mainu.pas')]);
+  var LExtA := -1;
+  for var LMi := 0 to GProj.ModelCount - 1 do
+    if SameText(TPath.GetFileName(GProj.ModelFile(LMi)), 'exta.pas') then
+      LExtA := LMi;
+  ProjCase(PROJ_HEAD + '  B.|'#10 + PROJ_TAIL);
+  GCounter.Ok('demoted: exta is demoted, B.| still lists Over',
+    (LExtA >= 0) and GProj.Model(LExtA).Demoted and Has('Over'));
+  GCounter.Ok('demoted: head word and has-params from the symbols',
+    (GComp.ItemHeadWord(ItemNamed('Over')) = 'procedure') and
+    GComp.ItemHasParams(ItemNamed('Over')) and
+    not GComp.ItemHasParams(ItemNamed('Pub')));
+  GCounter.Ok('demoted: ...without rehydrating exta',
+    GProj.Model(LExtA).Demoted);
+  GCounter.Ok('demoted: the params text rehydrates it',
+    (GComp.ItemParamsText(ItemNamed('Over')) = '(A: Integer)') and
+    not GProj.Model(LExtA).Demoted);
+
   // Empty `()` must answer False (the auto-parenthesis driver), and a
   // multi-line list must collapse to one display line.
   ProjCase(

@@ -598,6 +598,13 @@ type
       positions from a DIFFERENT parse than the one Symbols/RefMap were built
       from: a wrong answer where the contract above promises none. }
     DemotedFileHashes: TArray<Cardinal>;  // FNV-1a over Files[i].Source
+    { TPasSemaProject.EnsureHydrated's memo of a FAILED rehydration: the
+      stamp of what it read (the buffer generation and every file's write
+      time and size), '' when none. A call with the same stamp fails at
+      once instead of re-preprocessing the file - a changed library file
+      cost a full preprocess per completion row and per reference hit
+      (audit C1-35). A new model starts without one. }
+    HydrateFailStamp: string;
     DemotedHeads: TArray<Byte>;           // per symbol: Ord(TPasRoutineHead)
     { The parser's own rows as AddParseDiags received them (VisIndex-based),
       kept through DemoteText: a parse-donor hit reuses the tree, not the
