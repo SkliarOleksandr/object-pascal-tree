@@ -478,7 +478,10 @@ against dcc cannot see (`docs/parser-fidelity.md`).
 ### 16.3.1 Generic instantiation syntax
 - there is no intra-unit instantiation - members of
   `TList<TFoo>` type as the open generic's members; project-level frames
-  exist, but overlay (mid-edit) generic frames stay unsubstituted.
+  exist, but overlay (mid-edit) generic frames stay unsubstituted: a
+  completion after `FSensor.` (`FSensor: T`) in a descendant of an own-unit
+  `TSensor<T: TCustomSensor>` written `class(TSensor<TCustomLocationSensor>)`
+  lists the constraint's members, not the argument's.
 - `Id<...>` in an expression is told from a comparison by syntax, where dcc
   decides by what the head names (spec 16.3.1): `F(A < B, C > (D))` - two
   comparisons for dcc - is read as a generic call or cast with one

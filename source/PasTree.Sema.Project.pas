@@ -878,10 +878,6 @@ type
     function InstanceRead(AInst: Integer): TSemaInstance;
     function TypeDefNodeOf(AMid, ASym: Integer): Integer;
     function GenericParamIdents(AMid, ASym: Integer): TArray<Integer>;
-    // The same walk over a model that need not be in FModels yet (a fresh
-    // re-parse the module path is still deciding about).
-    class function GenericParamIdentsOf(LM: TPasSemaModel;
-      ASym: Integer): TArray<Integer>;
     function GenericParamConstraints(AMid,
       ASym: Integer): TArray<TArray<Integer>>;
     function RealGenericBase(const AX: TSemaXType): TSemaXType;
@@ -1054,6 +1050,12 @@ type
     procedure CommitXNewExprType(AId: Integer);
     procedure RunCrossTypePass(ACount: Integer);
   public
+    // The generic parameter NAME idents of a type or a method declaration
+    // ASym of LM, in order (the ones TypeArgs bind positionally); a model
+    // that need not be in FModels yet works too (a fresh re-parse the
+    // module path is still deciding about; completion's overlay twin).
+    class function GenericParamIdentsOf(LM: TPasSemaModel;
+      ASym: Integer): TArray<Integer>;
     constructor Create(APlatform: TPasPlatform;
       const ASearchPaths: TArray<string>; const AExtraDefines: TArray<string>;
       ACompilerVersion: Double = DEFAULT_COMPILER_VERSION);
@@ -14533,13 +14535,25 @@ function TPasSemaProject.XTypeText(const AX: TSemaXType): string;
 var
   LIdx: Integer;
   LArgs: TArray<TSemaXType>;
+  LInst: TSemaInstance;
+  LOuter: TSemaXType;
 begin
   if not XValid(AX) then
     Exit('?');
   Result := FModels[AX.UnitId].Symbols[AX.Sym].Name;
   if AX.Inst <> NIL_INST then
   begin
-    LArgs := InstanceRead(AX.Inst).Args;
+    LInst := InstanceRead(AX.Inst);
+    // A type NESTED in a generic carries the OUTER instantiation as its
+    // frame: TList<Integer>'s `arrayofT` is `TList<Integer>.arrayofT`, and
+    // `arrayofT<Integer>` names a type that does not exist.
+    if (LInst.UnitId <> AX.UnitId) or (LInst.Sym <> AX.Sym) then
+    begin
+      LOuter := XPlain(LInst.UnitId, LInst.Sym);
+      LOuter.Inst := AX.Inst;
+      Exit(XTypeText(LOuter) + '.' + Result);
+    end;
+    LArgs := LInst.Args;
     Result := Result + '<';
     for LIdx := 0 to High(LArgs) do
     begin

@@ -577,9 +577,150 @@ const
     '  CA: array of TBase48Class;'#10 +
     'begin'#10;
 
+  // The completion findings of 2026-10-15 (local/completion-findings-2026-
+  // 10-15.md): what the list holds at a constrained type parameter, a
+  // protected member, a declaration below the caret, `Self`, a parameter's
+  // type, a member's start, after `inherited`, and an override's row. The
+  // System stub gives TObject a body, so `T: class` has members to find.
+  CF_SYSTEM =
+    'unit System;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TObject = class'#10 +
+    '  public'#10 +
+    '    procedure Free;'#10 +
+    '    function ClassName: string;'#10 +
+    '  protected'#10 +
+    '    function GetDisposed: Boolean;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TObject.Free;'#10'begin'#10'end;'#10 +
+    'function TObject.ClassName: string;'#10'begin'#10'end;'#10 +
+    'function TObject.GetDisposed: Boolean;'#10'begin'#10'end;'#10 +
+    'end.'#10;
+  CF_EXT =
+    'unit extcf;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TCfBase = class'#10 +
+    '  protected'#10 +
+    '    procedure BaseProt;'#10 +
+    '  public'#10 +
+    '    type TNest = Integer;'#10 +
+    '    const KC = 1;'#10 +
+    '  public'#10 +
+    '    BaseF: Integer;'#10 +
+    '    procedure BaseVirt; virtual;'#10 +
+    '    procedure Ov(A: Integer); overload; virtual;'#10 +
+    '    procedure Ov(const S: string); overload;'#10 +
+    '    property BaseP: Integer read BaseF;'#10 +
+    '  end;'#10 +
+    '  TCfMid = class(TCfBase)'#10 +
+    '  public'#10 +
+    '    procedure BaseVirt; override;'#10 +
+    '    procedure Ov(A: Integer); overload; override;'#10 +
+    '  end;'#10 +
+    '  TCfGen<T> = class'#10 +
+    '  protected'#10 +
+    '    procedure GenProt;'#10 +
+    '  public'#10 +
+    '    type TItems = array of T;'#10 +
+    '    procedure GenPub;'#10 +
+    '    function Get: T;'#10 +
+    '    function Items: TItems;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TCfBase.BaseProt;'#10'begin'#10'end;'#10 +
+    'procedure TCfBase.BaseVirt;'#10'begin'#10'end;'#10 +
+    'procedure TCfBase.Ov(A: Integer);'#10'begin'#10'end;'#10 +
+    'procedure TCfBase.Ov(const S: string);'#10'begin'#10'end;'#10 +
+    'procedure TCfMid.BaseVirt;'#10'begin'#10'end;'#10 +
+    'procedure TCfMid.Ov(A: Integer);'#10'begin'#10'end;'#10 +
+    'procedure TCfGen<T>.GenProt;'#10'begin'#10'end;'#10 +
+    'procedure TCfGen<T>.GenPub;'#10'begin'#10'end;'#10 +
+    'function TCfGen<T>.Get: T;'#10'begin'#10'end;'#10 +
+    'function TCfGen<T>.Items: TItems;'#10'begin'#10'end;'#10 +
+    'end.'#10;
+  // `//X` comment lines are the caret sites CfCase replaces.
+  CF_MAIN =
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses extcf;'#10 +
+    'type'#10 +
+    '  TCfE = (ceA, ceB);'#10 +
+    '//TSEC'#10 +
+    '  TOwnFoo = class(TCfBase)'#10 +
+    '  end;'#10 +
+    '  TOwnList<T: class> = class(TCfGen<T>)'#10 +
+    '  public'#10 +
+    '    FItem: T;'#10 +
+    '    procedure Go(const V: T);'#10 +
+    '  end;'#10 +
+    '  TOwnBox<T: TCfBase> = class'#10 +
+    '  public'#10 +
+    '    procedure Go(const V: T);'#10 +
+    '  end;'#10 +
+    '  TOwnU<T> = class'#10 +
+    '  public'#10 +
+    '    procedure Go(const V: T);'#10 +
+    '  end;'#10 +
+    '  TUseGen = class'#10 +
+    '  public'#10 +
+    '//DECL'#10 +
+    '    procedure Run(G: TCfGen<Integer>);'#10 +
+    '    class function CS: Integer; static;'#10 +
+    '    class function CN: Integer;'#10 +
+    '  end;'#10 +
+    '  TKidCf = class(TCfMid)'#10 +
+    '  public'#10 +
+    '    procedure BaseVirt; override;'#10 +
+    '  end;'#10 +
+    'const'#10 +
+    '  IntfK = 1;'#10 +
+    'var'#10 +
+    '  GG: TCfGen<Integer>;'#10 +
+    '  GB: TCfBase;'#10 +
+    '  GF: TOwnFoo;'#10 +
+    'procedure Probe;'#10 +
+    'implementation'#10 +
+    'const'#10 +
+    '  EarlyK = 1;'#10 +
+    'procedure TOwnList<T>.Go(const V: T);'#10'begin'#10'//LIST'#10'end;'#10 +
+    'procedure TOwnBox<T>.Go(const V: T);'#10'begin'#10'//BOX'#10'end;'#10 +
+    'procedure TOwnU<T>.Go(const V: T);'#10'begin'#10'//U'#10'end;'#10 +
+    'procedure TUseGen.Run(G: TCfGen<Integer>);'#10'begin'#10'//RUN'#10 +
+    'end;'#10 +
+    'class function TUseGen.CS: Integer;'#10'begin'#10'//CS'#10'end;'#10 +
+    'class function TUseGen.CN: Integer;'#10'begin'#10'//CN'#10'end;'#10 +
+    'procedure TKidCf.BaseVirt;'#10'begin'#10'//KID'#10'end;'#10 +
+    'procedure Probe;'#10'begin'#10'//PROBE'#10'end;'#10 +
+    'const'#10 +
+    '  LateK = 2;'#10 +
+    'procedure LateProc;'#10'begin'#10'end;'#10 +
+    'end.'#10;
+
 var
   GDir: string;
   B50_Src: string;
+
+// One completion-findings case: the marker `//AMarker` replaced by ALine,
+// and the list there holds AWant and not ANot ('' = no check).
+procedure CfCase(const AMarker, ALine, AWant, ANot: string);
+begin
+  ProjCase(StringReplace(CF_MAIN, '//' + AMarker, ALine, []));
+  GCounter.Ok(Format('CF %s %s lists %s%s', [AMarker, Trim(ALine),
+    IfThen(AWant <> '', AWant, '(any)'), IfThen(ANot <> '', ', not ' + ANot,
+    '')]),
+    GHit and ((AWant = '') or Has(AWant)) and
+    ((ANot = '') or not Has(ANot)),
+    procedure
+    begin
+      Write('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':');
+      for var LFi := 0 to Min(High(GItems), 9) do
+        Write(' ', GItems[LFi].Name);
+      Writeln;
+    end);
+end;
 
 // One B48 overlay case: the list at the marker (a ccMember or a bare-name
 // position) holds AWant and not ANot ('' = no check).
@@ -784,8 +925,12 @@ begin
   GCounter.Ok('B.| classifies ccMember', GHit and (GCtx = ccMember));
   GCounter.Ok('B.| lists the public method', Has('Pub'));
   GCounter.Ok('B.| lists the property', Has('Prop'));
-  GCounter.Ok('B.| lists the protected field (caret struct descends)',
-    Has('FProt'));
+  // In a descendant's method, an ancestor's protected member is reachable
+  // through a value of a class this unit declares, not through a TBase
+  // (dcc: E2362; local/probe-cc UB_viaA) - the caret struct descending
+  // from TBase is not enough.
+  GCounter.Ok('B.| hides the protected field of another unit''s class',
+    not Has('FProt'));
   GCounter.Ok('B.| hides the private field of another unit',
     not Has('FSecret'));
   GCounter.Ok('B.| collapses the overload pair into one item',
@@ -801,6 +946,8 @@ begin
   ProjCase(PROJ_HEAD + '  M.|'#10 + PROJ_TAIL);
   GCounter.Ok('M.| lists the own method', Has('Own'));
   GCounter.Ok('M.| lists the inherited method', Has('Pub'));
+  GCounter.Ok('M.| lists the inherited protected field (an own-unit class)',
+    Has('FProt'));
 
   // Inside a HALF-OPEN with body (5.7): TMy is declared in the overlay, its
   // ancestor TBase in exta. The body must offer the own member AND the
@@ -1739,6 +1886,83 @@ begin
     'end.'#10);
   GCounter.Ok('B48 standalone: an ancestor''s strict protected field',
     GHit and Has('SPField'));
+
+  // ======== completion findings 2026-10-15 ====================================
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_smokecf');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'System.pas'), CF_SYSTEM);
+  TFile.WriteAllText(TPath.Combine(GDir, 'extcf.pas'), CF_EXT);
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), CF_MAIN);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  GCounter.Ok('CF mini-project analyzed', GProjMid >= 0);
+  // 1. A constrained type parameter has its constraint's members (16.4.1),
+  // on the overlay too; an unconstrained one has none.
+  CfCase('LIST', '  V.|', 'Free', 'GetDisposed');
+  CfCase('LIST', '  FItem.|', 'ClassName', '');
+  CfCase('LIST', '  Self.Get.|', 'Free', '');
+  CfCase('LIST', '  Get.|', 'Free', '');
+  CfCase('BOX', '  V.|', 'BaseVirt', 'BaseProt');
+  CfCase('U', '  V.|', '', 'Free');
+  // 2. A generic's plain protected is reachable from a method body only
+  // (11.2.1); an own-unit descendant reaches its ancestors' protected.
+  CfCase('RUN', '  G.|', 'GenProt', '');
+  CfCase('CS', '  GG.|', 'GenProt', '');
+  CfCase('PROBE', '  GG.|', 'GenPub', 'GenProt');
+  CfCase('PROBE', '  GB.|', 'BaseVirt', 'BaseProt');
+  CfCase('PROBE', '  GF.|', 'BaseProt', '');
+  // 3. A unit-level declaration below the caret is not visible yet.
+  CfCase('RUN', '  |', 'EarlyK', 'LateK');
+  CfCase('RUN', '  |', 'IntfK', 'LateProc');
+  // 4. Self, in a method body with one (11.3.3).
+  CfCase('LIST', '  |', 'Self', '');
+  CfCase('CN', '  |', 'Self', '');
+  CfCase('CS', '  |', '', 'Self');
+  CfCase('PROBE', '  |', '', 'Self');
+  // 5. A parameter's type is a type identifier (6.2).
+  CfCase('DECL', '    procedure Pr(const A: |', 'TCfE', 'IntfK');
+  CfCase('DECL', '    procedure Pr(const A: |', 'TCfBase', 'ceA');
+  CfCase('DECL', '    function Fr: |', 'TCfE', 'ceA');
+  // 6. A member's start in a class declaration: keywords, no names.
+  CfCase('DECL', '    |', 'procedure', 'TCfBase');
+  CfCase('DECL', '    pro|', 'property', 'Probe');
+  // ... but after `procedure` an interface may stand (`procedure IFoo.M =
+  // DoM;`, 14.2.2).
+  CfCase('DECL', '    procedure |', 'TCfBase', '');
+  // A later type of the same section: a class reference's target only.
+  CfCase('TSEC', '  TLaterRef = class of |;', 'TOwnFoo', '');
+  CfCase('TSEC', '  TRecX = record X: |; end;', 'TCfBase', 'TOwnFoo');
+  // 7. `inherited` names a method or a property (12.1.2).
+  CfCase('KID', '  inherited |', 'BaseVirt', 'BaseF');
+  CfCase('KID', '  inherited |', 'BaseP', 'TNest');
+  CfCase('KID', '  inherited |', 'Ov', 'KC');
+  // 8. An override chain is one signature, an overload another.
+  ProjCase(StringReplace(CF_MAIN, '//KID', '  Self.|', []));
+  GCounter.Ok('CF Self.| counts an override chain as no overload',
+    GHit and (OverloadsOf('BaseVirt') = 0) and (OverloadsOf('Ov') = 1),
+    procedure
+    begin
+      Writeln('    BaseVirt +', OverloadsOf('BaseVirt'), ', Ov +',
+        OverloadsOf('Ov'));
+    end);
+  // XTypeText of a type nested in a generic names the outer instantiation.
+  ProjCase(StringReplace(CF_MAIN, '//PROBE', '  GG.|', []));
+  var LText := '';
+  if Has('Items') then
+    LText := GProj.XTypeText(GProj.SubstX(GProj.SymDeclTypeX(
+      ItemNamed('Items').Mid, ItemNamed('Items').Sym), ItemNamed('Items').Ctx,
+      0));
+  GCounter.Ok('CF XTypeText of TCfGen<Integer>''s nested TItems',
+    LText = 'TCfGen<Integer>.TItems',
+    procedure
+    begin
+      Writeln('    got ''', LText, '''');
+    end);
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
 
   if GCounter.Finish('SemaCompleteSmoke') then
     ExitCode := 1;

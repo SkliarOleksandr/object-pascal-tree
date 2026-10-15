@@ -156,6 +156,14 @@ begin
     begin
       if LM.Symbols[LSym].DeclNode = LNode then
         Continue;   // the declaration site names something new
+      // So is a forward's own name (`TFoo = class;`): the resolver moved the
+      // symbol's DeclNode to the completing declaration, but this half
+      // declares the name too.
+      if (LM.Tree.Nodes[LNode].Parent <> NIL_NODE) and
+         (LM.Tree.Nodes[LM.Tree.Nodes[LNode].Parent].Kind = nkTypeDecl) and
+         (PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LM.Tree.Nodes[LNode].
+           Parent].FirstChild) = LNode) then
+        Continue;
       if LM.Symbols[LSym].Kind in [skUnitRef, skLabel] then
         Continue;
       if LM.Symbols[LSym].Name = '' then

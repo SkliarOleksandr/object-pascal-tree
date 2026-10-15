@@ -251,6 +251,9 @@ type
     FItems: TArray<TPasComplItem>;
     FCount: Integer;
     FSeen: TDictionary<string, Integer>;   // NameLower -> item index
+    // Per item: the `override`s listed under its name whose ancestor slot
+    // the walk has not met yet (AddItem's overload count).
+    FPendingOverrides: TArray<Integer>;
     FUnitMids: TDictionary<string, Integer>;  // lazy: unit basename -> mid
     FContext: TPasComplContext;
     FCaretVis: Integer;            // block-scope positional visibility
@@ -276,6 +279,14 @@ type
     // Overlay-space ancestors of the caret structs - see OverlayMemberVisible.
     FOverlayAncestry: TArray<Integer>;
     FAncestryBuilt: Boolean;
+    // The caret is inside a method body - a struct's routine, or a routine or
+    // anonymous method nested in one (11.2.1: a GENERIC class's plain
+    // protected is reachable there, and only there).
+    FInMethodBody: Boolean;
+    // ccType where only a type IDENTIFIER may stand - a parameter's, a
+    // result's, a property's type (6.2 ParamType = TypeRef): no subrange
+    // bounds, so no constants and no enum values.
+    FTypeNameOnly: Boolean;
     // The last-good model's sckImplementation scope (lazy; -2 = not yet
     // looked up, NIL_SCOPE = the model has none) - OwnModelTypeX resolves
     // from it so implementation-section types bridge too.
@@ -292,6 +303,13 @@ type
     function BridgeUnitMid(const AName: string): Integer;
     function OwnModelTypeX(AOvSym: Integer;
       ADepth: Integer = 0): TSemaXType;
+    function OwnModelParamX(AOvSym: Integer): TSemaXType;
+    function MethodBodyScope(AScope: Integer): Integer;
+    function IsOverrideSym(AMid, ASym: Integer): Boolean;
+    function MethodHasSelf(AMethodScope: Integer): Boolean;
+    function TypeNameOnlyAt(const AInfo: TPasCaretInfo): Boolean;
+    function IsStructMemberStart(const AInfo: TPasCaretInfo): Boolean;
+    function StatementSiteKind(const AInfo: TPasCaretInfo): TPasNodeKind;
     function TypeOfOverlaySym(ASym, ADepth: Integer): TPasComplTypeRef;
     function TypeOfProjectSym(AMid, ASym, ACtx, ADepth: Integer):
       TPasComplTypeRef;
@@ -320,6 +338,8 @@ type
     procedure AppendCallTarget(AMid, ASym, ACtx: Integer;
       var AInfo: TPasCallInfo; ASkipSameSig: Boolean = False);
     function IsDescendantNode(ANode, AAncestor: Integer): Boolean;
+    function UpChainNode(ANode: Integer; AKind: TPasNodeKind): Integer;
+    function ForwardTypeAbove(ASym, ATypeSec: Integer): Boolean;
     function UpChainKind(ANode: Integer;
       const AKinds: array of TPasNodeKind): TPasNodeKind;
     function AggregateTypeOf(AAggNode, ADepth: Integer): TPasComplTypeRef;
@@ -1052,10 +1072,119 @@ begin
     skGenericParam:
       // A value typed as an unbound parameter has its CONSTRAINTS' members
       // (16 sec. 16.4.1) - the walk lives in EnumMembersX/FindMemberX, which
-      // need a project-space identity. Available only when this model IS
-      // the project's (overlay generic bodies are a stage-E gap).
+      // need a project-space identity: the symbol itself when this model IS
+      // the project's, else its twin in the last-good model.
       if FIsProjectModel then
-        Result.X := XPlain(FProjMid, ASym);
+        Result.X := XPlain(FProjMid, ASym)
+      else
+        Result.X := OwnModelParamX(ASym);
+  end;
+end;
+
+{ An overlay generic parameter's twin in the last-good model of this file,
+  where ConstraintsOfParamX can read its constraints: the same-named
+  parameter of the project twin of the type or method that declares it.
+  A method body's `<T>` repeats no constraint (16.4.1: they are written once,
+  on the declaration), so the body's T is looked up on its struct - the
+  struct's own parameters, then a generic method of the segment's name
+  (`TArray.BinarySearch<T>`). XNil when nothing matches. }
+function TPasCompletion.OwnModelParamX(AOvSym: Integer): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LDecl, LList, LOwner, LChild, LSegment, LScope, LOvStruct, LCand: Integer;
+  LStructX: TSemaXType;
+  LKey, LSegKey: string;
+
+  function MatchIn(ASym: Integer): TSemaXType;
+  var
+    LIdent, LParam: Integer;
+  begin
+    Result := XNil;
+    for LIdent in TPasSemaProject.GenericParamIdentsOf(LM, ASym) do
+      if LM.Tree.NodeNameLower(LIdent) = LKey then
+      begin
+        LParam := LM.RefMap[LIdent];
+        if (LParam <> NIL_SYM) and (LM.Symbols[LParam].Kind = skGenericParam)
+        then
+          Exit(XPlain(FProjMid, LParam));
+      end;
+  end;
+
+begin
+  Result := XNil;
+  if (FProj = nil) or (FProjMid < 0) then
+    Exit;
+  // ident -> nkGenericParam -> nkGenericParams -> the declaring node
+  LDecl := FModel.Symbols[AOvSym].DeclNode;
+  if (LDecl = NIL_NODE) or (FModel.Tree.Nodes[LDecl].Parent = NIL_NODE) then
+    Exit;
+  LList := FModel.Tree.Nodes[FModel.Tree.Nodes[LDecl].Parent].Parent;
+  if (LList = NIL_NODE) or
+     (FModel.Tree.Nodes[LList].Kind <> nkGenericParams) then
+    Exit;
+  LOwner := FModel.Tree.Nodes[LList].Parent;
+  if LOwner = NIL_NODE then
+    Exit;
+  LKey := FModel.Symbols[AOvSym].NameLower;
+  LM := ProjModel(FProjMid, 'OwnModelParamX');
+  // A type's own `<T>`: the nkTypeDecl's name is the type.
+  if FModel.Tree.Nodes[LOwner].Kind = nkTypeDecl then
+  begin
+    LChild := FModel.Tree.Nodes[LOwner].FirstChild;
+    while (LChild <> NIL_NODE) and
+          (FModel.Tree.Nodes[LChild].Kind <> nkIdent) do
+      LChild := FModel.Tree.Nodes[LChild].NextSibling;
+    if LChild = NIL_NODE then
+      Exit;
+    LStructX := OwnModelTypeX(FModel.RefMap[LChild]);
+    if XValid(LStructX) and (LStructX.UnitId = FProjMid) then
+      Result := MatchIn(LStructX.Sym);
+    Exit;
+  end;
+  if FModel.Tree.Nodes[LOwner].Kind <> nkRoutine then
+    Exit;
+  // A routine header: the name segment the list follows says whose it is.
+  LSegment := NIL_NODE;
+  LChild := FModel.Tree.Nodes[LOwner].FirstChild;
+  while (LChild <> NIL_NODE) and (LChild <> LList) do
+  begin
+    if nfName in FModel.Tree.Nodes[LChild].Flags then
+      LSegment := LChild;
+    LChild := FModel.Tree.Nodes[LChild].NextSibling;
+  end;
+  if LSegment = NIL_NODE then
+    Exit;
+  LSegKey := FModel.Tree.NodeNameLower(LSegment);
+  LOvStruct := NIL_SYM;
+  LScope := FModel.Symbols[AOvSym].Scope;
+  while LScope <> NIL_SCOPE do
+  begin
+    if FModel.Scopes[LScope].StructSym <> NIL_SYM then
+    begin
+      LOvStruct := FModel.Scopes[LScope].StructSym;
+      Break;
+    end;
+    LScope := FModel.Scopes[LScope].Parent;
+  end;
+  if LOvStruct = NIL_SYM then
+    Exit;
+  LStructX := OwnModelTypeX(LOvStruct);
+  if not XValid(LStructX) or (LStructX.UnitId <> FProjMid) then
+    Exit;
+  if LM.Symbols[LStructX.Sym].NameLower = LSegKey then
+    Exit(MatchIn(LStructX.Sym));
+  if LM.Symbols[LStructX.Sym].MemberScope = NIL_SCOPE then
+    Exit;
+  LCand := LM.FindLocal(LM.Symbols[LStructX.Sym].MemberScope, LSegKey);
+  while LCand <> NIL_SYM do
+  begin
+    if LM.Symbols[LCand].Kind = skRoutine then
+    begin
+      Result := MatchIn(LCand);
+      if XValid(Result) then
+        Exit;
+    end;
+    LCand := LM.Symbols[LCand].NextOverload;
   end;
 end;
 
@@ -2380,6 +2509,21 @@ end;
   this runs once per CANDIDATE, thousands of times per request, and PasNameKey
   allocates - the exact "cheap-looking normalization on a shared hot path"
   this codebase has paid for three times (see FindLocal's own comment). }
+// Is the routine ASym declared `override`? A flag the resolver stamps from
+// either heading - kept by a text-demoted model, so no text is read.
+function TPasCompletion.IsOverrideSym(AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+begin
+  if ASym = NIL_SYM then
+    Exit(False);
+  if AMid < 0 then
+    LM := FModel
+  else
+    LM := ProjModel(AMid, 'IsOverrideSym');
+  Result := sfOverrideDirective in LM.Symbols[ASym].Flags;
+end;
+
 procedure TPasCompletion.AddItem(const AName, AKey: string;
   AKind: TSemaSymbolKind; ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
 var
@@ -2390,17 +2534,33 @@ begin
   if FSeen.TryGetValue(AKey, LIdx) then
   begin
     // First hit wins (buckets run in precedence order); a same-name routine
-    // is an overload of the one already listed, not a new row.
+    // is an overload of the one already listed, not a new row - unless it is
+    // the ancestor slot an `override` already listed redeclares: the walks
+    // go from the type to its ancestors, so each override met earlier stands
+    // for one declaration met later, and `Destroy` over TList, TEnumerable
+    // and TObject is one signature, not three.
     if (AKind = skRoutine) and (FItems[LIdx].Kind = skRoutine) and
        (FItems[LIdx].Bucket <> cbKeyword) then
-      Inc(FItems[LIdx].Overloads);
+    begin
+      if FPendingOverrides[LIdx] > 0 then
+        Dec(FPendingOverrides[LIdx])
+      else
+        Inc(FItems[LIdx].Overloads);
+      if IsOverrideSym(AMid, ASym) then
+        Inc(FPendingOverrides[LIdx]);
+    end;
     Exit;
   end;
   if FCount = Length(FItems) then
+  begin
     if FCount = 0 then
       SetLength(FItems, 64)
     else
       SetLength(FItems, FCount * 2);
+    SetLength(FPendingOverrides, Length(FItems));
+  end;
+  FPendingOverrides[FCount] := Ord((AKind = skRoutine) and
+    IsOverrideSym(AMid, ASym));
   FItems[FCount].Name := AName;
   FItems[FCount].Kind := AKind;
   FItems[FCount].Bucket := ABucket;
@@ -2437,6 +2597,16 @@ begin
   if (FContext = ccType) and not (LM.Symbols[ASym].Kind in
     [skType, skBuiltinType, skUnitRef, skGenericParam, skConst,
      skEnumValue]) then
+    Exit;
+  // ... except where the type must be NAMED: `procedure P(A: 1..2)` and
+  // `function F: 1..2` are E2029, `(A: K)` E2005 (local/probe-cc P5a-P5e).
+  if FTypeNameOnly and (LM.Symbols[ASym].Kind in [skConst, skEnumValue]) then
+    Exit;
+  // `inherited X` names a method or a property of an ancestor; a field, a
+  // class var, a nested type or a const there is E2096 Method identifier
+  // expected (12.1.2; local/probe-cc P7).
+  if (FContext = ccInherited) and
+     not (LM.Symbols[ASym].Kind in [skRoutine, skProperty]) then
     Exit;
   // Property accessor positions take members of the right SHAPE only:
   // fields always, routines split by head - a function can stand after
@@ -2607,11 +2777,13 @@ begin
   end;
 end;
 
-// Visibility of a PROJECT member from this caret (11 sec. 11.2.1): private is
-// same-unit-friendly, protected needs the caret's struct to descend from the
-// declaring one (non-strict protected is also same-unit-friendly), strict
-// variants drop the friend rule. svDefault means "no section stated" and
-// stays visible - hiding on a guess is the wrong failure mode for a list.
+// Visibility of a PROJECT member from this caret (11 sec. 11.2.1): private and
+// protected are same-unit-friendly - the member's unit, or (protected) a base
+// whose type this unit declares; a generic's protected is open in a method
+// body; strict protected needs the caret's struct to descend from the
+// declaring one, and the strict variants drop the friend rule. svDefault
+// means "no section stated" and stays visible - hiding on a guess is the
+// wrong failure mode for a list.
 function TPasCompletion.MemberVisible(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
@@ -2643,11 +2815,11 @@ begin
         if Result then
           Exit;
         // dcc enforces a GENERIC class's plain `protected` only outside
-        // method bodies (dcc32 37.0-probed; spec 11.2.1) - and completion
-        // positions are method bodies in every case that matters, so a
-        // generic's protected members stay visible. spring4d's collections
-        // depend on the access being legal.
-        if (LM.Symbols[ASym].Visibility = svProtected) and
+        // method bodies (spec 11.2.1) - spring4d's collections depend on the
+        // access being legal there. From a unit-level routine, a main block
+        // or an anonymous method in one it is E2362 (local/probe-cc P2a,
+        // P2f, P2j): `L.Notify` in a program's main block is no candidate.
+        if FInMethodBody and (LM.Symbols[ASym].Visibility = svProtected) and
            (LM.Symbols[ASym].Scope <> NIL_SCOPE) then
         begin
           LDeclStruct := LM.Scopes[LM.Symbols[ASym].Scope].StructSym;
@@ -2655,6 +2827,13 @@ begin
              (sfGeneric in LM.Symbols[LDeclStruct].Flags) then
             Exit(True);
         end;
+        // Plain `protected` has no descendant rule of its own: in a
+        // descendant's method in another unit, TA's protected P is legal
+        // through Self or a value of a class declared in that unit (the
+        // friend rule above) and E2362 through a TA, a sibling or even a
+        // further descendant declared elsewhere (local/probe-cc UB, UE).
+        if LM.Symbols[ASym].Visibility = svProtected then
+          Exit(False);
         if LM.Symbols[ASym].Scope = NIL_SCOPE then
           Exit(True);
         LDeclStruct := LM.Scopes[LM.Symbols[ASym].Scope].StructSym;
@@ -2723,7 +2902,10 @@ begin
   // after it in the same request.
   LSaveOwn := FBaseOwnUnit;
   try
-    if AX.UnitId = FProjMid then
+    // A type parameter of this unit is no type of it: `V.GetDisposed` on a
+    // `T: class` value is E2362 in its own generic (local/probe-cc P1a).
+    if (AX.UnitId = FProjMid) and (ProjModel(AX.UnitId,
+       'CollectProjMembers').Symbols[AX.Sym].Kind <> skGenericParam) then
       FBaseOwnUnit := True;
     FProj.EnumMembersX(FProjMid, AX,
       procedure(AMid, ASym, ACtx: Integer)
@@ -3097,6 +3279,10 @@ var
   LInterfaceOnly: Boolean;
   LRef: TPasComplTypeRef;
   LChainBucket: TPasComplBucket;
+  LCaretTypeSec: Integer;
+  // The caret is a slot that may name a type declared later in its own
+  // section: a pointer's target (`^|`) or a class reference's (`class of |`).
+  LEarlySlot: Boolean;
 
   // The inherited members of the caret struct whose own member scope AScope
   // is - once per struct.
@@ -3167,6 +3353,12 @@ begin
     LWith := FModel.Tree.Nodes[LWith].Parent;
   end;
   FClassSide := False;
+  // `Self` has no symbol (11.3.3), so no scope lists it: a method body with
+  // one names it beside its parameters (3.3.2 step 2).
+  LScope := MethodBodyScope(AInfo.Scope);
+  if (FContext in [ccStatement, ccExpression]) and (LScope <> NIL_SCOPE) and
+     MethodHasSelf(LScope) then
+    AddItem('Self', 'self', skParam, cbLocal, -1, NIL_SYM, NIL_INST);
   // 2. The lexical scope chain, deep (joined scopes included) - this is
   // exactly what unqualified lookup sees intra-unit: locals, params, the
   // enclosing struct's own members through the method-body join, enum
@@ -3180,6 +3372,16 @@ begin
   EnsureAncestry(AInfo.Scope);
   SetLength(LStructDone, Length(FCaretStructs));
   LChainBucket := cbLocal;
+  LCaretTypeSec := UpChainNode(AInfo.Node, nkTypeSec);
+  if AInfo.Kind = ckIdent then
+    LIdx := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LIdx := AInfo.RawToken;
+  LEarlySlot := (LIdx >= 0) and
+    ((FModel.Tree.Source.Files[0].Tokens[LIdx].Kind = tkCaret) or
+     ((FModel.Tree.Source.Files[0].Tokens[LIdx].Kind = tkOf) and
+      (UpChainKind(AInfo.Node, [nkClassOf, nkArrayType, nkSetType,
+        nkFileType, nkCaseStmt]) = nkClassOf)));
   LOnSym :=
     procedure(ASym, AScopeOfSym: Integer)
     var
@@ -3193,11 +3395,33 @@ begin
       else
         LBucket := LChainBucket;
       end;
-      // Inline vars/consts are visible only BELOW their declaration
-      // (3.1.3) - the same positional rule ResolveAt applies.
-      if (FModel.Scopes[AScopeOfSym].Kind = sckBlock) and
+      // A declaration is visible only BELOW itself (3.3.2, "position
+      // counts"): an inline var or const (3.1.3), and a unit-level or a
+      // routine's own declaration alike - an implementation-section const,
+      // type or routine under the caret is E2003 there, and so is a local
+      // declared after a nested routine that names it (local/probe-cc
+      // U3a-U3d). A struct's members are the exception: every method body
+      // sees all of them. So is a type the caret's own `type` section
+      // completes below it, where the language allows naming it early: a
+      // pointer's target (`P = ^T; T = record`, 10.1.1), a class reference's
+      // (`TC = class of T; T = class`, P10d), and a class whose
+      // forward `TFoo = class;` stands above the caret (11.1.1; the
+      // symbol's DeclNode is the completing declaration) - nothing else,
+      // `TA = record X: TB; end; TB = Integer;` is E2003 (local/probe-cc
+      // P10a-P10c).
+      // (The section holding the caret, or one around it: a class's nested
+      // `public type` section sits inside the unit's.)
+      if not (FModel.Scopes[AScopeOfSym].Kind in [sckStruct, sckSystem]) and
          FModel.DeclaredAfter(ASym, FCaretVis) then
-        Exit;
+      begin
+        if (LCaretTypeSec = NIL_NODE) or
+           (FModel.Symbols[ASym].Kind <> skType) then
+          Exit;
+        var LSymSec := UpChainNode(FModel.Symbols[ASym].DeclNode, nkTypeSec);
+        if (LSymSec = NIL_NODE) or not IsDescendantNode(AInfo.Node, LSymSec)
+           or not (LEarlySlot or ForwardTypeAbove(ASym, LSymSec)) then
+          Exit;
+      end;
       AddSym(-1, ASym, NIL_INST, LBucket);
     end;
   LScope := AInfo.Scope;
@@ -3419,6 +3643,52 @@ end;
 
 // The innermost node of the given kinds on ANode's parent chain, stopping at
 // statement/section boundaries - the disambiguator for `:`/`=`/`of`/`(`.
+// Does the `type` section ATypeSec declare ASym's FORWARD (`TFoo = class;`,
+// `IFoo = interface;`) above the caret? The resolver moved the symbol's
+// DeclNode to the completing declaration, so the section is read for it.
+function TPasCompletion.ForwardTypeAbove(ASym, ATypeSec: Integer): Boolean;
+var
+  LDecl, LChild: Integer;
+begin
+  Result := False;
+  LDecl := FModel.Tree.Nodes[ATypeSec].FirstChild;
+  while (LDecl <> NIL_NODE) and
+        (FModel.Tree.Nodes[LDecl].FirstToken <= FCaretVis) do
+  begin
+    if FModel.Tree.Nodes[LDecl].Kind = nkTypeDecl then
+    begin
+      LChild := FModel.Tree.Nodes[LDecl].FirstChild;
+      while (LChild <> NIL_NODE) and
+            (FModel.Tree.Nodes[LChild].Kind <> nkIdent) do
+        LChild := FModel.Tree.Nodes[LChild].NextSibling;
+      if (LChild <> NIL_NODE) and (FModel.RefMap[LChild] = ASym) then
+        while LChild <> NIL_NODE do
+        begin
+          case FModel.Tree.Nodes[LChild].Kind of
+            nkClassType:
+              if FModel.Tree.Nodes[LChild].Aux = 1 then
+                Exit(True);
+            nkInterfaceType:
+              if FModel.Tree.Nodes[LChild].Aux and 2 <> 0 then
+                Exit(True);
+          end;
+          LChild := FModel.Tree.Nodes[LChild].NextSibling;
+        end;
+    end;
+    LDecl := FModel.Tree.Nodes[LDecl].NextSibling;
+  end;
+end;
+
+// The nearest node of AKind on ANode's parent chain (ANode included), or
+// NIL_NODE.
+function TPasCompletion.UpChainNode(ANode: Integer;
+  AKind: TPasNodeKind): Integer;
+begin
+  Result := ANode;
+  while (Result <> NIL_NODE) and (FModel.Tree.Nodes[Result].Kind <> AKind) do
+    Result := FModel.Tree.Nodes[Result].Parent;
+end;
+
 function TPasCompletion.UpChainKind(ANode: Integer;
   const AKinds: array of TPasNodeKind): TPasNodeKind;
 var
@@ -3521,6 +3791,16 @@ begin
   if LPrev < 0 then
     Exit(ccStatement);
   LKind := LTS.Tokens[LPrev].Kind;
+  // A visibility section word is identifier-lexed (a directive, 11.2.1) -
+  // inside a structured type the caret after it starts a member.
+  if (LKind = tkIdentifier) and (UpChainKind(AInfo.Node, [nkClassType,
+     nkRecordType, nkObjectType, nkInterfaceType, nkHelperType]) <> nkError)
+  then
+    for var LWord in ['private', 'protected', 'public', 'published',
+      'automated', 'strict'] do
+      if SameText(Copy(LTS.Source, LTS.Tokens[LPrev].Start + 1,
+         LTS.Tokens[LPrev].Len), LWord) then
+        Exit(ccStatement);
   case LKind of
     tkInherited:
       // `inherited |` - the ancestor's members (12.1.2).
@@ -3619,6 +3899,84 @@ begin
   end;
 end;
 
+{ A ccType position after a colon that a heading owns - a parameter's type,
+  a function's result, a property's type, those of a procedural type: the
+  grammar takes a type identifier there and no other type expression (6.2
+  ParamType = TypeRef). A var, field, const or type declaration's colon is
+  not one of them (a subrange is legal there, `X: 1..9`). }
+function TPasCompletion.TypeNameOnlyAt(const AInfo: TPasCaretInfo): Boolean;
+var
+  LPrev: Integer;
+begin
+  Result := False;
+  if AInfo.Kind = ckIdent then
+    LPrev := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LPrev := AInfo.RawToken;
+  if (LPrev < 0) or
+     (FModel.Tree.Source.Files[0].Tokens[LPrev].Kind <> tkColon) then
+    Exit;
+  Result := UpChainKind(AInfo.Node, [nkParam, nkPropertyDecl, nkRoutine,
+    nkProcType, nkVarDecl, nkVarSec, nkConstDecl, nkTypeDecl, nkInlineVar,
+    nkInlineConst]) in [nkParam, nkPropertyDecl, nkRoutine, nkProcType];
+end;
+
+{ The construct a statement-class caret (ccStatement) stands in: the
+  innermost statement list, routine declaration part or structured type on
+  the chain - a caret right after a construct's closing `;` / `end` is past
+  that construct. nkError when none is (unit level). }
+function TPasCompletion.StatementSiteKind(
+  const AInfo: TPasCaretInfo): TPasNodeKind;
+var
+  LNode: Integer;
+begin
+  LNode := AInfo.Node;
+  if (LNode <> NIL_NODE) and
+     (FModel.Tree.Nodes[LNode].LastToken = AInfo.VisToken) and
+     (FModel.Tree.Source.Files[0].Tokens[AInfo.RawToken].Kind in
+       [tkSemicolon, tkEnd]) then
+    LNode := FModel.Tree.Nodes[LNode].Parent;
+  // A record's variant part is no member start: its labels are constant
+  // expressions (`msAny: ();`, 9.1.3).
+  Result := UpChainKind(LNode, [nkBlock, nkInitSec, nkFinalSec, nkRoutine,
+    nkVariantPart, nkClassType, nkRecordType, nkObjectType, nkInterfaceType,
+    nkHelperType]);
+end;
+
+{ The start of a member in a structured type's declaration (11.1): what can
+  stand there is a keyword (a visibility, `procedure`, `property`, `class`,
+  `type`, `const`, `var`, ...) or the NAME of a new field - nothing to
+  complete - so no declared name is a candidate; a type stands only after
+  the field's colon or inside an attribute's brackets, other contexts. }
+function TPasCompletion.IsStructMemberStart(
+  const AInfo: TPasCaretInfo): Boolean;
+var
+  LPrev: Integer;
+begin
+  Result := False;
+  if FContext <> ccStatement then
+    Exit;
+  // Only where a member STARTS: after a `;`, a section word, the type's
+  // opening word or its heritage / GUID bracket. After `procedure` or
+  // `function` an interface's name may stand - a method resolution clause,
+  // `procedure IFoo.M = DoM;` (14.2.2).
+  if AInfo.Kind = ckIdent then
+    LPrev := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LPrev := AInfo.RawToken;
+  if (LPrev < 0) or not (FModel.Tree.Source.Files[0].Tokens[LPrev].Kind in
+     [tkSemicolon, tkIdentifier, tkClass, tkRecord, tkObject, tkInterface,
+      tkDispinterface, tkRParen, tkRBracket, tkEnd]) then
+    Exit;
+  case StatementSiteKind(AInfo) of
+    nkClassType, nkRecordType, nkObjectType, nkInterfaceType, nkHelperType:
+      Result := True;
+    nkError:
+      Result := (AInfo.Scope <> NIL_SCOPE) and
+        (FModel.Scopes[AInfo.Scope].Kind = sckStruct);
+  end;
+end;
+
 procedure TPasCompletion.AddContextKeywords(const AInfo: TPasCaretInfo);
 const
   STMT_WORDS: array[0..21] of string = ('begin', 'end', 'if', 'then', 'else',
@@ -3639,30 +3997,24 @@ const
   // A routine's declaration part, before its `begin` (6.1).
   ROUTINE_WORDS: array[0..7] of string = ('var', 'const', 'type', 'label',
     'procedure', 'function', 'begin', 'asm');
-var
-  LNode: Integer;
+  // A parameter's, a result's, a property's type (TypeNameOnlyAt).
+  PARAM_TYPE_WORDS: array[0..2] of string = ('array', 'string', 'file');
 begin
   case FContext of
     ccExpression:
       AddKeywords(EXPR_WORDS);
     ccType:
-      AddKeywords(TYPE_WORDS);
+      if FTypeNameOnly then
+        AddKeywords(PARAM_TYPE_WORDS)
+      else
+        AddKeywords(TYPE_WORDS);
     ccStatement:
       begin
         // Decided by the NODE (audit A1-32): a statement list - a block, a
         // program's main block, an initialization or finalization section -
         // takes statement words; a routine's declaration part declaration
-        // words; elsewhere the scope says unit level or a struct body. A
-        // caret right after a construct's closing `;` / `end` is past it.
-        LNode := AInfo.Node;
-        if (LNode <> NIL_NODE) and
-           (FModel.Tree.Nodes[LNode].LastToken = AInfo.VisToken) and
-           (FModel.Tree.Source.Files[0].Tokens[AInfo.RawToken].Kind in
-             [tkSemicolon, tkEnd]) then
-          LNode := FModel.Tree.Nodes[LNode].Parent;
-        case UpChainKind(LNode, [nkBlock, nkInitSec, nkFinalSec, nkRoutine,
-          nkClassType, nkRecordType, nkObjectType, nkInterfaceType,
-          nkHelperType]) of
+        // words; elsewhere the scope says unit level or a struct body.
+        case StatementSiteKind(AInfo) of
           nkBlock, nkInitSec, nkFinalSec:
             AddKeywords(STMT_WORDS);
           nkRoutine:
@@ -4500,6 +4852,7 @@ begin
     ACaret := LInfo;
   end;
   FItems := nil;
+  FPendingOverrides := nil;
   FCount := 0;
   // Not Clear: it discards the table's capacity AND virtual-notifies every
   // old entry - recreating at the same capacity is cheaper at list scale.
@@ -4509,6 +4862,8 @@ begin
   FClassSide := False;
   FFieldsOnly := False;
   FBaseOwnUnit := False;
+  FInMethodBody := MethodBodyScope(LInfo.Scope) <> NIL_SCOPE;
+  FTypeNameOnly := (FContext = ccType) and TypeNameOnlyAt(LInfo);
   case FContext of
     ccNone:
       Exit(False);
@@ -4603,20 +4958,94 @@ begin
       end;
   else
     begin
-      EnsureAncestry(LInfo.Scope);
-      CollectScope(LInfo);
+      // A member's start in a type declaration takes keywords alone.
+      if not IsStructMemberStart(LInfo) then
+      begin
+        EnsureAncestry(LInfo.Scope);
+        CollectScope(LInfo);
+      end;
       AddContextKeywords(LInfo);
     end;
   end;
   SetLength(FItems, FCount);
   AItems := FItems;
   FItems := nil;
+  FPendingOverrides := nil;
   FCount := 0;
 end;
 
 function TPasCompletion.EnclosingStructSym(AScope: Integer): Integer;
 begin
   Result := FModel.EnclosingStructSymOfScope(AScope);
+end;
+
+{ The routine scope of the method whose body holds AScope - the innermost
+  routine scope on the chain that names its struct, past nested routines and
+  anonymous methods - or NIL_SCOPE outside every method body: unit level, a
+  main block, a struct's declaration. }
+function TPasCompletion.MethodBodyScope(AScope: Integer): Integer;
+begin
+  while AScope <> NIL_SCOPE do
+  begin
+    case FModel.Scopes[AScope].Kind of
+      sckRoutine:
+        if FModel.Scopes[AScope].StructSym <> NIL_SYM then
+          Exit(AScope);
+      sckStruct, sckUnit, sckImplementation:
+        Break;
+    end;
+    AScope := FModel.Scopes[AScope].Parent;
+  end;
+  Result := NIL_SCOPE;
+end;
+
+{ Does the method of AMethodScope have `Self` (3.3.2's body rule): an
+  instance method, a constructor, a non-static class method do; a `class
+  ... static` one does not, and only its declaration says `static` - the
+  implementation heading never repeats it, so the struct's same-named class
+  routine is asked. }
+function TPasCompletion.MethodHasSelf(AMethodScope: Integer): Boolean;
+var
+  LRoutine, LChild, LName, LMembers, LDecl, LDeclRoutine: Integer;
+begin
+  Result := True;
+  LRoutine := FModel.Scopes[AMethodScope].OwnerNode;
+  if (LRoutine = NIL_NODE) or
+     (FModel.Tree.Nodes[LRoutine].Kind <> nkRoutine) or
+     (FModel.Tree.Nodes[LRoutine].Aux <> 1) then
+    Exit;
+  LName := NIL_NODE;
+  LChild := FModel.Tree.Nodes[LRoutine].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if nfName in FModel.Tree.Nodes[LChild].Flags then
+      LName := LChild
+    else if FModel.Tree.Nodes[LChild].Kind = nkDirective then
+      if FModel.Tree.NodeTextEquals(LChild, 'static') then
+        Exit(False);
+    LChild := FModel.Tree.Nodes[LChild].NextSibling;
+  end;
+  LMembers := FModel.Symbols[FModel.Scopes[AMethodScope].StructSym].MemberScope;
+  if (LName = NIL_NODE) or (LMembers = NIL_SCOPE) then
+    Exit;
+  LDecl := FModel.FindLocal(LMembers, FModel.Tree.NodeNameLower(LName));
+  while LDecl <> NIL_SYM do
+  begin
+    LDeclRoutine := RoutineNodeOf(FModel, LDecl);
+    if (LDeclRoutine <> NIL_NODE) and (LDeclRoutine <> LRoutine) and
+       (FModel.Tree.Nodes[LDeclRoutine].Aux = 1) then
+    begin
+      LChild := FModel.Tree.Nodes[LDeclRoutine].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        if (FModel.Tree.Nodes[LChild].Kind = nkDirective) and
+           FModel.Tree.NodeTextEquals(LChild, 'static') then
+          Exit(False);
+        LChild := FModel.Tree.Nodes[LChild].NextSibling;
+      end;
+    end;
+    LDecl := FModel.Symbols[LDecl].NextOverload;
+  end;
 end;
 
 end.
