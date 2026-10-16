@@ -144,7 +144,8 @@ type
 
   TSearchTabKind = (stkRefs, stkRename, stkOverrides, stkImpls,
     stkDescendants, stkAssigns, stkCreations, stkDestructions,
-    stkDefines, stkDefinesAt, stkUnused, stkUnusedProject, stkUnreferenced);
+    stkDefines, stkDefinesAt, stkUnused, stkUnusedProject, stkUnreferenced,
+    stkOptionsAt);
 
   TFindRefTab = class(TTabSheet)
   public
@@ -159,7 +160,8 @@ type
     // and -5 are the two cursor-free define pages (Find All Defines /
     // Defines at cursor), one page each, told apart by Kind; SymSym = -6 is
     // an Unused Units page (SymMid the unit's model, -1 for the project's),
-    // SymSym = -7 the Units Nobody Uses page.
+    // SymSym = -7 the Units Nobody Uses page, SymSym = -8 the Options at
+    // cursor page.
     SymMid, SymSym: Integer;
     SymBuiltinName: string;
     { WHICH question this page answers about (SymMid, SymSym). Six answers
@@ -288,6 +290,8 @@ type
     FindDefines1: TMenuItem;
     FindDefinesAtAction: TAction;
     FindDefinesAt1: TMenuItem;
+    FindOptionsAtAction: TAction;
+    FindOptionsAt1: TMenuItem;
     FindUnusedSep1: TMenuItem;
     FindUnusedUnitsAction: TAction;
     FindUnusedUnits1: TMenuItem;
@@ -370,6 +374,7 @@ type
     procedure FindDefinesActionExecute(Sender: TObject);
     procedure FindDefinesAtActionUpdate(Sender: TObject);
     procedure FindDefinesAtActionExecute(Sender: TObject);
+    procedure FindOptionsAtActionExecute(Sender: TObject);
     procedure FindUnusedUnitsActionUpdate(Sender: TObject);
     procedure FindUnusedUnitsActionExecute(Sender: TObject);
     procedure FindProjectUnusedUnitsActionUpdate(Sender: TObject);
@@ -1791,6 +1796,78 @@ begin
   LTab := SearchTabFor(-1, -5, stkDefinesAt);
   PopulateFindRefTab(LTab, Format('Defines at %s:%d (%d)',
     [TPath.GetFileName(LFilePath), LLine, Length(LHits)]), LHits, False,
+    Default(TPasRefHit), LPrefixes, nil, True);
+  pgcBottom.ActivePage := LTab;
+end;
+
+{ Find All > Options at cursor: every compiler option's value where the caret
+  is - what an `$IFOPT` written there would see (FNav.OptionsAt) - one flat
+  row per option, in FNav's order: dcc's defaults, the project's, then the
+  ones a directive set. Each row names the option short form first, then
+  long (`$R- RANGECHECKS OFF`; the long form alone for an option with no
+  letter). A default or project row says so as Defines at cursor's base
+  rows do (`default: ` / `project: `); a directive's row says where it is
+  (file and line, the directive highlighted, a double-click lands on it).
+  Enabled like Defines at cursor (it shares its OnUpdate); one page, key
+  -8. }
+
+// `$R- RANGECHECKS OFF`, `$A8 ALIGN 8`, `SCOPEDENUMS ON`.
+function OptionRowText(const ASite: TPasOptionSite): string;
+begin
+  Result := ASite.Name + ' ' + ASite.Value;
+  if ASite.Letter = #0 then
+    Exit;
+  if ASite.Option in [optA, optZ] then
+    Result := '$' + ASite.Letter + ASite.Value + ' ' + Result
+  else if ASite.Value = 'ON' then
+    Result := '$' + ASite.Letter + '+ ' + Result
+  else
+    Result := '$' + ASite.Letter + '- ' + Result;
+end;
+
+procedure TfrmMain.FindOptionsAtActionExecute(Sender: TObject);
+const
+  ORIGINS: array[TPasOptionOrigin] of string = ('', 'project: ', 'default: ');
+var
+  LLine, LCol, LIdx, LUnit: Integer;
+  LFilePath, LText: string;
+  LEditor: TSynEdit;
+  LSites: TArray<TPasOptionSite>;
+  LHits: TArray<TPasRefHit>;
+  LPrefixes: TArray<string>;
+  LTab: TFindRefTab;
+begin
+  if not Assigned(FNav) or
+     not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
+    Exit;
+  LSites := FNav.OptionsAt(FNav.ModelIdOf(LFilePath), LLine, LCol);
+  SetLength(LHits, Length(LSites));
+  SetLength(LPrefixes, Length(LSites));
+  LUnit := 0;
+  for LIdx := 0 to High(LSites) do
+  begin
+    LHits[LIdx] := LSites[LIdx].Hit;
+    LText := OptionRowText(LSites[LIdx]);
+    if LSites[LIdx].Origin = ooUnit then
+    begin
+      // The directive's own line follows, the directive highlighted.
+      Inc(LUnit);
+      LPrefixes[LIdx] := Format('%s (Line %d): %s - ',
+        [TPath.GetFileName(LSites[LIdx].Hit.FilePath), LSites[LIdx].Hit.Line,
+         LText]);
+    end
+    else
+    begin
+      // No source line to quote: the row is the option itself.
+      LPrefixes[LIdx] := ORIGINS[LSites[LIdx].Origin];
+      LHits[LIdx].Snippet := LText;
+      LHits[LIdx].HiFrom := 0;
+      LHits[LIdx].HiTo := Length(LText);
+    end;
+  end;
+  LTab := SearchTabFor(-1, -8, stkOptionsAt);
+  PopulateFindRefTab(LTab, Format('Options at %s:%d (%d set in units)',
+    [TPath.GetFileName(LFilePath), LLine, LUnit]), LHits, False,
     Default(TPasRefHit), LPrefixes, nil, True);
   pgcBottom.ActivePage := LTab;
 end;

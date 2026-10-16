@@ -1737,6 +1737,25 @@ const
   INC_DEFN =
     '{$DEFINE NESTED}'#10;                                 // inc 1
 
+  // OptionsAt: an include's switches outlive it, its $PUSHOPT pairs with the
+  // unit's $POPOPT (1.3.1, 1.3.4), a dead switch changes nothing.
+  UNIT_OPT =
+    'unit NavOpt;'#10 +                                    // 1
+    'interface'#10 +                                       // 2
+    '{$R+}'#10 +                                           // 3
+    '{$I NavOpt.inc}'#10 +                                 // 4
+    'const C1 = 1;'#10 +                                   // 5
+    '{$POPOPT}'#10 +                                       // 6
+    'const C2 = 2;'#10 +                                   // 7
+    '{$IFDEF NAVOPTNOPE}{$B+}{$ENDIF}'#10 +                // 8
+    '{$RANGECHECKS OFF}{$SCOPEDENUMS ON}'#10 +             // 9
+    'implementation'#10 +                                  // 10
+    'end.'#10;                                             // 11
+  INC_OPT =
+    '{$Q+}'#10 +                                           // inc 1
+    '{$PUSHOPT}'#10 +                                      // inc 2
+    '{$ALIGN 4}{$RTTI EXPLICIT METHODS([vcPublic])}'#10;   // inc 3
+
 var
   GProj: TPasSemaProject;
   GNav: TPasNavigator;
@@ -3535,6 +3554,25 @@ begin
       Exit(True);
 end;
 
+// An OptionsAt row by option name: its value and origin; for a unit row the
+// directive's file, line and col too.
+function HasOpt(const ASites: TArray<TPasOptionSite>; const AName,
+  AValue: string; AOrigin: TPasOptionOrigin; const AFile: string = '';
+  ALine: Integer = 0; ACol: Integer = 0): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  for LIdx := 0 to High(ASites) do
+    if ASites[LIdx].Name = AName then
+      Exit((ASites[LIdx].Value = AValue) and
+        (ASites[LIdx].Origin = AOrigin) and
+        ((AOrigin <> ooUnit) or
+         (SameText(TPath.GetFileName(ASites[LIdx].Hit.FilePath), AFile) and
+          (ASites[LIdx].Hit.Line = ALine) and
+          (ASites[LIdx].Hit.Col = ACol))));
+end;
+
 // How many rows carry AName at all (any origin, any activity).
 function SiteCount(const ASites: TArray<TPasDefineSite>;
   const AName: string): Integer;
@@ -3780,6 +3818,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDefL.pas'), UNIT_DEFL);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDefL.inc'), INC_DEFL);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDefN.inc'), INC_DEFN);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavOpt.pas'), UNIT_OPT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavOpt.inc'), INC_OPT);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavIfn.pas'), UNIT_IFN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.pas'), UNIT_OUT);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDpA.pas'), UNIT_DPA);
@@ -4424,6 +4464,60 @@ begin
       Ok('DefinesAt: no model (-1) -> the base set alone',
         (SiteCount(GNav.DefinesAt(-1, 0, 0), 'NAVFOO') = 0) and
         HasSite(GNav.DefinesAt(-1, 0, 0), 'WIN32', doPlatform, True));
+
+      // OptionsAt: what an $IFOPT at the cursor would see, and who set it.
+      var LMidOpt := GNav.ModelIdOf(TPath.Combine(LDir, 'NavOpt.pas'));
+      var LOpts := GNav.OptionsAt(LMidOpt, 1, 1);
+      Ok('OptionsAt line 1: one row per option, dcc''s defaults',
+        (Length(LOpts) = 25) and
+        HasOpt(LOpts, 'RANGECHECKS', 'OFF', ooDefault) and
+        HasOpt(LOpts, 'ALIGN', '8', ooDefault) and
+        HasOpt(LOpts, 'LONGSTRINGS', 'ON', ooDefault) and
+        HasOpt(LOpts, 'RTTI', 'INHERIT', ooDefault) and
+        (LOpts[0].Name = 'ALIGN') and (LOpts[0].Letter = 'A') and
+        (LOpts[High(LOpts)].Name = 'VARPROPSETTER') and
+        (LOpts[High(LOpts)].Letter = #0));
+      LOpts := GNav.OptionsAt(LMidOpt, 5, 1);
+      Ok('OptionsAt line 5: $R+ of the unit, the include''s switches',
+        HasOpt(LOpts, 'RANGECHECKS', 'ON', ooUnit, 'NavOpt.pas', 3, 1) and
+        HasOpt(LOpts, 'OVERFLOWCHECKS', 'ON', ooUnit, 'NavOpt.inc', 1, 1) and
+        HasOpt(LOpts, 'ALIGN', '4', ooUnit, 'NavOpt.inc', 3, 1) and
+        HasOpt(LOpts, 'RTTI', 'EXPLICIT METHODS([vcPublic])', ooUnit,
+          'NavOpt.inc', 3, 11));
+      LOpts := GNav.OptionsAt(LMidOpt, 3, 6);
+      Ok('OptionsAt line 3 end: an $I below the cursor has not run yet',
+        HasOpt(LOpts, 'OVERFLOWCHECKS', 'OFF', ooDefault) and
+        HasOpt(LOpts, 'RANGECHECKS', 'ON', ooUnit, 'NavOpt.pas', 3, 1));
+      LOpts := GNav.OptionsAt(LMidOpt, 7, 1);
+      Ok('OptionsAt line 7: $POPOPT restores the values and their origins',
+        HasOpt(LOpts, 'ALIGN', '8', ooDefault) and
+        HasOpt(LOpts, 'RTTI', 'INHERIT', ooDefault) and
+        HasOpt(LOpts, 'OVERFLOWCHECKS', 'ON', ooUnit, 'NavOpt.inc', 1, 1) and
+        HasOpt(LOpts, 'RANGECHECKS', 'ON', ooUnit, 'NavOpt.pas', 3, 1));
+      LOpts := GNav.OptionsAt(LMidOpt, 10, 1);
+      Ok('OptionsAt line 10: long forms, a dead $B+ changes nothing',
+        HasOpt(LOpts, 'RANGECHECKS', 'OFF', ooUnit, 'NavOpt.pas', 9, 1) and
+        HasOpt(LOpts, 'SCOPEDENUMS', 'ON', ooUnit, 'NavOpt.pas', 9, 19) and
+        HasOpt(LOpts, 'BOOLEVAL', 'OFF', ooDefault));
+      Ok('OptionsAt line 10: defaults first, the directives'' last by position',
+        (LOpts[0].Origin = ooDefault) and
+        (LOpts[High(LOpts) - 1].Name = 'RANGECHECKS') and
+        (LOpts[High(LOpts)].Name = 'SCOPEDENUMS') and
+        (LOpts[High(LOpts)].Letter = #0));
+      var LOldStart := GProj.SwitchStart;
+      GProj.SwitchStart := PasStartOptState(['-$R+', '-$A4']);
+      LOpts := GNav.OptionsAt(-1, 0, 0);
+      Ok('OptionsAt: no model (-1) -> the project''s start, said so',
+        (Length(LOpts) = 25) and
+        HasOpt(LOpts, 'RANGECHECKS', 'ON', ooProject) and
+        HasOpt(LOpts, 'ALIGN', '4', ooProject) and
+        HasOpt(LOpts, 'OVERFLOWCHECKS', 'OFF', ooDefault));
+      Ok('OptionsAt: the project''s rows after the defaults, in option order',
+        (LOpts[High(LOpts) - 1].Name = 'ALIGN') and
+        (LOpts[High(LOpts) - 1].Origin = ooProject) and
+        (LOpts[High(LOpts)].Name = 'RANGECHECKS') and
+        (LOpts[High(LOpts) - 2].Origin = ooDefault));
+      GProj.SwitchStart := LOldStart;
 
       // A shared include (audit P2: C1-27): NavDef.inc is read by NavDef
       // and NavDef2, one row per site, active when one includer reached it.

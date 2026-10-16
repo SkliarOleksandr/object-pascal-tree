@@ -695,6 +695,14 @@ object frmMain: TfrmMain
       OnExecute = FindDefinesAtActionExecute
       OnUpdate = FindDefinesAtActionUpdate
     end
+    object FindOptionsAtAction: TAction
+      Caption = 'Options at cursor'
+      Hint =
+        'The compiler options in effect at the caret - what an $IFOPT wri' +
+        'tten there would see, each pointing at the directive that set it'
+      OnExecute = FindOptionsAtActionExecute
+      OnUpdate = FindDefinesAtActionUpdate
+    end
     object FindUnusedUnitsAction: TAction
       Caption = 'Unused Units'
       Hint =
@@ -781,6 +789,9 @@ object frmMain: TfrmMain
       end
       object FindDefinesAt1: TMenuItem
         Action = FindDefinesAtAction
+      end
+      object FindOptionsAt1: TMenuItem
+        Action = FindOptionsAtAction
       end
       object FindUnusedSep1: TMenuItem
         Caption = '-'

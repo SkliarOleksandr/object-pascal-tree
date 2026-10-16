@@ -106,6 +106,26 @@ type
     Active: Boolean;
   end;
 
+  { One row of OptionsAt: a compiler option and the value it has at a
+    position. Name is its long form (PAS_OPTION_NAMES), Letter its switch
+    letter or #0 for a long-form-only one (SCOPEDENUMS, RTTI, VARPROPSETTER),
+    Value as PasOptionValue spells it. ooUnit: a live directive of the unit
+    or an include set it - Hit is that directive, highlighted whole (after a
+    `$POPOPT`, the directive that set the value the pop restored).
+    ooProject: the project's switches set it (a `.dproj` DCC_* option, dcc's
+    `-$`), ooDefault: dcc's no-config value - neither has a source site, so
+    Hit is placed as a project define's is (TPasDefineSite) with Snippet =
+    Name + ' ' + Value. }
+  TPasOptionOrigin = (ooUnit, ooProject, ooDefault);
+  TPasOptionSite = record
+    Hit: TPasRefHit;
+    Option: TPasOption;
+    Name: string;
+    Letter: Char;
+    Value: string;
+    Origin: TPasOptionOrigin;
+  end;
+
   { One text replacement produced by PlanRename - the SAME identifier
     positions Find References reports (the declaration plus every resolved
     USE), turned into edits. Line/Col/Len address the OLD identifier in the
@@ -468,6 +488,11 @@ type
       ADefinesOnly: Boolean): TArray<TPasDefineRow>;
     procedure HitFromDefineRef(LM: TPasSemaModel; const ARef: TPasDefineRef;
       out AHit: TPasRefHit);
+    // Per file of LM's source, the main-file offset its directives are
+    // placed at in processing order: the `$I` that pulled it in, a nested
+    // include through its includer; -1 for a file no `$I` placed. The main
+    // file's own directives sit at their own offsets (entry 0 unused).
+    function IncludeAnchors(LM: TPasSemaModel): TArray<Integer>;
     // Declaration<->implementation toggle helpers (all pure CST walks - no
     // dependency on the resolver's symbol table, so a redeclaration or an
     // unusual overload shape can never break navigation, only miss it).
@@ -973,6 +998,21 @@ type
       file has no model) returns the base set alone, so a host can offer the
       command everywhere. Never a dead-branch row. }
     function DefinesAt(AMid, ALine, ACol: Integer): TArray<TPasDefineSite>;
+    { Options at cursor: the compiler options IN EFFECT at (ALine, ACol) of
+      model AMid's main file - what an `$IFOPT` written there would see, and
+      the layout and RTTI state a declaration there gets. One row per
+      option (E, F, K and N, which have no switch, left out), base first:
+      dcc's defaults, then the project's, each in PAS_OPTION_NAMES order,
+      then the directives' by file/line/col. A row's value is the one after
+      the last live option directive
+      before the cursor in preprocessing order (an include's directives
+      count where its `$I` sat - options are linear, 1.3.1), else the
+      project's start state. Origin says what set it - a directive, the
+      project's switches, dcc's default - replaying `$PUSHOPT`/`$POPOPT`,
+      so a popped value names the directive that set it before the push.
+      AMid < 0 (the file has no model) returns the project's start state,
+      so a host can offer the command everywhere. }
+    function OptionsAt(AMid, ALine, ACol: Integer): TArray<TPasOptionSite>;
     { Find Overrides, part one: the cursor is on a CLASS METHOD (its
       declaration, its implementation header, or a use of it) whose override
       chain can be searched - the Enabled test for the command, and the
@@ -3653,25 +3693,10 @@ begin
       LTS := LM.Tree.Source.Files[0];
       if not LTS.OffsetOf(ALine, ACol, LOffset) then
         LOffset := MaxInt;   // past the end: everything the unit defines
-      // Processing order: an include's directives (FileId <> 0) sit between
-      // the main file's own, where its `$I` sat - so each file is placed at
-      // the main-file offset of the `$I` that pulled it in, a nested one
-      // through its includer (each inclusion has a file id of its own, and
-      // an includer's row precedes its includes'). The walk stops at the
-      // first directive placed past the cursor: an include with no main-file
-      // directive between the cursor and its `$I` was counted as run (audit
-      // A2-22).
-      SetLength(LAnchor, Length(LM.Tree.Source.FileNames));
-      for LIdx := 0 to High(LAnchor) do
-        LAnchor[LIdx] := -1;
-      for LIdx := 0 to High(LM.Tree.Source.IncludeRefs) do
-        with LM.Tree.Source.IncludeRefs[LIdx] do
-          if (IncludedFileId > 0) and (IncludedFileId <= High(LAnchor)) and
-             (FileId >= 0) and (FileId <= High(LAnchor)) then
-            if FileId = 0 then
-              LAnchor[IncludedFileId] := Start
-            else
-              LAnchor[IncludedFileId] := LAnchor[FileId];
+      // The walk stops at the first directive placed past the cursor: an
+      // include with no main-file directive between the cursor and its `$I`
+      // was counted as run (audit A2-22).
+      LAnchor := IncludeAnchors(LM);
       for LIdx := 0 to High(LM.Tree.Source.DefineRefs) do
         with LM.Tree.Source.DefineRefs[LIdx] do
         begin
@@ -3720,6 +3745,152 @@ begin
     LUndone.Free;
     LInEffect.Free;
   end;
+end;
+
+function TPasNavigator.IncludeAnchors(LM: TPasSemaModel): TArray<Integer>;
+var
+  LIdx: Integer;
+begin
+  // Processing order: an include's directives (FileId <> 0) sit between the
+  // main file's own, where its `$I` sat - so each file is placed at the
+  // main-file offset of the `$I` that pulled it in, a nested one through its
+  // includer (each inclusion has a file id of its own, and an includer's
+  // row precedes its includes').
+  SetLength(Result, Length(LM.Tree.Source.FileNames));
+  for LIdx := 0 to High(Result) do
+    Result[LIdx] := -1;
+  for LIdx := 0 to High(LM.Tree.Source.IncludeRefs) do
+    with LM.Tree.Source.IncludeRefs[LIdx] do
+      if (IncludedFileId > 0) and (IncludedFileId <= High(Result)) and
+         (FileId >= 0) and (FileId <= High(Result)) then
+        if FileId = 0 then
+          Result[IncludedFileId] := Start
+        else
+          Result[IncludedFileId] := Result[FileId];
+end;
+
+function TPasNavigator.OptionsAt(AMid, ALine,
+  ACol: Integer): TArray<TPasOptionSite>;
+type
+  TOrigins = array[TPasOption] of Integer;   // OptionRefs index; -1 = start
+var
+  LM: TPasSemaModel;
+  LOffset, LIdx, LAt, LMain, LCount: Integer;
+  LAnchor: TArray<Integer>;
+  LStart, LDefault, LState: TPasOptState;
+  LOrigins: TOrigins;
+  LStack: TList<TOrigins>;
+  LOpt: TPasOption;
+  LRef: TPasOptionRef;
+  LSite: TPasOptionSite;
+  LTS: TPasTokenStream;
+begin
+  // The state each unit starts in: the project's switches, the long-form-only
+  // options at dcc's defaults (TPasPreprocessor's reset).
+  LStart := FProj.SwitchStart;
+  LDefault := PasStartOptState([]);
+  LStart.ScopedEnums := LDefault.ScopedEnums;
+  LStart.Rtti := LDefault.Rtti;
+  LStart.VarPropSetter := LDefault.VarPropSetter;
+  LState := LStart;
+  for LOpt := Low(TPasOption) to High(TPasOption) do
+    LOrigins[LOpt] := -1;
+  LM := nil;
+  if (AMid >= 0) and (AMid < FProj.ModelCount) and
+     FProj.EnsureHydrated(AMid) then
+  begin
+    LM := FProj.Model(AMid);
+    if not LM.Tree.Source.Files[0].OffsetOf(ALine, ACol, LOffset) then
+      LOffset := MaxInt;   // past the end: everything the unit set
+    LAnchor := IncludeAnchors(LM);
+    LStack := TList<TOrigins>.Create;
+    try
+      for LIdx := 0 to High(LM.Tree.Source.OptionRefs) do
+      begin
+        LRef := LM.Tree.Source.OptionRefs[LIdx];
+        if LRef.FileId = 0 then
+          LAt := LRef.Start
+        else if (LRef.FileId > 0) and (LRef.FileId <= High(LAnchor)) then
+          LAt := LAnchor[LRef.FileId]
+        else
+          LAt := -1;
+        if LAt > LOffset then
+          Break;
+        LState := LRef.State;
+        case LRef.Kind of
+          orSet:
+            for LOpt in LRef.Touched do
+              LOrigins[LOpt] := LIdx;
+          orPush:
+            LStack.Add(LOrigins);
+          orPop:
+            // Recorded only when the preprocessor's own stack had a
+            // snapshot, so this one has its twin.
+            if LStack.Count > 0 then
+            begin
+              LOrigins := LStack.Last;
+              LStack.Delete(LStack.Count - 1);
+            end;
+        end;
+      end;
+    finally
+      LStack.Free;
+    end;
+  end;
+
+  LMain := MainModuleId;
+  SetLength(Result, Ord(High(TPasOption)) + 1);
+  LCount := 0;
+  for LOpt := Low(TPasOption) to High(TPasOption) do
+  begin
+    if PAS_OPTION_NAMES[LOpt] = '' then
+      Continue;
+    LSite := Default(TPasOptionSite);
+    LSite.Option := LOpt;
+    LSite.Name := PAS_OPTION_NAMES[LOpt];
+    if LOpt <= optZ then
+      LSite.Letter := Char(Ord('A') + Ord(LOpt))
+    else
+      LSite.Letter := #0;
+    LSite.Value := PasOptionValue(LState, LOpt);
+    if LOrigins[LOpt] >= 0 then
+    begin
+      LSite.Origin := ooUnit;
+      LRef := LM.Tree.Source.OptionRefs[LOrigins[LOpt]];
+      LTS := LM.Tree.Source.Files[LRef.FileId];
+      LSite.Hit.FilePath := LM.Tree.Source.FileNames[LRef.FileId];
+      LTS.OffsetToLineCol(LRef.Start, LSite.Hit.Line, LSite.Hit.Col);
+      LSite.Hit.Snippet := LTS.LineText(LSite.Hit.Line);
+      LSite.Hit.HiFrom := LSite.Hit.Col - 1;
+      LSite.Hit.HiTo := LSite.Hit.HiFrom + LRef.Len;
+    end
+    else
+    begin
+      // Placed as a project define's row is; dcc's default when the
+      // project's start agrees with it.
+      if PasOptionValue(LStart, LOpt) = PasOptionValue(LDefault, LOpt) then
+        LSite.Origin := ooDefault
+      else
+        LSite.Origin := ooProject;
+      LSite.Hit := BaseDefineSite(LSite.Name + ' ' + LSite.Value, doProject,
+        LMain).Hit;
+    end;
+    Result[LCount] := LSite;
+    Inc(LCount);
+  end;
+  SetLength(Result, LCount);
+  // The base first, then what the code changed: dcc's defaults, the
+  // project's, each in option order, then the unit's by file/line/col.
+  TArray.Sort<TPasOptionSite>(Result, TComparer<TPasOptionSite>.Construct(
+    function(const A, B: TPasOptionSite): Integer
+    begin
+      Result := Ord(B.Origin) - Ord(A.Origin);   // ooDefault, ooProject, ooUnit
+      if (Result = 0) and (A.Origin = ooUnit) then
+        Result := PasCompareHitPos(A.Hit.FilePath, A.Hit.Line, A.Hit.Col,
+          B.Hit.FilePath, B.Hit.Line, B.Hit.Col);
+      if Result = 0 then
+        Result := Ord(A.Option) - Ord(B.Option);
+    end));
 end;
 
 { ---- Find Overrides ----------------------------------------------------

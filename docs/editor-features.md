@@ -547,7 +547,9 @@ rest in the order this document describes them:
 - `Find All > Destructions` (§8 - `ClassAt`)
 - a separator, then the two cursor-free define inventories (§10):
   `Find All > Defines` (`FindDefines`) and `Find All > Defines at cursor`
-  (`DefinesAt`) - always enabled, no identity at the caret
+  (`DefinesAt`) - always enabled, no identity at the caret - and
+  `Find All > Options at cursor` (`OptionsAt`, §10.1), enabled like the
+  latter
 - a separator, then the three `uses` checks (§12): `Find All > Unused Units`
   (the unit in the editor), `Find All > Unused Units in the Project` (every
   unit outside `LibraryPaths`) and `Find All > Units Nobody Uses` (§12.1)
@@ -567,7 +569,8 @@ Refactor items the same way) so the submenu's shape never shifts with the
 caret. Every command opens its own results page: `TFindRefTab.Kind`
 (`stkRefs`, `stkRename`, `stkOverrides`, `stkImpls`, `stkDescendants`,
 `stkAssigns`, `stkCreations`, `stkDestructions`, `stkDefines`,
-`stkDefinesAt`, `stkUnused`, `stkUnusedProject`, `stkUnreferenced`) is part
+`stkDefinesAt`, `stkUnused`, `stkUnusedProject`, `stkUnreferenced`,
+`stkOptionsAt`) is part
 of the page identity, so a repeated search refreshes
 its own page and eight answers about one symbol never overwrite each other.
 
@@ -987,6 +990,64 @@ No protocol surface maps onto "list all defines" directly; two candidates:
 "what does the project define" without a navigator, e.g. in its
 `initialize` log. `cMinPasTreeVersion` moves to 0.28.0 only if one of these
 is taken up; nothing in the existing handlers changes.
+
+### 10.1 Options at cursor (`TPasNavigator.OptionsAt` + demo wiring)
+
+Status: IMPLEMENTED (PasTree 0.112.0) - `OptionsAt` and the
+`TPasOptionSite` row in `source/PasTree.Sema.Nav.pas`, the preprocessor's
+`OptionRefs` (`TPasOptionRef`), `PAS_OPTION_NAMES` and `PasOptionValue` in
+`source/PasTree.Preprocessor.pas`, wired into the demo as
+`Find All > Options at cursor`, regression-covered by
+`tests/SemaNavSmoke.dpr` (fixtures `NavOpt` + `NavOpt.inc`).
+
+The compiler options in effect at the cursor of a model's main file - what
+an `$IFOPT` written there would see, and the alignment, enum size, scoping
+and RTTI state a declaration there gets. The rule is the spec's (1.3.1):
+option state is linear in preprocessing order and unit-local - an include's
+switch outlives the include, a switch in a routine body outlives its `end`,
+nothing reaches another unit. So the preprocessor records every LIVE
+directive that changed the state - a switch group (`{$R-,Q+}`), a tracked
+long form (`{$RANGECHECKS OFF}`, `{$ALIGN 4}`, `{$SCOPEDENUMS ON}`,
+`{$RTTI ...}`...), `{$I+}` / `{$I-}`, `$PUSHOPT`, `$POPOPT` - with the
+options it wrote and the whole state after it, retained across `DemoteText`
+like `DefineRefs`. `OptionsAt` replays those rows up to the first one placed
+past the cursor (an include's at its `$I`, as `DefinesAt` places them),
+keeping a stack of its own for `$PUSHOPT`/`$POPOPT`, so a popped value names
+the directive that set it before the push.
+
+One row per option, 25 in all; E, F, K and N, letters with no switch, are
+left out. The rows come base first, then what the code changed: dcc's
+defaults, then the project's, each in option order (letter order, `ALIGN`
+... `MINENUMSIZE`, then `SCOPEDENUMS`, `RTTI`, `VARPROPSETTER`), then the
+ones a directive set, by the directive's file/line/col. (Defines at cursor
+orders the other way, unit rows first - §10.) A row is the long name, the
+switch letter (#0 for the
+three long-form-only options), the value as the long form spells it (`ON` /
+`OFF`, the byte count of `ALIGN` and `MINENUMSIZE`, the RTTI clause) and an
+origin:
+
+| Origin | Set by | Hit |
+|--------|--------|-----|
+| `ooUnit` | a live directive of the unit or an include | the directive, highlighted whole |
+| `ooProject` | the project's switches (`.dproj` DCC_* options, dcc's `-$`) | the main module's header, as a project define's (§10) |
+| `ooDefault` | dcc's no-config value | the same |
+
+`AMid < 0` (the file has no model) returns the project's start state, so the
+command is offered in every editor. Not tracked, so not listed: options the
+preprocessor does not model (`POINTERMATH`, `EXCESSPRECISION`, `WARN`,
+`HINTS`...) - each would need its own state first. A cursor in an opened
+`.inc` gets `AMid < 0`, as §10 row 8.
+
+The demo shows the rows as a FLAT page (`SymSym` sentinel -8), each naming
+the option short form first, then long - `$R- RANGECHECKS OFF`,
+`$A8 ALIGN 8`, the long form alone for `SCOPEDENUMS ON` - prefixed as
+Defines at cursor's rows are: `default: ` / `project: `, or for a
+directive's row `File.pas (Line N): $R- RANGECHECKS OFF - ` before the
+directive's line.
+
+pastree-lsp: a custom request (`pastree/optionsAt` with a text document
+position) or a hover on an `$IFOPT` line could carry it; nothing in the
+existing handlers changes.
 
 ## 11. Go To - the module and project outline picker (`PasTree.Outline.PasModuleOutline`, `TPasNavigator.ProjectOutline` + demo `PasTreeDemo.GoToPicker`)
 

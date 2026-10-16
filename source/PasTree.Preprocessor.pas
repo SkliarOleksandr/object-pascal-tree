@@ -255,6 +255,76 @@ type
     const AName: string; const APos: TPasCondPos;
     out AValue: TPasSymbolValue): Boolean;
 
+  TPasSwitchState = array['A'..'Z'] of Boolean;
+
+  // {$RTTI mode METHODS(set) PROPERTIES(set) FIELDS(set)} (19.2.1) -- unlike
+  // the single-letter switches this has real grammar to parse, not just an
+  // ON/OFF flag: a mode word plus up to three category clauses, each an
+  // explicit visibility set (or a AA..BB range). HasXxx tells "was this
+  // category clause present at all" apart from "present with an empty set".
+  TPasRttiVisibility = (rvPrivate, rvProtected, rvPublic, rvPublished);
+  TPasRttiVisibilitySet = set of TPasRttiVisibility;
+  TPasRttiMode = (rmInherit, rmExplicit);
+
+  TPasRttiState = record
+    Mode: TPasRttiMode;               // dcc default: INHERIT
+    HasMethods: Boolean;
+    Methods: TPasRttiVisibilitySet;
+    HasFields: Boolean;
+    Fields: TPasRttiVisibilitySet;
+    HasProperties: Boolean;
+    Properties: TPasRttiVisibilitySet;
+  end;
+
+  // Everything {$PUSHOPT} must save: the single-letter switches PLUS the
+  // long-form-only options tracked individually (real dcc's PUSHOPT/POPOPT
+  // covers all compiler options, SCOPEDENUMS and RTTI included).
+  // Also the state a unit STARTS in (TPasPreprocessor.StartState): the
+  // project's switches, which dcc takes from its command line (`-$D-`,
+  // `-$A4`; a .dproj's DCC_* properties become exactly those) - only
+  // Switches, MinEnumSize and Align have a command-line form, the rest start
+  // at dcc's defaults whatever the record holds.
+  TPasOptState = record
+    Switches: TPasSwitchState;
+    ScopedEnums: Boolean;
+    Rtti: TPasRttiState;
+    VarPropSetter: Boolean;
+    MinEnumSize: Integer;
+    Align: Integer;
+  end;
+
+  // One tracked option of TPasOptState: a single-letter switch (optA..optZ, in
+  // letter order - $A carries the alignment cap and $Z the minimum enum size
+  // too) or a long-form-only one.
+  TPasOption = (optA, optB, optC, optD, optE, optF, optG, optH, optI, optJ, optK, optL,
+    optM, optN, optO, optP, optQ, optR, optS, optT, optU, optV, optW, optX, optY, optZ,
+    optScopedEnums, optRtti, optVarPropSetter);
+  TPasOptions = set of TPasOption;
+
+  // One LIVE directive that changed the option state - a switch group, a
+  // tracked long form, `$PUSHOPT` or `$POPOPT` - in processing order, an
+  // include's where its `{$I}` was hit, exactly as TPasDefineRef. Options are
+  // positional and linear (1.3.1): an include's switch outlives the include,
+  // a `$PUSHOPT` in one pairs with the includer's `$POPOPT`, a switch in a
+  // routine body outlives its `end`, and nothing reaches another unit. A
+  // dead directive changes nothing and is not recorded, nor is a `$POPOPT`
+  // with no snapshot (W1078). Touched names the options the directive WROTE,
+  // even to the value they already had (orSet only); State is the whole state
+  // after it, so the options at a position are the last row before it -
+  // and where each came from is a replay with a stack of its own
+  // (TPasNavigator.OptionsAt). Start/Len span the whole directive.
+  // Retained across DemoteText (it is not text). Not read by parsing or
+  // resolution.
+  TPasOptionRefKind = (orSet, orPush, orPop);
+  TPasOptionRef = record
+    FileId: Integer;
+    Start: Integer;
+    Len: Integer;
+    Kind: TPasOptionRefKind;
+    Touched: TPasOptions;
+    State: TPasOptState;
+  end;
+
   TPasPreprocessed = record
   public
     FileNames: TArray<string>;              // [0] = main file
@@ -306,6 +376,9 @@ type
     // Every other name a `$IF`/`$ELSEIF` expression mentions - see
     // TPasIfNameRef. Retained across DemoteText too.
     IfNameRefs: TArray<TPasIfNameRef>;
+    // Every live directive that changed the option state, processing order -
+    // see TPasOptionRef. Retained across DemoteText too.
+    OptionRefs: TArray<TPasOptionRef>;
     function VisibleToken(AIndex: Integer): TPasToken;
     function VisibleText(AIndex: Integer): string;
     { SameText(VisibleText(AIndex), AWord) without materializing the text -
@@ -334,6 +407,16 @@ const
   { The compiler the analyzer emulates when the host names none - see
     PasTree.Platforms, which republishes it under the same name. }
   DEFAULT_COMPILER_VERSION = 37.0;
+
+  // The long name of each tracked option, the one its long-form directive
+  // spells - '' for E, F, K and N, letters with no switch of their own.
+  PAS_OPTION_NAMES: array[TPasOption] of string = (
+    'ALIGN', 'BOOLEVAL', 'ASSERTIONS', 'DEBUGINFO', '', '', 'IMPORTEDDATA',
+    'LONGSTRINGS', 'IOCHECKS', 'WRITEABLECONST', '', 'LOCALSYMBOLS',
+    'TYPEINFO', '', 'OPTIMIZATION', 'OPENSTRINGS', 'OVERFLOWCHECKS',
+    'RANGECHECKS', 'STACKCHECKS', 'TYPEDADDRESS', 'SAFEDIVIDE',
+    'VARSTRINGCHECKS', 'STACKFRAMES', 'EXTENDEDSYNTAX', 'REFERENCEINFO',
+    'MINENUMSIZE', 'SCOPEDENUMS', 'RTTI', 'VARPROPSETTER');
 
 type
   TPasDefines = class
@@ -374,8 +457,6 @@ type
   TPasDeclaredQuery = reference to function(const AName: string;
     const APos: TPasCondPos; out ADeclared: Boolean): Boolean;
 
-  TPasSwitchState = array['A'..'Z'] of Boolean;
-
   // A preprocessor's conditional-symbol spellings: Intern returns the one heap
   // string of a slice's exact (case-sensitive) text, so DefineRefs rows share
   // their Name - and a slice already pooled costs no allocation at all.
@@ -388,42 +469,6 @@ type
     procedure Grow;
   public
     function Intern(AText: PChar; ALen: Integer): string;
-  end;
-
-  // {$RTTI mode METHODS(set) PROPERTIES(set) FIELDS(set)} (19.2.1) -- unlike
-  // the single-letter switches this has real grammar to parse, not just an
-  // ON/OFF flag: a mode word plus up to three category clauses, each an
-  // explicit visibility set (or a AA..BB range). HasXxx tells "was this
-  // category clause present at all" apart from "present with an empty set".
-  TPasRttiVisibility = (rvPrivate, rvProtected, rvPublic, rvPublished);
-  TPasRttiVisibilitySet = set of TPasRttiVisibility;
-  TPasRttiMode = (rmInherit, rmExplicit);
-
-  TPasRttiState = record
-    Mode: TPasRttiMode;               // dcc default: INHERIT
-    HasMethods: Boolean;
-    Methods: TPasRttiVisibilitySet;
-    HasFields: Boolean;
-    Fields: TPasRttiVisibilitySet;
-    HasProperties: Boolean;
-    Properties: TPasRttiVisibilitySet;
-  end;
-
-  // Everything {$PUSHOPT} must save: the single-letter switches PLUS the
-  // long-form-only options tracked individually (real dcc's PUSHOPT/POPOPT
-  // covers all compiler options, SCOPEDENUMS and RTTI included).
-  // Also the state a unit STARTS in (TPasPreprocessor.StartState): the
-  // project's switches, which dcc takes from its command line (`-$D-`,
-  // `-$A4`; a .dproj's DCC_* properties become exactly those) - only
-  // Switches, MinEnumSize and Align have a command-line form, the rest start
-  // at dcc's defaults whatever the record holds.
-  TPasOptState = record
-    Switches: TPasSwitchState;
-    ScopedEnums: Boolean;
-    Rtti: TPasRttiState;
-    VarPropSetter: Boolean;
-    MinEnumSize: Integer;
-    Align: Integer;
   end;
 
   TPasPreprocessor = class
@@ -445,6 +490,8 @@ type
     FIncludeRefs: TList<TPasIncludeRef>;
     FIfNameRefs: TList<TPasIfNameRef>;
     FSwitchStack: TStack<TPasOptState>;
+    FOptionRefs: TList<TPasOptionRef>;
+    FTouched: TPasOptions;   // what the directive being handled wrote
     FStartState: TPasOptState;
     FProgramFile: string;
     FProgramDefines: TPasDefines;   // caller-owned; nil = FBaseDefines
@@ -497,6 +544,9 @@ type
     procedure ResetSwitches;
     procedure ApplySwitches(const ABody: string);
     procedure ApplyLongSwitch(const AName, AArg: string);
+    function CurrentOptState: TPasOptState;
+    procedure AddOptionRef(AFileId: Integer; const AToken: TPasToken;
+      AKind: TPasOptionRefKind);
     procedure SetScopedEnums(AValue: Boolean);
     procedure SetMinEnumSize(AValue: Integer);
     procedure SetAlign(AValue: Integer);
@@ -586,6 +636,12 @@ type
   Y+, `-$A4` A+, `-$A1` A-, `-$Z2` Z+. An argument the rules do not read
   changes nothing. }
 function PasStartOptState(const ASwitches: array of string): TPasOptState;
+
+{ AOption's value in AState as its long form takes it: ON / OFF, the byte
+  count of ALIGN and MINENUMSIZE, the RTTI clause (its mode word and each
+  category clause given, e.g. `EXPLICIT METHODS([vcPublic])`). }
+function PasOptionValue(const AState: TPasOptState;
+  AOption: TPasOption): string;
 
 const
   PP_DIAG_MESSAGES: array[TPasPPDiagCode] of string = (
@@ -999,6 +1055,7 @@ begin
   FTarget := PasBuiltinTargetOf(APointerBytes, AExtendedBytes, AExtendedAlign,
     ALongBytes);
   FSwitchStack := TStack<TPasOptState>.Create;
+  FOptionRefs := TList<TPasOptionRef>.Create;
   FScopedEnumsEvents := TList<TPasScopedEnumsEvent>.Create;
   FMinEnumEvents := TList<TPasMinEnumEvent>.Create;
   FAlignEvents := TList<TPasAlignEvent>.Create;
@@ -1089,8 +1146,10 @@ end;
 // One group of single-letter switches - `X+`, `X-`, `X+,Y-`, `Zn`, `An`,
 // `Dn`, `YD` - applied to AState, the one reader of an in-file `{$...}`
 // switch and of a command-line `-$...` (PasStartOptState). Anything else
-// (`R *.res`) ends the group with no state to track.
-procedure ApplySwitchText(var AState: TPasOptState; const ABody: string);
+// (`R *.res`) ends the group with no state to track. ATouched gains each
+// letter the group wrote (TPasOptionRef).
+procedure ApplySwitchText(var AState: TPasOptState; const ABody: string;
+  var ATouched: TPasOptions);
 
   procedure SkipSeparators(var AIdx: Integer);
   begin
@@ -1112,6 +1171,7 @@ begin
     if CharInSet(ABody[LIdx + 1], ['+', '-']) then
     begin
       AState.Switches[LSwitch] := ABody[LIdx + 1] = '+';
+      Include(ATouched, TPasOption(Ord(LSwitch) - Ord('A')));
       // {$Z+} is {$Z4} and {$Z-} is {$Z1} - dcc's own equivalences; the
       // boolean table above keeps its generic entry ($IFOPT Z reads it),
       // the SIZE is what SizeOf-of-an-enum needs.
@@ -1135,6 +1195,7 @@ begin
       // TPasMinEnumEvent). $IFOPT Z+ is any size above 1.
       AState.MinEnumSize := Ord(ABody[LIdx + 1]) - Ord('0');
       AState.Switches['Z'] := AState.MinEnumSize > 1;
+      Include(ATouched, optZ);
       LIdx := LIdx + 2;
       SkipSeparators(LIdx);
     end
@@ -1158,6 +1219,7 @@ begin
         LIdx := LIdx + 2;
       end;
       AState.Switches['A'] := AState.Align > 1;
+      Include(ATouched, optA);
       SkipSeparators(LIdx);
     end
     else if (LSwitch = 'D') and CharInSet(ABody[LIdx + 1], ['0', '1', '2']) then
@@ -1165,6 +1227,7 @@ begin
       // {$D0} is D-, {$D1} and {$D2} D+ (dcc64 37.0; the .dproj's
       // DCC_DebugInformation 0 reaches dcc as -$D0). The group goes on.
       AState.Switches['D'] := ABody[LIdx + 1] <> '0';
+      Include(ATouched, optD);
       LIdx := LIdx + 2;
       SkipSeparators(LIdx);
     end
@@ -1173,6 +1236,7 @@ begin
       // {$YD}, definitions only, is Y+ to $IFOPT - and dcc reads nothing of
       // the group after it: `{$R-}{$YD,R+}` leaves R- (dcc64 37.0).
       AState.Switches['Y'] := True;
+      Include(ATouched, optY);
       Exit;
     end
     else
@@ -1183,15 +1247,74 @@ end;
 function PasStartOptState(const ASwitches: array of string): TPasOptState;
 var
   LArg: string;
+  LTouched: TPasOptions;
 begin
   Result := NoConfigOptState;
+  LTouched := [];
   for LArg in ASwitches do
     if LArg.StartsWith('-$') then
-      ApplySwitchText(Result, Copy(LArg, 3, MaxInt))
+      ApplySwitchText(Result, Copy(LArg, 3, MaxInt), LTouched)
     else if LArg.StartsWith('$') then
-      ApplySwitchText(Result, Copy(LArg, 2, MaxInt))
+      ApplySwitchText(Result, Copy(LArg, 2, MaxInt), LTouched)
     else
-      ApplySwitchText(Result, LArg);
+      ApplySwitchText(Result, LArg, LTouched);
+end;
+
+function PasOptionValue(const AState: TPasOptState;
+  AOption: TPasOption): string;
+
+  function OnOff(AValue: Boolean): string;
+  begin
+    if AValue then
+      Result := 'ON'
+    else
+      Result := 'OFF';
+  end;
+
+  function Clause(const AName: string; AHas: Boolean;
+    AVis: TPasRttiVisibilitySet): string;
+  const
+    CVis: array[TPasRttiVisibility] of string =
+      ('vcPrivate', 'vcProtected', 'vcPublic', 'vcPublished');
+  var
+    LVis: TPasRttiVisibility;
+    LList: string;
+  begin
+    Result := '';
+    if not AHas then
+      Exit;
+    LList := '';
+    for LVis := Low(TPasRttiVisibility) to High(TPasRttiVisibility) do
+      if LVis in AVis then
+      begin
+        if LList <> '' then
+          LList := LList + ',';
+        LList := LList + CVis[LVis];
+      end;
+    Result := ' ' + AName + '([' + LList + '])';
+  end;
+
+begin
+  case AOption of
+    optA: Result := IntToStr(AState.Align);
+    optZ: Result := IntToStr(AState.MinEnumSize);
+    optScopedEnums: Result := OnOff(AState.ScopedEnums);
+    optVarPropSetter: Result := OnOff(AState.VarPropSetter);
+    optRtti:
+      begin
+        if AState.Rtti.Mode = rmInherit then
+          Result := 'INHERIT'
+        else
+          Result := 'EXPLICIT';
+        Result := Result +
+          Clause('METHODS', AState.Rtti.HasMethods, AState.Rtti.Methods) +
+          Clause('FIELDS', AState.Rtti.HasFields, AState.Rtti.Fields) +
+          Clause('PROPERTIES', AState.Rtti.HasProperties,
+            AState.Rtti.Properties);
+      end;
+  else
+    Result := OnOff(AState.Switches[Char(Ord('A') + Ord(AOption))]);
+  end;
 end;
 
 destructor TPasPreprocessor.Destroy;
@@ -1219,6 +1342,7 @@ begin
   FDefineRefs.Free;
   FIncludeRefs.Free;
   FIfNameRefs.Free;
+  FOptionRefs.Free;
   FSwitchStack.Free;
   inherited;
 end;
@@ -1328,6 +1452,7 @@ begin
   FDefineRefs.Clear;
   FIncludeRefs.Clear;
   FIfNameRefs.Clear;
+  FOptionRefs.Clear;
   FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
   FVarPropSetter := False;                // dcc default: OFF (13.1.6)
   FAppTypeEvents.Clear;
@@ -1382,6 +1507,7 @@ begin
   Result.DefineRefs := FDefineRefs.ToArray;
   Result.IncludeRefs := FIncludeRefs.ToArray;
   Result.IfNameRefs := FIfNameRefs.ToArray;
+  Result.OptionRefs := FOptionRefs.ToArray;
   SetLength(Result.Skipped, FSkipped.Count);
   for LIdx := 0 to FSkipped.Count - 1 do
     Result.Skipped[LIdx] := FSkipped[LIdx].ToArray;
@@ -1766,9 +1892,11 @@ begin
       // {$I+} / {$I-}: the IOCHECKS switch, not an include. And it can HEAD A
       // GROUP - `{$I-,R+}` - so the remainder goes through the ordinary
       // switch parser instead of being dropped on the floor.
+      FTouched := [optI];
       FSwitches['I'] := LArg[1] = '+';
       if Length(LArg) > 1 then
         ApplySwitches('I' + LArg);
+      AddOptionRef(AFileId, AToken, orSet);
     end
     else
       // %DATE% too: dcc64 37.0 has no insertion form, {$I %DATE%} is
@@ -1777,14 +1905,8 @@ begin
   end
   else if LKind = pdPushopt then
   begin
-    var LOpt: TPasOptState;
-    LOpt.Switches := FSwitches;
-    LOpt.ScopedEnums := FScopedEnums;
-    LOpt.Rtti := FRttiState;
-    LOpt.VarPropSetter := FVarPropSetter;
-    LOpt.MinEnumSize := FMinEnumSize;
-    LOpt.Align := FAlign;
-    FSwitchStack.Push(LOpt);
+    FSwitchStack.Push(CurrentOptState);
+    AddOptionRef(AFileId, AToken, orPush);
   end
   else if LKind = pdPopopt then
   begin
@@ -1797,6 +1919,7 @@ begin
       FVarPropSetter := LOpt.VarPropSetter;
       SetMinEnumSize(LOpt.MinEnumSize);
       SetAlign(LOpt.Align);
+      AddOptionRef(AFileId, AToken, orPop);
     end
     else
       Diag(ppPopWithoutPush, AFileId, AToken.Start, AToken.Len);
@@ -1805,7 +1928,10 @@ begin
   begin
     // Single-letter switch directive(s): {$R-}, {$O+,W-}, {$Z4}, {$R *.res}
     SetString(LBody, LText, LLen);
+    FTouched := [];
     ApplySwitches(LBody);
+    if FTouched <> [] then
+      AddOptionRef(AFileId, AToken, orSet);
   end
   else
   begin
@@ -1816,8 +1942,38 @@ begin
     for LIdx := 1 to LNameLen do
       if (LName[LIdx] >= 'a') and (LName[LIdx] <= 'z') then
         LName[LIdx] := Char(Ord(LName[LIdx]) - 32);
+    FTouched := [];
     ApplyLongSwitch(LName, Arg);
+    if FTouched <> [] then
+      AddOptionRef(AFileId, AToken, orSet);
   end;
+end;
+
+function TPasPreprocessor.CurrentOptState: TPasOptState;
+begin
+  Result.Switches := FSwitches;
+  Result.ScopedEnums := FScopedEnums;
+  Result.Rtti := FRttiState;
+  Result.VarPropSetter := FVarPropSetter;
+  Result.MinEnumSize := FMinEnumSize;
+  Result.Align := FAlign;
+end;
+
+procedure TPasPreprocessor.AddOptionRef(AFileId: Integer;
+  const AToken: TPasToken; AKind: TPasOptionRefKind);
+var
+  LRef: TPasOptionRef;
+begin
+  LRef.FileId := AFileId;
+  LRef.Start := AToken.Start;
+  LRef.Len := AToken.Len;
+  LRef.Kind := AKind;
+  if AKind = orSet then
+    LRef.Touched := FTouched
+  else
+    LRef.Touched := [];
+  LRef.State := CurrentOptState;
+  FOptionRefs.Add(LRef);
 end;
 
 procedure TPasPreprocessor.HandleInclude(AFileId: Integer;
@@ -1951,7 +2107,7 @@ begin
   LOpt.Switches := FSwitches;
   LOpt.MinEnumSize := FMinEnumSize;
   LOpt.Align := FAlign;
-  ApplySwitchText(LOpt, ABody);
+  ApplySwitchText(LOpt, ABody, FTouched);
   FSwitches := LOpt.Switches;
   SetMinEnumSize(LOpt.MinEnumSize);
   SetAlign(LOpt.Align);
@@ -1964,7 +2120,10 @@ procedure TPasPreprocessor.ApplyLongSwitch(const AName, AArg: string);
     if SameText(AArg, 'ON') then
       FSwitches[ALetter] := True
     else if SameText(AArg, 'OFF') then
-      FSwitches[ALetter] := False;
+      FSwitches[ALetter] := False
+    else
+      Exit;
+    Include(FTouched, TPasOption(Ord(ALetter) - Ord('A')));
   end;
 
 begin
@@ -1994,7 +2153,11 @@ begin
   else if AName = 'STACKCHECKS' then SetSwitch('S')
   // `{$YD}` is a two-letter word, so it is classified here, not as a
   // switch group; it is Y+ and ends the group (ApplySwitchText's rule).
-  else if AName = 'YD' then FSwitches['Y'] := True
+  else if AName = 'YD' then
+  begin
+    FSwitches['Y'] := True;
+    Include(FTouched, optY);
+  end
   else if AName = 'APPTYPE' then
   begin
     if SameText(AArg, 'CONSOLE') or SameText(AArg, 'GUI') then
@@ -2014,16 +2177,25 @@ begin
     if SameText(AArg, 'ON') then
       SetScopedEnums(True)
     else if SameText(AArg, 'OFF') then
-      SetScopedEnums(False);
+      SetScopedEnums(False)
+    else
+      Exit;
+    Include(FTouched, optScopedEnums);
   end
   else if AName = 'RTTI' then
-    ApplyRtti(AArg)
+  begin
+    ApplyRtti(AArg);
+    Include(FTouched, optRtti);
+  end
   else if AName = 'MINENUMSIZE' then
   begin
     // The long form of {$Z1/2/4} (13.0 docs list both). Positional - see
     // TPasMinEnumEvent.
     if (Length(AArg) = 1) and CharInSet(AArg[1], ['1', '2', '4']) then
+    begin
       SetMinEnumSize(Ord(AArg[1]) - Ord('0'));
+      Include(FTouched, optZ);
+    end;
   end
   else if AName = 'ALIGN' then
   begin
@@ -2037,7 +2209,10 @@ begin
       SetAlign(1)
     else if (AArg = '1') or (AArg = '2') or (AArg = '4') or (AArg = '8') or
             (AArg = '16') then
-      SetAlign(StrToInt(AArg));
+      SetAlign(StrToInt(AArg))
+    else
+      Exit;
+    Include(FTouched, optA);
   end
   else if AName = 'VARPROPSETTER' then
   begin
@@ -2046,7 +2221,10 @@ begin
     if SameText(AArg, 'ON') then
       FVarPropSetter := True
     else if SameText(AArg, 'OFF') then
-      FVarPropSetter := False;
+      FVarPropSetter := False
+    else
+      Exit;
+    Include(FTouched, optVarPropSetter);
   end;
   // Unknown names: passthrough (WARN, HINTS, REGION, HPPEMIT, ...)
 end;
