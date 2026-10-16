@@ -540,6 +540,10 @@ against dcc cannot see (`docs/parser-fidelity.md`).
   only when the argument's ancestry is followed to its end: an ancestor
   that does not resolve - its unit missing from the search path - leaves
   the argument unchecked, where dcc would know.
+- a lone `constructor` constraint unlocks `T.Create` and no other member,
+  as in dcc; the member walk does not tell the type `T` from a value `V: T`,
+  so `V.Create` (dcc: E2003) is accepted and completion lists `Create` on
+  `V.` too.
 
 ### 16.5.1 Inference for generic methods & inline vars
 - inference handles only the direct shape (the

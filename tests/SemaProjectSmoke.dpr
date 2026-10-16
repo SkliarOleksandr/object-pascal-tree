@@ -9631,12 +9631,14 @@ begin
     'unit CFSys;'#10'interface'#10 +
     'type'#10 +
     '  TObject = class'#10 +
+    '    constructor Create;'#10 +
     '    procedure Free;'#10 +
     '  end;'#10 +
     // TBytes: real (PasTree.Sema.Builtins no longer seeds it) -- see the
     // header comment on why this fixture exercises it beside TMyArr.
     '  TBytes = array of Byte;'#10 +
     'implementation'#10 +
+    'constructor TObject.Create; begin end;'#10 +
     'procedure TObject.Free;'#10 +
     'begin'#10 +
     'end;'#10 +
@@ -9652,8 +9654,29 @@ begin
     '  TRecOnly<T: record> = class'#10 +
     '    procedure Use(const V: T);'#10 +
     '  end;'#10 +
+    // 16.4.1 (local/probe-ctor C1-C7): a lone `constructor` unlocks T.Create
+    // and nothing else - not on V, not on T.Create's own result; together
+    // with `class` everything TObject has.
+    '  TCtorOnly<T: constructor> = class'#10 +
+    '    procedure Use(const V: T);'#10 +
+    '  end;'#10 +
+    '  TClassCtor<T: class, constructor> = class'#10 +
+    '    procedure Use(const V: T);'#10 +
+    '  end;'#10 +
     'procedure P;'#10 +
     'implementation'#10 +
+    'procedure TCtorOnly<T>.Use(const V: T);'#10 +
+    'var X: T;'#10 +
+    'begin'#10 +
+    '  X := T.Create;'#10 +              // the one thing it allows
+    '  V.Free;'#10 +                     // dcc: E2003
+    '  T.Create.Free;'#10 +              // dcc: E2003 - the result is a T
+    'end;'#10 +
+    'procedure TClassCtor<T>.Use(const V: T);'#10 +
+    'begin'#10 +
+    '  V.Free;'#10 +
+    '  T.Create.Free;'#10 +
+    'end;'#10 +
     'procedure TClassOnly<T>.Use(const V: T);'#10 +
     'begin'#10 +
     '  V.Free;'#10 +                     // TObject through `class`
@@ -9681,11 +9704,19 @@ begin
     GProj.AnalyzeDirectory(LDir);
     var LCF := ModelByName('cfuse');
     Ok('ctorfree: CFUse loaded', Assigned(LCF));
-    // Three left: the record-constrained Free and the two illegal Creates.
+    // Five left: the record-constrained Free, the two illegal Creates and
+    // the two Frees under a lone `constructor`.
     Ok('ctorfree: `class` answers TObject and the other kinds do not',
-      DiagCount(LCF, 'E2003') = 3);
+      DiagCount(LCF, 'E2003') = 5);
     Ok('ctorfree: the surviving report is the record-constrained Free',
       DiagHasText(LCF, 'E2003', 'Free'));
+    var LCreates := 0;
+    for var LDi := 0 to High(LCF.Diags) do
+      if (LCF.Diags[LDi].Code = 'E2003') and
+         LCF.Diags[LDi].Msg.Contains('''Create''') then
+        Inc(LCreates);
+    Ok('ctorfree: a lone `constructor` resolves T.Create - the only Create ' +
+      'reports are the two illegal ones', LCreates = 2);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then

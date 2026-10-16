@@ -2041,6 +2041,47 @@ begin
   GProjMid := -1;
   TDirectory.Delete(GDir, True);
 
+  // ======== 16.4.1: a lone `constructor` unlocks T.Create only ==============
+  // (local/probe-ctor C1-C7: V.Free, V.ClassName, T.Create.Free are E2003.)
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_ctor');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class constructor Create; procedure Free; end;'#10 +
+    'implementation'#10 +
+    'constructor TObject.Create; begin end;'#10 +
+    'procedure TObject.Free; begin end;'#10'end.'#10);
+  var LCtorMain :=
+    'unit mainu;'#10'interface'#10'type'#10 +
+    '  TG<T: constructor> = class procedure Run(const V: T); end;'#10 +
+    '  TC<T: class, constructor> = class procedure Run(const V: T); end;'#10 +
+    'implementation'#10 +
+    'procedure TG<T>.Run(const V: T);'#10'begin'#10'  //G'#10'end;'#10 +
+    'procedure TC<T>.Run(const V: T);'#10'begin'#10'  //C'#10'end;'#10 +
+    'end.'#10;
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), LCtorMain);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  ProjCase(StringReplace(LCtorMain, '//G', 'T.|', []));
+  GCounter.Ok('16.4.1: T. under a lone constructor lists Create, not Free',
+    GHit and Has('Create') and not Has('Free'));
+  ProjCase(StringReplace(LCtorMain, '//G', 'V.|', []));
+  // Create is listed here too: the member walk cannot tell `T.` from `V.`
+  // (docs/coverage.md 16.4.1 - dcc's `V.Create` is E2003).
+  GCounter.Ok('16.4.1: V. under a lone constructor lists no TObject member ' +
+    'but Create', not Has('Free'));
+  ProjCase(StringReplace(LCtorMain, '//C', 'V.|', []));
+  GCounter.Ok('16.4.1: V. under class, constructor lists Free',
+    GHit and Has('Free'));
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
   if GCounter.Finish('SemaCompleteSmoke') then
     ExitCode := 1;
   GComp.Free;

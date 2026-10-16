@@ -897,8 +897,11 @@ type
     function GenericParamConstraints(AMid,
       ASym: Integer): TArray<TArray<Integer>>;
     function RealGenericBase(const AX: TSemaXType): TSemaXType;
-    function ConstraintsOfParamX(
-      const AParam: TSemaXType): TArray<TSemaXType>;
+    // ACtorOnly: instead, System's TObject when the parameter's only kind
+    // constraint is a lone `constructor` - the type `T.Create` is looked up
+    // in, and nothing else (16.4.1).
+    function ConstraintsOfParamX(const AParam: TSemaXType;
+      ACtorOnly: Boolean = False): TArray<TSemaXType>;
     function RoutineNameOfParam(AMid, ANode: Integer): string;
     procedure CheckConstraints(AId: Integer);
     function ResolveCustomAttributeX(AId: Integer): TSemaXType;
@@ -3641,9 +3644,10 @@ end;
 
 { The bindings a generic declaration is measured under when nothing
   instantiates it: each parameter OPEN - pskOpenRef when a constraint makes
-  it a reference whatever it becomes (`class`, `constructor` - only a class
-  meets it - or a named class or interface, the only types a constraint can
-  name), pskOpenMin otherwise (none, or `record`), which lays it out as 0
+  it a reference whatever it becomes (`class`, or a named class or
+  interface, the only types a constraint can name), pskOpenMin otherwise
+  (none, `record`, or a lone `constructor` - which Integer meets as well as
+  a class, 16.4.1, local/probe-ctor I_Integer), which lays it out as 0
   bytes aligned 1: the layout only grows with a field, so the result is the
   least any instantiation takes - exactly what an empty record gives
   (`TGn<TER>`, dcc-measured). Empty for a type that is not generic; False
@@ -3687,8 +3691,7 @@ begin
         if LM.Tree.Nodes[LCon].Kind = nkConstraint then
           if LM.Tree.Nodes[LCon].FirstChild <> NIL_NODE then
             LKind := pskOpenRef   // a named class or interface
-          else if LM.Tree.NodeTextEquals(LCon, 'class') or
-                  LM.Tree.NodeTextEquals(LCon, 'constructor') then
+          else if LM.Tree.NodeTextEquals(LCon, 'class') then
             LKind := pskOpenRef;
         LCon := LM.Tree.Nodes[LCon].NextSibling;
       end;
@@ -8840,7 +8843,7 @@ end;
   every use of a constrained parameter lives, so the group is searched first and
   the DECLARING type's same-named parameter second. }
 function TPasSemaProject.ConstraintsOfParamX(
-  const AParam: TSemaXType): TArray<TSemaXType>;
+  const AParam: TSemaXType; ACtorOnly: Boolean): TArray<TSemaXType>;
 var
   LM: TPasSemaModel;
   LDecl, LGroup, LStruct, LIdx, LScope, LMethod: Integer;
@@ -8875,45 +8878,74 @@ var
     end;
   end;
 
-  { A KIND constraint that means "a class", as TObject. A kind constraint
-    adopts no child (the parser consumes the keyword), so the node's own text
-    is what tells the three apart.
-
-    `constructor` counts for the same reason `class` does, and it is not a
-    formality: only a CLASS can satisfy it (16 sec. 16.4.1 - a record has no
-    constructor to require), so a `T: constructor` parameter is a class
-    parameter that additionally promises a parameterless `Create`.
-    `Atomic<I; T: constructor>` in a threading library writes exactly that and
-    then `T.Create`, and with only `class` recognised the walk stopped at the
-    parameter. `record` is the one kind that must NOT land here.
-
-    Routed through ImplicitRootX like every other implicit-TObject hop, so
-    it finds System's own declaration - not a seeded stub, and not a
-    TObject the `uses` clause names (11.1.1). }
-  function ClassConstraintX(const ANodes: TArray<Integer>): TSemaXType;
+  // Does ANodes hold the KIND constraint AWord? A kind constraint adopts no
+  // child (the parser consumes the keyword), so its word tells the three
+  // apart - read from KeywordConstraints, which Phase 1 recorded and a
+  // text-demoted model keeps, else off the token.
+  function HasKind(const ANodes: TArray<Integer>; const AWord: string;
+    AKind: PasTree.Types.TPasTokenKind): Boolean;
   var
-    LNode, LRMid, LRSym: Integer;
+    LNode: Integer;
+    LWord: Byte;
   begin
-    Result := XNil;
     for LNode in ANodes do
-      if (LM.Tree.Nodes[LNode].FirstChild = NIL_NODE) and
-         (LM.Tree.NodeTextEquals(LNode, 'class') or
-          LM.Tree.NodeTextEquals(LNode, 'constructor')) and
-         ImplicitRootX(AParam.UnitId, 'tobject', LRMid, LRSym) then
-        Exit(XPlain(LRMid, LRSym));
+      if LM.Tree.Nodes[LNode].FirstChild = NIL_NODE then
+        if LM.KeywordConstraints.TryGetValue(LNode, LWord) then
+        begin
+          if PasTree.Types.TPasTokenKind(LWord) = AKind then
+            Exit(True);
+        end
+        else if LM.Tree.NodeTextEquals(LNode, AWord) then
+          Exit(True);
+    Result := False;
   end;
 
-  { The named constraints, then TObject when a KIND constraint asks for a
+  { System's TObject - through ImplicitRootX like every other implicit-TObject
+    hop, so not a seeded stub and not a TObject the `uses` clause names
+    (11.1.1). }
+  function RootX: TSemaXType;
+  var
+    LRMid, LRSym: Integer;
+  begin
+    if ImplicitRootX(AParam.UnitId, 'tobject', LRMid, LRSym) then
+      Result := XPlain(LRMid, LRSym)
+    else
+      Result := XNil;
+  end;
+
+  { The named constraints, then TObject when the `class` kind asks for a
     class. Last, not first: a named type's members are a superset of
-    TObject's, so trying it earlier can only find the same names later. }
+    TObject's, so trying it earlier can only find the same names later.
+
+    A lone `constructor` is NOT `class` (16.4.1, local/probe-ctor): Integer
+    meets it, `V.Free`, `V.ClassName` and `T.Create.Free` are E2003 under it,
+    and `T.Create` is all it unlocks - answered in ACtorOnly mode, the
+    group's TObject for a `constructor` without `class`, which the member
+    walks ask for `Create` only (`Atomic<I; T: constructor>` in a threading
+    library writes `T.Create`). }
   function ConstraintList(const ANodes: TArray<Integer>): TArray<TSemaXType>;
   var
     LClass: TSemaXType;
   begin
+    if ACtorOnly then
+    begin
+      Result := nil;
+      if HasKind(ANodes, 'constructor', PasTree.Types.tkConstructor) and
+         not HasKind(ANodes, 'class', PasTree.Types.tkClass) then
+      begin
+        LClass := RootX;
+        if XValid(LClass) then
+          Result := [LClass];
+      end;
+      Exit;
+    end;
     Result := AllTypeConstraints(ANodes);
-    LClass := ClassConstraintX(ANodes);
-    if XValid(LClass) then
-      Result := Result + [LClass];
+    if HasKind(ANodes, 'class', PasTree.Types.tkClass) then
+    begin
+      LClass := RootX;
+      if XValid(LClass) then
+        Result := Result + [LClass];
+    end;
   end;
 
   function OwnConstraints(AGroup: Integer): TArray<Integer>;
@@ -10962,6 +10994,13 @@ begin
            FindMemberX(AFromMid, LNext, AKey, AMemMid, AMemSym, ACtx,
              ADepth + 1, ANoHelpers) then
           Exit(True);
+      // A lone `constructor` unlocks `T.Create` and nothing else (16.4.1):
+      // TObject's Create, no other member of it.
+      if SemaKeyEquals('create', AKey) then
+        for LNext in ConstraintsOfParamX(LCur, {ACtorOnly} True) do
+          if FindMemberX(AFromMid, LNext, AKey, AMemMid, AMemSym, ACtx,
+               ADepth + 1, ANoHelpers) then
+            Exit(True);
       Exit;
     end;
     if not (LM.Symbols[LCur.Sym].Kind in [skType, skBuiltinType]) then
@@ -11188,6 +11227,14 @@ begin
         if XValid(LNext) and
            not ((LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym)) then
           EnumMembersX(AFromMid, LNext, AOnMember, ADepth + 1);
+      // A lone `constructor`: TObject's Create only, as FindMemberX.
+      for LNext in ConstraintsOfParamX(LCur, {ACtorOnly} True) do
+        EnumMembersX(AFromMid, LNext,
+          procedure(AMid, ASym, ACtx: Integer)
+          begin
+            if FModels[AMid].Symbols[ASym].NameLower = 'create' then
+              AOnMember(AMid, ASym, ACtx);
+          end, ADepth + 1);
       Exit;
     end;
     if not (LM.Symbols[LCur.Sym].Kind in [skType, skBuiltinType]) then
