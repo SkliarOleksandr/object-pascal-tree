@@ -92,6 +92,8 @@ type
     // instead of re-copying it per uses entry; Analyze trims before returning.
     FUsesCount: Integer;
     FSkipTyper: Boolean;   // see Analyze
+    // The filled prefix of FModel.WithUnopened while ResolveWithStmts runs.
+    FWithUnopenedCount: Integer;
     // The routine declarations an implementation header has completed, by
     // symbol (CompletionOf): a declaration is completed once, so a second
     // header of the name is another overload.
@@ -106,6 +108,7 @@ type
     function NodeNameLower(ANode: Integer): string; inline;
     // The same name as a lookup key, read off the token (no string).
     function NodeKey(ANode: Integer): TSemaKey; inline;
+    class function SameNodeKey(const A, B: TSemaKey): Boolean; static;
     function SkipAttr(AChild: Integer): Integer;
     function IsAttributeTypeRef(ANode: Integer): Boolean;
     function IsBareTypeUse(ANode: Integer): Boolean;
@@ -212,6 +215,10 @@ type
     procedure CheckForCounters;
     procedure CheckBareRaises;
     procedure CheckSlicePositions;
+    function ReachesRoot(ANode: Integer): Boolean;
+    procedure AppendHit(var AHits: TArray<Integer>; var ACount: Integer;
+      ANode: Integer);
+    procedure SortHitsBySource(var AHits: TArray<Integer>; ACount: Integer);
     procedure StampRetainedFlags;
     procedure CollectBuiltinShadows;
     procedure Run;
@@ -334,6 +341,29 @@ end;
 function TPasSemaResolver.NodeKey(ANode: Integer): TSemaKey;
 begin
   Result := PasNodeKey(FTree, ANode);
+end;
+
+// Do two keys name the same identifier? Length and hash first, then the folded
+// characters (either key may be raw source spelling).
+class function TPasSemaResolver.SameNodeKey(const A, B: TSemaKey): Boolean;
+var
+  LIdx: Integer;
+  LA, LB: Char;
+begin
+  if (A.Len <> B.Len) or (A.Hash <> B.Hash) then
+    Exit(False);
+  for LIdx := 0 to A.Len - 1 do
+  begin
+    LA := A.Text[LIdx];
+    LB := B.Text[LIdx];
+    if A.Raw then
+      LA := PasFoldChar(LA);
+    if B.Raw then
+      LB := PasFoldChar(LB);
+    if LA <> LB then
+      Exit(False);
+  end;
+  Result := True;
 end;
 
 // Every leading attribute group: a parameter adopts one before its modifier
@@ -1768,13 +1798,12 @@ begin
           // itself: a type that is its own definition, whose members are
           // therefore nothing. ResolveNode leaves an already-bound node alone,
           // which is what makes writing it here enough.
-          if KindOf(LChild) = nkIdent then
-          begin
-            var LChildLower := NodeNameLower(LChild);
-            if LChildLower = NodeNameLower(LName) then
-              FModel.RefMap[LChild] := ResolveSkipping(LBody,
-                LChildLower, LSym);
-          end;
+          // Compared as keys: every `type X = Y` alias asked, and two
+          // lower-cased strings per alias only to compare them (audit C2-05).
+          if (KindOf(LChild) = nkIdent) and
+             SameNodeKey(NodeKey(LChild), NodeKey(LName)) then
+            FModel.RefMap[LChild] := ResolveSkipping(LBody,
+              NodeNameLower(LChild), LSym);
           Collect(LChild, LBody);  // alias target, array, pointer...
         end;
       end;
@@ -4525,8 +4554,11 @@ begin
   // against a class field, local, parameter, same-unit global and even an
   // inline var declared inside the body). Recorded so the typer withholds
   // judgement here and the project's with pass can revise the binding.
+  // Count-tracked: in a form unit nearly every with lands here, and a grow by
+  // one per statement was quadratic (audit C1-17). Trimmed and sealed when
+  // ResolveWithStmts is over.
   if LAnyUnopened then
-    FModel.WithUnopened := FModel.WithUnopened + [AWith];
+    AppendHit(FModel.WithUnopened, FWithUnopenedCount, AWith);
 
   if LWithScope = NIL_SCOPE then
     Exit;   // no target resolved to a real, member-bearing type - leave as-is
@@ -4804,6 +4836,54 @@ begin
   end;
 end;
 
+{ The flat checks' shared pieces (CheckBareRaises, CheckSlicePositions). A
+  flat scan also meets nodes no walk from the root reaches - the parser's
+  MarkContextKeyword nkDirective nodes hang off nothing - so a hit counts only
+  when its climb ends at the root. The hits are reported in source order, the
+  order the recursive walks they replaced reported them in (preorder: a
+  statement or a call precedes what it contains, in tokens as in the walk). }
+function TPasSemaResolver.ReachesRoot(ANode: Integer): Boolean;
+begin
+  while FTree.Nodes[ANode].Parent <> NIL_NODE do
+    ANode := FTree.Nodes[ANode].Parent;
+  Result := ANode = 0;
+end;
+
+procedure TPasSemaResolver.AppendHit(var AHits: TArray<Integer>;
+  var ACount: Integer; ANode: Integer);
+begin
+  if ACount = Length(AHits) then
+    SetLength(AHits, ACount * 2 + 4);
+  AHits[ACount] := ANode;
+  Inc(ACount);
+end;
+
+procedure TPasSemaResolver.SortHitsBySource(var AHits: TArray<Integer>;
+  ACount: Integer);
+var
+  LIdx, LPos, LNode: Integer;
+
+  function Before(A, B: Integer): Boolean;
+  begin
+    Result := (FTree.Nodes[A].FirstToken < FTree.Nodes[B].FirstToken) or
+      ((FTree.Nodes[A].FirstToken = FTree.Nodes[B].FirstToken) and (A < B));
+  end;
+
+begin
+  // Insertion sort: the hits are a handful at most.
+  for LIdx := 1 to ACount - 1 do
+  begin
+    LNode := AHits[LIdx];
+    LPos := LIdx;
+    while (LPos > 0) and Before(LNode, AHits[LPos - 1]) do
+    begin
+      AHits[LPos] := AHits[LPos - 1];
+      Dec(LPos);
+    end;
+    AHits[LPos] := LNode;
+  end;
+end;
+
 { 18 sec. 18.3.1: a bare `raise` re-raises the in-flight exception and is only
   valid inside an exception handler - dcc reports `E2145 Re-raising an
   exception only allowed in exception handler`.
@@ -4823,7 +4903,8 @@ end;
   `procedure begin ... end` written in a handler is accepted, which makes the
   boundary the try-statement part and nothing else. A named nested routine
   needs no rule of its own: its body is never lexically inside a statement, so
-  the walk reaches it with no part in effect and rejects, exactly as dcc does.
+  the climb from a raise in it meets no try statement and rejects, exactly as
+  dcc does.
 
   All eight shapes above plus the `on ... do` and `else` branches are pinned in
   SemaSmoke, and the probe's output matches dcc line for line.
@@ -4831,66 +4912,47 @@ end;
   Structural, like CheckForCounters, but unlike it needs no bindings at all -
   it runs on the tree alone. }
 procedure TPasSemaResolver.CheckBareRaises;
-
-  procedure Walk(ANode: Integer; AInHandler: Boolean);
-  var
-    LChild, LPart: Integer;
-    LFileId, LLine, LCol: Integer;
-  begin
-    case KindOf(ANode) of
-      nkRaiseStmt:
-        // No children = bare (an operand, and its optional `at` address, are
-        // the children the parser adds).
-        if (FirstChild(ANode) = NIL_NODE) and not AInHandler then
-        begin
-          NodePos(ANode, LFileId, LLine, LCol);
-          FModel.AddDiag(MakeDiag('E2145', SE2145_ReRaiseOutsideHandler,
-            ANode, LFileId, LLine, LCol));
-          Exit;
-        end;
-      nkTryStmt:
-        begin
-          // Children: the guarded block, then exactly one part. The block is
-          // walked with the context CLEARED whichever part follows it.
-          LChild := FirstChild(ANode);
-          if LChild = NIL_NODE then
-            Exit;
-          Walk(LChild, False);
-          LPart := NextSib(LChild);
-          while LPart <> NIL_NODE do
-          begin
-            LChild := FirstChild(LPart);
-            while LChild <> NIL_NODE do
-            begin
-              Walk(LChild, KindOf(LPart) = nkExceptPart);
-              LChild := NextSib(LChild);
-            end;
-            LPart := NextSib(LPart);
-          end;
-          Exit;
-        end;
-      nkBinaryOp:
-        begin
-          // An operator chain in a loop (TPasTree.ChainFirst, audit A1-01).
-          LChild := FTree.ChainFirst(ANode, LPart);
-          while LChild <> NIL_NODE do
-          begin
-            Walk(LChild, AInHandler);
-            LChild := FTree.ChainNext(ANode, LPart, LChild);
-          end;
-          Exit;
-        end;
-    end;
-    LChild := FirstChild(ANode);
-    while LChild <> NIL_NODE do
-    begin
-      Walk(LChild, AInHandler);
-      LChild := NextSib(LChild);
-    end;
-  end;
-
+var
+  LHits: TArray<Integer>;
+  LCount, LIdx, LCur, LParent, LFileId, LLine, LCol: Integer;
+  LInHandler: Boolean;
 begin
-  Walk(0, False);
+  // One flat scan for the rare node, its context read by climbing from it
+  // (audit C2-03: a recursion over every node of every unit, 84 ms over
+  // 704 RTL files, for a check that almost never fires). The NEAREST try
+  // statement decides, through the child of it the climb came up by: an
+  // except part is a handler, the guarded block and a finally part are not.
+  LHits := nil;
+  LCount := 0;
+  for LIdx := 0 to High(FTree.Nodes) do
+  begin
+    if (FTree.Nodes[LIdx].Kind <> nkRaiseStmt) or
+       (FTree.Nodes[LIdx].FirstChild <> NIL_NODE) then
+      Continue;   // an operand (and its `at` address) are the children
+    LInHandler := False;
+    LCur := LIdx;
+    LParent := FTree.Nodes[LCur].Parent;
+    while LParent <> NIL_NODE do
+    begin
+      if FTree.Nodes[LParent].Kind = nkTryStmt then
+      begin
+        LInHandler := (LCur <> FTree.Nodes[LParent].FirstChild) and
+          (FTree.Nodes[LCur].Kind = nkExceptPart);
+        Break;
+      end;
+      LCur := LParent;
+      LParent := FTree.Nodes[LCur].Parent;
+    end;
+    if not LInHandler and ReachesRoot(LIdx) then
+      AppendHit(LHits, LCount, LIdx);
+  end;
+  SortHitsBySource(LHits, LCount);
+  for LIdx := 0 to LCount - 1 do
+  begin
+    NodePos(LHits[LIdx], LFileId, LLine, LCol);
+    FModel.AddDiag(MakeDiag('E2145', SE2145_ReRaiseOutsideHandler,
+      LHits[LIdx], LFileId, LLine, LCol));
+  end;
 end;
 
 { 4 sec. 4.11: `Slice(A, Count)` is valid only as an actual argument to an open-array
@@ -4991,61 +5053,51 @@ procedure TPasSemaResolver.CheckSlicePositions;
     // Fewer parameters than arguments: an arity error, not this rule's.
   end;
 
-  procedure Walk(ANode: Integer; ASliceOk: Boolean);
-  var
-    LChild, LCallee, LArgIdx: Integer;
-    LFileId, LLine, LCol: Integer;
-    LArgsOk: Boolean;
-  begin
-    if IsIntrinsicCall(ANode, 'slice') and not ASliceOk then
-    begin
-      // On the CALLEE, not the call: that is the `Slice` token, and it is where
-      // dcc points.
-      LCallee := FirstChild(ANode);
-      NodePos(LCallee, LFileId, LLine, LCol);
-      FModel.AddDiag(MakeDiag('E2193', SE2193_SliceOutsideOpenArray,
-        LCallee, LFileId, LLine, LCol));
-    end;
-    if KindOf(ANode) = nkBinaryOp then
-    begin
-      // An operator chain in a loop (TPasTree.ChainFirst, audit A1-01); an
-      // operand is never an argument.
-      LChild := FTree.ChainFirst(ANode, LArgIdx);
-      while LChild <> NIL_NODE do
-      begin
-        Walk(LChild, False);
-        LChild := FTree.ChainNext(ANode, LArgIdx, LChild);
-      end;
-      Exit;
-    end;
-    LChild := FirstChild(ANode);
-    if KindOf(ANode) = nkCall then
-    begin
-      // The callee is never an argument; the arguments are one only if this
-      // call is an ordinary routine call.
-      if LChild = NIL_NODE then
-        Exit;
-      LArgsOk := not IsIntrinsicCall(ANode, '');
-      Walk(LChild, False);
-      LChild := NextSib(LChild);
-      LArgIdx := 0;
-      while LChild <> NIL_NODE do
-      begin
-        Walk(LChild, LArgsOk and ParamTakesSlice(ANode, LArgIdx));
-        Inc(LArgIdx);
-        LChild := NextSib(LChild);
-      end;
-      Exit;
-    end;
-    while LChild <> NIL_NODE do
-    begin
-      Walk(LChild, False);
-      LChild := NextSib(LChild);
-    end;
-  end;
-
+var
+  LHits: TArray<Integer>;
+  LCount, LIdx, LParent, LArg, LArgIdx, LCallee: Integer;
+  LFileId, LLine, LCol: Integer;
+  LOk: Boolean;
 begin
-  Walk(0, False);
+  // One flat scan for the rare Slice call, judged by its parent alone (audit
+  // C2-03: the recursion asked IsIntrinsicCall of every node and
+  // ParamTakesSlice of every argument of every call, 94 ms over 704 RTL
+  // files). Allowed only as an argument - not the callee - of an ordinary,
+  // non-intrinsic call whose parameter there takes it; anything else (an
+  // operand, a parenthesis, a statement, an index base) is not an argument.
+  LHits := nil;
+  LCount := 0;
+  for LIdx := 0 to High(FTree.Nodes) do
+  begin
+    if not IsIntrinsicCall(LIdx, 'slice') then
+      Continue;
+    LParent := FTree.Nodes[LIdx].Parent;
+    LOk := False;
+    if (LParent <> NIL_NODE) and (KindOf(LParent) = nkCall) and
+       (FirstChild(LParent) <> LIdx) and not IsIntrinsicCall(LParent, '') then
+    begin
+      LArgIdx := 0;
+      LArg := NextSib(FirstChild(LParent));
+      while (LArg <> NIL_NODE) and (LArg <> LIdx) do
+      begin
+        Inc(LArgIdx);
+        LArg := NextSib(LArg);
+      end;
+      LOk := (LArg = LIdx) and ParamTakesSlice(LParent, LArgIdx);
+    end;
+    if not LOk and ReachesRoot(LIdx) then
+      AppendHit(LHits, LCount, LIdx);
+  end;
+  SortHitsBySource(LHits, LCount);
+  for LIdx := 0 to LCount - 1 do
+  begin
+    // On the CALLEE, not the call: that is the `Slice` token, and it is where
+    // dcc points.
+    LCallee := FirstChild(LHits[LIdx]);
+    NodePos(LCallee, LFileId, LLine, LCol);
+    FModel.AddDiag(MakeDiag('E2193', SE2193_SliceOutsideOpenArray,
+      LCallee, LFileId, LLine, LCol));
+  end;
 end;
 
 { Directive facts other units ask of this unit's symbols, read off the tree
@@ -5189,6 +5241,8 @@ begin
   BindTypes;
   ResolveAggregates;  // needs BindTypes' declared types - see its own header
   ResolveWithStmts;   // needs BindTypes' declared types - see its own header
+  SetLength(FModel.WithUnopened, FWithUnopenedCount);
+  FModel.SealWithUnopened;
   CheckForCounters;   // needs RefMap - see its own header
   CheckBareRaises;    // structural only - see its own header
   CheckSlicePositions; // needs RefMap - see its own header

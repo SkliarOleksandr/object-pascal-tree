@@ -535,6 +535,10 @@ type
     // any type derived from it is unreliable - which is why the typer stays
     // quiet over these nodes (see InUnopenedWithBody / TPasSemaTyper.Diag).
     WithUnopened: TArray<Integer>;
+    // WithUnopened sorted by node, for InUnopenedWithBody's membership test
+    // (WithUnopened itself keeps its resolution order, which completion
+    // reads). Filled by SealWithUnopened at the end of Phase 1.
+    WithUnopenedSorted: TArray<Integer>;
     // The expressions (an assignment, or the outermost expression of a
     // statement) the typer withheld a diagnostic over because a name in them
     // is BoundPastStruct: the project's inherited pass may move that name
@@ -747,6 +751,8 @@ type
       the last-child test. WithUnopened is empty for the overwhelming
       majority of units, so this costs one length check on the hot path. }
     function InUnopenedWithBody(ANode: Integer): Boolean;
+    // WithUnopenedSorted from WithUnopened - once Phase 1 has listed them all.
+    procedure SealWithUnopened;
     { True when ANode, an identifier in a METHOD body, is bound to a
       declaration dcc reaches only after the method's own type and its
       ancestors: a unit-level declaration of this unit (either section, an
@@ -2338,6 +2344,7 @@ var
 begin
   ExprType := nil;
   WithUnopened := nil;
+  WithUnopenedSorted := nil;
   PastStructRecheck := nil;
   ExprTypeX.Clear;
   // NodeScope joins the released set - but its one post-analysis consumer
@@ -2785,8 +2792,32 @@ begin
 end;
 
 function TPasSemaModel.InUnopenedWithBody(ANode: Integer): Boolean;
+
+  // Binary search of WithUnopenedSorted (audit C1-17: a linear scan of the
+  // list at every enclosing with, per with-body name, per with-pass round -
+  // and in a form unit nearly every with is listed, as a class target's
+  // ancestry always leaves the unit).
+  function Listed(AWith: Integer): Boolean;
+  var
+    LLo, LHi, LMid: Integer;
+  begin
+    LLo := 0;
+    LHi := High(WithUnopenedSorted);
+    while LLo <= LHi do
+    begin
+      LMid := (LLo + LHi) shr 1;
+      if WithUnopenedSorted[LMid] = AWith then
+        Exit(True);
+      if WithUnopenedSorted[LMid] < AWith then
+        LLo := LMid + 1
+      else
+        LHi := LMid - 1;
+    end;
+    Result := False;
+  end;
+
 var
-  LCur, LParent, LLast, LIdx: Integer;
+  LCur, LParent, LLast: Integer;
 begin
   Result := False;
   // Bounds-checked, not just nil-checked - same cross-generation-id class the
@@ -2794,26 +2825,48 @@ begin
   if (Length(WithUnopened) = 0) or (ANode = NIL_NODE) or
      (ANode > High(Tree.Nodes)) then
     Exit;
+  // Not sealed (a caller between ResolveWithStmts and the end of Phase 1):
+  // seal now - the only writer is the resolver, on this thread.
+  if Length(WithUnopenedSorted) <> Length(WithUnopened) then
+    SealWithUnopened;
   LCur := ANode;
   LParent := Tree.Nodes[LCur].Parent;
   while LParent <> NIL_NODE do
   begin
-    if Tree.Nodes[LParent].Kind = nkWithStmt then
-      for LIdx := 0 to High(WithUnopened) do
-        if WithUnopened[LIdx] = LParent then
-        begin
-          // Children are target1..targetN then the body (last one).
-          LLast := Tree.Nodes[LParent].FirstChild;
-          while (LLast <> NIL_NODE) and
-                (Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
-            LLast := Tree.Nodes[LLast].NextSibling;
-          if LCur = LLast then
-            Exit(True);
-          Break;
-        end;
+    if (Tree.Nodes[LParent].Kind = nkWithStmt) and Listed(LParent) then
+    begin
+      // Children are target1..targetN then the body (last one).
+      LLast := Tree.Nodes[LParent].FirstChild;
+      while (LLast <> NIL_NODE) and
+            (Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
+        LLast := Tree.Nodes[LLast].NextSibling;
+      if LCur = LLast then
+        Exit(True);
+    end;
     LCur := LParent;
     LParent := Tree.Nodes[LCur].Parent;
   end;
+end;
+
+procedure TPasSemaModel.SealWithUnopened;
+var
+  LIdx, LPos, LNode: Integer;
+  LSorted: TArray<Integer>;
+begin
+  LSorted := Copy(WithUnopened);
+  // Insertion sort: the list arrives almost in node order already.
+  for LIdx := 1 to High(LSorted) do
+  begin
+    LNode := LSorted[LIdx];
+    LPos := LIdx;
+    while (LPos > 0) and (LSorted[LPos - 1] > LNode) do
+    begin
+      LSorted[LPos] := LSorted[LPos - 1];
+      Dec(LPos);
+    end;
+    LSorted[LPos] := LNode;
+  end;
+  WithUnopenedSorted := LSorted;
 end;
 
 procedure TPasSemaModel.AddDiag(const ADiag: TSemaDiag);

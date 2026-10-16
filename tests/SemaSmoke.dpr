@@ -172,6 +172,26 @@ begin
       Inc(Result);
 end;
 
+// Are the ACode diagnostics in source order (line, then column)?
+function DiagsInSourceOrder(const ACode: string): Boolean;
+var
+  LLine, LCol: Integer;
+begin
+  Result := True;
+  LLine := 0;
+  LCol := 0;
+  for var LIdx := 0 to High(GModel.Diags) do
+    if GModel.Diags[LIdx].Code = ACode then
+    begin
+      if (GModel.Diags[LIdx].Line < LLine) or
+         ((GModel.Diags[LIdx].Line = LLine) and
+          (GModel.Diags[LIdx].Col < LCol)) then
+        Exit(False);
+      LLine := GModel.Diags[LIdx].Line;
+      LCol := GModel.Diags[LIdx].Col;
+    end;
+end;
+
 // Does any diagnostic with that code contain ASubstr in its message?
 function DiagHasText(const ACode, ASubstr: string): Boolean;
 begin
@@ -3102,6 +3122,8 @@ begin
     'end;'#10 +
     'end.'#10);
   Ok('e2145: one report per offending raise', DiagCount('E2145') = 6);
+  // A flat scan since audit P8 (C2-03): still the recursive walk's order.
+  Ok('e2145: reported in source order', DiagsInSourceOrder('E2145'));
   Ok('e2145: dcc''s wording',
     DiagHasText('E2145', 'only allowed in exception handler'));
   GModel.Free;
@@ -3182,6 +3204,8 @@ begin
     'end;'#10 +
     'end.'#10);
   Ok('e2193: one report per bad position', DiagCount('E2193') = 7);
+  Ok('e2193: reported in source order - the outer Slice of a nested one ' +
+    'first', DiagsInSourceOrder('E2193'));
   Ok('e2193: dcc''s wording',
     DiagHasText('E2193', 'only allowed as open array argument'));
   GModel.Free;
