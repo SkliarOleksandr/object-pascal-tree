@@ -5038,6 +5038,71 @@ begin
   Ok('non-ASCII fold: ...and print the same key', SemaKeyText(LKey) = LStr);
 end;
 
+// 11.1.1 (audit P7, C1-11; local/probe-p7/root R1-R7): the implicit root of a
+// heritage-less class, interface and dispinterface, and the members of a
+// `T: class` value, are System's TObject / IInterface / IDispatch - never a
+// same-named type a used unit declares. dcc64: every `OnlyOnFake*` below is
+// E2003, and `class(TObject)` written out reaches the fake's member. Before,
+// the root was looked up through the uses clause and the fake won.
+procedure TestImplicitRoot;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_implicit_root');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TGUID = record D1: Cardinal; end;'#10 +
+    '  IInterface = interface procedure RealI; end;'#10 +
+    '  IDispatch = interface(IInterface) procedure RealD; end;'#10 +
+    '  TObject = class procedure Free; end;'#10 +
+    'implementation'#10'procedure TObject.Free; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UFake.pas'),
+    'unit UFake;'#10'interface'#10'type'#10 +
+    '  TObject = class(System.TObject) procedure OnlyOnFake; end;'#10 +
+    '  IInterface = interface(System.IInterface) procedure OnlyOnFakeI; end;'#10 +
+    '  IDispatch = interface(System.IDispatch) procedure OnlyOnFakeD; end;'#10 +
+    'implementation'#10'procedure TObject.OnlyOnFake; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'RootP.dpr'),
+    'program RootP;'#10'uses UFake;'#10'type'#10 +
+    '  TBar = class procedure M; end;'#10 +
+    '  TBaz = class(TObject) end;'#10 +
+    '  IBar = interface end;'#10 +
+    '  IBarD = dispinterface [''{1C2D3E4F-0000-0000-0000-000000000001}''] end;'#10 +
+    '  TG<T: class> = class procedure Run(V: T); end;'#10 +
+    'procedure TBar.M; begin Free; OnlyOnFake; end;'#10 +
+    'procedure TG<T>.Run(V: T); begin V.Free; V.OnlyOnFake; end;'#10 +
+    'var B: TBar; Z: TBaz; I: IBar; D: IBarD;'#10 +
+    'begin'#10 +
+    '  B.Free; B.OnlyOnFake;'#10 +
+    '  Z.OnlyOnFake;'#10 +
+    '  I.RealI; I.OnlyOnFakeI;'#10 +
+    '  D.RealD; D.OnlyOnFakeD;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'RootP.dpr'));
+    LM := ModelByName('rootp');
+    Ok('11.1.1: the program loaded', LM <> nil);
+    if LM <> nil then
+    begin
+      Ok('11.1.1: a heritage-less class, interface, dispinterface and a ' +
+        'T: class value reach System''s root, not the used unit''s - five ' +
+        'E2003s, all on the fake''s members',
+        (DiagCount(LM, 'E2003') = 5) and
+        DiagHasText(LM, 'E2003', 'OnlyOnFakeI') and
+        DiagHasText(LM, 'E2003', 'OnlyOnFakeD'));
+    end;
+  finally
+    GProj.Free;
+  end;
+  TDirectory.Delete(LDir, True);
+end;
+
 // Depth that is not the source's nesting, through the project's passes
 // (audit A1-01, A1-07): 10,000-term operator chains - a constant typed from
 // its operands (UntypedInitTypeX), an inline var inferred from them (the
@@ -14046,6 +14111,7 @@ begin
   TestProjectSwitchState;
   TestIncludeRows;
   TestNonAsciiFold;
+  TestImplicitRoot;
   TestInstanceSize;
   TestOperatorChains;
   TestDonorSafety;

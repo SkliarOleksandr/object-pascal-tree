@@ -347,6 +347,11 @@ type
       dropped by ReleaseCrossWork. One slot per model, OWNER-only: only the
       worker processing model i reads or creates slot i. }
     FUsesMemo: TArray<TDictionary<string, TPasExtRef>>;
+    { FixCrossArity's corrections, beside FUsesMemo with its lifetime and its
+      owner-only slots: (unit, symbol, written arity) of the binding found ->
+      the right-arity type (audit C1-16 - every `TArray<X>` next to
+      System.Generics.Collections walked the whole uses clause). }
+    FArityMemo: TArray<TDictionary<Int64, TPasExtRef>>;
     // Set by ReleaseTransientMaps; every Analyze* refuses to run after it -
     // see the public method's contract comment.
     FTransientReleased: Boolean;
@@ -1068,6 +1073,14 @@ type
     procedure CommitXNewExprType(AId: Integer);
     procedure RunCrossTypePass(ACount: Integer);
   public
+    // The nkGenericParams node of the type or method declaration ASym of LM
+    // (NIL_NODE when it declares none), and the number of parameters it
+    // declares - the arity, without building the idents' array.
+    class function GenericParamsNodeOf(LM: TPasSemaModel;
+      ASym: Integer): Integer; static;
+    class function GenericParamCountOf(LM: TPasSemaModel;
+      ASym: Integer): Integer; static;
+    function GenericParamCount(AMid, ASym: Integer): Integer;
     // The generic parameter NAME idents of a type or a method declaration
     // ASym of LM, in order (the ones TypeArgs bind positionally); a model
     // that need not be in FModels yet works too (a fresh re-parse the
@@ -1259,6 +1272,13 @@ type
       first AMid's own `uses` (last-uses-wins, matching normal resolution
       priority), then the implicit System unit as a last resort. }
     function ResolveRealDecl(AMid: Integer; const ANameLower: string;
+      out ARMid, ARSym: Integer): Boolean;
+    { The IMPLICIT root ANameLower ('tobject', 'iinterface', 'idispatch') a
+      heritage-less type of AMid descends from: System's declaration, never
+      a same-named type the `uses` clause brings in (11.1.1, probe-p7 R1-R7).
+      ResolveRealDecl's walk only when System is not loaded or does not
+      declare it (a fixture with no RTL). }
+    function ImplicitRootX(AMid: Integer; const ANameLower: string;
       out ARMid, ARSym: Integer): Boolean;
     { ANode's enclosing namespace-qualifier prefix (System/SysUtils in
       System.SysUtils.TBytes), if any: the unit's model id (-1 if none), with
@@ -2413,6 +2433,36 @@ begin
       end;
     end;
   end;
+end;
+
+// The uses walk this replaced ran on every member lookup that climbed past a
+// heritage-less class (FindMemberX, EnumMembersX, XDescendsFrom, AncestorOfX
+// through HeritageHopX; every member use on a `T: class` value): one Resolve
+// per used unit, 0.13 us each, 246 against 14 ms of inherited pass on a unit
+// with 300 uses (audit C1-11) - and it found a used unit's TObject first,
+// which dcc never does.
+function TPasSemaProject.ImplicitRootX(AMid: Integer;
+  const ANameLower: string; out ARMid, ARSym: Integer): Boolean;
+var
+  LUid, LS: Integer;
+  LSys: TPasSemaModel;
+begin
+  LUid := EnsureSystemUnit;
+  if LUid >= 0 then
+  begin
+    LSys := FModels[LUid];
+    if LSys.InterfaceScope <> NIL_SCOPE then
+    begin
+      LS := LSys.FindLocal(LSys.InterfaceScope, ANameLower);
+      if (LS <> NIL_SYM) and (LSys.Symbols[LS].DeclNode <> NIL_NODE) then
+      begin
+        ARMid := LUid;
+        ARSym := LS;
+        Exit(True);
+      end;
+    end;
+  end;
+  Result := ResolveRealDecl(AMid, ANameLower, ARMid, ARSym);
 end;
 
 function TPasSemaProject.ModelCount: Integer;
@@ -7076,7 +7126,7 @@ begin
   if not IsGenericTypeSym(AMid, ASym) then
     Result := 0
   else
-    Result := Length(GenericParamIdents(AMid, ASym));
+    Result := GenericParamCount(AMid, ASym);
 end;
 
 { The same arity search, but in the referring unit's OWN interface scope.
@@ -7339,12 +7389,34 @@ procedure TPasSemaProject.FixCrossArity(AId: Integer; AModel: TPasSemaModel;
   ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
 var
   LWant, LProbe, LDepth, LUid, LFound: Integer;
+  LKey: Int64;
+  LMemo: TDictionary<Int64, TPasExtRef>;
+  LExt: TPasExtRef;
+  LHit: Boolean;
 begin
   if FModels[AUnit].Symbols[ASym].Kind <> skType then
     Exit;
   LWant := WrittenArityOfRef(AModel, ANode);
   if ArityOfTypeSym(AUnit, ASym) = LWant then
     Exit;
+  // The answer depends on the binding found and the written arity only (the
+  // name is the binding's): memoized in AId's slot, which only its worker
+  // touches - every caller corrects a reference of the model it owns.
+  LMemo := nil;
+  LKey := (Int64(AUnit) shl 40) or (Int64(ASym) shl 8) or (LWant and $FF);
+  if AId <= High(FArityMemo) then
+  begin
+    if FArityMemo[AId] = nil then
+      FArityMemo[AId] := TDictionary<Int64, TPasExtRef>.Create;
+    LMemo := FArityMemo[AId];
+    if LMemo.TryGetValue(LKey, LExt) then
+    begin
+      AUnit := LExt.UnitId;
+      ASym := LExt.Sym;
+      Exit;
+    end;
+  end;
+  LHit := False;
   LProbe := FModels[AUnit].Symbols[ASym].NextOverload;
   for LDepth := 1 to 32 do
   begin
@@ -7354,14 +7426,22 @@ begin
        (ArityOfTypeSym(AUnit, LProbe) = LWant) then
     begin
       ASym := LProbe;
-      Exit;
+      LHit := True;
+      Break;
     end;
     LProbe := FModels[AUnit].Symbols[LProbe].NextOverload;
   end;
-  if FindTypeInUsesArity(AId, ANameLower, LWant, LUid, LFound) then
+  if not LHit then
+    if FindTypeInUsesArity(AId, ANameLower, LWant, LUid, LFound) then
+    begin
+      AUnit := LUid;
+      ASym := LFound;
+    end;
+  if LMemo <> nil then
   begin
-    AUnit := LUid;
-    ASym := LFound;
+    LExt.UnitId := AUnit;
+    LExt.Sym := ASym;
+    LMemo.Add(LKey, LExt);
   end;
 end;
 
@@ -7630,6 +7710,22 @@ begin
         Exit;
       end;
     end;
+  end
+  else
+  begin
+    // A unit name is identifiers and dots only: a chain whose head is a
+    // call, an index, a dereference or parentheses names none - answered
+    // before its text is built (audit C2-13: every `Q.F('x').AsString`,
+    // `L[I].Name`, `P^.X` sliced its first token into a string).
+    var LHead := ANode;
+    while LM.Tree.Nodes[LHead].Kind = nkMember do
+    begin
+      LHead := LM.Tree.Nodes[LHead].FirstChild;
+      if LHead = NIL_NODE then
+        Exit;
+    end;
+    if LM.Tree.Nodes[LHead].Kind <> nkIdent then
+      Exit;
   end;
   Result := UnitNamedBy(AId, LM.Tree.DottedText(ANode));
 end;
@@ -8536,29 +8632,74 @@ begin
   Result := GenericParamIdentsOf(FModels[AMid], ASym);
 end;
 
-class function TPasSemaProject.GenericParamIdentsOf(LM: TPasSemaModel;
-  ASym: Integer): TArray<Integer>;
+// The nkGenericParams node of ASym's declaration, or NIL_NODE. A generic TYPE
+// hangs its parameters off the nkTypeDecl; a generic METHOD (16.2.1,
+// `function Wrap<T>(...)`) off its nkRoutine. Both are read the same way from
+// there, which is what lets ONE substitution frame serve either - see
+// InferMethodFrame.
+class function TPasSemaProject.GenericParamsNodeOf(LM: TPasSemaModel;
+  ASym: Integer): Integer;
 var
-  LName, LParent, LGen, LParam, LP: Integer;
+  LName, LParent: Integer;
 begin
-  Result := nil;
+  Result := NIL_NODE;
   LName := LM.Symbols[ASym].DeclNode;
   if LName = NIL_NODE then
     Exit;
-  // A generic TYPE hangs its parameters off the nkTypeDecl; a generic METHOD
-  // (16.2.1, `function Wrap<T>(...)`) off its nkRoutine. Both are read the
-  // same way from there, which is what lets ONE substitution frame serve
-  // either - see InferMethodFrame.
   LParent := LM.Tree.Nodes[LName].Parent;
   if (LParent = NIL_NODE) or not (LM.Tree.Nodes[LParent].Kind in
      [nkTypeDecl, nkRoutine]) then
     Exit;
-  LGen := LM.Tree.Nodes[LParent].FirstChild;
-  while (LGen <> NIL_NODE) and (LM.Tree.Nodes[LGen].Kind <> nkGenericParams) do
-    LGen := LM.Tree.Nodes[LGen].NextSibling;
-  if LGen = NIL_NODE then
+  Result := LM.Tree.Nodes[LParent].FirstChild;
+  while (Result <> NIL_NODE) and
+        (LM.Tree.Nodes[Result].Kind <> nkGenericParams) do
+    Result := LM.Tree.Nodes[Result].NextSibling;
+end;
+
+// How many parameters ASym declares (0: not generic) - GenericParamIdentsOf's
+// Length without building it; the arity tests ask only this (audit C1-21).
+class function TPasSemaProject.GenericParamCountOf(LM: TPasSemaModel;
+  ASym: Integer): Integer;
+var
+  LParam, LP: Integer;
+begin
+  Result := 0;
+  LParam := GenericParamsNodeOf(LM, ASym);
+  if LParam = NIL_NODE then
     Exit;
-  LParam := LM.Tree.Nodes[LGen].FirstChild;
+  LParam := LM.Tree.Nodes[LParam].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LParam].Kind = nkGenericParam then
+    begin
+      LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LParam].FirstChild);
+      while (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIdent) do
+      begin
+        Inc(Result);
+        LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LP].NextSibling);
+      end;
+    end;
+    LParam := LM.Tree.Nodes[LParam].NextSibling;
+  end;
+end;
+
+function TPasSemaProject.GenericParamCount(AMid, ASym: Integer): Integer;
+begin
+  Result := GenericParamCountOf(FModels[AMid], ASym);
+end;
+
+class function TPasSemaProject.GenericParamIdentsOf(LM: TPasSemaModel;
+  ASym: Integer): TArray<Integer>;
+var
+  LParam, LP, LCount: Integer;
+begin
+  Result := nil;
+  LCount := GenericParamCountOf(LM, ASym);
+  if LCount = 0 then
+    Exit;
+  SetLength(Result, LCount);
+  LCount := 0;
+  LParam := LM.Tree.Nodes[GenericParamsNodeOf(LM, ASym)].FirstChild;
   while LParam <> NIL_NODE do
   begin
     if LM.Tree.Nodes[LParam].Kind = nkGenericParam then
@@ -8568,7 +8709,8 @@ begin
       LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LParam].FirstChild);
       while (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIdent) do
       begin
-        Result := Result + [LP];
+        Result[LCount] := LP;
+        Inc(LCount);
         LP := PasSkipAttrGroups(LM.Tree, LM.Tree.Nodes[LP].NextSibling);
       end;
     end;
@@ -8584,22 +8726,13 @@ function TPasSemaProject.GenericParamConstraints(AMid,
   ASym: Integer): TArray<TArray<Integer>>;
 var
   LM: TPasSemaModel;
-  LName, LParent, LGen, LParam, LP: Integer;
+  LGen, LParam, LP: Integer;
   LGroup: TArray<Integer>;
   LCount: Integer;
 begin
   Result := nil;
   LM := FModels[AMid];
-  LName := LM.Symbols[ASym].DeclNode;
-  if LName = NIL_NODE then
-    Exit;
-  LParent := LM.Tree.Nodes[LName].Parent;
-  if (LParent = NIL_NODE) or not (LM.Tree.Nodes[LParent].Kind in
-     [nkTypeDecl, nkRoutine]) then
-    Exit;
-  LGen := LM.Tree.Nodes[LParent].FirstChild;
-  while (LGen <> NIL_NODE) and (LM.Tree.Nodes[LGen].Kind <> nkGenericParams) do
-    LGen := LM.Tree.Nodes[LGen].NextSibling;
+  LGen := GenericParamsNodeOf(LM, ASym);
   if LGen = NIL_NODE then
     Exit;
   LParam := LM.Tree.Nodes[LGen].FirstChild;
@@ -8754,8 +8887,9 @@ var
     then `T.Create`, and with only `class` recognised the walk stopped at the
     parameter. `record` is the one kind that must NOT land here.
 
-    Routed through ResolveRealDecl like every other implicit-TObject hop, so
-    it finds the real System.pas declaration rather than a seeded stub. }
+    Routed through ImplicitRootX like every other implicit-TObject hop, so
+    it finds System's own declaration - not a seeded stub, and not a
+    TObject the `uses` clause names (11.1.1). }
   function ClassConstraintX(const ANodes: TArray<Integer>): TSemaXType;
   var
     LNode, LRMid, LRSym: Integer;
@@ -8765,7 +8899,7 @@ var
       if (LM.Tree.Nodes[LNode].FirstChild = NIL_NODE) and
          (LM.Tree.NodeTextEquals(LNode, 'class') or
           LM.Tree.NodeTextEquals(LNode, 'constructor')) and
-         ResolveRealDecl(AParam.UnitId, 'tobject', LRMid, LRSym) then
+         ImplicitRootX(AParam.UnitId, 'tobject', LRMid, LRSym) then
         Exit(XPlain(LRMid, LRSym));
   end;
 
@@ -9100,11 +9234,22 @@ begin
     LCons := GenericParamConstraints(LBase.UnitId, LBase.Sym);
     if (Length(LIdents) = 0) or (Length(LCons) <> Length(LIdents)) then
       Continue;
+    // TList<T>, TDictionary<K, V>: nothing to check, so no argument is
+    // resolved for it (audit C1-22 - one resolution per argument per use,
+    // a nested instantiation under the instance lock).
+    var LAnyCons := False;
+    for var LGroup in LCons do
+      LAnyCons := LAnyCons or (Length(LGroup) > 0);
+    if not LAnyCons then
+      Continue;
     LArgNode := LM.Tree.Nodes[LHead].NextSibling;
     LIdx := 0;
     while (LArgNode <> NIL_NODE) and (LIdx <= High(LIdents)) do
     begin
-      LArgX := ResolveTypeExpr(AId, LArgNode);
+      if Length(LCons[LIdx]) > 0 then
+        LArgX := ResolveTypeExpr(AId, LArgNode)
+      else
+        LArgX := XNil;
       // An argument that is itself an open parameter (an instantiation inside
       // another generic's body) constrains nothing until it is closed.
       if XValid(LArgX) and (FModels[LArgX.UnitId].Symbols[LArgX.Sym].Kind <>
@@ -9743,7 +9888,7 @@ begin
         end;
         Result := LBase;
         if (Length(LArgs) > 0) and
-           (Length(GenericParamIdents(LBase.UnitId, LBase.Sym)) =
+           (GenericParamCount(LBase.UnitId, LBase.Sym) =
             Length(LArgs)) then
           Result.Inst := Instantiate(LBase, LArgs);
       end;
@@ -12812,7 +12957,7 @@ var
         // arguments, and the first candidate winning the tie.
         if IsClassCtorDtorSym(AMid, LCand) or
            ((LTypeArgs >= 0) and
-            (Length(GenericParamIdents(AMid, LCand)) <> LTypeArgs)) then
+            (GenericParamCount(AMid, LCand) <> LTypeArgs)) then
         begin
           LCand := FModels[AMid].Symbols[LCand].NextOverload;
           Continue;
@@ -13001,7 +13146,7 @@ var
     while (LMemSym <> NIL_SYM) and
           (FModels[AMid].Symbols[LMemSym].Kind = skRoutine) do
     begin
-      if Length(GenericParamIdents(AMid, LMemSym)) = LWanted then
+      if GenericParamCount(AMid, LMemSym) = LWanted then
         Exit;
       LMemSym := FModels[AMid].Symbols[LMemSym].NextOverload;
     end;
@@ -13032,7 +13177,7 @@ var
       while (LCand <> NIL_SYM) and
             (FModels[LMemMid].Symbols[LCand].Kind = skRoutine) do
       begin
-        if Length(GenericParamIdents(LMemMid, LCand)) = LWanted then
+        if GenericParamCount(LMemMid, LCand) = LWanted then
         begin
           AMid := LMemMid;
           ASym := LCand;
@@ -13082,7 +13227,7 @@ var
     while (LCand <> NIL_SYM) and
           (FModels[LMid].Symbols[LCand].Kind = skRoutine) do
     begin
-      if (Length(GenericParamIdents(LMid, LCand)) = LWanted) and
+      if (GenericParamCount(LMid, LCand) = LWanted) and
          not RoutineRequiresArgs(LMid, LCand) then
         Break;
       LCand := FModels[LMid].Symbols[LCand].NextOverload;
@@ -16266,7 +16411,7 @@ begin
   // No real root (no System.pas on the path - only the seeded stand-in) is
   // still a KNOWN end: the chain is this type, then the root, which has no
   // ancestor of its own. And the root reached is its own end.
-  if not ResolveRealDecl(AMid, LRootName, LRMid, LRSym) or
+  if not ImplicitRootX(AMid, LRootName, LRMid, LRSym) or
      ((LRMid = AMid) and (LRSym = ASym)) then
     Exit(hhNone);
   ANext := XPlain(LRMid, LRSym);
@@ -16845,7 +16990,7 @@ end;
 function TPasSemaProject.IsGenericRoutine(AMid, ASym: Integer): Boolean;
 begin
   Result := (FModels[AMid].Symbols[ASym].Kind = skRoutine) and
-    (Length(GenericParamIdents(AMid, ASym)) > 0);
+    (GenericParamCount(AMid, ASym) > 0);
 end;
 
 { No parameters at all - none written, or an empty `()`. }
@@ -19376,6 +19521,7 @@ begin
   // an answer that came from it.
   ReleaseUsesMemo;
   SetLength(FUsesMemo, ACount);
+  SetLength(FArityMemo, ACount);
 end;
 
 procedure TPasSemaProject.ReleaseUsesMemo;
@@ -19385,6 +19531,9 @@ begin
   for LIdx := 0 to High(FUsesMemo) do
     FUsesMemo[LIdx].Free;
   SetLength(FUsesMemo, 0);
+  for LIdx := 0 to High(FArityMemo) do
+    FArityMemo[LIdx].Free;
+  SetLength(FArityMemo, 0);
 end;
 
 { The DECLARATION-site companion to CrossResolveInherited: the names inside a
@@ -20657,7 +20806,7 @@ var
         LKey.NameLower := AModel.Symbols[LIdx].NameLower;
         LKey.ScopeId := ScopeIdOf(AModel.Symbols[LIdx].Scope);
         if sfGeneric in AModel.Symbols[LIdx].Flags then
-          LKey.Arity := Length(GenericParamIdentsOf(AModel, LIdx))
+          LKey.Arity := GenericParamCountOf(AModel, LIdx)
         else
           LKey.Arity := 0;
         LKey.Ordinal := 0;

@@ -2516,7 +2516,11 @@ begin
             else
               LRootName := 'iinterface';
         end;
-        if (LRootName <> '') and BridgeName(LRootName, LMid, LSym) then
+        // System's root, as the project's heritage hop (11.1.1): a TObject
+        // the uses clause names is not it.
+        if (LRootName <> '') and (FProj <> nil) and (FProjMid >= 0) and
+           (FProj.ImplicitRootX(FProjMid, LRootName, LMid, LSym) or
+            BridgeName(LRootName, LMid, LSym)) then
         begin
           Result.X := XPlain(LMid, LSym);
           Result.IsTypeRef := True;

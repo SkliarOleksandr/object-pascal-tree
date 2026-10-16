@@ -2010,6 +2010,37 @@ begin
   GProj := nil;
   GProjMid := -1;
 
+  // ======== 11.1.1: the implicit root on the overlay (audit P7, C1-11) ======
+  // A heritage-less class of the edited unit lists System.TObject's members,
+  // not those of a TObject its used unit declares (dcc64: E2003).
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_root');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'System.pas'), CF_SYSTEM);
+  TFile.WriteAllText(TPath.Combine(GDir, 'ufake.pas'),
+    'unit ufake;'#10'interface'#10'type'#10 +
+    '  TObject = class(System.TObject) procedure OnlyOnFake; end;'#10 +
+    'implementation'#10'procedure TObject.OnlyOnFake; begin end;'#10'end.'#10);
+  var LRootMain :=
+    'unit mainu;'#10'interface'#10'uses ufake;'#10'type'#10 +
+    '  TBar = class end;'#10 +
+    'implementation'#10'procedure P;'#10'var B: TBar;'#10'begin'#10 +
+    '  //ROOT'#10'end;'#10'end.'#10;
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), LRootMain);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  ProjCase(StringReplace(LRootMain, '//ROOT', 'B.|', []));
+  GCounter.Ok('11.1.1: B. on a heritage-less class lists System.TObject''s ' +
+    'Free, not the used unit''s TObject.OnlyOnFake',
+    GHit and Has('Free') and not Has('OnlyOnFake'));
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
   if GCounter.Finish('SemaCompleteSmoke') then
     ExitCode := 1;
   GComp.Free;
