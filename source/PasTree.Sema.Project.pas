@@ -3644,10 +3644,11 @@ end;
 
 { The bindings a generic declaration is measured under when nothing
   instantiates it: each parameter OPEN - pskOpenRef when a constraint makes
-  it a reference whatever it becomes (`class`, or a named class or
-  interface, the only types a constraint can name), pskOpenMin otherwise
-  (none, `record`, or a lone `constructor` - which Integer meets as well as
-  a class, 16.4.1, local/probe-ctor I_Integer), which lays it out as 0
+  it a reference whatever it becomes (`class`, `constructor` - written for
+  classes with a parameterless Create; dcc64 also takes Integer, a compiler
+  gap 16.4.1 does not build on - or a named class or interface, the only
+  types a constraint can name), pskOpenMin otherwise (none, or `record`),
+  which lays it out as 0
   bytes aligned 1: the layout only grows with a field, so the result is the
   least any instantiation takes - exactly what an empty record gives
   (`TGn<TER>`, dcc-measured). Empty for a type that is not generic; False
@@ -3691,7 +3692,8 @@ begin
         if LM.Tree.Nodes[LCon].Kind = nkConstraint then
           if LM.Tree.Nodes[LCon].FirstChild <> NIL_NODE then
             LKind := pskOpenRef   // a named class or interface
-          else if LM.Tree.NodeTextEquals(LCon, 'class') then
+          else if LM.Tree.NodeTextEquals(LCon, 'class') or
+                  LM.Tree.NodeTextEquals(LCon, 'constructor') then
             LKind := pskOpenRef;
         LCon := LM.Tree.Nodes[LCon].NextSibling;
       end;
@@ -8917,8 +8919,8 @@ var
     class. Last, not first: a named type's members are a superset of
     TObject's, so trying it earlier can only find the same names later.
 
-    A lone `constructor` is NOT `class` (16.4.1, local/probe-ctor): Integer
-    meets it, `V.Free`, `V.ClassName` and `T.Create.Free` are E2003 under it,
+    A lone `constructor` is NOT `class` (16.4.1, local/probe-ctor): `V.Free`,
+    `V.ClassName` and `T.Create.Free` are E2003 under it,
     and `T.Create` is all it unlocks - answered in ACtorOnly mode, the
     group's TObject for a `constructor` without `class`, which the member
     walks ask for `Create` only (`Atomic<I; T: constructor>` in a threading
