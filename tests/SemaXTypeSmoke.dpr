@@ -10,6 +10,7 @@ program SemaXTypeSmoke;
 uses
   System.SysUtils,
   System.IOUtils,
+  System.Diagnostics,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -1808,6 +1809,40 @@ begin
     end);
 end;
 
+// P6: analyzes XPZ (a 50-link constant chain P0..P50 and a function G) and
+// XPB (uses XPZ; AConsts in its interface, ABody in a procedure's body) in a
+// fresh GProj, left for the caller to read and free; the analysis time in ms.
+function TimeP6(const AName, AConsts, ABody: string): Int64;
+var
+  LDir, LSrc: string;
+begin
+  LSrc := 'unit XPZ;'#10'interface'#10'function G: string;'#10 +
+    'const'#10'  P0 = 1;'#10;
+  for var LK := 1 to 50 do
+    LSrc := LSrc + Format('  P%d = P%d + 1;'#10, [LK, LK - 1]);
+  LSrc := LSrc + 'implementation'#10 +
+    'function G: string; begin Result := ''''; end;'#10'end.'#10;
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_p6');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XPZ.pas'), LSrc);
+  LSrc := 'unit XPB;'#10'interface'#10'uses XPZ;'#10;
+  if AConsts <> '' then
+    LSrc := LSrc + 'const'#10 + AConsts;
+  LSrc := LSrc + 'type'#10'  PI = ^Integer;'#10'  TRec = record Q: PI; end;'#10 +
+    'implementation'#10'procedure Run;'#10 +
+    'var P: PI; R: TRec; V: Variant; I: Integer; S: string;'#10 +
+    'begin'#10 + ABody + 'end;'#10'end.'#10;
+  TFile.WriteAllText(TPath.Combine(LDir, 'XPB.pas'), LSrc);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  var LWatch := TStopwatch.StartNew;
+  GProj.AnalyzeDirectory(LDir);
+  Result := LWatch.ElapsedMilliseconds;
+  Writeln('  P6 ', AName, ': ', Result, ' ms');
+  TDirectory.Delete(LDir, True);
+end;
+
 const
   // ---- 4.11: intrinsic result typing across units. XIA owns the types and
   // the section-level constants an intrinsic initializes (3.2.1); XIB uses
@@ -3441,6 +3476,58 @@ begin
       GProj.Free;
       if TDirectory.Exists(LDir) then
         TDirectory.Delete(LDir, True);
+    end;
+  end;
+
+  // ---- P6 (audit C1-10, C2-08, C2-09, C1-14): shapes whose typing was
+  // exponential or quadratic in their depth, each analyzed on its own. An
+  // index chain whose base does not type re-typed that base in a fresh probe
+  // per level (2^n); a deep constant chain in a used unit was re-inferred
+  // twice per link (2^8 per reference past the depth cap); an operator chain
+  // led by a cross-unit call re-derived every nested operator (n^2). The
+  // bounds sit two orders of magnitude above the linear cost. ----
+  begin
+    var LIdx := '  I := P';
+    for var LK := 1 to 20 do
+      LIdx := LIdx + '[1]';
+    LIdx := LIdx + ';'#10'  I := R.Q';
+    for var LK := 1 to 20 do
+      LIdx := LIdx + '[1]';
+    LIdx := LIdx + ';'#10;
+    var LVar := '';
+    for var LRow := 1 to 50 do
+    begin
+      LVar := LVar + '  I := V';
+      for var LK := 1 to 7 do
+        LVar := LVar + '.S[1]';
+      LVar := LVar + ';'#10;
+    end;
+    var LOps := '  S := G';
+    for var LK := 1 to 1000 do
+      LOps := LOps + ' + ''a''';
+    LOps := LOps + ';'#10;
+    var LConsts := '';
+    for var LK := 0 to 499 do
+      LConsts := LConsts + Format('  C%d = P%d + 1;'#10, [LK, 9 + LK mod 40]);
+    var LMs := TimeP6('index', '', LIdx);
+    GProj.Free;
+    Ok('P6: an index chain over a base that does not type is linear',
+      LMs < 150);
+    LMs := TimeP6('variant', '', LVar);
+    GProj.Free;
+    Ok('P6: a late-bound Variant member and index chain is linear',
+      LMs < 150);
+    LMs := TimeP6('operators', '', LOps);
+    GProj.Free;
+    Ok('P6: an operator chain led by a cross-unit call is linear', LMs < 150);
+    LMs := TimeP6('constants', LConsts, '  var K := C7;'#10);
+    try
+      Ok('P6: constants naming a deep chain of a used unit are inferred once',
+        LMs < 150);
+      Eq('P6: a constant 17 links deep in a used unit still types',
+        XTypeOf(ModelByName('xpb'), 'K'), 'Integer');
+    finally
+      GProj.Free;
     end;
   end;
 

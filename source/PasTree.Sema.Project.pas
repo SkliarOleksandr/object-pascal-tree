@@ -167,6 +167,9 @@ type
     FNewSymType: TDictionary<Integer, TSemaXType>;
     FUsesHeads: TDictionary<string, TArray<TPasExtRef>>;
     FAmbig: TDictionary<Integer, Boolean>;      // call nodes whose overload tie left the type a guess
+    // A bare constant name whose inference from its initializer the CALLER
+    // makes (InitDesignatorTypeX): the walk leaves it out at this node.
+    FNoInferAt: Integer;
   public
     constructor Create;
     destructor Destroy; override;
@@ -745,7 +748,8 @@ type
     // `with` over a target whose TYPE lives in another unit (ch.05 sec. 5.7) -
     // see FindInEnclosingWith.
     function AllParamsDefaulted(AMid, AParams: Integer): Boolean;
-    function PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
+    function PointeeOfDeclX(AId, ABaseNode: Integer;
+      AProbe: TPasXProbe = nil): TSemaXType;
     function IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
     function PropertyHasParams(AMid, ASym: Integer): Boolean;
     function PropertyParamCount(AMid, ASym: Integer): Integer;
@@ -755,7 +759,11 @@ type
     function RoutineTakesNoParams(AMid, ASym: Integer): Boolean;
     function ParamlessOverloadX(const AX: TSemaXType;
       const ANameLower: string; out AMid, ASym, ACtx: Integer): Boolean;
-    function ElementX(AId, ABaseNode: Integer): TSemaXType;
+    // AProbe (here, in PointeeOfDeclX and DesignatorSymX): the probe the base
+    // is typed in when its type is not at hand - the caller's, so a node it
+    // walked is not walked again; nil makes a fresh one (audit C1-10).
+    function ElementX(AId, ABaseNode: Integer;
+      AProbe: TPasXProbe = nil): TSemaXType;
     { The type of `Base[i1, .., iN]` - ACount index levels peeled off the
       base's type (or, when that type is an inline array on the base's own
       declaration, off that node). See the implementation for why ElementX,
@@ -782,7 +790,7 @@ type
       An indexed or dereferenced base is not one: its declared type is the
       root's, not the value's (audit A3-24, B3-36, B3-37). }
     function PlainDesignatorSymX(AId, ANode: Integer;
-      out AMid, ASym: Integer): Boolean;
+      out AMid, ASym: Integer; AProbe: TPasXProbe = nil): Boolean;
     function BuiltinX(AMid: Integer; const ANameLower: string): TSemaXType;
     function IsIntrinsicRoutine(AMid, ASym: Integer;
       out AShape: TPasIntrinsicResult): Boolean;
@@ -1288,7 +1296,7 @@ type
       ANode: Integer);
     // The (model, symbol) a designator node names, when one does.
     function DesignatorSymX(AId, ANode: Integer;
-      out AMid, ASym: Integer): Boolean;
+      out AMid, ASym: Integer; AProbe: TPasXProbe = nil): Boolean;
     function AncestorOfX(const AX: TSemaXType): TSemaXType;
     { The ONE heritage step of a struct definition ADef of (AMid, ASym): the
       first heritage entry through ResolveTypeExprNested (`Outer.Inner`
@@ -11740,6 +11748,7 @@ begin
   FNewSymType := TDictionary<Integer, TSemaXType>.Create;
   FUsesHeads := TDictionary<string, TArray<TPasExtRef>>.Create;
   FAmbig := TDictionary<Integer, Boolean>.Create;
+  FNoInferAt := NIL_NODE;
 end;
 
 destructor TPasXProbe.Destroy;
@@ -11961,6 +11970,24 @@ var
   // The operator WalkChain is about to finish: its leftmost operand is walked
   // already, so Walk starts its child loop at the second operand.
   LSpineSkip: Integer;
+  // The pass's one probe for the questions it asks of a subtree off the
+  // declaration path (ElementX, PointeeOfDeclX): created on the first, kept
+  // for the walk, so a node is probed at most once. A fresh probe per
+  // question re-walked the base of every failing index in its own, and each
+  // nested failing index again - 2^n in an index chain over a base that does
+  // not type (audit C1-10, C2-08).
+  LFallback: TPasXProbe;
+
+  // The probe ElementX and PointeeOfDeclX are given: the walk's own in a
+  // probe, where FX already holds the base; the pass's LFallback otherwise.
+  function QuestionProbe: TPasXProbe;
+  begin
+    if LProbe <> nil then
+      Exit(LProbe);
+    if LFallback = nil then
+      LFallback := TPasXProbe.Create;
+    Result := LFallback;
+  end;
 
   // The per-node tables, mode-switched. In the pass they are the arrays; in a
   // probe the probe's dictionaries, where presence in FX also means "walked".
@@ -13342,6 +13369,18 @@ var
     LTX: TSemaXType;
   begin
     Result := NIL_INST;
+    // A frame is earned only through an instantiated hop, so the routine's
+    // own struct must be generic or nested in one: a unit-level routine, a
+    // seed (Exit, Inc, FreeAndNil) and a method of a plain class answer
+    // NIL_INST without the climb and the member lookups below (audit C1-12:
+    // 45 frames of 121,670 calls on a 665-unit closure).
+    LStruct := FModels[AMid].Symbols[ASym].Scope;
+    if LStruct = NIL_SCOPE then
+      Exit;
+    LStruct := FModels[AMid].Scopes[LStruct].StructSym;
+    if (LStruct = NIL_SYM) or not (IsGenericTypeSym(AMid, LStruct) or
+       NestedInGenericX(XPlain(AMid, LStruct))) then
+      Exit;
     LCur := N;
     LParent := LM.Tree.Nodes[LCur].Parent;
     while LParent <> NIL_NODE do
@@ -13460,6 +13499,29 @@ var
         not BinaryOpIsAs(AId, ANode);
     end;
 
+    // Is operand ANode an operator the walk has typed with this very function
+    // already? OpX runs post-order (Walk's operator cases, InferInitX on a
+    // walked initializer), and an operator the intra-unit typer left untyped
+    // got XAt := OpX(ANode) there - or nothing, when OpX had nothing, which
+    // its own GetX fallback reads the same. Re-deriving it made a left-deep
+    // chain led by a cross-unit operand cost n^2/2 operator typings (audit
+    // C1-14, C2-16). An operator the intra-unit typer DID type is still
+    // re-derived: its literals are read exactly here, not by category.
+    function TypedOperand(ANode: Integer): Boolean;
+    begin
+      Result := (ANode <> NIL_NODE) and
+        (LM.Tree.Nodes[ANode].Kind in [nkBinaryOp, nkUnaryOp]) and
+        (LM.IntraType(ANode) = NIL_SYM);
+    end;
+
+    function OperandX(ANode: Integer): TSemaXType;
+    begin
+      if TypedOperand(ANode) then
+        Result := XAt(ANode)
+      else
+        Result := OpX(ANode);
+    end;
+
   var
     LLit, LNode: Integer;
     LNeg: Boolean;
@@ -13477,14 +13539,17 @@ var
         begin
           // The left operand of an operator chain is the next operator down
           // the spine: computed in a loop, bottom-up, with the fallback each
-          // level's own OpX call had (audit A1-01, as Walk's chain).
+          // level's own OpX call had (audit A1-01, as Walk's chain) - down to
+          // the first operand the walk has typed already.
           LNode := N;
-          while IsChainOp(LM.Tree.Nodes[LNode].FirstChild) do
+          while IsChainOp(LM.Tree.Nodes[LNode].FirstChild) and
+                not TypedOperand(LM.Tree.Nodes[LNode].FirstChild) do
             LNode := LM.Tree.Nodes[LNode].FirstChild;
-          Result := OpX(LM.Tree.Nodes[LNode].FirstChild);
+          Result := OperandX(LM.Tree.Nodes[LNode].FirstChild);
           repeat
             Result := OperatorResultX(AId, LNode, Result,
-              OpX(LM.Tree.Nodes[LM.Tree.Nodes[LNode].FirstChild].NextSibling));
+              OperandX(LM.Tree.Nodes[LM.Tree.Nodes[LNode].FirstChild].
+                NextSibling));
             if LNode = N then
               Break;
             if not XValid(Result) then
@@ -13493,8 +13558,8 @@ var
           until False;
         end;
       nkUnaryOp:
-        Result := OperatorResultX(AId, N, OpX(LM.Tree.Nodes[N].FirstChild),
-          XNil);
+        Result := OperatorResultX(AId, N,
+          OperandX(LM.Tree.Nodes[N].FirstChild), XNil);
     end;
     if not XValid(Result) then
       Result := GetX(N);
@@ -13812,10 +13877,15 @@ var
                   // initializer then; a declaration this pass already
                   // inferred was found in LNewSymType above and never gets
                   // here. Own model only: the probe runs in parallel with
-                  // other units' with-pass workers.
+                  // other units' with-pass workers. Not a constant the
+                  // probe's caller infers itself (FNoInferAt): run here as
+                  // well, each link of a constant chain was inferred twice,
+                  // 2^n for n links (audit C2-09).
                   if not XValid(XAt(N)) and
                      (LM.Symbols[LSym].Kind in [skVar, skConst]) and
-                     (LM.Symbols[LSym].TypeNode = NIL_NODE) then
+                     (LM.Symbols[LSym].TypeNode = NIL_NODE) and
+                     not ((LProbe <> nil) and (LProbe.FNoInferAt = N) and
+                          (LM.Symbols[LSym].Kind = skConst)) then
                     SetXAt(N, InferredDeclTypeX(AId, LSym, False));
                 end;
               skType, skBuiltinType, skGenericParam:
@@ -13954,7 +14024,7 @@ var
           // record the member is looked up in, as `pField^.FieldId` already
           // was (nkDeref, PointeeOfDeclX).
           if not XValid(LBX) then
-            LBX := PointeeOfDeclX(AId, LBase);
+            LBX := PointeeOfDeclX(AId, LBase, QuestionProbe);
           LSym := RefAt(LName);
           // A compiler SEED is never anyone's member, so a member name bound to
           // one is a Phase-1 mistake to be corrected here rather than trusted:
@@ -14368,7 +14438,7 @@ var
               // no type, and ElementX would peel past it to the innermost
               // element (`J[1].Fld` bound TRec.Fld, dcc's E2018).
               if not XValid(XAt(N)) and not LInside then
-                SetXAt(N, ElementX(AId, LBase));
+                SetXAt(N, ElementX(AId, LBase, QuestionProbe));
             end;
           end;
         end;
@@ -14384,7 +14454,7 @@ var
           LBase := LM.Tree.Nodes[N].FirstChild;
           if LBase <> NIL_NODE then
           begin
-            SetXAt(N, PointeeOfDeclX(AId, LBase));
+            SetXAt(N, PointeeOfDeclX(AId, LBase, QuestionProbe));
             if not XValid(XAt(N)) then
               SetXAt(N, PointeeX(GetX(LBase)));
           end;
@@ -14500,6 +14570,7 @@ begin
   LM := FModels[AId];
   LProbe := AProbe;
   LSpineSkip := NIL_NODE;
+  LFallback := nil;
   if LProbe <> nil then
   begin
     // A PROBE: the probe's tables in place of the arrays and overlays, the
@@ -14539,6 +14610,7 @@ begin
       Walk(0);
     BindAggregateLabelsX(AId, LNewExt);
   finally
+    LFallback.Free;
     LUsesHeads.Free;
     LAmbig.Free;
     if (AId > High(FXNewSymType)) or (FXNewSymType[AId] = nil) then
@@ -15998,7 +16070,8 @@ end;
   Exactly the reason ElementX starts from the declared type node for an inline
   `array[...] of T` - same gap, the other type constructor. XNil whenever the
   base does have a named type, which is the ordinary path. }
-function TPasSemaProject.PointeeOfDeclX(AId, ABaseNode: Integer): TSemaXType;
+function TPasSemaProject.PointeeOfDeclX(AId, ABaseNode: Integer;
+  AProbe: TPasXProbe): TSemaXType;
 var
   LMid, LSym, LNode: Integer;
 begin
@@ -16014,7 +16087,7 @@ begin
   if (LNode = NIL_NODE) or
      not (FModels[AId].Tree.Nodes[LNode].Kind in [nkIdent, nkMember]) then
     Exit;
-  if not DesignatorSymX(AId, ABaseNode, LMid, LSym) then
+  if not DesignatorSymX(AId, ABaseNode, LMid, LSym, AProbe) then
     Exit;
   LNode := FModels[LMid].Symbols[LSym].TypeNode;
   if (LNode = NIL_NODE) or
@@ -16030,7 +16103,7 @@ end;
   declared type NODE is sometimes the only place an array type exists (an
   inline `array[...] of T` resolves to no symbol at all). }
 function TPasSemaProject.PlainDesignatorSymX(AId, ANode: Integer;
-  out AMid, ASym: Integer): Boolean;
+  out AMid, ASym: Integer; AProbe: TPasXProbe): Boolean;
 var
   LM: TPasSemaModel;
 begin
@@ -16044,7 +16117,7 @@ begin
   if (ANode = NIL_NODE) or
      not (LM.Tree.Nodes[ANode].Kind in [nkIdent, nkMember]) then
     Exit;
-  Result := DesignatorSymX(AId, ANode, AMid, ASym);
+  Result := DesignatorSymX(AId, ANode, AMid, ASym, AProbe);
 end;
 
 function TPasSemaProject.AliasStepX(const ACur: TSemaXType;
@@ -16054,7 +16127,7 @@ begin
 end;
 
 function TPasSemaProject.DesignatorSymX(AId, ANode: Integer;
-  out AMid, ASym: Integer): Boolean;
+  out AMid, ASym: Integer; AProbe: TPasXProbe): Boolean;
 var
   LM: TPasSemaModel;
   LName: Integer;
@@ -16076,7 +16149,8 @@ begin
           LName := LM.Tree.Nodes[LName].NextSibling;
       end;
     nkParen, nkDeref, nkIndex:
-      Exit(DesignatorSymX(AId, LM.Tree.Nodes[ANode].FirstChild, AMid, ASym));
+      Exit(DesignatorSymX(AId, LM.Tree.Nodes[ANode].FirstChild, AMid, ASym,
+        AProbe));
     nkIdent: ;
   else
     Exit;
@@ -16104,14 +16178,18 @@ begin
     type is an INLINE `array[..] of TRect`, so ElementX can only reach the
     element through the member SYMBOL's own type node, and it gets that symbol
     from here. Without the fallback the whole chain came back untyped and every
-    TRect field in the body was undeclared. }
+    TRect field in the body was undeclared.
+
+    AProbe: the caller's probe, so a base it has walked is not walked again
+    (audit C1-10: a fresh probe per question made an index chain over a base
+    that does not type cost 2^n). }
   if LM.Tree.Nodes[ANode].Kind = nkMember then
   begin
     var LBase := LM.Tree.Nodes[ANode].FirstChild;
     // The base may denote a VALUE (LB.Items) or a TYPE (THintAction.Create).
     // Both are member containers and both occur as with targets, so try the
     // value reading first and fall back to reading it as a type reference.
-    var LBX := WithTargetTypeX(AId, LBase);
+    var LBX := WithTargetTypeX(AId, LBase, AProbe);
     if not XValid(LBX) then
       LBX := ResolveTypeExpr(AId, LBase);
     var LMemMid, LMemSym, LCtx: Integer;
@@ -16918,7 +16996,8 @@ begin
   end;
 end;
 
-function TPasSemaProject.ElementX(AId, ABaseNode: Integer): TSemaXType;
+function TPasSemaProject.ElementX(AId, ABaseNode: Integer;
+  AProbe: TPasXProbe): TSemaXType;
 
   // The element type of an inline nkArrayType. For a multi-dimensional
   // `array[a, b] of T` this reaches T rather than the intermediate row type -
@@ -16965,7 +17044,7 @@ begin
   // designator's: `AO[1]`'s declared type is AO's, and reading it typed
   // `AO[1][0]` as AO's element, one level short (audit B3-36, E3-32).
   LSym := NIL_SYM;
-  if PlainDesignatorSymX(AId, ABaseNode, LMid, LSym) then
+  if PlainDesignatorSymX(AId, ABaseNode, LMid, LSym, AProbe) then
   begin
     Result := ElemOf(LMid, FModels[LMid].Symbols[LSym].TypeNode);
     if XValid(Result) then
@@ -17000,7 +17079,7 @@ begin
     LCur := ResolveTypeExprNested(LMid,
       FModels[LMid].Tree.Nodes[FModels[LMid].Symbols[LSym].TypeNode].FirstChild)
   else
-    LCur := WithTargetTypeX(AId, ABaseNode);
+    LCur := WithTargetTypeX(AId, ABaseNode, AProbe);
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
@@ -18415,6 +18494,10 @@ begin
   LM := FModels[AMid];
   LProbe := TPasXProbe.Create;
   try
+    // A bare constant name is inferred below, once, with AFollowForeign; the
+    // walk's own fallback would infer it first without (audit C2-09).
+    if LM.Tree.Nodes[ANode].Kind = nkIdent then
+      LProbe.FNoInferAt := ANode;
     Result := WithTargetTypeX(AMid, ANode, LProbe);
     case LM.Tree.Nodes[ANode].Kind of
       nkIdent, nkMember, nkTypeArgs:
@@ -18645,7 +18728,9 @@ begin
        (LM.Tree.Nodes[LInit].FirstChild = LParent) then
     begin
       LInit := LM.Tree.Nodes[LParent].NextSibling;
-      Exit(ForInElementX(AMid, LInit, WithTargetTypeX(AMid, LInit)));
+      // XNil: ForInElementX types the collection itself, in the one probe
+      // it shares with its ElementX fallback (audit C2-12).
+      Exit(ForInElementX(AMid, LInit, XNil));
     end;
     // `for var I := From to To do` (5.5.1): the counter's type is the FROM
     // bound's, which is the for-stmt's next child.
@@ -18841,69 +18926,86 @@ var
   LCur, LEnum: TSemaXType;
   LM: TPasSemaModel;
   LDef, LDepth, LMemMid, LMemSym, LCtx: Integer;
+  // The one probe of the collection, made on first use: the with-target
+  // typing below and ElementX share it, so the collection is walked once
+  // (audit C2-12).
+  LProbe: TPasXProbe;
+
+  function Probe: TPasXProbe;
+  begin
+    if LProbe = nil then
+      LProbe := TPasXProbe.Create;
+    Result := LProbe;
+  end;
+
 begin
   Result := XNil;
   if ACollNode = NIL_NODE then
     Exit;
-  // NOT ElementX first: that helper also answers for a class with a DEFAULT
-  // array property, and a for-in over such a class walks its enumerator, not
-  // its indexer - `for var LPair in Dict` yielded V instead of TPair<K,V>
-  // that way, and every `.Key`/`.Value` after it was a false E2003 (44 in
-  // one project). So the type is classified first; arrays defer to ElementX
-  // from inside the loop, and a designator whose type could not be named at
-  // all (an inline `array[..] of T` on its own declaration) is the fallback.
-  LCur := ACollX;
-  // The caller's walk records no type for an inline var inferred from its
-  // initializer (`var LDict := TObjectDictionary<..>.Create(..)` - see the
-  // nkForInStmt note in CrossType), but the with-target typer can read one
-  // off that initializer; without this the fallback below typed such a
-  // dictionary by its DEFAULT property and every `.Key`/`.Value` on the
-  // pair was a false E2003 (6 sites in one project).
-  if not XValid(LCur) then
-    LCur := WithTargetTypeX(AMid, ACollNode);
-  if not XValid(LCur) then
-  begin
-    Result := ShapeElementX(ACollNode);
-    if not XValid(Result) then
-      Result := ElementX(AMid, ACollNode);
-    Exit;
-  end;
-  for LDepth := 1 to 32 do
-  begin
+  LProbe := nil;
+  try
+    // NOT ElementX first: that helper also answers for a class with a DEFAULT
+    // array property, and a for-in over such a class walks its enumerator, not
+    // its indexer - `for var LPair in Dict` yielded V instead of TPair<K,V>
+    // that way, and every `.Key`/`.Value` after it was a false E2003 (44 in
+    // one project). So the type is classified first; arrays defer to ElementX
+    // from inside the loop, and a designator whose type could not be named at
+    // all (an inline `array[..] of T` on its own declaration) is the fallback.
+    LCur := ACollX;
+    // The caller's walk records no type for an inline var inferred from its
+    // initializer (`var LDict := TObjectDictionary<..>.Create(..)` - see the
+    // nkForInStmt note in CrossType), but the with-target typer can read one
+    // off that initializer; without this the fallback below typed such a
+    // dictionary by its DEFAULT property and every `.Key`/`.Value` on the
+    // pair was a false E2003 (6 sites in one project).
     if not XValid(LCur) then
-      Exit(XNil);
-    LM := FModels[LCur.UnitId];
-    // A string walks its character type (StringElementX: AnsiChar for the
-    // 1-byte kinds - audit A3-26, E3-37, B3-29).
-    if LM.Symbols[LCur.Sym].Kind = skBuiltinType then
-      Exit(StringElementX(AMid, LCur));
-    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
-    if LDef = NIL_NODE then
-      Exit(XNil);
-    case LM.Tree.Nodes[LDef].Kind of
-      nkStringType, nkCall:
-        Exit(StringElementX(AMid, LCur));
-      nkSetType:
-        Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
-          LM.Tree.Nodes[LDef].FirstChild), LCur.Inst, 0));
-      nkArrayType:
-        Exit(ElementX(AMid, ACollNode));
-      nkIdent, nkMember, nkTypeArgs:
-        LCur := AliasStepX(LCur, LDef);   // alias link
-      nkClassType, nkRecordType, nkInterfaceType, nkObjectType:
-        begin
-          if not FindMemberX(AMid, LCur, 'getenumerator', LMemMid, LMemSym,
-               LCtx) then
-            Exit(XNil);
-          LEnum := SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0);
-          if not XValid(LEnum) or
-             not FindMemberX(AMid, LEnum, 'current', LMemMid, LMemSym, LCtx) then
-            Exit(XNil);
-          Exit(SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0));
-        end;
-    else
-      Exit(XNil);
+      LCur := WithTargetTypeX(AMid, ACollNode, Probe);
+    if not XValid(LCur) then
+    begin
+      Result := ShapeElementX(ACollNode);
+      if not XValid(Result) then
+        Result := ElementX(AMid, ACollNode, Probe);
+      Exit;
     end;
+    for LDepth := 1 to 32 do
+    begin
+      if not XValid(LCur) then
+        Exit(XNil);
+      LM := FModels[LCur.UnitId];
+      // A string walks its character type (StringElementX: AnsiChar for the
+      // 1-byte kinds - audit A3-26, E3-37, B3-29).
+      if LM.Symbols[LCur.Sym].Kind = skBuiltinType then
+        Exit(StringElementX(AMid, LCur));
+      LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+      if LDef = NIL_NODE then
+        Exit(XNil);
+      case LM.Tree.Nodes[LDef].Kind of
+        nkStringType, nkCall:
+          Exit(StringElementX(AMid, LCur));
+        nkSetType:
+          Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
+            LM.Tree.Nodes[LDef].FirstChild), LCur.Inst, 0));
+        nkArrayType:
+          Exit(ElementX(AMid, ACollNode, Probe));
+        nkIdent, nkMember, nkTypeArgs:
+          LCur := AliasStepX(LCur, LDef);   // alias link
+        nkClassType, nkRecordType, nkInterfaceType, nkObjectType:
+          begin
+            if not FindMemberX(AMid, LCur, 'getenumerator', LMemMid, LMemSym,
+                 LCtx) then
+              Exit(XNil);
+            LEnum := SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0);
+            if not XValid(LEnum) or not FindMemberX(AMid, LEnum, 'current',
+                 LMemMid, LMemSym, LCtx) then
+              Exit(XNil);
+            Exit(SubstX(SymDeclTypeX(LMemMid, LMemSym), LCtx, 0));
+          end;
+      else
+        Exit(XNil);
+      end;
+    end;
+  finally
+    LProbe.Free;
   end;
 end;
 
