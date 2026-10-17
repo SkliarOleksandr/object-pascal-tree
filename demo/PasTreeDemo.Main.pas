@@ -4506,8 +4506,9 @@ procedure TfrmMain.ReportProjectResult(AElapsedMs: Int64);
 var
   LMain, LDiagTotal, LDiagListed, LId, LDIdx, LFileId: Integer;
   LTotalLines, LTotalChars, LTotalFiles: Int64;
-  LUnresUses, LUnitsGated: Integer;
+  LUnresUses, LUnitsGated, LNotLoaded: Integer;
   LMissing: TDictionary<string, TPasMissingUnit>;
+  LNotLoadedUnits: TDictionary<string, Boolean>;   // lower-cased names
   LModel: TPasSemaModel;
   LDiagFile, LVolume: string;
   LOwnFile: Boolean;
@@ -4527,7 +4528,9 @@ begin
   LTotalFiles := 0;
   LUnresUses := 0;
   LUnitsGated := 0;
+  LNotLoaded := 0;
   LMissing := TDictionary<string, TPasMissingUnit>.Create;
+  LNotLoadedUnits := TDictionary<string, Boolean>.Create;
   try
   // Locate the main unit BEFORE the diagnostics loop: the loop's own listing
   // filter reads FFileList, and for a .dproj-less project that list is not
@@ -4562,8 +4565,18 @@ begin
       // This is what distinguishes "the project got smaller" from "we resolved
       // less of it": without it, a run with too few search paths looks fast and
       // clean instead of incomplete.
+      // A light unit's implementation `uses` is resolved to its file and
+      // deliberately not loaded (UNIT_NOT_LOADED): only library bodies use
+      // those units. Counted apart - as unresolved it read as a broken
+      // closure (848 "F1027" sites on the client, not one of them real).
       for LDIdx := 0 to High(LModel.UsesList) do
-        if LModel.UsesList[LDIdx].UnitId < 0 then
+        if LModel.UsesList[LDIdx].UnitId = UNIT_NOT_LOADED then
+        begin
+          Inc(LNotLoaded);
+          LNotLoadedUnits.AddOrSetValue(
+            LowerCase(LModel.UsesList[LDIdx].NameFull), True);
+        end
+        else if LModel.UsesList[LDIdx].UnitId < 0 then
         begin
           Inc(LUnresUses);
           // Group by NAME: thousands of import sites are usually a handful of
@@ -4682,6 +4695,11 @@ begin
       [LUnresUses, LMissing.Count, LUnitsGated, FSemaProject.ModelCount]));
     LogMissingUnits(LMissing);
   end;
+  if LNotLoaded > 0 then
+    Log(Format('  light: %d implementation `uses` of light units, over %d ' +
+      'distinct unit(s), resolved and not loaded - only library bodies use ' +
+      'them (opening a library unit loads what it needs).',
+      [LNotLoaded, LNotLoadedUnits.Count]));
   // Units WE failed to parse. Distinct from F1027 on purpose: the source is
   // right there and the analyzer is what broke, so this is our bug, not a
   // project misconfiguration. It used to be silent, which let an internal
@@ -4702,6 +4720,7 @@ begin
     Log('Main source not found among analyzed units: ' + FMainSource);
   ScrollMessagesToEnd;
   finally
+    LNotLoadedUnits.Free;
     LMissing.Free;
   end;
 end;
