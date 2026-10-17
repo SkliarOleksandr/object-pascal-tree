@@ -577,6 +577,13 @@ type
     function FollowsUse(AModel: TPasSemaModel; AIdx: Integer;
       const APath: string): Boolean;
     procedure RelinkNotLoaded;
+    { APP.Process(AFile), stopped after the implementation `uses` clause
+      when ALight (TPasPreprocessor.StopAtImplementation) - every
+      preprocess of a unit goes through here, so a light unit's stream is the
+      same at its load, its declared-pass rounds, a rehydration and a donor's
+      identity check. }
+    function ProcessUnit(APP: TPasPreprocessor; const AFile: string;
+      ALight: Boolean): TPasPreprocessed;
     function RedecideRounds(AId: Integer; ALight: Boolean;
       out ASymLog: TArray<TPasOwnSymAnswer>): TPasSemaModel;
     { The declared pass for ONE unit outside a full run - a promotion's
@@ -2890,7 +2897,8 @@ begin
         LPP := RentPP;
         try
           LPP.OnDeclared := SeedDeclaredQuery();
-          LPre := LPP.Process(APath);
+          // A light donor's stream stopped at its implementation `uses`.
+          LPre := ProcessUnit(LPP, APath, LView.Light);
         finally
           ReturnPP(LPP);
         end;
@@ -2993,7 +3001,8 @@ begin
   // A light unit keeps its implementation's `uses` clause too: the units it
   // imports there are known (UNIT_NOT_LOADED, or loaded when they are own).
   if LLight then
-    LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags,
+    // ... and its text is lexed and preprocessed only that far.
+    LTree := TPasParser.ParseFile(ProcessUnit(APP, AFull, True), LDiags,
       pmInterfaceAndImplUses)
   else
     LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags, AIntf);
@@ -5925,6 +5934,17 @@ begin
     Result := pmFull;
 end;
 
+function TPasSemaProject.ProcessUnit(APP: TPasPreprocessor;
+  const AFile: string; ALight: Boolean): TPasPreprocessed;
+begin
+  APP.StopAtImplementation := ALight;
+  try
+    Result := APP.Process(AFile);
+  finally
+    APP.StopAtImplementation := False;   // the preprocessors are pooled
+  end;
+end;
+
 procedure TPasSemaProject.RelinkNotLoaded;
 var
   LM: TPasSemaModel;
@@ -5985,7 +6005,7 @@ begin
         LPP.OnDeclared := DeclaredQueryFor(AId, LBase, LLog);
         LPP.OnSymbol := SymbolQueryFor(AId, LSymLog);
         LNew := TPasSemaResolver.Analyze(
-          TPasParser.ParseFile(LPP.Process(FFiles[AId]), LDiags,
+          TPasParser.ParseFile(ProcessUnit(LPP, FFiles[AId], ALight), LDiags,
             LightParseMode(ALight)),
           False, FPlatform);
         LNew.AddParseDiags(LDiags);
@@ -23390,7 +23410,9 @@ begin
     LPP.OnDeclared := SeedDeclaredQuery();
     try
       Inc(FHydrateRuns);
-      LPre := LPP.Process(FFiles[AMid]);
+      // The same stop as the load: a light model's stream ended after its
+      // implementation `uses`, and the identity check compares streams.
+      LPre := ProcessUnit(LPP, FFiles[AMid], LModel.Light);
     except
       // A vanished or unreadable file cannot rehydrate - the demoted model
       // keeps answering everything that needs no text.

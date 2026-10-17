@@ -56,6 +56,8 @@ type
     FAsmCondDepth: Integer;
     // Kept by Resume for Finish: the line table of the stream it continues.
     FLineStarts: TArray<Integer>;
+    // Tokenize(.., True): stop after the first `implementation` token.
+    FStopAtImpl: Boolean;
     procedure NoteDirective(ANameStart: Integer);
     procedure Emit(AKind: TPasTokenKind; AStart: Integer;
       AFlags: TPasTokenFlags = []);
@@ -84,7 +86,15 @@ type
     procedure LexOne;
     procedure Run;
   public
-    class function Tokenize(const ASource: string): TPasTokenStream; static;
+    class function Tokenize(const ASource: string): TPasTokenStream; overload;
+      static;
+    { AStopAtImpl: stop after the first `implementation` token - live or not,
+      which the lexer cannot know (light mode, TPasPreprocessor.
+      StopAtImplementation): the EOF sentinel follows it at once and
+      Truncated is set; Source, LineStarts and every position stay those of
+      the whole text, so Resume can go on from the EOF token. }
+    class function Tokenize(const ASource: string;
+      AStopAtImpl: Boolean): TPasTokenStream; overload; static;
     { Pull lexing, for a caller that knows which text is live - the
       preprocessor (F26): Tokenize has to guess where an `asm` body ends
       before any branch is decided. Resume continues AStream at its token
@@ -148,10 +158,17 @@ end;
 { TPasLexer }
 
 class function TPasLexer.Tokenize(const ASource: string): TPasTokenStream;
+begin
+  Result := Tokenize(ASource, False);
+end;
+
+class function TPasLexer.Tokenize(const ASource: string;
+  AStopAtImpl: Boolean): TPasTokenStream;
 var
   LLexer: TPasLexer;
 begin
   LLexer := Default(TPasLexer);
+  LLexer.FStopAtImpl := AStopAtImpl;
   LLexer.FSource := ASource;
   LLexer.FLen := Length(ASource);
   if LLexer.FLen > 0 then
@@ -170,6 +187,7 @@ begin
   SetLength(LLexer.FDiags, LLexer.FDiagCount);
   Result.Diagnostics := LLexer.FDiags;
   Result.LineStarts := BuildLineStarts(LLexer.FSource);
+  Result.Truncated := LLexer.FPos < LLexer.FLen;
 end;
 
 procedure TPasLexer.Resume(const AStream: TPasTokenStream; AIndex: Integer);
@@ -233,6 +251,7 @@ begin
   SetLength(FDiags, FDiagCount);
   Result.Diagnostics := FDiags;
   Result.LineStarts := FLineStarts;
+  Result.Truncated := FPos < FLen;
 end;
 
 function TPasLexer.CharAt(AIndex: Integer): Char;
@@ -402,17 +421,24 @@ end;
 procedure TPasLexer.Run;
 begin
   while FPos < FLen do
+  begin
     LexOne;
+    if FStopAtImpl and (FTokenCount > 0) and
+       (FTokens[FTokenCount - 1].Kind = tkImplementation) then
+      Break;
+  end;
   // The file ended while still inside an `asm` block. Reported HERE and not
   // in LexAsmToken, where the test used to sit: that one needed FPos = LStart
   // with FPos >= FLen at once, and the chunk loop always consumes at least
   // one character - so the diagnostic could never fire, and a truncated asm
   // block ended the file silently.
-  if FInAsm then
+  // (A stop is no end: what follows is not lexed, an asm block included.)
+  if FInAsm and (FPos >= FLen) then
   begin
     FInAsm := False;
     Diag(dcUnterminatedAsm, FPos, 0);
   end;
+  FInAsm := False;
   // Zero-length EOF sentinel.
   Emit(tkEndOfFile, FPos);
 end;

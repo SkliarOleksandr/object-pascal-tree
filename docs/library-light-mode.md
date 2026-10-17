@@ -14,7 +14,7 @@ third-party component suite):
 | | units | analysis | CPU | held | after `DemoteText` |
 | --- | --- | --- | --- | --- | --- |
 | full | 3,782 | 3.0 s | 31 s | 2.3 GB | 1.5 GB |
-| light (every library tree) | 3,086 | 1.9 s | 16 s | 1.5 GB | 0.89 GB |
+| light (every library tree) | 3,086 | 1.8 s | 14 s | 1.2 GB | 0.86 GB |
 
 "After `DemoteText`" keeps the own units warm, as a long-running host does.
 Every binding the analysis makes in the own units - references, expression
@@ -94,6 +94,25 @@ interface section and parses fully whatever the tree says.
 - **Its interface is analyzed in full**, the expression typer included - a
   light model is permanent, not the staged driver's transient interface wave.
 - **Its diagnostics are its interface's only.**
+- **Its text is lexed and preprocessed only as far as the parse reads it**
+  (0.117.0): to the end of its implementation `uses` clause - the first LIVE
+  `implementation`, then the `;` of the clause after it if one follows
+  (`TPasPreprocessor.StopAtImplementation`, `TPasLexer.Tokenize` with its
+  stop, `TPasTokenStream.Truncated`). The lexer cannot tell a live
+  `implementation` from one in a branch the build does not compile, so it
+  stops at the first and the preprocessor, reaching the end of a truncated
+  stream without having stopped, lexes on from there (the resume rule: a dead
+  `{$IFDEF CPUX64}! Implementation error{$ENDIF}` in an interface must not
+  cut it). An `implementation` coming from an include stops the unit there.
+  What lies after the stop is not recorded: Find All Defines, Options at
+  cursor and the `defines` answers see a light unit's interface and its
+  implementation `uses` only, and a conditional left open across the stop is
+  not reported. A `$IF` written in its implementation is never asked - the
+  full analysis answers it, the light one has nothing to answer it about.
+  Every preprocess of a light unit takes the same stop - its load, the
+  declared pass's rounds, a rehydration after `DemoteText`, a demoted parse
+  donor's identity check - which is what keeps the streams comparable; a
+  promotion reads the whole file.
 - `sfHasBody` is never set on its interface routines (the flag comes from the
   implementation). Nothing reads it today but the module path's interface
   comparison; any later reader must handle light models.

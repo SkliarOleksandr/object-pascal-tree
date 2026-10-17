@@ -6511,6 +6511,203 @@ begin
   end;
 end;
 
+{ Light mode, stage 4: a light unit's text is lexed and preprocessed only up
+  to the end of its implementation `uses` clause
+  (TPasPreprocessor.StopAtImplementation). Each stopped stream must be the
+  start of the whole one, end where the light parse stops, and parse to the
+  same tree (pmInterfaceAndImplUses) - however `implementation` is written:
+  in a dead branch of the interface (the resume rule), in two branches, in an
+  include, in a comment, a string or as an `&`-escaped name, followed by a
+  `uses` clause with entries under conditions or by none. Then the project
+  half: a light model demoted rehydrates, a demoted light donor is reused, a
+  `Declared()` question in a light interface is re-decided over the stopped
+  stream as over the whole one. }
+procedure TestLightStop;
+var
+  LDir: string;
+  LSM: TPasSourceManager;
+  LDefs: TPasDefines;
+  LPP: TPasPreprocessor;
+
+  function VisText(const APre: TPasPreprocessed): string;
+  begin
+    Result := '';
+    for var LI := 0 to High(APre.Visible) - 1 do
+      Result := Result + APre.VisibleText(LI) + ' ';
+    Result := Trim(Result);
+  end;
+
+  // Stopped vs whole: a prefix, ending with AEnd, the same light tree.
+  procedure Check(const ACase, AFile, AEnd: string; AMustContain: string = '');
+  var
+    LStop, LWhole: TPasPreprocessed;
+    LD1, LD2: TArray<TPasParseDiag>;
+    LT1, LT2: TPasTree;
+    LSame: Boolean;
+  begin
+    LPP.StopAtImplementation := True;
+    LStop := LPP.Process(TPath.Combine(LDir, AFile));
+    Ok('pp stop: ' + ACase + ' - the run stopped', LPP.Stopped);
+    LPP.StopAtImplementation := False;
+    LWhole := LPP.Process(TPath.Combine(LDir, AFile));
+    Ok('pp stop: ' + ACase + ' - the start of the whole stream',
+      VisText(LWhole).StartsWith(VisText(LStop)));
+    Ok('pp stop: ' + ACase + ' - it ends with "' + AEnd + '"',
+      VisText(LStop).EndsWith(AEnd));
+    if AMustContain <> '' then
+      Ok('pp stop: ' + ACase + ' - it holds "' + AMustContain + '"',
+        Pos(AMustContain, VisText(LStop)) > 0);
+    LT1 := TPasParser.ParseFile(LStop, LD1, pmInterfaceAndImplUses);
+    LT2 := TPasParser.ParseFile(LWhole, LD2, pmInterfaceAndImplUses);
+    LSame := Length(LT1.Nodes) = Length(LT2.Nodes);
+    if LSame then
+      for var LN := 1 to High(LT1.Nodes) do
+        if (LT1.Nodes[LN].Kind <> LT2.Nodes[LN].Kind) or
+           (LT1.Nodes[LN].FirstToken <> LT2.Nodes[LN].FirstToken) or
+           (LT1.Nodes[LN].LastToken <> LT2.Nodes[LN].LastToken) or
+           (LT1.Nodes[LN].FirstChild <> LT2.Nodes[LN].FirstChild) or
+           (LT1.Nodes[LN].NextSibling <> LT2.Nodes[LN].NextSibling) then
+          LSame := False;
+    Ok('pp stop: ' + ACase + ' - the same light tree', LSame and
+      (Length(LD1) = Length(LD2)));
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_light_stop');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'S1.pas'),
+    'unit S1;'#13#10'interface'#13#10 +
+    '{$IFDEF NEVER} implementation {$ENDIF}'#13#10 +
+    'procedure Later;'#13#10 +
+    'implementation'#13#10'uses U1;'#13#10 +
+    'procedure Later;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'S2.pas'),
+    'unit S2;'#13#10'interface'#13#10'procedure P;'#13#10 +
+    '{$IFDEF NEVER}'#13#10'implementation'#13#10'uses UA;'#13#10 +
+    '{$ELSE}'#13#10'implementation'#13#10'uses UB;'#13#10'{$ENDIF}'#13#10 +
+    'procedure P;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'S3.pas'),
+    'unit S3;'#13#10'interface'#13#10'procedure P;'#13#10 +
+    '{$I s3impl.inc}'#13#10 +
+    'procedure P;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 's3impl.inc'),
+    'implementation'#13#10'uses UC;'#13#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'S4.pas'),
+    'unit S4;'#13#10'interface'#13#10 +
+    '{ implementation }'#13#10 +
+    'const S = ''implementation'';'#13#10 +
+    'var &implementation: Integer;'#13#10 +
+    'implementation'#13#10'uses UD;'#13#10 +
+    'var X: Integer;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'S8.pas'),
+    'unit S8;'#13#10'interface'#13#10'implementation'#13#10 +
+    'uses UE{$IFDEF NEVER}, UF{$ENDIF}{$IFDEF WIN64}, UG{$ENDIF};'#13#10 +
+    'var X: Integer;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'S9.pas'),
+    'unit S9;'#13#10'interface'#13#10'implementation'#13#10 +
+    'var X: Integer;'#13#10'end.'#13#10);
+  LSM := TPasSourceManager.Create([LDir]);
+  LDefs := TPasDefines.Create(['MSWINDOWS', 'WIN64']);
+  LPP := TPasPreprocessor.Create(LSM, LDefs);
+  try
+    Check('a dead implementation in the interface', 'S1.pas',
+      'implementation uses U1 ;', 'procedure Later ;');
+    Check('two branches, the live one stops', 'S2.pas',
+      'implementation uses UB ;');
+    Check('implementation from an include', 'S3.pas',
+      'implementation uses UC ;');
+    Check('a comment, a string, an escaped name', 'S4.pas',
+      'implementation uses UD ;', '&implementation');
+    Check('uses entries under conditions', 'S8.pas',
+      'implementation uses UE , UG ;');
+    Check('no uses clause', 'S9.pas', 'interface implementation');
+    LPP.StopAtImplementation := False;
+    LPP.Process(TPath.Combine(LDir, 'S1.pas'));
+    Ok('pp stop: off, the run goes to the end', not LPP.Stopped);
+  finally
+    LPP.Free;
+    LDefs.Free;
+    LSM.Free;
+  end;
+
+  // The project half.
+  var LOwn := TPath.Combine(LDir, 'own');
+  var LLib := TPath.Combine(LDir, 'lib');
+  TDirectory.CreateDirectory(LOwn);
+  TDirectory.CreateDirectory(LLib);
+  var LMain := TPath.Combine(LOwn, 'SApp.dpr');
+  TFile.WriteAllText(LMain,
+    'program SApp;'#13#10'uses SOwn;'#13#10'begin'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LOwn, 'SOwn.pas'),
+    'unit SOwn;'#13#10'interface'#13#10'uses LibS, LibT;'#13#10 +
+    'var V: TS; W: Integer;'#13#10'implementation'#13#10 +
+    'initialization'#13#10'  W := TQ;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibS.pas'),
+    'unit LibS;'#13#10'interface'#13#10 +
+    '{$IFDEF NEVER} implementation {$ENDIF}'#13#10 +
+    'type TS = Integer;'#13#10 +
+    'implementation'#13#10'uses LibB2;'#13#10 +
+    'var Z: Integer;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibB2.pas'),
+    'unit LibB2;'#13#10'interface'#13#10'const B2_X = 1;'#13#10 +
+    'implementation'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibT.pas'),
+    'unit LibT;'#13#10'interface'#13#10'uses LibB2;'#13#10 +
+    '{$IF Declared(B2_X)}'#13#10'const TQ = 1;'#13#10 +
+    '{$ELSE}'#13#10'const TQ_NO = 2;'#13#10'{$IFEND}'#13#10 +
+    'implementation'#13#10'end.'#13#10);
+  var LFull := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+  var LLight := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+  var LNext: TPasSemaProject := nil;
+  try
+    LFull.AnalyzeStaged([LMain], []);
+    LLight.LightPaths := [LLib];
+    LLight.AnalyzeStaged([LMain], []);
+    var LSPath := TPath.Combine(LLib, 'LibS.pas');
+    var LS := LLight.ModelIdOf(LSPath);
+    Ok('light stop: LibS is light, its stream stopped after its `uses`',
+      (LS >= 0) and LLight.IsLight(LS) and
+      LLight.Model(LS).Tree.Source.Files[0].Truncated and
+      (Length(LLight.Model(LS).Tree.Source.Visible) <
+       Length(LFull.Model(LFull.ModelIdOf(LSPath)).Tree.Source.Visible)));
+    Ok('light stop: the dead implementation did not cut its interface',
+      SymCountOf(LLight.Model(LS), 'ts', skType) = 1);
+    var LT := LLight.ModelIdOf(TPath.Combine(LLib, 'LibT.pas'));
+    Ok('light stop: LibT''s Declared() re-decided as in the full analysis',
+      (SymCountOf(LLight.Model(LT), 'tq', skConst) = 1) and
+      (SymCountOf(LFull.Model(LFull.ModelIdOf(
+        TPath.Combine(LLib, 'LibT.pas'))), 'tq', skConst) = 1));
+    Ok('light stop: SOwn binds TS and TQ, no diagnostics',
+      Length(LLight.Model(LLight.ModelIdOf(
+        TPath.Combine(LOwn, 'SOwn.pas'))).Diags) = 0);
+    var LVis := Length(LLight.Model(LS).Tree.Source.Visible);
+    LLight.DemoteText([TPath.Combine(LOwn, 'SOwn.pas'), LMain]);
+    Ok('light stop: LibS demoted', LLight.Model(LS).Demoted);
+    Ok('light stop: ...and rehydrated through the same stop',
+      LLight.EnsureHydrated(LS) and not LLight.Model(LS).Demoted and
+      (Length(LLight.Model(LS).Tree.Source.Visible) = LVis));
+    LLight.DemoteText([TPath.Combine(LOwn, 'SOwn.pas'), LMain]);
+    LNext := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+    LNext.LightPaths := [LLib];
+    LNext.AdoptParseDonor(LLight);
+    LNext.AnalyzeStaged([LMain], []);
+    Ok('light stop: a demoted light donor is reused',
+      LNext.IsLight(LNext.ModelIdOf(LSPath)) and
+      (Pos('donorhits=0;', DsfHits(LNext)) = 0) and (DsfHits(LNext) <> ''));
+    Ok('light stop: ...binding as before',
+      Length(LNext.Model(LNext.ModelIdOf(
+        TPath.Combine(LOwn, 'SOwn.pas'))).Diags) = 0);
+  finally
+    LNext.Free;
+    LLight.Free;
+    LFull.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Light mode (TPasSemaProject.LightPaths, docs/library-light-mode.md): the
   units under a light tree are analyzed interface-only for good, everything
   else exactly as before. The fixture is the plan's: App.dpr and UOwn in the
@@ -14745,6 +14942,7 @@ begin
   TestHeritageStep;
   TestPoolContract;
   TestLightUnits;
+  TestLightStop;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

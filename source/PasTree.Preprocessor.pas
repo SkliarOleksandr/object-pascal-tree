@@ -501,6 +501,12 @@ type
     // Inside a live asm body: the lexing mode ProcessFile wants for live
     // text, across include boundaries (F26).
     FLiveAsm: Boolean;
+    // StopAtImplementation (light mode): the property, whether this run has
+    // stopped, and where it is - 0 before the first live `implementation`,
+    // 1 right after it, 2 inside the `uses` clause that follows.
+    FStopAtImpl: Boolean;
+    FStopped: Boolean;
+    FStopPhase: Integer;
     // The kind of the last live visible token: an `asm` after a dot is a
     // member name, not a block (spec B.8, the lexer's rule).
     FLastVisKind: TPasTokenKind;
@@ -579,6 +585,25 @@ type
     { Same, but with the main file's text supplied directly (tests, LSP
       buffers). AFileName is used for include resolution and reporting. }
     function ProcessText(const AFileName, ASource: string): TPasPreprocessed;
+    { LIGHT MODE: the next runs stop at the end of the unit's implementation
+      `uses` clause - after the first LIVE `implementation`, and after the
+      `;` of the `uses` clause when one follows it at once (the part of a
+      light unit the parser reads, pmInterfaceAndImplUses). The main file is
+      lexed only that far too (TPasLexer.Tokenize's stop); the lexer cannot
+      tell a live `implementation` from one in a branch not compiled, so when
+      the preprocessor reaches the end of a truncated stream without having
+      stopped, it goes on lexing from there in pull mode until a live stop
+      or the real end of the text (the resume rule: a dead `implementation`
+      in the interface must not cut it). An `implementation` written in an
+      include stops the unit there. After a stop no conditional is reported
+      unterminated (one may legally span the sections), and what lies after
+      it - its skipped regions, define, option, include and `` name rows -
+      is not recorded. A pooled preprocessor keeps the value: the caller
+      sets it for each run. }
+    property StopAtImplementation: Boolean read FStopAtImpl
+      write FStopAtImpl;
+    // The last run stopped early (StopAtImplementation).
+    property Stopped: Boolean read FStopped;
     { Set to answer a `$IF Declared(X)` guard - see TPasDeclaredQuery. While
       set the expression is no longer flagged as needing semantics, because it
       no longer does. }
@@ -1463,8 +1488,10 @@ begin
   SetAlign(FStartState.Align);
   FLiveAsm := False;
   FLastVisKind := tkEndOfFile;
+  FStopped := False;
+  FStopPhase := 0;
 
-  LStream := TPasLexer.Tokenize(ASource);
+  LStream := TPasLexer.Tokenize(ASource, FStopAtImpl);
   // Visible tokens <= the main file's raw tokens (trivia and skipped regions
   // only subtract; includes add, and then the list grows the ordinary way).
   if FVisible.Capacity < Length(LStream.Tokens) then
@@ -1480,7 +1507,9 @@ begin
     FIncludePathStack.Clear;
   end;
 
-  // An entry an include opened was diagnosed at that include's end.
+  // An entry an include opened was diagnosed at that include's end. A run
+  // that stopped at the implementation has no end to judge it by.
+  if not FStopped then
   for LIdx := 0 to FCondOpener.Count - 1 do
     if FCondOpener[LIdx].FileId = 0 then
     begin
@@ -1544,6 +1573,9 @@ begin
   LIdx := 0;
   while True do
   begin
+    // StopAtImplementation: this file, or an include it opened, stopped.
+    if FStopped then
+      Break;
     LWantAsm := FLiveAsm and Active;
     if LPull then
     begin
@@ -1584,12 +1616,39 @@ begin
             LSkipStart := LTok.EndPos;
         end;
       tkEndOfFile:
-        ; // handled by Process for the main file
+        // The resume rule (see StopAtImplementation): the lexer stopped at
+        // an `implementation` this run has not stopped at - a dead one, or
+        // the live one whose `uses` clause is still to come. Lex on, in pull
+        // mode, from the end of the truncated stream.
+        if FStopAtImpl and not LPull and FFiles[AFileId].Truncated then
+        begin
+          LLexer.Resume(FFiles[AFileId], LIdx);
+          LPull := True;
+          Continue;
+        end;
+        // else handled by Process for the main file
     else
       if Active then
       begin
         if not IsTrivia(LTok.Kind) then
         begin
+          // StopAtImplementation: a live `implementation` and then its
+          // `uses` clause to its `;`; anything else after the keyword ends
+          // the run before it is added.
+          if FStopAtImpl then
+            case FStopPhase of
+              0:
+                if LTok.Kind = tkImplementation then
+                  FStopPhase := 1;
+              1:
+                if LTok.Kind = tkUses then
+                  FStopPhase := 2
+                else
+                begin
+                  FStopped := True;
+                  Break;
+                end;
+            end;
           LVis.FileId := AFileId;
           LVis.TokenIndex := LIdx;
           FVisible.Add(LVis);
@@ -1598,6 +1657,11 @@ begin
           else
             FLiveAsm := (LTok.Kind = tkAsm) and (FLastVisKind <> tkDot);
           FLastVisKind := LTok.Kind;
+          if (FStopPhase = 2) and (LTok.Kind = tkSemicolon) then
+          begin
+            FStopped := True;
+            Break;
+          end;
         end;
       end
       else if LSkipStart < 0 then
@@ -1609,7 +1673,8 @@ begin
   // open is unterminated. An include may end inside one (the includer
   // closes it).
   if LPull then
-    FFiles[AFileId] := LLexer.Finish((AFileId = 0) and FLiveAsm);
+    FFiles[AFileId] := LLexer.Finish((AFileId = 0) and FLiveAsm and
+      not FStopped);
   if LSkipStart >= 0 then
     MarkSkipped(AFileId, LSkipStart, Length(FFiles[AFileId].Source));
 end;
@@ -2064,7 +2129,9 @@ begin
     FIncludePathStack.Delete(FIncludePathStack.Count - 1);
   end;
   // A conditional the include opened and left open: dcc's E2280, at the
-  // include (F22). It stays open here and the includer may close it.
+  // include (F22). It stays open here and the includer may close it. Not
+  // after a stop inside the include (StopAtImplementation).
+  if not FStopped then
   for LIdx := 0 to FCondOpener.Count - 1 do
     if FCondOpener[LIdx].FileId = LNewId then
       Diag(ppUnterminatedConditional, LNewId, FCondOpener[LIdx].Start,

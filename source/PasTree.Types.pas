@@ -121,6 +121,9 @@ type
     Tokens: TArray<TPasToken>;
     Diagnostics: TArray<TPasDiagnostic>;
     LineStarts: TArray<Integer>;   // 0-based offset of each line start
+    // The tokens end before the text does (TPasLexer.Tokenize's stop at
+    // `implementation`, light mode); the EOF sentinel sits where they end.
+    Truncated: Boolean;
     function TokenText(AIndex: Integer): string; overload;
     function TokenText(const AToken: TPasToken): string; overload;
     { SameText(TokenText(AToken), AWord) without the copy - see
