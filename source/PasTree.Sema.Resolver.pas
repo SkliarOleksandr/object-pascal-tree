@@ -2255,6 +2255,8 @@ begin
   LU.NameNode := LNameNode;
   LU.Sym := LSym;
   LU.UnitId := NIL_SYM;
+  LU.InImpl := (AScope >= 0) and (AScope < FModel.Scopes.Count) and
+    (FModel.Scopes[AScope].Kind = sckImplementation);
   if FUsesCount = Length(FModel.UsesList) then
     SetLength(FModel.UsesList, FUsesCount * 2 + 8);
   FModel.UsesList[FUsesCount] := LU;

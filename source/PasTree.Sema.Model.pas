@@ -26,6 +26,13 @@ const
   NIL_SYM = -1;
   NIL_SCOPE = -1;
   NIL_INST = -1;
+  { TPasUsesRef.UnitId of an entry resolved to a file that is on purpose NOT
+    loaded: an implementation `uses` entry of a light unit
+    (TPasSemaProject.LightPaths) naming another light unit. Resolved as far
+    as anything counting unresolved names is concerned (no F1027, no E2003
+    gate); like NIL_SYM it names no model, so every "is there a model"
+    test (UnitId >= 0) passes it by. }
+  UNIT_NOT_LOADED = -2;
 
 type
   // A module's progress through the project's analysis pipeline. The async
@@ -97,7 +104,10 @@ type
     InPath: string;    // from `in '...'`, or ''
     NameNode: Integer; // CST node of the (qualified) name
     Sym: Integer;      // the skUnitRef symbol in this model
-    UnitId: Integer;   // resolved project model id; NIL_SYM if unresolved
+    // Resolved project model id; NIL_SYM if unresolved, UNIT_NOT_LOADED if
+    // resolved to a file that is not loaded on purpose (light mode).
+    UnitId: Integer;
+    InImpl: Boolean;   // the entry sits in the implementation's `uses`
   end;
 
   // Appended, never reordered: svAutomated last so existing ordinals hold.

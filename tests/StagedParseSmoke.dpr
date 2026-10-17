@@ -138,6 +138,85 @@ begin
     LSecSiblingDiffered);
 end;
 
+// The implementation-uses parse (pmInterfaceAndImplUses) against the full
+// one: a prefix whose only deltas are the root's LastToken, the
+// implementation section's LastToken / FirstChild (none of its own when the
+// section has no `uses`) / NextSibling, and the `uses` clause's
+// NextSibling. AItems: the `uses` items the clause must hold (-1: no clause).
+procedure CheckImplUsesPrefix(const ACase, AText: string; AItems: Integer);
+var
+  LPre: TPasPreprocessed;
+  LD1, LD2: TArray<TPasParseDiag>;
+  LPart, LFull: TPasTree;
+  LImpl, LUses, LI, LN: Integer;
+  LA, LB: TPasNode;
+  LOk: Boolean;
+begin
+  LPre := GPP.ProcessText('test.pas', AText);
+  LPart := TPasParser.ParseFile(LPre, LD1, pmInterfaceAndImplUses);
+  LFull := TPasParser.ParseFile(LPre, LD2, pmFull);
+  Ok(ACase + ': no more nodes than the full parse',
+    Length(LPart.Nodes) <= Length(LFull.Nodes));
+  if Length(LPart.Nodes) > Length(LFull.Nodes) then
+    Exit;
+  LImpl := NIL_NODE;
+  LI := LPart.Nodes[0].FirstChild;
+  while LI <> NIL_NODE do
+  begin
+    if LPart.Nodes[LI].Kind = nkImplementationSec then
+      LImpl := LI;
+    LI := LPart.Nodes[LI].NextSibling;
+  end;
+  Ok(ACase + ': has the implementation section', LImpl <> NIL_NODE);
+  if LImpl = NIL_NODE then
+    Exit;
+  LUses := LPart.Nodes[LImpl].FirstChild;
+  if AItems < 0 then
+    Ok(ACase + ': the section holds nothing', LUses = NIL_NODE)
+  else
+  begin
+    Ok(ACase + ': the section holds its uses clause alone',
+      (LUses <> NIL_NODE) and (LPart.Nodes[LUses].Kind = nkUsesClause) and
+      (LPart.Nodes[LUses].NextSibling = NIL_NODE));
+    if (LUses = NIL_NODE) or (LPart.Nodes[LUses].Kind <> nkUsesClause) then
+      Exit;
+    LN := 0;
+    LI := LPart.Nodes[LUses].FirstChild;
+    while LI <> NIL_NODE do
+    begin
+      if LPart.Nodes[LI].Kind = nkUsesItem then
+        Inc(LN);
+      LI := LPart.Nodes[LI].NextSibling;
+    end;
+    Ok(ACase + Format(': %d live uses items', [AItems]), LN = AItems);
+  end;
+  LOk := True;
+  for LI := 0 to High(LPart.Nodes) do
+  begin
+    LA := LPart.Nodes[LI];
+    LB := LFull.Nodes[LI];
+    if LI = 0 then
+      LA.LastToken := LB.LastToken;
+    if LI = LImpl then
+    begin
+      LA.LastToken := LB.LastToken;
+      if LA.NextSibling = NIL_NODE then
+        LA.NextSibling := LB.NextSibling;
+      if (LA.FirstChild = NIL_NODE) and (AItems < 0) then
+        LA.FirstChild := LB.FirstChild;
+    end;
+    if (LI = LUses) and (AItems >= 0) and (LA.NextSibling = NIL_NODE) then
+      LA.NextSibling := LB.NextSibling;
+    if not NodesEqual(LA, LB) then
+    begin
+      LOk := False;
+      Writeln(Format('  %s: node %d differs (kind %s)',
+        [ACase, LI, LPart.KindName(LPart.Nodes[LI].Kind)]));
+    end;
+  end;
+  Ok(ACase + ': a prefix of the full parse but for the sanctioned deltas', LOk);
+end;
+
 // Full parse of AText through the shared preprocessor.
 function ParseBoth(const AText: string; out AIntf, AFull: TPasTree): Boolean;
 var
@@ -221,6 +300,19 @@ const
     'implementation'#10 +
     'end.'#10;
 
+  // An implementation `uses` clause with entries under conditions: WIN64
+  // keeps B, NEXTGEN drops C; the clause ends on a dead entry.
+  UNIT_IMPL_USES_COND =
+    'unit ImplUses;'#10 +
+    'interface'#10 +
+    'procedure P;'#10 +
+    'implementation'#10 +
+    'uses A{$IFDEF WIN64}, B{$ENDIF}{$IFDEF NEXTGEN}, C{$ENDIF}, D;'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // A program has no interface section - AInterfaceOnly must be IGNORED.
   PROGRAM_SRC =
     'program App;'#10 +
@@ -257,6 +349,13 @@ begin
     ParseBoth(UNIT_EMPTY_IMPL, LIntf, LFull);
     CheckPrefix('empty implementation', LIntf, LFull);
 
+    // ---- The implementation-uses parse (light units): the same prefix
+    // property, one section further ----
+    CheckImplUsesPrefix('impl uses: basic unit', UNIT_BASIC, 1);
+    CheckImplUsesPrefix('impl uses: no uses clause', UNIT_IFDEF, -1);
+    CheckImplUsesPrefix('impl uses: empty implementation', UNIT_EMPTY_IMPL, -1);
+    CheckImplUsesPrefix('impl uses: conditional entries', UNIT_IMPL_USES_COND, 3);
+
     // ---- Determinism: full parse twice == identical (snapshot swap relies
     // on a reparse reproducing the exact same tree) ----
     LPre := GPP.ProcessText('test.pas', UNIT_BASIC);
@@ -283,6 +382,11 @@ begin
     LIntf := TPasParser.ParseFile(LPre, LD1, True);
     LFull := TPasParser.ParseFile(LPre, LD2, False);
     Ok('package: AInterfaceOnly ignored (identical trees)',
+      TreesIdentical(LIntf, LFull));
+    LPre := GPP.ProcessText('test.pas', PROGRAM_SRC);
+    LIntf := TPasParser.ParseFile(LPre, LD1, pmInterfaceAndImplUses);
+    LFull := TPasParser.ParseFile(LPre, LD2, pmFull);
+    Ok('program: pmInterfaceAndImplUses ignored (identical trees)',
       TreesIdentical(LIntf, LFull));
   finally
     GPP.Free;

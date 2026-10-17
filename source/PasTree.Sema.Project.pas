@@ -566,6 +566,17 @@ type
       produced (interface-only when ALight). nil when a round raised. ASymLog
       collects the own-symbol answers the last round gave. Reads FModels[AId]
       as the unit's registered model; writes nothing shared. }
+    { Light mode, stage 2. FollowsUse: whether the `uses` entry AIdx of
+      AModel, resolved to APath, is loaded - every entry is, but a light
+      unit's implementation entry naming another light unit (the import
+      stays UNIT_NOT_LOADED). An own unit a library implementation names is
+      loaded (the patched library copies a project keeps in its tree).
+      RelinkNotLoaded: the
+      UNIT_NOT_LOADED entries of every model that now resolve to a loaded
+      unit (a promotion's newcomer, a declared pass's import) point at it. }
+    function FollowsUse(AModel: TPasSemaModel; AIdx: Integer;
+      const APath: string): Boolean;
+    procedure RelinkNotLoaded;
     function RedecideRounds(AId: Integer; ALight: Boolean;
       out ASymLog: TArray<TPasOwnSymAnswer>): TPasSemaModel;
     { The declared pass for ONE unit outside a full run - a promotion's
@@ -2979,7 +2990,13 @@ begin
   // A light unit (LightPaths) parses interface-only in EVERY wave and
   // driver - it is never upgraded.
   LLight := IsLightFile(AFull);
-  LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags, AIntf or LLight);
+  // A light unit keeps its implementation's `uses` clause too: the units it
+  // imports there are known (UNIT_NOT_LOADED, or loaded when they are own).
+  if LLight then
+    LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags,
+      pmInterfaceAndImplUses)
+  else
+    LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags, AIntf);
   LIsUnit := (Length(LTree.Nodes) > 0) and (LTree.Nodes[0].Kind = nkUnit);
   // A model whose parse really did stop at the interface is TRANSIENT
   // (replaced by the full wave) - skip the expression typer, its
@@ -5892,6 +5909,47 @@ begin
   end;
 end;
 
+function TPasSemaProject.FollowsUse(AModel: TPasSemaModel; AIdx: Integer;
+  const APath: string): Boolean;
+begin
+  Result := not (AModel.Light and AModel.UsesList[AIdx].InImpl and
+    IsLightFile(APath));
+end;
+
+// A light unit's parse mode (see TPasSemaModel.Light), pmFull otherwise.
+function LightParseMode(ALight: Boolean): TPasParseMode;
+begin
+  if ALight then
+    Result := pmInterfaceAndImplUses
+  else
+    Result := pmFull;
+end;
+
+procedure TPasSemaProject.RelinkNotLoaded;
+var
+  LM: TPasSemaModel;
+  LPath: string;
+  LMid, LU, LUid: Integer;
+begin
+  for LMid := 0 to FModels.Count - 1 do
+  begin
+    LM := FModels[LMid];
+    if (LM = nil) or not LM.Light then
+      Continue;
+    for LU := 0 to High(LM.UsesList) do
+      if (LM.UsesList[LU].UnitId = UNIT_NOT_LOADED) and
+         FSM.ResolveUnit(LM.UsesList[LU].NameFull, LM.UsesList[LU].InPath,
+           FFiles[LMid], LPath) and
+         FByPath.TryGetValue(LowerCase(TPath.GetFullPath(LPath)), LUid) and
+         (LUid >= 0) then
+      begin
+        LM.UsesList[LU].UnitId := LUid;
+        if LM.UsesIndexed then
+          LM.UsesByName.TryAdd(PasFoldName(LM.UsesList[LU].NameFull), LUid);
+      end;
+  end;
+end;
+
 function TPasSemaProject.RedecideRounds(AId: Integer; ALight: Boolean;
   out ASymLog: TArray<TPasOwnSymAnswer>): TPasSemaModel;
 var
@@ -5927,7 +5985,8 @@ begin
         LPP.OnDeclared := DeclaredQueryFor(AId, LBase, LLog);
         LPP.OnSymbol := SymbolQueryFor(AId, LSymLog);
         LNew := TPasSemaResolver.Analyze(
-          TPasParser.ParseFile(LPP.Process(FFiles[AId]), LDiags, ALight),
+          TPasParser.ParseFile(LPP.Process(FFiles[AId]), LDiags,
+            LightParseMode(ALight)),
           False, FPlatform);
         LNew.AddParseDiags(LDiags);
         LNew.Light := ALight;
@@ -6060,7 +6119,7 @@ procedure TPasSemaProject.RunDeclaredPass(ACount: Integer);
 var
   LCand: TArray<Integer>;
   LDone: TArray<TPasSemaModel>;
-  LIdx, LU, LLoaded: Integer;
+  LIdx, LU, LLoaded, LStartCount: Integer;
   LPaths: TArray<string>;
   LPath: string;
   LIter, LSiteOff: Integer;
@@ -6069,6 +6128,7 @@ var
   LSymAns: TPasOwnSymAnswer;
   LSite: string;
 begin
+  LStartCount := FModels.Count;
   // Candidates are not "asked a question" but "would get a DIFFERENT answer".
   // The first pass answered every Declared() False, so a unit whose names all
   // still answer False would re-preprocess to a byte-identical stream - and
@@ -6149,7 +6209,8 @@ begin
         for LU := 0 to High(FModels[LCand[LIdx]].UsesList) do
           if FSM.ResolveUnit(FModels[LCand[LIdx]].UsesList[LU].NameFull,
                FModels[LCand[LIdx]].UsesList[LU].InPath, FFiles[LCand[LIdx]],
-               LPath) and not FByPath.ContainsKey(LowerCase(LPath)) then
+               LPath) and not FByPath.ContainsKey(LowerCase(LPath)) and
+             FollowsUse(FModels[LCand[LIdx]], LU, LPath) then
             LPaths := LPaths + [LPath];
     LLoaded := FModels.Count;
     if LPaths <> nil then
@@ -6191,6 +6252,9 @@ begin
         LNext := LNext + [LIdx];
     LCand := LNext;
   end;
+  // A unit the pass loaded may be what a light unit's implementation names.
+  if FModels.Count > LStartCount then
+    RelinkNotLoaded;
 end;
 
 { One PPENC per file that had to be RECOVERED to be read - see
@@ -6897,7 +6961,8 @@ var
   begin
     for LU := 0 to High(FModels[AMid].UsesList) do
       if FSM.ResolveUnit(FModels[AMid].UsesList[LU].NameFull,
-        FModels[AMid].UsesList[LU].InPath, FFiles[AMid], LPath) then
+        FModels[AMid].UsesList[LU].InPath, FFiles[AMid], LPath) and
+         FollowsUse(FModels[AMid], LU, LPath) then
         EnqueueLoad(LPath);
   end;
 
@@ -7189,13 +7254,24 @@ begin
     LPath := '';
     if FSM.ResolveUnit(LModel.UsesList[LIdx].NameFull,
       LModel.UsesList[LIdx].InPath, FFiles[AId], LPath) then
-      LUid := LoadFile(LPath)
+    begin
+      // A light unit's implementation import that is light too and not
+      // loaded stays so: resolved, on purpose not loaded.
+      if not FollowsUse(LModel, LIdx, LPath) and
+         not FByPath.ContainsKey(LowerCase(TPath.GetFullPath(LPath))) then
+        LUid := UNIT_NOT_LOADED
+      else
+        LUid := LoadFile(LPath);
+    end
     else
       // No file on any path - but the unit may ALREADY be loaded under this
       // name via a program's `uses X in 'path'` (dcc: an in-path locates the
       // unit for the whole project, not just the program file).
       LUid := LoadedUnitByName(LModel.UsesList[LIdx].NameFull);
     LModel.UsesList[LIdx].UnitId := LUid;
+    // Resolved: no F1027, no E2003 gate - nothing is bound through it.
+    if LUid = UNIT_NOT_LOADED then
+      Continue;
     if LUid >= 0 then
     begin
       if LModel.UsesList[LIdx].Sym <> NIL_SYM then
@@ -21466,7 +21542,8 @@ begin
       for LIdx := 0 to High(LWave) do
         for LU := 0 to High(LRes[LIdx].UsesList) do
           if FSM.ResolveUnit(LRes[LIdx].UsesList[LU].NameFull,
-               LRes[LIdx].UsesList[LU].InPath, LWave[LIdx], LPath) then
+               LRes[LIdx].UsesList[LU].InPath, LWave[LIdx], LPath) and
+             FollowsUse(LRes[LIdx], LU, LPath) then
           begin
             LPath := TPath.GetFullPath(LPath);
             LKey := LowerCase(LPath);
@@ -21552,7 +21629,10 @@ begin
       if (LMid = AId) or (FModels[LMid] = nil) then
         Continue;
       for LU := 0 to High(FModels[LMid].UsesList) do
-        if LNames.ContainsKey(
+        // A light unit's not-loaded implementation import binds nothing:
+        // RelinkNotLoaded points it at the newcomer after the commit.
+        if (FModels[LMid].UsesList[LU].UnitId <> UNIT_NOT_LOADED) and
+           LNames.ContainsKey(
              PasFoldName(FModels[LMid].UsesList[LU].NameFull)) then
         begin
           AWhy := Format('new-dependency-seen(%s uses %s)',
@@ -23023,6 +23103,10 @@ begin
           LAddNames := LAddNames + FModels[LAddIds[LIdx]].UnitNameLower;
         end;
       end;
+      // A newcomer may be what a light unit's implementation names (see
+      // NewcomersAdmissible): its entry points at it now.
+      if LAddIds <> nil then
+        RelinkNotLoaded;
     // Each affected consumer goes back to its OWN Phase-1 state - a fresh
     // Analyze over the tree it already has. No preprocessing, no parse: the
     // tree is unchanged and immutable, and Phase 1 over the same tree is

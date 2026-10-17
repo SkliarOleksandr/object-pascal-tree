@@ -334,11 +334,12 @@ usable.
 - **Light library units** (`TPasSemaProject.LightPaths`, 0.113.0, opt-in):
   a host names the directory trees of somebody else's code (RTL, VCL,
   third-party) and their units are analyzed interface-only for good - no
-  bodies, no implementation `uses` - while the project's own units are
-  analyzed exactly as before. Measured on a 3,782-unit closure: 3.1 -> 1.8 s,
-  2.3 -> 1.5 GB held, 1.5 GB -> 0.87 GB after `DemoteText`, every binding of
-  the own units identical. `PromoteUnit` (0.114.0) turns one light unit into
-  a fully analyzed one in place - System.pas included - in tens of
+  bodies, the implementation `uses` clause alone (0.116.0) - while the
+  project's own units are analyzed exactly as before. Measured on a
+  3,782-unit closure: 3.0 -> 1.9 s, 2.3 -> 1.5 GB held, 1.5 GB -> 0.89 GB
+  after `DemoteText`, every binding of the own units identical.
+  `PromoteUnit` (0.114.0) turns one light unit into a fully analyzed one in
+  place - System.pas included - in tens of
   milliseconds, nobody else redone. The uses lint answers on the safe side, and
   exactly after `LintPromotions` (0.115.0). What a host stops seeing, the
   exempt rules, promotion and the lint: `docs/library-light-mode.md`.

@@ -6546,7 +6546,7 @@ const
     'function Twice(X: Integer): Integer; overload;'#13#10 +
     'function Twice(const S: string): string; overload;'#13#10 +
     'implementation'#13#10 +
-    'uses LibC;'#13#10 +
+    'uses LibC, OwnPatch;'#13#10 +
     'procedure TBase.Run;'#13#10'begin'#13#10'end;'#13#10 +
     'procedure LibProc(const A: TItem);'#13#10'begin'#13#10'end;'#13#10 +
     'function LibInline: Integer;'#13#10'begin'#13#10 +
@@ -6580,6 +6580,12 @@ const
   // LibD's implementation asks two `$IF` questions only its own `uses` can
   // answer (LibC's constant, LibB's record size): a promotion re-decides them
   // as the full analysis's declared pass does.
+  // An own unit only a library unit's implementation names - the patched
+  // library copies a project keeps in its tree: light mode loads it (full).
+  OWNPATCH =
+    'unit OwnPatch;'#13#10'interface'#13#10'procedure OP;'#13#10 +
+    'implementation'#13#10'procedure OP;'#13#10'begin'#13#10'end;'#13#10 +
+    'end.'#13#10;
   LIBD =
     'unit LibD;'#13#10'interface'#13#10'uses LibB;'#13#10 +
     'function LibDVal: Integer;'#13#10 +
@@ -6599,6 +6605,7 @@ var
   LRoot, LOwn, LLib, LAppPath: string;
   LFull, LLight, LP: TPasSemaProject;
   LFullSig, LLightSig: string;
+  LUsesE: TPasUsesRef;
 
   // As the -fp fingerprint of tools/PasTreeSemaProject: every binding of
   // the unit, a target named by file + symbol name + declaring node, never
@@ -6654,17 +6661,64 @@ var
     end;
   end;
 
+  // Parsed to its `end.`: the implementation read whole. A light unit has
+  // an implementation section too (its `uses` clause, stage 2), but its
+  // parse stops after it.
   function HasImplSection(AProj: TPasSemaProject; const AFile: string): Boolean;
   var
-    LMid: Integer;
+    LMid, LLast: Integer;
+    LTree: TPasTree;
   begin
     Result := False;
     LMid := AProj.ModelIdOf(AFile);
     if LMid < 0 then
       Exit;
-    for var LN := 0 to High(AProj.Model(LMid).Tree.Nodes) do
-      if AProj.Model(LMid).Tree.Nodes[LN].Kind = nkImplementationSec then
+    LTree := AProj.Model(LMid).Tree;
+    LLast := LTree.Nodes[0].LastToken;
+    for var LN := 0 to High(LTree.Nodes) do
+      if LTree.Nodes[LN].Kind = nkImplementationSec then
+        Exit((LLast >= 1) and (LLast - 1 <= High(LTree.Source.Visible)) and
+          (LTree.Source.VisibleToken(LLast - 1).Kind = tkDot));
+  end;
+
+  // A light unit's tree: an implementation section holding its `uses`
+  // clause and nothing else.
+  function ImplUsesOnly(AProj: TPasSemaProject; const AFile: string): Boolean;
+  var
+    LTree: TPasTree;
+    LChild: Integer;
+  begin
+    Result := False;
+    if AProj.ModelIdOf(AFile) < 0 then
+      Exit;
+    LTree := AProj.Model(AProj.ModelIdOf(AFile)).Tree;
+    for var LN := 0 to High(LTree.Nodes) do
+      if LTree.Nodes[LN].Kind in [nkInitSec, nkFinalSec] then
+        Exit(False);
+    for var LN := 0 to High(LTree.Nodes) do
+      if LTree.Nodes[LN].Kind = nkImplementationSec then
+      begin
+        LChild := LTree.Nodes[LN].FirstChild;
+        Result := (LChild <> NIL_NODE) and
+          (LTree.Nodes[LChild].Kind = nkUsesClause) and
+          (LTree.Nodes[LChild].NextSibling = NIL_NODE);
+        Exit;
+      end;
+  end;
+
+  // The `uses` entry ANameLower of AFile's model.
+  function UsesEntry(AProj: TPasSemaProject; const AFile,
+    ANameLower: string; out AEntry: TPasUsesRef): Boolean;
+  begin
+    Result := False;
+    if AProj.ModelIdOf(AFile) < 0 then
+      Exit;
+    for var LU in AProj.Model(AProj.ModelIdOf(AFile)).UsesList do
+      if SameText(LU.NameFull, ANameLower) then
+      begin
+        AEntry := LU;
         Exit(True);
+      end;
   end;
 
   function ModelLight(AProj: TPasSemaProject; const AFile: string): Boolean;
@@ -6902,6 +6956,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LLib, 'LibB.pas'), LIBB);
   TFile.WriteAllText(TPath.Combine(LLib, 'LibC.pas'), LIBC);
   TFile.WriteAllText(TPath.Combine(LLib, 'LibD.pas'), LIBD);
+  TFile.WriteAllText(TPath.Combine(LOwn, 'OwnPatch.pas'), OWNPATCH);
   try
     for var LStaged in [False, True] do
     begin
@@ -6921,9 +6976,28 @@ begin
           ModelLight(LLight, TPath.Combine(LLib, 'LibB.pas')) and
           ModelLight(LLight, TPath.Combine(LLib, 'LibD.pas')) and
           (LLight.LightCount = 3));
-        Ok(LTag + 'LibA has no implementation section',
+        Ok(LTag + 'LibA: its implementation `uses` only, no bodies',
           not HasImplSection(LLight, TPath.Combine(LLib, 'LibA.pas')) and
+          ImplUsesOnly(LLight, TPath.Combine(LLib, 'LibA.pas')) and
           HasImplSection(LFull, TPath.Combine(LLib, 'LibA.pas')));
+        Ok(LTag + 'LibA''s entry for LibC: implementation, not loaded',
+          UsesEntry(LLight, TPath.Combine(LLib, 'LibA.pas'), 'LibC', LUsesE) and
+          LUsesE.InImpl and (LUsesE.UnitId = UNIT_NOT_LOADED) and
+          UsesEntry(LFull, TPath.Combine(LLib, 'LibA.pas'), 'LibC', LUsesE) and
+          LUsesE.InImpl and (LUsesE.UnitId >= 0));
+        Ok(LTag + '...and LibA counts as resolved',
+          LLight.Model(LLight.ModelIdOf(
+            TPath.Combine(LLib, 'LibA.pas'))).AllUsesResolved);
+        Ok(LTag + 'OwnPatch, own and named only there, is loaded, full',
+          (LLight.ModelIdOf(TPath.Combine(LOwn, 'OwnPatch.pas')) >= 0) and
+          not ModelLight(LLight, TPath.Combine(LOwn, 'OwnPatch.pas')) and
+          HasImplSection(LLight, TPath.Combine(LOwn, 'OwnPatch.pas')) and
+          UsesEntry(LLight, TPath.Combine(LLib, 'LibA.pas'), 'OwnPatch',
+            LUsesE) and (LUsesE.UnitId = LLight.ModelIdOf(
+            TPath.Combine(LOwn, 'OwnPatch.pas'))));
+        Ok(LTag + '...binding as in the full analysis',
+          Sig(LLight, TPath.Combine(LOwn, 'OwnPatch.pas')) =
+          Sig(LFull, TPath.Combine(LOwn, 'OwnPatch.pas')));
         Ok(LTag + 'IsLightFile: LibA yes, UOwn and App.dpr no',
           LLight.IsLightFile(TPath.Combine(LLib, 'LibA.pas')) and
           not LLight.IsLightFile(TPath.Combine(LOwn, 'UOwn.pas')) and

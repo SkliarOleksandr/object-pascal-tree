@@ -196,8 +196,11 @@ function CompareTrees(const A, B: TPasTree;
 
 { I7: the interface-only parse of a unit is a prefix of its full parse -
   nodes [0..N-1] identical except the root's LastToken and the interface
-  section's NextSibling (see TPasParser.ParseFile). For anything but a unit
-  the flag is ignored and the two trees must be identical. }
+  section's NextSibling (see TPasParser.ParseFile). An
+  interface-and-implementation-uses parse (pmInterfaceAndImplUses) is one as
+  well, its implementation section's LastToken, FirstChild and NextSibling
+  and its `uses` clause's NextSibling excepted. For anything but a unit the
+  flag is ignored and the two trees must be identical. }
 function CheckInterfacePrefix(const AIntf, AFull: TPasTree;
   var AReport: TPasCheckReport): Boolean;
 
@@ -2295,10 +2298,35 @@ end;
   implementation section in B. }
 function FirstDifference(const A, B: TPasTree; ALenient: Boolean): Integer;
 var
-  LIdx, LSec, LChild, LPrev: Integer;
+  LIdx, LSec, LChild, LPrev, LImpl, LImplUses: Integer;
   LA, LB: TPasNode;
 begin
   LSec := NIL_NODE;
+  // An interface-and-implementation-uses parse (pmInterfaceAndImplUses)
+  // holds the implementation section's node and its `uses` clause: the
+  // section's extent, children and successor, and the clause's successor,
+  // are what the full parse adds after them.
+  LImpl := NIL_NODE;
+  LImplUses := NIL_NODE;
+  if ALenient and (Length(A.Nodes) > 0) then
+  begin
+    LPrev := 0;
+    LChild := A.Nodes[0].FirstChild;
+    while (LChild > LPrev) and (LChild <= High(A.Nodes)) do
+    begin
+      LPrev := LChild;
+      if A.Nodes[LChild].Kind = nkImplementationSec then
+      begin
+        LImpl := LChild;
+        LImplUses := A.Nodes[LChild].FirstChild;
+        if (LImplUses <> NIL_NODE) and ((LImplUses > High(A.Nodes)) or
+           (A.Nodes[LImplUses].Kind <> nkUsesClause)) then
+          LImplUses := NIL_NODE;
+        Break;
+      end;
+      LChild := A.Nodes[LChild].NextSibling;
+    end;
+  end;
   if ALenient and (Length(B.Nodes) > 0) then
   begin
     // Children are created after their parent and in order, so each index
@@ -2326,6 +2354,16 @@ begin
     if ALenient and (LIdx = LSec) and (LA.NextSibling = NIL_NODE) and
        (LB.NextSibling >= 0) and (LB.NextSibling <= High(B.Nodes)) and
        (B.Nodes[LB.NextSibling].Kind = nkImplementationSec) then
+      LA.NextSibling := LB.NextSibling;
+    if LIdx = LImpl then
+    begin
+      LA.LastToken := LB.LastToken;
+      if LA.NextSibling = NIL_NODE then
+        LA.NextSibling := LB.NextSibling;
+      if LA.FirstChild = NIL_NODE then
+        LA.FirstChild := LB.FirstChild;
+    end;
+    if (LIdx = LImplUses) and (LA.NextSibling = NIL_NODE) then
       LA.NextSibling := LB.NextSibling;
     if not NodesEqual(LA, LB) then
       Exit(LIdx);

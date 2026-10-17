@@ -1132,8 +1132,10 @@ begin
         // (AllUsesResolved gates it), which makes the diagnostics an
         // under-count too. dcc treats an unresolvable uses as fatal (F1027),
         // so on a project that really builds, a healthy run has zero.
+        // UNIT_NOT_LOADED (a light unit's implementation import, light mode)
+        // is resolved: only NIL_SYM is a name nothing answers.
         for var LU := 0 to High(LM.UsesList) do
-          if LM.UsesList[LU].UnitId < 0 then
+          if LM.UsesList[LU].UnitId = NIL_SYM then
           begin
             Inc(LUnresUses);
             Bump(LMissing, LM.UsesList[LU].NameFull);

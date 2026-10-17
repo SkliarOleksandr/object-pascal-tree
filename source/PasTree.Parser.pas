@@ -32,6 +32,13 @@ type
     Msg: string;
   end;
 
+  { How much of a unit ParseFile reads (ignored for a program, library or
+    package): everything; the interface section; the interface section and
+    the implementation's `uses` clause - what a light unit keeps
+    (TPasSemaProject.LightPaths), so the units it imports there are known
+    without its declarations being parsed. }
+  TPasParseMode = (pmFull, pmInterface, pmInterfaceAndImplUses);
+
   TPasParser = record
   private
     FSrc: TPasPreprocessed;
@@ -278,10 +285,21 @@ type
       resulting tree's nodes [0..N-1] are byte-identical to a full parse of
       the same source, EXCEPT Nodes[0] (nkUnit root) LastToken and the
       nkInterfaceSec node's NextSibling (NIL_NODE here vs the impl section in
-      a full parse) - see StagedParseSmoke for the exact, tested delta. }
+      a full parse) - see StagedParseSmoke for the exact, tested delta.
+      AInterfaceOnly True is pmInterface, False pmFull. }
     class function ParseFile(const ASource: TPasPreprocessed;
       out ADiags: TArray<TPasParseDiag>;
-      AInterfaceOnly: Boolean = False): TPasTree; static;
+      AInterfaceOnly: Boolean = False): TPasTree; overload; static;
+    { The same with the mode spelled out. pmInterfaceAndImplUses goes on past
+      the interface: when `implementation` follows, its nkImplementationSec
+      node and the clause after it, if `uses` comes next, are built as the
+      full parse builds them, and the parse stops there. Still a prefix of
+      the full parse, with a delta of its own: besides the root's LastToken,
+      the implementation section's LastToken, FirstChild (when there is no
+      `uses` clause) and NextSibling, and the clause's NextSibling. }
+    class function ParseFile(const ASource: TPasPreprocessed;
+      out ADiags: TArray<TPasParseDiag>;
+      AMode: TPasParseMode): TPasTree; overload; static;
     { Parses ONE expression out of a bare text fragment (no unit around it):
       lexes AText, wraps the tokens in a minimal single-file visible stream,
       and runs the expression grammar once. ARoot is the expression's root
@@ -4496,11 +4514,23 @@ end;
 class function TPasParser.ParseFile(const ASource: TPasPreprocessed;
   out ADiags: TArray<TPasParseDiag>;
   AInterfaceOnly: Boolean = False): TPasTree;
+begin
+  if AInterfaceOnly then
+    Result := ParseFile(ASource, ADiags, pmInterface)
+  else
+    Result := ParseFile(ASource, ADiags, pmFull);
+end;
+
+class function TPasParser.ParseFile(const ASource: TPasPreprocessed;
+  out ADiags: TArray<TPasParseDiag>; AMode: TPasParseMode): TPasTree;
 var
   LP: TPasParser;
   LRoot, LSec: Integer;
-  LIsBegin: Boolean;
+  LIsBegin, LStopEarly: Boolean;
 begin
+  // Every mode but pmFull stops early; the implementation's `uses` clause
+  // is the one part pmInterfaceAndImplUses reads past the interface.
+  LStopEarly := AMode <> pmFull;
   LP := Default(TPasParser);
   LP.FSrc := ASource;
   LP.FLast := High(ASource.Visible);
@@ -4528,7 +4558,20 @@ begin
         // a full parse (append-only builder), so a later full reparse keeps
         // the same interface node indices and symbol ids (the prefix
         // invariant the async snapshot swap depends on).
-        if not AInterfaceOnly then
+        // pmInterfaceAndImplUses: the implementation section's node and its
+        // `uses` clause, built exactly as the full parse below builds them
+        // (the same nodes in the same order), then stop.
+        if (AMode = pmInterfaceAndImplUses) and
+           (LP.CurKind = tkImplementation) then
+        begin
+          LSec := LP.FB.AddNode(nkImplementationSec, NIL_NODE, LP.FPos);
+          LP.Expect(tkImplementation, '"implementation"');
+          if LP.CurKind = tkUses then
+            LP.FB.Adopt(LSec, LP.ParseUsesClause);
+          LP.FB.SetLast(LSec, LP.FPos - 1);
+          LP.FB.Adopt(LRoot, LSec);
+        end;
+        if not LStopEarly then
         begin
           // implementation section
           LSec := LP.FB.AddNode(nkImplementationSec, NIL_NODE, LP.FPos);
@@ -4663,7 +4706,7 @@ begin
   // ignore and stays as it was: the root takes its first token only.
   // A unit's interface-only parse stops on purpose (anything else ignores
   // the flag, and must: the two parses are then one tree).
-  if not (AInterfaceOnly and (LP.FB.Kind(LRoot) = nkUnit)) and
+  if not (LStopEarly and (LP.FB.Kind(LRoot) = nkUnit)) and
      (LP.FPos < LP.FLast) and not ((LP.FPos >= 2) and
      (LP.FSrc.VisibleToken(LP.FPos - 1).Kind = tkDot) and
      (LP.FSrc.VisibleToken(LP.FPos - 2).Kind = tkEnd)) then
