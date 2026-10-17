@@ -54,7 +54,31 @@ program PasTreeSemaProject;
   -$<switch> (repeatable: -$D-, -$A4, -$YD) and -CC  dcc's own command-line
          switches and console target (TPasSemaProject.SwitchStart,
          ConsoleTarget). With -dproj they go on top of the .dproj's DCC_*
-         switch properties and DCC_ConsoleTarget, which are always read. }
+         switch properties and DCC_ConsoleTarget, which are always read.
+
+  Light-mode measurements (library units interface-only). "Own" is a unit
+  the .dproj lists or one under its directory; a directory run counts every
+  unit as own, a file run what lies under the file's directory.
+
+  -fp:<file>  per own unit one line: the file, then count:hash for RefMap,
+         ExprType, ExtRefMap, CallTargetX, SymTypeX, ExprTypeX and Diags.
+         Order-independent, a target named by file + symbol name + declaring
+         node (never a model id), so two closures compare. -fpdetail also
+         writes every entry, sorted, to <file>.detail.txt.
+
+  -stats  per category (own listed, own unlisted, Studio, other) units,
+         tokens and nodes with their interface shares; the closure each light
+         rule would load; references from library code to own units, by target.
+
+  -demotelib  at the end, DemoteText keeping the own units: held memory and
+         the time it took (the MCP server's resident state).
+
+  -promote:<file> (repeatable)  AnalyzeModuleOnly over the file, timed, with
+         its stage timings and what the module holds after.
+
+  -refset:<unit> (repeatable)  the units whose bodies could refer to a symbol
+         of the unit: a unit-level name's candidates and a member's, by
+         category with node totals. }
 
 {$APPTYPE CONSOLE}
 {$MAXSTACKSIZE $01000000}   // 16 MB per thread: README, "The stack every host should reserve"
@@ -124,6 +148,13 @@ var
                        // recovered encodings), which no fixture can cover.
   GSW: TStopwatch;
   GMode: string;
+  // Light-mode measurements, see ReportLightMeasures and the header.
+  GStats: Boolean;            // -stats
+  GDemoteLib: Boolean;        // -demotelib
+  GFp: string;                // -fp:<file>
+  GFpDetail: Boolean;         // -fpdetail
+  GRefSets: TArray<string>;   // -refset:<unit>, repeatable
+  GPromotes: TArray<string>;  // -promote:<file>, repeatable
 
 { Studio SOURCE trees, so System.*/Vcl.*/FMX.* resolve. See the -dproj note in
   the header: the demo reads the IDE's registry paths, this does not. }
@@ -393,6 +424,543 @@ begin
   end;
 end;
 
+// ---- Light-mode measurements: -stats, -fp, -refset, -promote, -demotelib ----
+// The harness every light-mode gate reads (local working plan, stage 0). A
+// unit is put in one of four categories by its file alone: own listed (the
+// .dproj names it), own unlisted (under the project directory), Studio (under
+// the Studio root) and other (a library path). A directory run has no project
+// to say what is library: every unit is own there (GAllOwn).
+const
+  CAT_NAMES: array[0..3] of string = ('own-listed', 'own-unlisted', 'studio',
+    'other');
+
+var
+  GAllOwn: Boolean;
+  GOwnDir: string;
+  GOwnFiles: TDictionary<string, Boolean>;   // lower-cased; nil = none listed
+
+function UnitCat(const AFile: string): Integer;
+begin
+  if GAllOwn or ((GOwnFiles <> nil) and
+     GOwnFiles.ContainsKey(LowerCase(AFile))) then
+    Result := 0
+  else if (GOwnDir <> '') and
+          StartsText(IncludeTrailingPathDelimiter(GOwnDir), AFile) then
+    Result := 1
+  else if (GStudio <> '') and
+          StartsText(IncludeTrailingPathDelimiter(GStudio), AFile) then
+    Result := 2
+  else
+    Result := 3;
+end;
+
+// The node index of the unit's implementation section, -1 when there is none
+// (an interface-only tree, a program).
+function ImplSecNode(M: TPasSemaModel): Integer;
+var
+  LC: Integer;
+begin
+  Result := -1;
+  if (Length(M.Tree.Nodes) = 0) or (M.Tree.Nodes[0].Kind <> nkUnit) then
+    Exit;
+  LC := M.Tree.Nodes[0].FirstChild;
+  while LC >= 0 do
+  begin
+    if M.Tree.Nodes[LC].Kind = nkImplementationSec then
+      Exit(LC);
+    LC := M.Tree.Nodes[LC].NextSibling;
+  end;
+end;
+
+// Per category: units, tokens, nodes and the interface share of each; the
+// closure each light rule would load (a light unit's implementation `uses`
+// not followed); references from library code to own units, by target.
+procedure ReportLightStats(const AMain: string);
+var
+  LUnits, LTok, LTokIntf, LNodes, LNodesIntf, LChars: array[0..3] of Int64;
+  LReach: array[0..2, 0..3] of Int64;   // rule: none, Studio light, all library light
+  LCatOf, LImpl: TArray<Integer>;
+  LMid, LC, LI, LMode, LU, LTo: Integer;
+  LM: TPasSemaModel;
+  LSeen: TArray<Boolean>;
+  LQueue: TList<Integer>;
+  LLight: Boolean;
+begin
+  FillChar(LUnits, SizeOf(LUnits), 0);
+  FillChar(LTok, SizeOf(LTok), 0);
+  FillChar(LTokIntf, SizeOf(LTokIntf), 0);
+  FillChar(LNodes, SizeOf(LNodes), 0);
+  FillChar(LNodesIntf, SizeOf(LNodesIntf), 0);
+  FillChar(LChars, SizeOf(LChars), 0);
+  FillChar(LReach, SizeOf(LReach), 0);
+  SetLength(LCatOf, GProj.ModelCount);
+  SetLength(LImpl, GProj.ModelCount);
+  for LMid := 0 to GProj.ModelCount - 1 do
+  begin
+    LM := GProj.Model(LMid);
+    LC := UnitCat(GProj.ModelFile(LMid));
+    LCatOf[LMid] := LC;
+    LImpl[LMid] := ImplSecNode(LM);
+    Inc(LUnits[LC]);
+    Inc(LTok[LC], Length(LM.Tree.Source.Visible));
+    Inc(LNodes[LC], Length(LM.Tree.Nodes));
+    if LImpl[LMid] >= 0 then
+    begin
+      Inc(LTokIntf[LC], LM.Tree.Nodes[LImpl[LMid]].FirstToken);
+      Inc(LNodesIntf[LC], LImpl[LMid]);
+    end
+    else
+    begin
+      Inc(LTokIntf[LC], Length(LM.Tree.Source.Visible));
+      Inc(LNodesIntf[LC], Length(LM.Tree.Nodes));
+    end;
+    for LI := 0 to High(LM.Tree.Source.Files) do
+      Inc(LChars[LC], Length(LM.Tree.Source.Files[LI].Source));
+  end;
+  Writeln(ErrOutput, '--- stats: per category ---');
+  Writeln(ErrOutput, Format('  %-13s %6s %12s %12s %6s %12s %12s %6s %9s',
+    ['category', 'units', 'tokens', 'intf tokens', 'intf%', 'nodes',
+     'intf nodes', 'intf%', 'MB text']));
+  for LC := 0 to 3 do
+    Writeln(ErrOutput, Format('  %-13s %6d %12d %12d %5.1f%% %12d %12d %5.1f%% %9.1f',
+      [CAT_NAMES[LC], LUnits[LC], LTok[LC], LTokIntf[LC],
+       100 * LTokIntf[LC] / Max(1, LTok[LC]), LNodes[LC], LNodesIntf[LC],
+       100 * LNodesIntf[LC] / Max(1, LNodes[LC]),
+       LChars[LC] * 2 / (1024 * 1024)]));
+
+  // A directory run has no library and no main source to walk from.
+  if GAllOwn then
+    Exit;
+  // Closure: from the main source, System and SysInit; a light unit's
+  // implementation `uses` are not followed.
+  LQueue := TList<Integer>.Create;
+  try
+    for LMode := 0 to 2 do
+    begin
+      SetLength(LSeen, 0);
+      SetLength(LSeen, GProj.ModelCount);
+      LQueue.Clear;
+      for LMid := 0 to GProj.ModelCount - 1 do
+        if SameText(GProj.ModelFile(LMid), AMain) or
+           SameText(TPath.GetFileName(GProj.ModelFile(LMid)), 'System.pas') or
+           SameText(TPath.GetFileName(GProj.ModelFile(LMid)), 'SysInit.pas') then
+        begin
+          LSeen[LMid] := True;
+          LQueue.Add(LMid);
+        end;
+      LI := 0;
+      while LI < LQueue.Count do
+      begin
+        LMid := LQueue[LI];
+        Inc(LI);
+        LM := GProj.Model(LMid);
+        case LMode of
+          1: LLight := LCatOf[LMid] = 2;
+          2: LLight := LCatOf[LMid] >= 2;
+        else
+          LLight := False;
+        end;
+        for LU := 0 to High(LM.UsesList) do
+        begin
+          LTo := LM.UsesList[LU].UnitId;
+          if (LTo < 0) or (LTo >= GProj.ModelCount) or LSeen[LTo] then
+            Continue;
+          if LLight and (LImpl[LMid] >= 0) and
+             (LM.UsesList[LU].NameNode > LImpl[LMid]) then
+            Continue;   // an implementation `uses` of a light unit
+          LSeen[LTo] := True;
+          LQueue.Add(LTo);
+        end;
+      end;
+      for LMid := 0 to GProj.ModelCount - 1 do
+        if LSeen[LMid] then
+          Inc(LReach[LMode, LCatOf[LMid]]);
+    end;
+  finally
+    LQueue.Free;
+  end;
+  Writeln(ErrOutput, '--- stats: closure each light rule would load ---');
+  Writeln(ErrOutput, Format('  %-13s %8s %14s %15s',
+    ['category', 'full', 'studio-light', 'library-light']));
+  for LC := 0 to 3 do
+    Writeln(ErrOutput, Format('  %-13s %8d %14d %15d',
+      [CAT_NAMES[LC], LReach[0, LC], LReach[1, LC], LReach[2, LC]]));
+
+  // References FROM library code TO own declarations - what light mode loses
+  // outright (the virtual/interface dispatch it loses is not counted here).
+  var LLibToOwn: array[0..1] of Integer;   // [in a library interface, in a body]
+  var LLibUnits := TDictionary<Integer, Boolean>.Create;
+  var LByTarget := TDictionary<Integer, Integer>.Create;   // own model -> refs
+  try
+    LLibToOwn[0] := 0;
+    LLibToOwn[1] := 0;
+    for LMid := 0 to GProj.ModelCount - 1 do
+    begin
+      if LCatOf[LMid] < 2 then
+        Continue;
+      LM := GProj.Model(LMid);
+      for var LP in LM.ExtRefMap do
+        if (LP.Value.UnitId >= 0) and (LP.Value.UnitId < GProj.ModelCount) and
+           (LCatOf[LP.Value.UnitId] < 2) then
+        begin
+          if (LImpl[LMid] >= 0) and (LP.Key > LImpl[LMid]) then
+            Inc(LLibToOwn[1])
+          else
+            Inc(LLibToOwn[0]);
+          LLibUnits.AddOrSetValue(LMid, True);
+          var LN := 0;
+          LByTarget.TryGetValue(LP.Value.UnitId, LN);
+          LByTarget.AddOrSetValue(LP.Value.UnitId, LN + 1);
+        end;
+    end;
+    Writeln(ErrOutput, Format('--- stats: library -> own references: ' +
+      '%d in library interfaces, %d in library bodies; %d library unit(s) ' +
+      'refer to %d own unit(s)',
+      [LLibToOwn[0], LLibToOwn[1], LLibUnits.Count, LByTarget.Count]));
+    var LRows := TList<string>.Create;
+    try
+      // Most-referenced first; the count is zero-padded so a text sort orders it.
+      for var LT in LByTarget do
+        LRows.Add(Format('%.8d|%s|%s', [MaxInt - LT.Value, CAT_NAMES[LCatOf[LT.Key]],
+          GProj.ModelFile(LT.Key)]));
+      LRows.Sort;
+      for var LR in LRows do
+      begin
+        var LParts := LR.Split(['|']);
+        Writeln(ErrOutput, Format('  %6d to [%s] %s',
+          [MaxInt - StrToInt(LParts[0]), LParts[1], LParts[2]]));
+      end;
+    finally
+      LRows.Free;
+    end;
+  finally
+    LByTarget.Free;
+    LLibUnits.Free;
+  end;
+end;
+
+// The fingerprint hashes wrap by design; the tool is also built with -$Q+.
+{$IFOPT Q+}{$DEFINE FP_Q_WAS_ON}{$Q-}{$ENDIF}
+function Fnv64(const S: string): UInt64;
+var
+  LI: Integer;
+begin
+  Result := UInt64($CBF29CE484222325);
+  for LI := 1 to Length(S) do
+    Result := (Result xor Ord(S[LI])) * UInt64($100000001B3);
+end;
+
+function HashSum(A, B: UInt64): UInt64;
+begin
+  Result := A + B;
+end;
+{$IFDEF FP_Q_WAS_ON}{$Q+}{$UNDEF FP_Q_WAS_ON}{$ENDIF}
+
+// -fp: per own model, an order-independent hash of every binding the
+// analysis made in it - local refs, expression types, external refs, call
+// targets, cross-model types, diagnostics - with a target named by its file,
+// symbol name and declaring node, never by model id (ids differ between two
+// closures), so a full and a light analysis compare. One line per model:
+// the file, then count:hash for each family in that order.
+procedure ReportFingerprint(const AOutFile: string; ADetail: Boolean);
+var
+  LLines, LDet: TList<string>;
+  LMid, LI: Integer;
+  LM: TPasSemaModel;
+  LH: array[0..6] of UInt64;
+  LN: array[0..6] of Integer;
+  LS: string;
+
+  function MF(AUnit: Integer): string;
+  begin
+    if (AUnit >= 0) and (AUnit < GProj.ModelCount) then
+      Result := LowerCase(GProj.ModelFile(AUnit))
+    else
+      Result := '?' + IntToStr(AUnit);
+  end;
+
+  // A target symbol by what it IS - file, name, declaring node - not by its
+  // index in that model's arena.
+  function TS(AUnit, ASym: Integer): string;
+  var
+    LTM: TPasSemaModel;
+  begin
+    Result := MF(AUnit);
+    if (AUnit >= 0) and (AUnit < GProj.ModelCount) then
+    begin
+      LTM := GProj.Model(AUnit);
+      if (ASym >= 0) and (ASym < LTM.SymCount) then
+        Result := Result + ':' + LTM.Symbols[ASym].Name + ':' +
+          IntToStr(LTM.Symbols[ASym].DeclNode)
+      else
+        Result := Result + ':#' + IntToStr(ASym);
+    end;
+  end;
+
+  procedure Put(AFam: Integer; const AEntry: string);
+  begin
+    LH[AFam] := HashSum(LH[AFam], Fnv64(AEntry));
+    Inc(LN[AFam]);
+    if ADetail then
+      LDet.Add(LowerCase(GProj.ModelFile(LMid)) + '|' + AEntry);
+  end;
+
+begin
+  LLines := TList<string>.Create;
+  LDet := TList<string>.Create;
+  try
+    for LMid := 0 to GProj.ModelCount - 1 do
+    begin
+      if UnitCat(GProj.ModelFile(LMid)) > 1 then
+        Continue;
+      LM := GProj.Model(LMid);
+      FillChar(LH, SizeOf(LH), 0);
+      FillChar(LN, SizeOf(LN), 0);
+      for LI := 0 to High(LM.RefMap) do
+        if LM.RefMap[LI] <> NIL_SYM then
+          Put(0, Format('L %d %s', [LI, TS(LMid, LM.RefMap[LI])]));
+      for LI := 0 to High(LM.ExprType) do
+        if LM.ExprType[LI] <> NIL_SYM then
+          Put(1, Format('T %d %s', [LI, TS(LMid, LM.ExprType[LI])]));
+      for var LP in LM.ExtRefMap do
+        Put(2, Format('X %d %s', [LP.Key, TS(LP.Value.UnitId, LP.Value.Sym)]));
+      for var LP in LM.CallTargetX do
+        Put(3, Format('CX %d %s', [LP.Key, TS(LP.Value.UnitId, LP.Value.Sym)]));
+      for var LP in LM.SymTypeX do
+        Put(4, Format('ST %d %s %s', [LP.Key, TS(LP.Value.UnitId, LP.Value.Sym),
+          IfThen(LP.Value.Inst = NIL_INST, '-', 'I')]));
+      for var LP in LM.ExprTypeX do
+        Put(5, Format('ET %d %s %s', [LP.Key, TS(LP.Value.UnitId, LP.Value.Sym),
+          IfThen(LP.Value.Inst = NIL_INST, '-', 'I')]));
+      for LI := 0 to High(LM.Diags) do
+        Put(6, Format('D %d %d %d %s %s', [LM.Diags[LI].FileId, LM.Diags[LI].Line,
+          LM.Diags[LI].Col, LM.Diags[LI].Code, LM.Diags[LI].Msg]));
+      LS := LowerCase(GProj.ModelFile(LMid));
+      for LI := 0 to 6 do
+        LS := LS + Format(' %d:%x', [LN[LI], LH[LI]]);
+      LLines.Add(LS);
+    end;
+    LLines.Sort;
+    TFile.WriteAllLines(AOutFile, LLines.ToArray);
+    if ADetail then
+    begin
+      LDet.Sort;
+      TFile.WriteAllLines(ChangeFileExt(AOutFile, '.detail.txt'), LDet.ToArray);
+    end;
+    Writeln(ErrOutput, Format('fingerprint: %d own model(s) -> %s',
+      [LLines.Count, AOutFile]));
+  finally
+    LDet.Free;
+    LLines.Free;
+  end;
+end;
+
+// -refset: Find References on a symbol of AUnit with library bodies light -
+// which units' bodies could hold a use. D: the units naming AUnit in a
+// `uses` (either section) and AUnit itself, every unit for System - the
+// candidates for a unit-level name. I: AUnit and every unit whose INTERFACE
+// `uses` reaches it through interface `uses` only. M: I plus every unit with
+// any `uses` edge into I - the candidates for a member, which a value of a
+// type leading there reaches without naming AUnit.
+procedure ReportRefSet(const AUnit: string);
+var
+  LTarget, LMid, LU, LTo, LI, LC: Integer;
+  LM: TPasSemaModel;
+  LImpl, LCatOf: TArray<Integer>;
+  LInD, LInI, LInM: TArray<Boolean>;
+  LRev: TArray<TList<Integer>>;   // interface edges, reversed: to -> froms
+  LQueue: TList<Integer>;
+  LCntD, LCntM: array[0..3] of Integer;
+  LNodesD, LNodesM: array[0..3] of Int64;
+  LIsSystem: Boolean;
+begin
+  LTarget := -1;
+  for LMid := 0 to GProj.ModelCount - 1 do
+    if SameText(GProj.Model(LMid).UnitNameLower, AUnit) then
+    begin
+      LTarget := LMid;
+      Break;
+    end;
+  if LTarget < 0 then
+  begin
+    Writeln(ErrOutput, '  refset: no unit ', AUnit);
+    Exit;
+  end;
+  LIsSystem := SameText(AUnit, 'system');
+  SetLength(LImpl, GProj.ModelCount);
+  SetLength(LCatOf, GProj.ModelCount);
+  SetLength(LInD, GProj.ModelCount);
+  SetLength(LInI, GProj.ModelCount);
+  SetLength(LInM, GProj.ModelCount);
+  SetLength(LRev, GProj.ModelCount);
+  for LMid := 0 to GProj.ModelCount - 1 do
+  begin
+    LImpl[LMid] := ImplSecNode(GProj.Model(LMid));
+    LCatOf[LMid] := UnitCat(GProj.ModelFile(LMid));
+    LRev[LMid] := TList<Integer>.Create;
+  end;
+  LQueue := TList<Integer>.Create;
+  try
+    for LMid := 0 to GProj.ModelCount - 1 do
+    begin
+      LM := GProj.Model(LMid);
+      for LU := 0 to High(LM.UsesList) do
+      begin
+        LTo := LM.UsesList[LU].UnitId;
+        if (LTo < 0) or (LTo >= GProj.ModelCount) then
+          Continue;
+        if LTo = LTarget then
+          LInD[LMid] := True;
+        if (LImpl[LMid] < 0) or (LM.UsesList[LU].NameNode < LImpl[LMid]) then
+          LRev[LTo].Add(LMid);
+      end;
+    end;
+    LInD[LTarget] := True;
+    if LIsSystem then
+      for LMid := 0 to GProj.ModelCount - 1 do
+        LInD[LMid] := True;
+    LInI[LTarget] := True;
+    LQueue.Add(LTarget);
+    LI := 0;
+    while LI < LQueue.Count do
+    begin
+      for LTo in LRev[LQueue[LI]] do
+        if not LInI[LTo] then
+        begin
+          LInI[LTo] := True;
+          LQueue.Add(LTo);
+        end;
+      Inc(LI);
+    end;
+    if LIsSystem then
+      for LMid := 0 to GProj.ModelCount - 1 do
+        LInI[LMid] := True;
+    for LMid := 0 to GProj.ModelCount - 1 do
+    begin
+      if LInI[LMid] then
+      begin
+        LInM[LMid] := True;
+        Continue;
+      end;
+      LM := GProj.Model(LMid);
+      for LU := 0 to High(LM.UsesList) do
+      begin
+        LTo := LM.UsesList[LU].UnitId;
+        if (LTo >= 0) and (LTo < GProj.ModelCount) and LInI[LTo] then
+        begin
+          LInM[LMid] := True;
+          Break;
+        end;
+      end;
+    end;
+    FillChar(LCntD, SizeOf(LCntD), 0);
+    FillChar(LCntM, SizeOf(LCntM), 0);
+    FillChar(LNodesD, SizeOf(LNodesD), 0);
+    FillChar(LNodesM, SizeOf(LNodesM), 0);
+    for LMid := 0 to GProj.ModelCount - 1 do
+    begin
+      LC := LCatOf[LMid];
+      if LInD[LMid] then
+      begin
+        Inc(LCntD[LC]);
+        Inc(LNodesD[LC], Length(GProj.Model(LMid).Tree.Nodes));
+      end;
+      if LInM[LMid] then
+      begin
+        Inc(LCntM[LC]);
+        Inc(LNodesM[LC], Length(GProj.Model(LMid).Tree.Nodes));
+      end;
+    end;
+    Writeln(ErrOutput, Format('  refset %s:', [AUnit]));
+    Writeln(ErrOutput, Format('    %-17s %-13s %6s %10s',
+      ['set', 'category', 'units', 'nodes']));
+    for LC := 0 to 3 do
+      Writeln(ErrOutput, Format('    %-17s %-13s %6d %10d',
+        ['unit-level (D)', CAT_NAMES[LC], LCntD[LC], LNodesD[LC]]));
+    for LC := 0 to 3 do
+      Writeln(ErrOutput, Format('    %-17s %-13s %6d %10d',
+        ['member (M)', CAT_NAMES[LC], LCntM[LC], LNodesM[LC]]));
+  finally
+    LQueue.Free;
+    for LMid := 0 to High(LRev) do
+      LRev[LMid].Free;
+  end;
+end;
+
+// -promote: AnalyzeModuleOnly over one file, timed, and what the module holds
+// after - the stand-in for promoting a light unit to a full parse until the
+// API for it exists.
+procedure ReportPromote(const AFile: string);
+var
+  LBefore, LMid, LImpl, LBodyRefs, LI: Integer;
+  LOk: Boolean;
+  LM: TPasSemaModel;
+  LSW: TStopwatch;
+begin
+  LBefore := GProj.ModelCount;
+  LSW := TStopwatch.StartNew;
+  LOk := GProj.AnalyzeModuleOnly(AFile);
+  LSW.Stop;
+  Writeln(ErrOutput, Format('  promote %s: %s in %d ms',
+    [TPath.GetFileName(AFile), BoolToStr(LOk, True), LSW.ElapsedMilliseconds]));
+  if GProj.StageTimings <> '' then
+    Writeln(ErrOutput, '    stages: ', GProj.StageTimings);
+  LMid := GProj.ModelIdOf(AFile);
+  if LMid < 0 then
+  begin
+    Writeln(ErrOutput, '    no model for the file');
+    Exit;
+  end;
+  LM := GProj.Model(LMid);
+  LImpl := ImplSecNode(LM);
+  LBodyRefs := 0;
+  if LImpl >= 0 then
+  begin
+    for LI := LImpl + 1 to High(LM.RefMap) do
+      if LM.RefMap[LI] <> NIL_SYM then
+        Inc(LBodyRefs);
+    for var LP in LM.ExtRefMap do
+      if LP.Key > LImpl then
+        Inc(LBodyRefs);
+  end;
+  Writeln(ErrOutput, Format('    after: implementation section %s, %d body ' +
+    'ref(s), %d diagnostic(s), %d unit(s) added',
+    [IfThen(LImpl >= 0, 'yes', 'no'), LBodyRefs, Length(LM.Diags),
+     GProj.ModelCount - LBefore]));
+end;
+
+// -demotelib: the MCP server's resident state - DemoteText keeping the own
+// units (listed or under the project directory) warm.
+procedure ReportDemoteLib;
+var
+  LKeep: TArray<string>;
+  LSW: TStopwatch;
+begin
+  LKeep := nil;
+  for var LMid := 0 to GProj.ModelCount - 1 do
+    if UnitCat(GProj.ModelFile(LMid)) <= 1 then
+      LKeep := LKeep + [GProj.ModelFile(LMid)];
+  LSW := TStopwatch.StartNew;
+  GProj.DemoteText(LKeep);
+  LSW.Stop;
+  Writeln(ErrOutput, Format(
+    'after DemoteText (keeping %d own units): %s held, %d ms',
+    [Length(LKeep), MemoryText(AllocatedBytes), LSW.ElapsedMilliseconds]));
+end;
+
+// After the analysis, before the -release/-demote measurements.
+procedure ReportLightMeasures(const AMain: string);
+begin
+  if GStats then
+    ReportLightStats(AMain);
+  if GFp <> '' then
+    ReportFingerprint(GFp, GFpDetail);
+  for var LRS in GRefSets do
+    ReportRefSet(LRS);
+  for var LPF in GPromotes do
+    ReportPromote(LPF);
+end;
+
 procedure RunDProj(const APath: string);
 var
   LD: TPasDProj;
@@ -610,6 +1178,9 @@ begin
          MemoryText(AllocatedBytes), GMode]));
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, '  stages: ', GProj.StageTimings);
+      GOwnFiles := LOwn;
+      GOwnDir := LD.Dir;
+      ReportLightMeasures(LD.MainSource);
       // The retained-memory measurements: keep only the main source (the
       // "open editor"), release/demote everything else, report the delta.
       if GRelease then
@@ -718,7 +1289,10 @@ begin
       ReportHistogram('--- library units, by identifier/code ---', LOutProj, 25,
         LLibSites);
       ReportChains;
+      if GDemoteLib then
+        ReportDemoteLib;
     finally
+      GOwnFiles := nil;
       GProj.Free;
     end;
   finally
@@ -795,6 +1369,19 @@ begin
         GUnused := True
       else if SameText(ParamStr(GIdx), '-defines') then
         GDefines := True
+      else if SameText(ParamStr(GIdx), '-stats') then
+        GStats := True
+      else if SameText(ParamStr(GIdx), '-demotelib') then
+        GDemoteLib := True
+      else if SameText(ParamStr(GIdx), '-fpdetail') then
+        GFpDetail := True
+      else if ParamStr(GIdx).StartsWith('-fp:', True) then
+        GFp := TPath.GetFullPath(Copy(ParamStr(GIdx), 5, MaxInt))
+      else if ParamStr(GIdx).StartsWith('-refset:', True) then
+        GRefSets := GRefSets + [Copy(ParamStr(GIdx), 9, MaxInt)]
+      else if ParamStr(GIdx).StartsWith('-promote:', True) then
+        GPromotes := GPromotes +
+          [TPath.GetFullPath(Copy(ParamStr(GIdx), 10, MaxInt))]
       else if ParamStr(GIdx).StartsWith('-$') then
         GSwitches := GSwitches + [ParamStr(GIdx)]
       else if SameText(ParamStr(GIdx), '-CC') then
@@ -884,6 +1471,14 @@ begin
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, 'stages: ' + GProj.StageTimings);
       ReportLoadFailures;
+      // A directory is the whole world: every unit is own. A file run has
+      // no list - own is what lies under the file's directory.
+      GAllOwn := TDirectory.Exists(GPath);
+      if not GAllOwn then
+        GOwnDir := TPath.GetDirectoryName(GPath);
+      ReportLightMeasures(GPath);
+      if GDemoteLib then
+        ReportDemoteLib;
       if GRelease then
       begin
         GProj.ReleaseTransientMaps([GPath]);
