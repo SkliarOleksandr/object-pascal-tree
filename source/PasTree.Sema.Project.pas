@@ -22621,6 +22621,16 @@ var
     Result := False;
   end;
 
+  // A promotion this path cannot make exact: refused, and the file kept
+  // full for the host's rebuild (PromotedFiles) - never a guessed result.
+  function NeedsRebuild(const AWhy: string): Boolean;
+  begin
+    if FPromoted = nil then
+      FPromoted := TDictionary<string, Boolean>.Create;
+    FPromoted.AddOrSetValue(LKey, True);
+    Result := Refuse('promote-needs-rebuild(' + AWhy + ')');
+  end;
+
   // An `in` clause of the edited module that a rebuild would read
   // differently from the pins this project holds (audit A4-19): an entry
   // that keeps its name but changes or drops its path, an in-path entry
@@ -22762,12 +22772,7 @@ begin
       // PromotedFiles - never a guessed stream.
       LRedecided := RedecideStream(LId, LNew, LWhy);
       if LWhy <> '' then
-      begin
-        if FPromoted = nil then
-          FPromoted := TDictionary<string, Boolean>.Create;
-        FPromoted.AddOrSetValue(LKey, True);
-        Exit(Refuse('promote-needs-rebuild(' + LWhy + ')'));
-      end;
+        Exit(NeedsRebuild(LWhy));
       if LRedecided <> nil then
       begin
         LNew.Free;
@@ -22799,10 +22804,16 @@ begin
     if LSeeds <> nil then
     begin
       LSW := TStopwatch.StartNew;
-      if not LoadNewcomers(LSeeds, LAddModels, LAddPaths, LWhy) then
+      // A promotion's take-in the module path cannot admit (a newcomer
+      // asking `$IF` questions of its own, one that fails to load) is what a
+      // rebuild does exactly: the host rebuilds with the unit kept full.
+      if not LoadNewcomers(LSeeds, LAddModels, LAddPaths, LWhy) or
+         not NewcomersAdmissible(LId, LNew, LAddModels, LAddPaths, LWhy) then
+      begin
+        if AMode = mpPromote then
+          Exit(NeedsRebuild(LWhy));
         Exit(Refuse(LWhy));
-      if not NewcomersAdmissible(LId, LNew, LAddModels, LAddPaths, LWhy) then
-        Exit(Refuse(LWhy));
+      end;
       FStageTimings := FStageTimings +
         Format('newload=%d;', [LSW.ElapsedMilliseconds]);
     end;

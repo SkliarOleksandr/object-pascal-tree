@@ -97,6 +97,25 @@ function FindUnusedUses(ANav: TPasNavigator;
   const AMids: TArray<Integer>;
   AOptions: TPasLintOptions = []): TArray<TPasUnusedUse>;
 
+{ LIGHT MODE (TPasSemaProject.LightPaths). The lint reads what a light unit
+  never had analyzed - an inline routine's body (InlineDeps), its
+  initialization (the link effects, loHideGlobalInit's test), the units its
+  implementation `uses` brings in (reach) - and answers those on the safe
+  side: a doubt on the row naming the unit ("the expansion of an inline
+  routine of X ... is not known", "removing it leaves X out of P, analyzed
+  interface-only ..."), a light unit's initialization counted as global
+  under loHideGlobalInit. A unit kept, never one a removal needs called
+  unused. LintPromotions is the preparation step that makes the lint exact
+  instead: the light units the same lint over AMids (both reports, AOptions)
+  had to treat as unknown, as file paths, sorted. The host promotes them
+  (TPasSemaProject.PromoteUnit) and asks again until the answer is empty -
+  a promotion loads the unit's implementation-only units light, which may
+  be needed in turn - recreates its navigator, then lints. A promotion
+  refused leaves its unit's doubts on the rows. The lint itself stays
+  read-only. }
+function LintPromotions(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions = []): TArray<string>;
+
 implementation
 
 uses
@@ -133,6 +152,14 @@ type
   end;
 
   // What is read more than once over the units checked: the interface names
+  // A form file as DesignerUnits reads it: whether it is there and parses,
+  // its root object's class, every class name it streams (folded).
+  TLintFormInfo = record
+    Valid: Boolean;
+    RootClass: string;
+    Classes: TArray<string>;
+  end;
+
   // of the units they list, the uses graph, what each program reaches, which
   // units run code at start.
   TUsesLint = class
@@ -153,24 +180,39 @@ type
     FDeadEdges: TDictionary<Int64, Boolean>;   // From shl 32 or Target
     FOptions: TPasLintOptions;
     FGlobalInit: TDictionary<Integer, Boolean>;
+    // Light mode: an inline routine -> the LIGHT units its expansion depends
+    // on (a body there is not analyzed), and every light unit an answer had
+    // to treat as unknown - what LintPromotions returns.
+    FInlineLight: TDictionary<Int64, TArray<Integer>>;
+    FLightNeeded: TDictionary<Integer, Boolean>;
+    // DesignerUnits' form files by lower-cased path: every component class
+    // of every form climbs its ancestry, and each level asked the disk for
+    // two files and re-parsed the one it found - 12 of the lint's 13 s on a
+    // 1,566-unit project.
+    FForms: TDictionary<string, TLintFormInfo>;
+    function FormInfo(const AFile: string): TLintFormInfo;
+    function IsLight(AMid: Integer): Boolean;
     procedure BuildGraph;
     function GlobalInit(AMid: Integer): Boolean;
     function DropsGlobalInit(AFrom, ATo: Integer): Boolean;
     function ReachOf(ARoot, ASkipFrom, ASkipTo: Integer): TArray<Boolean>;
     function FullReach(ARoot: Integer): TArray<Boolean>;
-    function EffectsFrom(AStart: Integer;
-      const ALost: TArray<Boolean>): TArray<string>;
+    function EffectsFrom(AStart: Integer; const ALost: TArray<Boolean>;
+      out AUnknown: TArray<string>): TArray<string>;
     function NamesOf(AMid: Integer): TDictionary<string, Integer>;
     function LinkEffect(AMid: Integer): string;
     function NeedsItsUnit(const AExt: TPasExtRef): Boolean;
     function UnitNameOf(AMid: Integer): string;
-    function DropsText(AFrom, ATo: Integer): string;
+    function DropsText(AFrom, ATo: Integer; out AUnknown: string): string;
     procedure AddNodeUnits(AMid, ANode: Integer;
       AUnits: TDictionary<Integer, Boolean>);
     procedure AddTypeUnits(AMid, ASym: Integer;
       AUnits: TDictionary<Integer, Boolean>);
     function InlineAccessors(AMid, ASym: Integer): TArray<Int64>;
     function InlineDeps(AMid, ASym: Integer): TArray<Integer>;
+    // After InlineDeps of the same routine (AKey = model shl 32 or symbol):
+    // the light units its expansion depends on, nil for none.
+    function InlineLightOf(AKey: Int64): TArray<Integer>;
     function ClassTypeIn(AMid: Integer; const ANameLower: string): TSemaXType;
     function DesignerUnits(AMid: Integer; const AFormFile: string;
       const AClasses: TArray<string>): TDictionary<Integer, Boolean>;
@@ -427,6 +469,9 @@ begin
   FRows := TList<TPasUnusedUse>.Create;
   FDeadEdges := TDictionary<Int64, Boolean>.Create;
   FGlobalInit := TDictionary<Integer, Boolean>.Create;
+  FInlineLight := TDictionary<Int64, TArray<Integer>>.Create;
+  FLightNeeded := TDictionary<Integer, Boolean>.Create;
+  FForms := TDictionary<string, TLintFormInfo>.Create;
   for var LMid := 0 to FProj.ModelCount - 1 do
   begin
     LM := FProj.Model(LMid);
@@ -439,6 +484,9 @@ end;
 
 destructor TUsesLint.Destroy;
 begin
+  FForms.Free;
+  FLightNeeded.Free;
+  FInlineLight.Free;
   FGlobalInit.Free;
   FAccessors.Free;
   FInline.Free;
@@ -448,6 +496,13 @@ begin
   FEffect.Free;
   FNames.Free;
   inherited;
+end;
+
+// A light model (TPasSemaProject.LightPaths): its implementation - bodies,
+// implementation `uses`, initialization - was never analyzed.
+function TUsesLint.IsLight(AMid: Integer): Boolean;
+begin
+  Result := FProj.IsLight(AMid);
 end;
 
 function TUsesLint.UnitNameOf(AMid: Integer): string;
@@ -629,15 +684,18 @@ begin
 end;
 
 // The units with an effect AStart reaches through the units in ALost,
-// 'Name (initialization)'.
-function TUsesLint.EffectsFrom(AStart: Integer;
-  const ALost: TArray<Boolean>): TArray<string>;
+// 'Name (initialization)'. A light unit among them is not judged - its
+// initialization and what its implementation `uses` brings in are not known:
+// its name goes to AUnknown instead.
+function TUsesLint.EffectsFrom(AStart: Integer; const ALost: TArray<Boolean>;
+  out AUnknown: TArray<string>): TArray<string>;
 var
   LSeen: TArray<Boolean>;
   LQueue: TList<Integer>;
   LAt, LU: Integer;
 begin
   Result := nil;
+  AUnknown := nil;
   SetLength(LSeen, FProj.ModelCount);
   LQueue := TList<Integer>.Create;
   try
@@ -647,7 +705,12 @@ begin
     while LAt < LQueue.Count do
     begin
       LU := LQueue[LAt];
-      if LinkEffect(LU) <> '' then
+      if IsLight(LU) then
+      begin
+        FLightNeeded.AddOrSetValue(LU, True);
+        AUnknown := AUnknown + [UnitNameOf(LU)];
+      end
+      else if LinkEffect(LU) <> '' then
         Result := Result + [Format('%s (%s)', [UnitNameOf(LU),
           LinkEffect(LU)])];
       for var LE := FStart[LU] to FStart[LU + 1] - 1 do
@@ -665,22 +728,35 @@ end;
 
 // 'removing it leaves X (initialization) out of P', '' when it leaves
 // nothing with an effect out. With no program in the analysis (a directory
-// of units) only the listed unit's own effect is known.
-function TUsesLint.DropsText(AFrom, ATo: Integer): string;
+// of units) only the listed unit's own effect is known. AUnknown: the same
+// for the light units the removal leaves out, whose effects are not known
+// ('' for none) - a doubt on the safe side.
+function TUsesLint.DropsText(AFrom, ATo: Integer; out AUnknown: string): string;
 var
   LFull, LLess, LLost: TArray<Boolean>;
-  LUnits, LPrograms, LEffects: TArray<string>;
+  LUnits, LPrograms, LEffects, LLightUnits, LLightPrograms,
+    LUnknown: TArray<string>;
 begin
   Result := '';
+  AUnknown := '';
   if FRoots = nil then
   begin
-    if LinkEffect(ATo) <> '' then
+    if IsLight(ATo) then
+    begin
+      FLightNeeded.AddOrSetValue(ATo, True);
+      AUnknown := Format('%s is analyzed interface-only - whether it has ' +
+        'initialization a program may need linked in is not known',
+        [UnitNameOf(ATo)]);
+    end
+    else if LinkEffect(ATo) <> '' then
       Result := Format('%s has %s - a program may need it linked in',
         [UnitNameOf(ATo), LinkEffect(ATo)]);
     Exit;
   end;
   LUnits := nil;
   LPrograms := nil;
+  LLightUnits := nil;
+  LLightPrograms := nil;
   for var LRoot in FRoots do
   begin
     LFull := FullReach(LRoot);
@@ -692,16 +768,27 @@ begin
     SetLength(LLost, Length(LFull));
     for var LMid := 0 to High(LFull) do
       LLost[LMid] := LFull[LMid] and not LLess[LMid];
-    LEffects := EffectsFrom(ATo, LLost);
+    LEffects := EffectsFrom(ATo, LLost, LUnknown);
     for var LU in LEffects do
       if not MatchText(LU, LUnits) then
         LUnits := LUnits + [LU];
     if (LEffects <> nil) and not MatchText(UnitNameOf(LRoot), LPrograms) then
       LPrograms := LPrograms + [UnitNameOf(LRoot)];
+    for var LU in LUnknown do
+      if not MatchText(LU, LLightUnits) then
+        LLightUnits := LLightUnits + [LU];
+    if (LUnknown <> nil) and
+       not MatchText(UnitNameOf(LRoot), LLightPrograms) then
+      LLightPrograms := LLightPrograms + [UnitNameOf(LRoot)];
   end;
   if LUnits <> nil then
     Result := Format('removing it leaves %s out of %s', [NamedList(LUnits,
       MAX_NAMED), NamedList(LPrograms, MAX_NAMED)]);
+  if LLightUnits <> nil then
+    AUnknown := Format('removing it leaves %s out of %s, analyzed ' +
+      'interface-only - what their initialization and implementation bring ' +
+      'in is not known', [NamedList(LLightUnits, MAX_NAMED),
+      NamedList(LLightPrograms, MAX_NAMED)]);
 end;
 
 // Whether AMid's initialization reaches outside the unit - see
@@ -779,6 +866,14 @@ var
 begin
   if FGlobalInit.TryGetValue(AMid, Result) then
     Exit;
+  // A light unit's initialization was never analyzed: unknown counts as
+  // global - the safe side (its rows are held back, the unit kept).
+  if IsLight(AMid) then
+  begin
+    FLightNeeded.AddOrSetValue(AMid, True);
+    FGlobalInit.Add(AMid, True);
+    Exit(True);
+  end;
   Result := False;
   // Nodes and both maps only, as LinkEffect and AddNodeUnits: a
   // text-demoted model answers without hydrating (RoutineImplNode hydrates
@@ -1054,6 +1149,7 @@ var
   LStack: TList<Integer>;
   LDecl, LImpl, LNode, LChild: Integer;
   LExt: TPasExtRef;
+  LLight: TDictionary<Integer, Boolean>;
 
   procedure Bind(ABMid, ABSym: Integer);
   var
@@ -1105,7 +1201,15 @@ begin
   LUnits := TDictionary<Integer, Boolean>.Create;
   LNested := TList<Int64>.Create;
   LStack := TList<Integer>.Create;
+  LLight := TDictionary<Integer, Boolean>.Create;
   try
+    // A light unit's routine has no body here: what its expansion needs is
+    // not known - recorded, for the doubt and for LintPromotions.
+    if IsLight(AMid) then
+    begin
+      LLight.AddOrSetValue(AMid, True);
+      FLightNeeded.AddOrSetValue(AMid, True);
+    end;
     LImpl := FNav.RoutineImplNode(AMid, ASym);
     LM := FProj.Model(AMid);
     LDecl := RoutineNodeOf(LM, ASym);
@@ -1115,15 +1219,56 @@ begin
       Walk(LImpl);
     for var LInner in LNested do
       if LInner <> LKey then
+      begin
         for var LU in InlineDeps(LInner shr 32, Integer(LInner and $FFFFFFFF)) do
           LUnits.AddOrSetValue(LU, True);
+        for var LU in InlineLightOf(LInner) do
+          LLight.AddOrSetValue(LU, True);
+      end;
     Result := LUnits.Keys.ToArray;
+    if LLight.Count > 0 then
+      FInlineLight.AddOrSetValue(LKey, LLight.Keys.ToArray);
   finally
+    LLight.Free;
     LStack.Free;
     LNested.Free;
     LUnits.Free;
   end;
   FInline[LKey] := Result;
+end;
+
+function TUsesLint.FormInfo(const AFile: string): TLintFormInfo;
+var
+  LKey: string;
+  LDoc: IPasDfmDoc;
+begin
+  LKey := LowerCase(AFile);
+  if FForms.TryGetValue(LKey, Result) then
+    Exit;
+  Result := Default(TLintFormInfo);
+  if FileExists(AFile) then
+  begin
+    LDoc := PasDfmLoad(AFile);
+    if (LDoc <> nil) and (LDoc.Doc.Error = '') then
+    begin
+      Result.Valid := True;
+      for var LI := 0 to High(LDoc.Doc.Idents) do
+        if LDoc.Doc.Idents[LI].Role = dirClassName then
+        begin
+          if Result.Classes = nil then
+            Result.RootClass := LDoc.Doc.IdentText(LI);
+          Result.Classes := Result.Classes +
+            [PasFoldName(LDoc.Doc.IdentText(LI))];
+        end;
+    end;
+  end;
+  FForms.Add(LKey, Result);
+end;
+
+function TUsesLint.InlineLightOf(AKey: Int64): TArray<Integer>;
+begin
+  if not FInlineLight.TryGetValue(AKey, Result) then
+    Result := nil;
 end;
 
 // The class type ANameLower names in unit AMid - its own interface first,
@@ -1174,8 +1319,7 @@ var
   LX: TSemaXType;
   LAt, LDepth: Integer;
   LFile: string;
-  LDoc: IPasDfmDoc;
-  LRoot: Boolean;
+  LInfo: TLintFormInfo;
 begin
   Result := TDictionary<Integer, Boolean>.Create;
   LQueue := TList<TPair<Integer, string>>.Create;
@@ -1196,28 +1340,17 @@ begin
         for var LExt in ['.dfm', '.fmx'] do
         begin
           LFile := ChangeFileExt(FProj.ModelFile(LX.UnitId), LExt);
-          if LSeen.ContainsKey(LowerCase(LFile)) or not FileExists(LFile) then
+          if LSeen.ContainsKey(LowerCase(LFile)) then
             Continue;
-          LDoc := PasDfmLoad(LFile);
-          if (LDoc = nil) or (LDoc.Doc.Error <> '') then
-            Continue;
+          LInfo := FormInfo(LFile);
           // The file's first class is its root object's: only a form file
           // whose root IS this class holds components this form inherits.
-          LRoot := False;
-          for var LI := 0 to High(LDoc.Doc.Idents) do
-            if LDoc.Doc.Idents[LI].Role = dirClassName then
-            begin
-              LRoot := SameText(LDoc.Doc.IdentText(LI),
-                FProj.Model(LX.UnitId).Symbols[LX.Sym].Name);
-              Break;
-            end;
-          if not LRoot then
+          if not LInfo.Valid or not SameText(LInfo.RootClass,
+             FProj.Model(LX.UnitId).Symbols[LX.Sym].Name) then
             Continue;
           LSeen.Add(LowerCase(LFile), True);
-          for var LI := 0 to High(LDoc.Doc.Idents) do
-            if LDoc.Doc.Idents[LI].Role = dirClassName then
-              LQueue.Add(TPair<Integer, string>.Create(LX.UnitId,
-                PasFoldName(LDoc.Doc.IdentText(LI))));
+          for var LClass in LInfo.Classes do
+            LQueue.Add(TPair<Integer, string>.Create(LX.UnitId, LClass));
         end;
         if not FProj.EnsureHydrated(LX.UnitId) then
           Break;
@@ -1249,6 +1382,7 @@ var
   LOverCalls: TDictionary<string, Integer>;   // called routine name -> a call
   LNames: TDictionary<string, Integer>;
   LInline: TDictionary<Integer, Boolean>;   // units inline expansions need
+  LInlineLight: TArray<string>;   // light units whose expansions are unknown
   LExtM: TPasSemaModel;
   LKeys: TArray<Int64>;
   LRow: TPasUnusedUse;
@@ -1417,6 +1551,7 @@ begin
     // written through a property too. Asked only while an entry is left: a
     // body's pairing hydrates the model declaring it.
     LInline := nil;
+    LInlineLight := nil;
     for LEntry in LEntries do
       if not LEntry.Used then
       begin
@@ -1440,8 +1575,13 @@ begin
             LKeys := InlineAccessors(LPair.Value.UnitId, LPair.Value.Sym);
         end;
         for var LK in LKeys do
+        begin
           for var LU in InlineDeps(LK shr 32, Integer(LK and $FFFFFFFF)) do
             LInline.AddOrSetValue(LU, True);
+          for var LU in InlineLightOf(LK) do
+            if not MatchText(UnitNameOf(LU), LInlineLight) then
+              LInlineLight := LInlineLight + [UnitNameOf(LU)];
+        end;
       end;
       for LE := 0 to LEntries.Count - 1 do
         if not LEntries[LE].Used and LInline.ContainsKey(LEntries[LE].UnitId)
@@ -1499,11 +1639,20 @@ begin
             '%s:%d - removed, the call may take another overload',
             [LM.Tree.NodeText(LW.Value), ExtractFileName(LText), LLine]));
         end;
+      // An inline routine of a light unit called here: what its expansion
+      // needs is not known, so any entry may be what it needs - the safe
+      // side; LintPromotions names the units whose promotion settles it.
+      if LInlineLight <> nil then
+        AddDoubt(LE, Format('the expansion of an inline routine of %s ' +
+          'called here is not known (analyzed interface-only) - it may ' +
+          'need this unit', [NamedList(LInlineLight, MAX_NAMED)]));
       if not AEdges then
       begin
-        LText := DropsText(AMid, LEntry.UnitId);
+        LText := DropsText(AMid, LEntry.UnitId, LName);
         if LText <> '' then
           AddDoubt(LE, LText);
+        if LName <> '' then
+          AddDoubt(LE, LName);
       end;
     end;
 
@@ -1547,8 +1696,9 @@ begin
   end;
 end;
 
-function FindUnreferencedUnits(ANav: TPasNavigator;
-  const AMids: TArray<Integer>;
+// FindUnreferencedUnits over a lint the caller owns (LintPromotions reads
+// what it recorded).
+function UnreferencedRows(LLint: TUsesLint; const AMids: TArray<Integer>;
   AOptions: TPasLintOptions): TArray<TPasUnreferencedUnit>;
 
   // Whether AMid, or a unit only it brings into the program (not live),
@@ -1585,7 +1735,6 @@ function FindUnreferencedUnits(ANav: TPasNavigator;
   end;
 
 var
-  LLint: TUsesLint;
   LLive: TArray<Boolean>;
   LRows: TList<TPasUnreferencedUnit>;
   LRow: TPasUnreferencedUnit;
@@ -1596,8 +1745,7 @@ var
   LQueue: TList<Integer>;
   LAt, LU: Integer;
 begin
-  LProj := ANav.Project;
-  LLint := TUsesLint.Create(ANav);
+  LProj := LLint.FProj;
   LRows := TList<TPasUnreferencedUnit>.Create;
   try
     LLint.FOptions := AOptions;
@@ -1673,7 +1821,14 @@ begin
             Break;   // listed twice (E2004): one row
           end;
       TArray.Sort<string>(LRow.ListedBy, TIStringComparer.Ordinal);
-      if LLint.LinkEffect(LMid) <> '' then
+      if LLint.IsLight(LMid) then
+      begin
+        LLint.FLightNeeded.AddOrSetValue(LMid, True);
+        LRow.Doubts := ['it is analyzed interface-only - whether it has ' +
+          'initialization, finalization or a resource a unit can be listed ' +
+          'for is not known'];
+      end
+      else if LLint.LinkEffect(LMid) <> '' then
         LRow.Doubts := [Format('it has %s - a unit can be listed only for ' +
           'what that registers', [LLint.LinkEffect(LMid)])];
       LRows.Add(LRow);
@@ -1681,7 +1836,6 @@ begin
     Result := LRows.ToArray;
   finally
     LRows.Free;
-    LLint.Free;
   end;
   TArray.Sort<TPasUnreferencedUnit>(Result,
     TComparer<TPasUnreferencedUnit>.Construct(
@@ -1691,6 +1845,53 @@ begin
       if Result = 0 then
         Result := CompareText(A.Hit.FilePath, B.Hit.FilePath);
     end));
+end;
+
+function FindUnreferencedUnits(ANav: TPasNavigator;
+  const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions): TArray<TPasUnreferencedUnit>;
+var
+  LLint: TUsesLint;
+begin
+  LLint := TUsesLint.Create(ANav);
+  try
+    Result := UnreferencedRows(LLint, AMids, AOptions);
+  finally
+    LLint.Free;
+  end;
+end;
+
+function LintPromotions(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions): TArray<string>;
+var
+  LRowsLint, LUnrefLint: TUsesLint;
+  LNeeded: TDictionary<Integer, Boolean>;
+begin
+  Result := nil;
+  LNeeded := TDictionary<Integer, Boolean>.Create;
+  LRowsLint := TUsesLint.Create(ANav);
+  LUnrefLint := TUsesLint.Create(ANav);
+  try
+    // Both reports, run as a host runs them; every light unit an answer had
+    // to treat as unknown is recorded on the way.
+    LRowsLint.FOptions := AOptions;
+    for var LMid in AMids do
+      if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
+        LRowsLint.CheckUnit(LMid);
+    LUnrefLint.FOptions := AOptions;
+    UnreferencedRows(LUnrefLint, AMids, AOptions);
+    for var LMid in LRowsLint.FLightNeeded.Keys do
+      LNeeded.AddOrSetValue(LMid, True);
+    for var LMid in LUnrefLint.FLightNeeded.Keys do
+      LNeeded.AddOrSetValue(LMid, True);
+    for var LMid in LNeeded.Keys do
+      Result := Result + [ANav.Project.ModelFile(LMid)];
+  finally
+    LUnrefLint.Free;
+    LRowsLint.Free;
+    LNeeded.Free;
+  end;
+  TArray.Sort<string>(Result, TIStringComparer.Ordinal);
 end;
 
 function FindUnusedUses(ANav: TPasNavigator;

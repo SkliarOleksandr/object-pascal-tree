@@ -87,7 +87,12 @@ program PasTreeSemaProject;
          units under these trees are analyzed interface-only. `lib` = every
          -L path plus the Studio source trees, `studio` = the Studio source
          trees only, anything else = a directory tree. Prints the light
-         count after the analysis line. }
+         count after the analysis line.
+
+  -lintpromote  with -unused in light mode: LintPromotions and PromoteUnit
+         on what it names, until nothing is left, a rebuild with the project
+         as donor when a promotion asks for one - the host's preparation
+         step, after which the lint is exact. }
 
 {$APPTYPE CONSOLE}
 {$MAXSTACKSIZE $01000000}   // 16 MB per thread: README, "The stack every host should reserve"
@@ -164,6 +169,7 @@ var
   GFpDetail: Boolean;         // -fpdetail
   GFpAfter: string;           // -fpafter:<file>, the fingerprint after -promote
   GFpUnits: TArray<string>;  // -fpunit:<file>, repeatable: a library unit in -fp too
+  GLintPromote: Boolean;      // -lintpromote: LintPromotions + PromoteUnit before -unused
   GRefSets: TArray<string>;   // -refset:<unit>, repeatable
   GPromotes: TArray<string>;  // -promote:<file>, repeatable
   GLightSpecs: TArray<string>; // -light:<spec>, repeatable; see LightTrees
@@ -1013,6 +1019,34 @@ var
   LUnresUses, LUnitsGated, LSiteLine, LSiteCol: Integer;
   LName, LFile, LSiteFile: string;
   LIsOwn: Boolean;
+  // The project's configuration, as the .dproj states it - for the run's
+  // project and for -lintpromote's rebuild.
+  procedure Configure(AProj: TPasSemaProject);
+  begin
+    AProj.SingleThreaded := GSingle;
+    AProj.ReportUnresolvedMembers := GMembers;
+    AProj.ReportVisibility := GVisibility;
+    AProj.ReportGuessedIfs := GIfs;
+    AProj.LightPaths := LightTrees;
+    // The .dproj's DCC_* switches and console target, as msbuild hands them
+    // to dcc - and a command-line -$X / -CC on top, as dcc would take it.
+    AProj.SwitchStart := PasStartOptState(LD.Switches + GSwitches);
+    AProj.ConsoleTarget := LD.ConsoleTarget or GConsole;
+    // No -NS list in the .dproj means we could not read the option, not that
+    // the project wants zero prefixes - dcc has none built in, so zero would
+    // turn every legacy unqualified import into an F1027.
+    if Length(LD.Namespaces) > 0 then
+      AProj.SetNamespaces(LD.Namespaces)
+    else
+      AProj.SetNamespaces(PasDefaultNamespaces(LD.Platform));
+    // Defaults always, project's on top (the IDE prepends rather than
+    // replaces; AddUnitAlias is last-wins, so this gives the project priority).
+    for var LDef in PasDefaultUnitAliases(LD.Platform) do
+      AProj.AddUnitAlias(LDef.Alias, LDef.UnitName);
+    for var LA in LD.UnitAliases do
+      AProj.AddUnitAlias(LA.Alias, LA.UnitName);
+  end;
+
 begin
   LD := TPasDProj.Create;
   LOwn := TDictionary<string, Boolean>.Create;
@@ -1070,30 +1104,9 @@ begin
 
     GProj := TPasSemaProject.Create(LD.Platform, LPaths, LD.Defines);
     try
-      GProj.SingleThreaded := GSingle;
-      GProj.ReportUnresolvedMembers := GMembers;
-      GProj.ReportVisibility := GVisibility;
-      GProj.ReportGuessedIfs := GIfs;
-      GProj.LightPaths := LightTrees;
-      // The .dproj's DCC_* switches and console target, as msbuild hands them
-      // to dcc - and a command-line -$X / -CC on top, as dcc would take it.
-      GProj.SwitchStart := PasStartOptState(LD.Switches + GSwitches);
-      GProj.ConsoleTarget := LD.ConsoleTarget or GConsole;
+      Configure(GProj);
       if Length(LD.Switches) > 0 then
         Writeln(ErrOutput, '    switches: ', string.Join(' ', LD.Switches));
-      // No -NS list in the .dproj means we could not read the option, not that
-      // the project wants zero prefixes - dcc has none built in, so zero would
-      // turn every legacy unqualified import into an F1027.
-      if Length(LD.Namespaces) > 0 then
-        GProj.SetNamespaces(LD.Namespaces)
-      else
-        GProj.SetNamespaces(PasDefaultNamespaces(LD.Platform));
-      // Defaults always, project's on top (the IDE prepends rather than
-      // replaces; AddUnitAlias is last-wins, so this gives the project priority).
-      for var LDef in PasDefaultUnitAliases(LD.Platform) do
-        GProj.AddUnitAlias(LDef.Alias, LDef.UnitName);
-      for var LA in LD.UnitAliases do
-        GProj.AddUnitAlias(LA.Alias, LA.UnitName);
 
       GSW := TStopwatch.StartNew;
       GProj.AnalyzeStaged([LD.MainSource], []);
@@ -1287,12 +1300,86 @@ begin
         for var LUF in LD.Files do
           if GProj.ModelIdOf(LUF) >= 0 then
             LUMids := LUMids + [GProj.ModelIdOf(LUF)];
+        // -lintpromote: the light units the lint would have to answer as
+        // unknown are promoted first, until none is left (a promotion loads
+        // implementation-only units light, which may be needed in turn).
+        if GLintPromote then
+          // A refusal that asks for a rebuild gets one, as a host does: a
+          // fresh project with this one as parse donor (which carries the
+          // promoted set, so those units load full), then the loop again.
+          for var LPass := 1 to 3 do
+          begin
+            var LTried := TDictionary<string, Boolean>.Create;
+            var LRebuild := False;
+            try
+              var LPSW := TStopwatch.StartNew;
+              var LPRounds := 0;
+              var LPOk := 0;
+              var LPRefused: TArray<string> := nil;
+              var LPMore: Boolean;
+              repeat
+                LPMore := False;
+                Inc(LPRounds);
+                var LPNav := TPasNavigator.Create(GProj);
+                var LPNeed: TArray<string>;
+                try
+                  var LPRSW := TStopwatch.StartNew;
+                  LPNeed := LintPromotions(LPNav, LUMids);
+                  Writeln(ErrOutput, Format('    round %d: %d to promote, %d ms',
+                    [LPRounds, Length(LPNeed), LPRSW.ElapsedMilliseconds]));
+                finally
+                  LPNav.Free;
+                end;
+                for var LPF in LPNeed do
+                  if LTried.TryAdd(LowerCase(LPF), True) then
+                    if GProj.PromoteUnit(LPF) then
+                    begin
+                      Inc(LPOk);
+                      LPMore := True;
+                    end
+                    else
+                    begin
+                      LPRefused := LPRefused + [TPath.GetFileName(LPF) + ' ' +
+                        GProj.StageTimings];
+                      if Pos('promote-needs-rebuild', GProj.StageTimings) > 0 then
+                        LRebuild := True;
+                    end;
+              until not LPMore;
+              Writeln(ErrOutput, Format('  lint promotions (pass %d): %d ' +
+                'promoted, %d refused, %d round(s), %d ms', [LPass, LPOk,
+                Length(LPRefused), LPRounds, LPSW.ElapsedMilliseconds]));
+              for var LPR in LPRefused do
+                Writeln(ErrOutput, '    refused: ' + LPR);
+            finally
+              LTried.Free;
+            end;
+            if not LRebuild or (LPass = 3) then
+              Break;
+            var LRSW := TStopwatch.StartNew;
+            var LNewP := TPasSemaProject.Create(LD.Platform, LPaths, LD.Defines);
+            Configure(LNewP);
+            LNewP.AdoptParseDonor(GProj);
+            LNewP.AnalyzeStaged([LD.MainSource], []);
+            GProj.Free;
+            GProj := LNewP;
+            LUMids := nil;
+            for var LUF in LD.Files do
+              if GProj.ModelIdOf(LUF) >= 0 then
+                LUMids := LUMids + [GProj.ModelIdOf(LUF)];
+            Writeln(ErrOutput, Format('  lint rebuild: %d units, %d light, ' +
+              '%d promoted kept, %d ms', [GProj.ModelCount, GProj.LightCount,
+              Length(GProj.PromotedFiles), LRSW.ElapsedMilliseconds]));
+          end;
         var LUNav := TPasNavigator.Create(GProj);
         var LURows: TArray<TPasUnusedUse>;
         var LUUnits: TArray<TPasUnreferencedUnit>;
         try
+          var LUSW := TStopwatch.StartNew;
           LURows := FindUnusedUses(LUNav, LUMids);
+          var LUMs1 := LUSW.ElapsedMilliseconds;
           LUUnits := FindUnreferencedUnits(LUNav, LUMids);
+          Writeln(ErrOutput, Format('  lint: unused %d ms, unreferenced %d ms',
+            [LUMs1, LUSW.ElapsedMilliseconds - LUMs1]));
         finally
           LUNav.Free;
         end;
@@ -1408,6 +1495,8 @@ begin
         GOutline := True
       else if SameText(ParamStr(GIdx), '-unused') then
         GUnused := True
+      else if SameText(ParamStr(GIdx), '-lintpromote') then
+        GLintPromote := True
       else if SameText(ParamStr(GIdx), '-defines') then
         GDefines := True
       else if SameText(ParamStr(GIdx), '-stats') then

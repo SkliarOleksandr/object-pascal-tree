@@ -168,18 +168,52 @@ code:
 - **Unit lists and the uses graph**: units reachable only through library
   implementations are absent, and a light unit has no implementation edges.
 - **Diagnostics of library units**: interface only.
-- **The uses lint** reads library implementations (an inline routine's body,
-  a unit's initialization): until it learns light mode, run it on a full
-  analysis.
+- **The uses lint** reads library implementations - see below: on its own it
+  answers them on the safe side, with `LintPromotions` exactly.
+
+## The uses lint in light mode
+
+`FindUnusedUses` / `FindUnreferencedUnits` (`PasTree.Sema.Lint`) read library
+code in four places, each of which a light unit does not have:
+
+| reader | what it reads | light, on its own |
+| --- | --- | --- |
+| `InlineDeps`, `InlineAccessors` | an inline routine's body - the units dcc needs to expand a call (H2443) | every unused entry of the unit gets "the expansion of an inline routine of X called here is not known (analyzed interface-only) - it may need this unit" |
+| `LinkEffect`, via the reach | the initialization and finalization of the units a removal leaves out of the program | the light ones among them are named apart: "removing it leaves X out of P, analyzed interface-only - what their initialization and implementation bring in is not known" |
+| `GlobalInit` (`loHideGlobalInit`) | the initialization and the routines it calls | unknown counts as global: the row is held back |
+| the reach itself | the uses graph, implementation edges included | a light unit has none, so a removal can only seem to leave MORE out (a superset - never less) |
+
+So a light lint never calls a needed unit unused without saying why it may be
+wrong. A light row is the full row, or the same row with more doubts, or a row
+the full lint does not have, carrying one of the doubts above.
+
+`LintPromotions(ANav, AMids, AOptions)` makes it exact: the light units the
+same lint over AMids had to treat as unknown. The host promotes them
+(`PromoteUnit`), asks again - a promotion loads the unit's implementation-only
+units light, and they may be needed in turn - until the answer is empty,
+recreates its navigator and lints. A promotion that asks for a rebuild
+(`promote-needs-rebuild`) gets one, with the project as parse donor.
+
+Measured on the 3,782-unit closure, the client's 1,566 listed units: full mode
+12,098 unused entries and 137 unreferenced units; light with the promotions -
+six rounds, 172 units promoted, two refused, then one rebuild - the same 137
+units and 12,098 entries, 12,091 of them with the same doubts and seven whose
+"removing it leaves" list is a strict superset of the full one (units the full
+analysis reaches through the implementation of a unit still light). 29 s
+against 7.6 s for the full analysis and lint; the lint itself takes 2.7 s (it
+took 25 s before 0.115.0, which caches the form files the designer rule reads).
+Without the promotions, the light lint is on the safe side as above: 34 rows
+the full lint does not have, each with a light doubt, and 4,821 rows with more
+doubts.
 
 ## Hosts
 
 Every host already computes its library trees for the navigator
 (`TPasNavigator.LibraryPaths`): the IDE's library and browsing paths plus the
 Studio source trees, minus the project's own trees. That list is the natural
-`LightPaths`. A host switching light mode on by default should promote a unit
-when the user opens it or navigates into its bodies, and wait until the lint
-handles light units.
+`LightPaths`. A host switching light mode on by default promotes a unit when
+the user opens it or navigates into its bodies, and runs `LintPromotions`
+before the lint.
 
 The command-line tool takes `-light:<spec>` (repeatable): `lib` = every `-L`
 path plus the Studio source trees, `studio` = the Studio source trees only,

@@ -1949,6 +1949,203 @@ begin
   end;
 end;
 
+{ The uses lint in light mode (TPasSemaProject.LightPaths). The own units
+  sit beside LMain.dpr, the library units in a light tree of their own:
+  - UInl lists LibJ only for the expansion of LibI's inline InlI, whose body
+    calls LibJ's LJFun - the case of System.UITypes next to MessageDlg;
+  - UReg lists LibR, used for nothing but what its initialization does
+    (a routine of LibH, LibR's implementation import);
+  - UQ calls LibQ's inline InlQ and lists LibJ for nothing; LibQ asks a
+    `$IF` question its implementation import LibQ2 answers, and LibQ2 is
+    loaded by nobody else - so its promotion cannot be exact in place.
+  Light, the lint is on the safe side - each row that reads library code it
+  does not have says so; LintPromotions names the units whose promotion
+  makes it exact, and after them (and the rebuild a refused one asks for)
+  the rows are the full analysis's. }
+procedure TestLintLight;
+const
+  APP =
+    'program LMain;'#13#10'uses UInl, UReg, UQ;'#13#10'begin'#13#10'end.'#13#10;
+var
+  LRoot, LOwn, LLib: string;
+  LFull, LLight, LP: TPasSemaProject;
+  LMain: string;
+
+  procedure WriteUnit(const ADir, AName, AIntf, AImpl: string);
+  begin
+    TFile.WriteAllText(TPath.Combine(ADir, AName + '.pas'),
+      'unit ' + AName + ';'#13#10'interface'#13#10 + AIntf +
+      'implementation'#13#10 + AImpl + 'end.'#13#10);
+  end;
+
+  function Make(ALight: Boolean; ADonor: TPasSemaProject = nil): TPasSemaProject;
+  begin
+    Result := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+    if ALight then
+      Result.LightPaths := [LLib];
+    if ADonor <> nil then
+      Result.AdoptParseDonor(ADonor);
+    Result.AnalyzeStaged([LMain], []);
+  end;
+
+  function OwnMids(AProj: TPasSemaProject): TArray<Integer>;
+  begin
+    Result := [AProj.ModelIdOf(TPath.Combine(LOwn, 'UInl.pas')),
+      AProj.ModelIdOf(TPath.Combine(LOwn, 'UReg.pas')),
+      AProj.ModelIdOf(TPath.Combine(LOwn, 'UQ.pas'))];
+  end;
+
+  // One line per row: listing unit, entry, doubts.
+  function RowsOf(AProj: TPasSemaProject;
+    AOptions: TPasLintOptions = []): string;
+  var
+    LNav: TPasNavigator;
+  begin
+    Result := '';
+    LNav := TPasNavigator.Create(AProj);
+    try
+      for var LRow in FindUnusedUses(LNav, OwnMids(AProj), AOptions) do
+        Result := Result + ExtractFileName(LRow.Hit.FilePath) + ' ' +
+          LRow.UnitName + ' [' + string.Join(' | ', LRow.Doubts) + ']'#10;
+    finally
+      LNav.Free;
+    end;
+  end;
+
+  function InList(const AName: string; const AList: TArray<string>): Boolean;
+  begin
+    for var LS in AList do
+      if SameText(LS, AName) then
+        Exit(True);
+    Result := False;
+  end;
+
+  // LintPromotions, then PromoteUnit on each, until nothing new: the host's
+  // preparation step. The refused file names, comma-separated.
+  function PromoteForLint(AProj: TPasSemaProject; out AFirst: TArray<string>): string;
+  var
+    LNav: TPasNavigator;
+    LNeed: TArray<string>;
+    LTried: TArray<string>;
+    LMore: Boolean;
+  begin
+    Result := '';
+    AFirst := nil;
+    LTried := nil;
+    begin
+      repeat
+        LMore := False;
+        LNav := TPasNavigator.Create(AProj);
+        try
+          LNeed := LintPromotions(LNav, OwnMids(AProj));
+        finally
+          LNav.Free;
+        end;
+        if AFirst = nil then
+          for var LF in LNeed do
+            AFirst := AFirst + [ChangeFileExt(ExtractFileName(LF), '')];
+        for var LF in LNeed do
+          if not InList(LF, LTried) then
+          begin
+            LTried := LTried + [LF];
+            if AProj.PromoteUnit(LF) then
+              LMore := True
+            else
+              Result := Result + ChangeFileExt(ExtractFileName(LF), '') + ',';
+          end;
+      until not LMore;
+    end;
+  end;
+
+var
+  LFullRows, LRows, LRefused: string;
+  LFirst: TArray<string>;
+begin
+  LRoot := TPath.Combine(TPath.GetTempPath, 'pastree_lint_light');
+  if TDirectory.Exists(LRoot) then
+    TDirectory.Delete(LRoot, True);
+  LOwn := TPath.Combine(LRoot, 'own');
+  LLib := TPath.Combine(LRoot, 'lib');
+  TDirectory.CreateDirectory(LOwn);
+  TDirectory.CreateDirectory(LLib);
+  LMain := TPath.Combine(LOwn, 'LMain.dpr');
+  TFile.WriteAllText(LMain, APP);
+  WriteUnit(LOwn, 'UInl', 'uses LibI, LibJ;'#13#10'procedure Go;'#13#10,
+    'procedure Go;'#13#10'var X: Integer;'#13#10'begin'#13#10 +
+    '  X := InlI;'#13#10'end;'#13#10);
+  WriteUnit(LOwn, 'UReg', 'uses LibR;'#13#10, '');
+  WriteUnit(LOwn, 'UQ', 'uses LibQ, LibJ;'#13#10'procedure GoQ;'#13#10,
+    'procedure GoQ;'#13#10'var X: Integer;'#13#10'begin'#13#10 +
+    '  X := InlQ;'#13#10'end;'#13#10);
+  WriteUnit(LLib, 'LibI', 'function InlI: Integer; inline;'#13#10,
+    'uses LibJ;'#13#10'function InlI: Integer;'#13#10'begin'#13#10 +
+    '  Result := LJFun;'#13#10'end;'#13#10);
+  WriteUnit(LLib, 'LibJ', 'function LJFun: Integer;'#13#10,
+    'function LJFun: Integer;'#13#10'begin'#13#10'  Result := 1;'#13#10 +
+    'end;'#13#10);
+  WriteUnit(LLib, 'LibR', 'procedure Noop;'#13#10,
+    'uses LibH;'#13#10'procedure Noop;'#13#10'begin'#13#10'end;'#13#10 +
+    'initialization'#13#10'  LHReg;'#13#10);
+  WriteUnit(LLib, 'LibH', 'procedure LHReg;'#13#10,
+    'procedure LHReg;'#13#10'begin'#13#10'end;'#13#10);
+  WriteUnit(LLib, 'LibQ', 'function InlQ: Integer; inline;'#13#10,
+    'uses LibQ2;'#13#10 +
+    '{$IF Declared(LQ2Fun)}'#13#10'const QQ = 1;'#13#10'{$IFEND}'#13#10 +
+    'function InlQ: Integer;'#13#10'begin'#13#10'  Result := LQ2Fun;'#13#10 +
+    'end;'#13#10);
+  WriteUnit(LLib, 'LibQ2', 'function LQ2Fun: Integer;'#13#10,
+    'function LQ2Fun: Integer;'#13#10'begin'#13#10'  Result := 2;'#13#10 +
+    'end;'#13#10);
+  LFull := Make(False);
+  LLight := Make(True);
+  LP := nil;
+  try
+    LFullRows := RowsOf(LFull);
+    Ok('lint light: full mode - LibJ unused in UQ only, LibR with its ' +
+      'initialization doubt',
+      LFullRows = 'UQ.pas LibJ []'#10 +
+      'UReg.pas LibR [removing it leaves LibR (initialization) out of ' +
+      'LMain]'#10);
+    LRows := RowsOf(LLight);
+    Ok('lint light: LibJ, needed by LibI''s inline body, carries the doubt',
+      Pos('UInl.pas LibJ [the expansion of an inline routine of LibI called ' +
+        'here is not known', LRows) > 0);
+    Ok('lint light: LibR''s initialization is not known - said',
+      Pos('UReg.pas LibR [removing it leaves LibR out of LMain, analyzed ' +
+        'interface-only', LRows) > 0);
+    Ok('lint light: UQ''s LibJ, with LibQ''s expansion unknown',
+      Pos('UQ.pas LibJ [the expansion of an inline routine of LibQ', LRows) > 0);
+    Ok('lint light: loHideGlobalInit - an unknown initialization is held back',
+      (Pos('UReg.pas', RowsOf(LLight, [loHideGlobalInit])) = 0) and
+      (Pos('UReg.pas', RowsOf(LFull, [loHideGlobalInit])) = 0));
+    LRefused := PromoteForLint(LLight, LFirst);
+    Ok('lint light: LintPromotions names LibI, LibQ and LibR',
+      InList('LibI', LFirst) and InList('LibQ', LFirst) and
+      InList('LibR', LFirst));
+    Ok('lint light: LibQ''s promotion is refused - it asks for a rebuild',
+      LRefused = 'LibQ,');
+    LRows := RowsOf(LLight);
+    Ok('lint light: after the promotions UInl and UReg are the full rows',
+      (Pos('UInl.pas', LRows) = 0) and
+      (Pos('UReg.pas LibR [removing it leaves LibR (initialization) out of ' +
+        'LMain]', LRows) > 0));
+    Ok('lint light: ...UQ keeps the doubt the refusal leaves',
+      Pos('UQ.pas LibJ [the expansion of an inline routine of LibQ', LRows) > 0);
+    // The rebuild the refusal asked for: LibQ is in PromotedFiles, the donor
+    // carries the set, so it loads full - and the lint is the full one.
+    LP := Make(True, LLight);
+    PromoteForLint(LP, LFirst);
+    Ok('lint light: after the rebuild, the rows are the full analysis''s',
+      RowsOf(LP) = LFullRows);
+  finally
+    LP.Free;
+    LLight.Free;
+    LFull.Free;
+    if TDirectory.Exists(LRoot) then
+      TDirectory.Delete(LRoot, True);
+  end;
+end;
+
 // FindUnusedUses (PasTree.Sema.Lint): LintUse lists ten units. Used: a
 // type in the interface (LintLib), an enum value (LintEnum), a qualifier
 // (LintQual), an interface entry used in the implementation (LintImpl), a
@@ -6592,6 +6789,7 @@ begin
   TestUnusedUses;
   TestUnreferencedUnits;
   TestLintGlobalInit;
+  TestLintLight;
 
   if GCounter.Finish('SemaNavSmoke') then
     ExitCode := 1;

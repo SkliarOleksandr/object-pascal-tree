@@ -339,8 +339,9 @@ usable.
   2.3 -> 1.5 GB held, 1.5 GB -> 0.87 GB after `DemoteText`, every binding of
   the own units identical. `PromoteUnit` (0.114.0) turns one light unit into
   a fully analyzed one in place - System.pas included - in tens of
-  milliseconds, nobody else redone. What a host stops seeing, the exempt
-  rules and promotion: `docs/library-light-mode.md`.
+  milliseconds, nobody else redone. The uses lint answers on the safe side, and
+  exactly after `LintPromotions` (0.115.0). What a host stops seeing, the
+  exempt rules, promotion and the lint: `docs/library-light-mode.md`.
 
 ## Current features
 
