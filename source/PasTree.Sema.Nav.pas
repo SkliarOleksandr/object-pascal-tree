@@ -6662,42 +6662,17 @@ end;
 { Rename }
 
 procedure TPasNavigator.SetLibraryPaths(const AValue: TArray<string>);
-var
-  LList: TList<string>;
-  LDir: string;
 begin
-  LList := TList<string>.Create;
-  try
-    for LDir in AValue do
-    begin
-      if Trim(LDir) = '' then
-        Continue;
-      LList.Add(LowerCase(IncludeTrailingPathDelimiter(
-        TPath.GetFullPath(Trim(LDir)))));
-    end;
-    FLibraryPaths := LList.ToArray;
-    // The binder listed its form files against the old trees.
-    FreeAndNil(FForms);
-  finally
-    LList.Free;
-  end;
+  // The same normalization as TPasSemaProject.LightPaths - one definition of
+  // "under a library tree" (PasNormalizeDirTrees / PasUnderDirTrees).
+  FLibraryPaths := PasNormalizeDirTrees(AValue);
+  // The binder listed its form files against the old trees.
+  FreeAndNil(FForms);
 end;
 
 function TPasNavigator.IsUnderLibraryPath(const APath: string): Boolean;
-var
-  LFull, LDir: string;
 begin
-  Result := False;
-  if (Length(FLibraryPaths) = 0) or (APath = '') then
-    Exit;
-  // The file's own full path, lower case. The stored dirs each carry a
-  // trailing delimiter, so this prefix test cannot mistake a file in a
-  // sibling directory whose name merely STARTS with a library dir's name
-  // (`...\rtl2\x.pas` under `...\rtl\`) for a library source.
-  LFull := LowerCase(TPath.GetFullPath(APath));
-  for LDir in FLibraryPaths do
-    if LFull.StartsWith(LDir) then
-      Exit(True);
+  Result := PasUnderDirTrees(APath, FLibraryPaths);
 end;
 
 function TPasNavigator.RenameBlockReason(const APath: string): string;

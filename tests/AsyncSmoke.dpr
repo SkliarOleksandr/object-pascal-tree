@@ -477,8 +477,78 @@ begin
     end;
   end;
 
+  // ---- 7. Light mode through the session (TPasSemaProject.LightPaths) ----
+  // LibL sits in a light tree; its implementation uses LibM, which a light
+  // run never loads. The session forwards the trees; the progress counts a
+  // light unit as done in the full wave (it is never upgraded), so the full
+  // wave's last report already reads FullDone = Total. The tree lies
+  // OUTSIDE the project directory - one under it would be exempt (own).
+  var LLib := TPath.Combine(TPath.GetTempPath, 'pastree_async_lightlib');
+  begin
+    if TDirectory.Exists(LLib) then
+      TDirectory.Delete(LLib, True);
+    TDirectory.CreateDirectory(LLib);
+    TFile.WriteAllText(TPath.Combine(LDir, 'LApp.dpr'),
+      'program LApp;'#10'uses LibL;'#10'begin'#10'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LLib, 'LibL.pas'),
+      'unit LibL;'#10'interface'#10'const LL = 1;'#10 +
+      'implementation'#10'uses LibM;'#10'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LLib, 'LibM.pas'),
+      'unit LibM;'#10'interface'#10'implementation'#10'end.'#10);
+    var LSession := TPasAsyncSession.Create(pfWin32, [LDir, LLib], [],
+      [TPath.Combine(LDir, 'LApp.dpr')], []);
+    try
+      LSession.SetLightPaths([LLib]);
+      LSession.Start;
+      var LLate := False;
+      try
+        LSession.SetLightPaths([]);
+      except
+        on EInvalidOperation do
+          LLate := True;
+      end;
+      Ok('light session: SetLightPaths after Start raises', LLate);
+      LSession.WaitFor;
+      Ok('light session: ends done', LSession.IsDone and
+        (LSession.LastError = '') and (LSession.Progress.Phase = 'done'));
+      Ok('light session: IntfDone = FullDone = Total at the end',
+        (LSession.Progress.Total > 0) and
+        (LSession.Progress.IntfDone = LSession.Progress.Total) and
+        (LSession.Progress.FullDone = LSession.Progress.Total));
+      var LTaken := LSession.TakeProject;
+      try
+        Ok('light session: LibL is light, LibM not loaded',
+          (LTaken <> nil) and
+          LTaken.IsLight(LTaken.ModelIdOf(TPath.Combine(LLib, 'LibL.pas'))) and
+          (LTaken.ModelIdOf(TPath.Combine(LLib, 'LibM.pas')) = -1) and
+          (LTaken.LightCount = 1));
+      finally
+        LTaken.Free;
+      end;
+    finally
+      LSession.Free;
+    end;
+    var LLastFull: TPasStagedProgress := Default(TPasStagedProgress);
+    var LProj := TPasSemaProject.Create(pfWin32, [LDir, LLib], []);
+    try
+      LProj.LightPaths := [LLib];
+      LProj.AnalyzeStaged([TPath.Combine(LDir, 'LApp.dpr')], [], nil,
+        procedure(AP: TPasStagedProgress)
+        begin
+          if AP.Phase = 'full' then
+            LLastFull := AP;
+        end);
+      Ok('light progress: the full wave ends at FullDone = Total',
+        (LLastFull.Total > 0) and (LLastFull.FullDone = LLastFull.Total));
+    finally
+      LProj.Free;
+    end;
+  end;
+
   if TDirectory.Exists(LDir) then
     TDirectory.Delete(LDir, True);
+  if TDirectory.Exists(LLib) then
+    TDirectory.Delete(LLib, True);
 
   if GCounter.Finish('AsyncSmoke') then
     ExitCode := 1;

@@ -162,6 +162,10 @@ type
       because a switch that can only be set on the project itself is a switch
       an async host (which never sees the project before Start) cannot use. }
     procedure SetReportVisibility(AValue: Boolean);
+    { Forwarded to the inner project's LightPaths: the directory trees whose
+      units are analyzed interface-only (docs/library-light-mode.md). Set
+      BEFORE Start, like the switches above. }
+    procedure SetLightPaths(const APaths: TArray<string>);
     procedure Start;
     { Request cooperative cancellation; the worker stops at the next module/
       wave boundary. Does not block. }
@@ -327,6 +331,12 @@ procedure TPasAsyncSession.SetReportVisibility(AValue: Boolean);
 begin
   CheckNotStarted('SetReportVisibility');
   FProject.ReportVisibility := AValue;
+end;
+
+procedure TPasAsyncSession.SetLightPaths(const APaths: TArray<string>);
+begin
+  CheckNotStarted('SetLightPaths');
+  FProject.LightPaths := APaths;
 end;
 
 procedure TPasAsyncSession.RunBody;

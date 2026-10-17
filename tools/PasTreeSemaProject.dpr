@@ -78,7 +78,13 @@ program PasTreeSemaProject;
 
   -refset:<unit> (repeatable)  the units whose bodies could refer to a symbol
          of the unit: a unit-level name's candidates and a member's, by
-         category with node totals. }
+         category with node totals.
+
+  -light:<spec> (repeatable)  light mode (TPasSemaProject.LightPaths): the
+         units under these trees are analyzed interface-only. `lib` = every
+         -L path plus the Studio source trees, `studio` = the Studio source
+         trees only, anything else = a directory tree. Prints the light
+         count after the analysis line. }
 
 {$APPTYPE CONSOLE}
 {$MAXSTACKSIZE $01000000}   // 16 MB per thread: README, "The stack every host should reserve"
@@ -155,6 +161,7 @@ var
   GFpDetail: Boolean;         // -fpdetail
   GRefSets: TArray<string>;   // -refset:<unit>, repeatable
   GPromotes: TArray<string>;  // -promote:<file>, repeatable
+  GLightSpecs: TArray<string>; // -light:<spec>, repeatable; see LightTrees
 
 { Studio SOURCE trees, so System.*/Vcl.*/FMX.* resolve. See the -dproj note in
   the header: the demo reads the IDE's registry paths, this does not. }
@@ -181,6 +188,21 @@ begin
     if TDirectory.Exists(LDir) then
       Result := Result + [LDir];
   end;
+end;
+
+{ -light:<spec>, each: `lib` = every -L path plus the Studio source trees
+  (the IDE's library set), `studio` = the Studio source trees only, anything
+  else = one directory tree. }
+function LightTrees: TArray<string>;
+begin
+  Result := nil;
+  for var LSpec in GLightSpecs do
+    if SameText(LSpec, 'lib') then
+      Result := Result + GExtraPaths + StudioSearchPaths(GStudio)
+    else if SameText(LSpec, 'studio') then
+      Result := Result + StudioSearchPaths(GStudio)
+    else
+      Result := Result + [LSpec];
 end;
 
 // TDictionary has no GetValueOrDefault in this RTL - one-liner instead.
@@ -1036,6 +1058,7 @@ begin
       GProj.ReportUnresolvedMembers := GMembers;
       GProj.ReportVisibility := GVisibility;
       GProj.ReportGuessedIfs := GIfs;
+      GProj.LightPaths := LightTrees;
       // The .dproj's DCC_* switches and console target, as msbuild hands them
       // to dcc - and a command-line -$X / -CC on top, as dcc would take it.
       GProj.SwitchStart := PasStartOptState(LD.Switches + GSwitches);
@@ -1176,6 +1199,8 @@ begin
       Writeln(ErrOutput, Format('analysis: %d units in %.1f s, %s held (%s)',
         [GProj.ModelCount, GSW.ElapsedMilliseconds / 1000,
          MemoryText(AllocatedBytes), GMode]));
+      if GLightSpecs <> nil then
+        Writeln(ErrOutput, Format('light: %d units', [GProj.LightCount]));
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, '  stages: ', GProj.StageTimings);
       GOwnFiles := LOwn;
@@ -1379,6 +1404,8 @@ begin
         GFp := TPath.GetFullPath(Copy(ParamStr(GIdx), 5, MaxInt))
       else if ParamStr(GIdx).StartsWith('-refset:', True) then
         GRefSets := GRefSets + [Copy(ParamStr(GIdx), 9, MaxInt)]
+      else if ParamStr(GIdx).StartsWith('-light:', True) then
+        GLightSpecs := GLightSpecs + [Copy(ParamStr(GIdx), 8, MaxInt)]
       else if ParamStr(GIdx).StartsWith('-promote:', True) then
         GPromotes := GPromotes +
           [TPath.GetFullPath(Copy(ParamStr(GIdx), 10, MaxInt))]
@@ -1440,6 +1467,7 @@ begin
       GProj.ReportGuessedIfs := GIfs;
       GProj.SwitchStart := PasStartOptState(GSwitches);
       GProj.ConsoleTarget := GConsole;
+      GProj.LightPaths := LightTrees;
       // Same reasoning as the -dproj driver: a directory or bare-file run has
       // no project to state its prefixes, and zero prefixes is not what the IDE
       // would use.
@@ -1467,6 +1495,8 @@ begin
       Writeln(ErrOutput, Format('%d units in %d ms, %s held (%s)',
         [GProj.ModelCount, GSW.ElapsedMilliseconds,
          MemoryText(AllocatedBytes), GMode]));
+      if GLightSpecs <> nil then
+        Writeln(ErrOutput, Format('light: %d units', [GProj.LightCount]));
       // Per-stage breakdown: without it a slow run says only THAT it is slow.
       if GProj.StageTimings <> '' then
         Writeln(ErrOutput, 'stages: ' + GProj.StageTimings);

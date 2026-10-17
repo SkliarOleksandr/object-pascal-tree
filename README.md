@@ -331,6 +331,14 @@ usable.
   MB private, every differential step still identical to a full build. The
   trade is first-touch latency per demoted unit; details in
   `docs/incremental-analysis.md` (the memory dial).
+- **Light library units** (`TPasSemaProject.LightPaths`, 0.113.0, opt-in):
+  a host names the directory trees of somebody else's code (RTL, VCL,
+  third-party) and their units are analyzed interface-only for good - no
+  bodies, no implementation `uses` - while the project's own units are
+  analyzed exactly as before. Measured on a 3,782-unit closure: 3.1 -> 1.8 s,
+  2.3 -> 1.5 GB held, 1.5 GB -> 0.87 GB after `DemoteText`, every binding of
+  the own units identical. What a host stops seeing, and the exempt rules:
+  `docs/library-light-mode.md`.
 
 ## Current features
 

@@ -6511,6 +6511,356 @@ begin
   end;
 end;
 
+{ Light mode (TPasSemaProject.LightPaths, docs/library-light-mode.md): the
+  units under a light tree are analyzed interface-only for good, everything
+  else exactly as before. The fixture is the plan's: App.dpr and UOwn in the
+  own directory; LibA (interface uses LibB, implementation uses LibC, an
+  initialization calling LibC), LibB and LibC in the library directory. LibC
+  is reachable only through LibA's implementation, so a light run never
+  loads it. Whatever the own unit binds - an override of a library virtual,
+  a record parameter, an inline function, both overloads of a library
+  routine, a library constant - binds to the same declarations in both
+  modes, by identity (file + symbol name + declaring node). }
+procedure TestLightUnits;
+const
+  LIBB =
+    'unit LibB;'#13#10'interface'#13#10'type'#13#10 +
+    '  TItem = record'#13#10'    A, B: Integer;'#13#10'  end;'#13#10 +
+    'const'#13#10'  LB_MAX = 10;'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  LIBC =
+    'unit LibC;'#13#10'interface'#13#10 +
+    'const'#13#10'  LC_VAL = 3;'#13#10 +
+    'procedure LibCInit;'#13#10 +
+    'implementation'#13#10 +
+    'procedure LibCInit;'#13#10'begin'#13#10'end;'#13#10 +
+    'end.'#13#10;
+  LIBA =
+    'unit LibA;'#13#10'interface'#13#10'uses LibB;'#13#10 +
+    'type'#13#10 +
+    '  TBase = class'#13#10 +
+    '    procedure Run; virtual;'#13#10 +
+    '  end;'#13#10 +
+    'procedure LibProc(const A: TItem);'#13#10 +
+    'function LibInline: Integer; inline;'#13#10 +
+    'function Twice(X: Integer): Integer; overload;'#13#10 +
+    'function Twice(const S: string): string; overload;'#13#10 +
+    'implementation'#13#10 +
+    'uses LibC;'#13#10 +
+    'procedure TBase.Run;'#13#10'begin'#13#10'end;'#13#10 +
+    'procedure LibProc(const A: TItem);'#13#10'begin'#13#10'end;'#13#10 +
+    'function LibInline: Integer;'#13#10'begin'#13#10 +
+    '  Result := LC_VAL;'#13#10'end;'#13#10 +
+    'function Twice(X: Integer): Integer;'#13#10'begin'#13#10 +
+    '  Result := X * 2;'#13#10'end;'#13#10 +
+    'function Twice(const S: string): string;'#13#10'begin'#13#10 +
+    '  Result := S + S;'#13#10'end;'#13#10 +
+    'initialization'#13#10 +
+    '  LibCInit;'#13#10 +
+    'end.'#13#10;
+  UOWN =
+    'unit UOwn;'#13#10'interface'#13#10'uses LibA, LibB;'#13#10 +
+    'type'#13#10 +
+    '  TDerived = class(TBase)'#13#10 +
+    '    procedure Run; override;'#13#10 +
+    '  end;'#13#10 +
+    'procedure Go;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TDerived.Run;'#13#10'begin'#13#10'  inherited;'#13#10'end;'#13#10 +
+    'procedure Go;'#13#10 +
+    'var'#13#10'  R: TItem;'#13#10'  I: Integer;'#13#10'  S: string;'#13#10 +
+    'begin'#13#10 +
+    '  LibProc(R);'#13#10 +
+    '  I := LibInline;'#13#10 +
+    '  I := Twice(I);'#13#10 +
+    '  S := Twice(''a'');'#13#10 +
+    '  I := LB_MAX + 1;'#13#10 +
+    'end;'#13#10 +
+    'end.'#13#10;
+  APP =
+    'program App;'#13#10'uses UOwn, LibA;'#13#10'begin'#13#10'  Go;'#13#10 +
+    'end.'#13#10;
+var
+  LRoot, LOwn, LLib, LAppPath: string;
+  LFull, LLight, LP: TPasSemaProject;
+  LFullSig, LLightSig: string;
+
+  // As the -fp fingerprint of tools/PasTreeSemaProject: every binding of
+  // the unit, a target named by file + symbol name + declaring node, never
+  // by model id (the two closures number their models differently).
+  function Sig(AProj: TPasSemaProject; const AFile: string): string;
+  var
+    LMid, LI: Integer;
+    LM: TPasSemaModel;
+    LRows: TList<string>;
+
+    function TS(AUnit, ASym: Integer): string;
+    begin
+      if (AUnit < 0) or (AUnit >= AProj.ModelCount) then
+        Exit('?' + IntToStr(AUnit));
+      Result := LowerCase(ExtractFileName(AProj.ModelFile(AUnit)));
+      if (ASym >= 0) and (ASym < AProj.Model(AUnit).SymCount) then
+        Result := Result + ':' + AProj.Model(AUnit).Symbols[ASym].Name + ':' +
+          IntToStr(AProj.Model(AUnit).Symbols[ASym].DeclNode)
+      else
+        Result := Result + ':#' + IntToStr(ASym);
+    end;
+
+  begin
+    Result := '';
+    LMid := AProj.ModelIdOf(AFile);
+    if LMid < 0 then
+      Exit('<no model>');
+    LM := AProj.Model(LMid);
+    LRows := TList<string>.Create;
+    try
+      for LI := 0 to High(LM.RefMap) do
+        if LM.RefMap[LI] <> NIL_SYM then
+          LRows.Add(Format('L %d %s', [LI, TS(LMid, LM.RefMap[LI])]));
+      for LI := 0 to High(LM.ExprType) do
+        if LM.ExprType[LI] <> NIL_SYM then
+          LRows.Add(Format('T %d %s', [LI, TS(LMid, LM.ExprType[LI])]));
+      for var LPr in LM.ExtRefMap do
+        LRows.Add(Format('X %d %s', [LPr.Key, TS(LPr.Value.UnitId, LPr.Value.Sym)]));
+      for var LPr in LM.CallTargetX do
+        LRows.Add(Format('CX %d %s', [LPr.Key, TS(LPr.Value.UnitId, LPr.Value.Sym)]));
+      for var LPr in LM.SymTypeX do
+        LRows.Add(Format('ST %d %s', [LPr.Key, TS(LPr.Value.UnitId, LPr.Value.Sym)]));
+      for var LPr in LM.ExprTypeX do
+        LRows.Add(Format('ET %d %s', [LPr.Key, TS(LPr.Value.UnitId, LPr.Value.Sym)]));
+      for LI := 0 to High(LM.Diags) do
+        LRows.Add(Format('D %d %d %s', [LM.Diags[LI].Line, LM.Diags[LI].Col,
+          LM.Diags[LI].Code]));
+      LRows.Sort;
+      for var LRow in LRows do
+        Result := Result + LRow + #10;
+    finally
+      LRows.Free;
+    end;
+  end;
+
+  function HasImplSection(AProj: TPasSemaProject; const AFile: string): Boolean;
+  var
+    LMid: Integer;
+  begin
+    Result := False;
+    LMid := AProj.ModelIdOf(AFile);
+    if LMid < 0 then
+      Exit;
+    for var LN := 0 to High(AProj.Model(LMid).Tree.Nodes) do
+      if AProj.Model(LMid).Tree.Nodes[LN].Kind = nkImplementationSec then
+        Exit(True);
+  end;
+
+  function ModelLight(AProj: TPasSemaProject; const AFile: string): Boolean;
+  begin
+    Result := AProj.IsLight(AProj.ModelIdOf(AFile));
+  end;
+
+  // The distinct Twice declarations UOwn's calls go to (CallTargetX).
+  function TwiceTargets(AProj: TPasSemaProject): Integer;
+  var
+    LM, LTM: TPasSemaModel;
+    LSeen: TDictionary<Integer, Boolean>;
+  begin
+    LM := AProj.Model(AProj.ModelIdOf(TPath.Combine(LOwn, 'UOwn.pas')));
+    LSeen := TDictionary<Integer, Boolean>.Create;
+    try
+      for var LPr in LM.CallTargetX do
+      begin
+        LTM := AProj.Model(LPr.Value.UnitId);
+        if (LTM.UnitNameLower = 'liba') and
+           (LTM.Symbols[LPr.Value.Sym].NameLower = 'twice') then
+          LSeen.AddOrSetValue(LTM.Symbols[LPr.Value.Sym].DeclNode, True);
+      end;
+      Result := LSeen.Count;
+    finally
+      LSeen.Free;
+    end;
+  end;
+
+  // TDerived.Run among TBase.Run's overrides (Find Overrides).
+  function OverrideLinked(AProj: TPasSemaProject): Boolean;
+  var
+    LAMid, LRun: Integer;
+    LNav: TPasNavigator;
+  begin
+    Result := False;
+    LAMid := AProj.ModelIdOf(TPath.Combine(LLib, 'LibA.pas'));
+    if LAMid < 0 then
+      Exit;
+    LRun := -1;
+    for var LS := 0 to AProj.Model(LAMid).SymCount - 1 do
+      if (AProj.Model(LAMid).Symbols[LS].NameLower = 'run') and
+         (AProj.Model(LAMid).Symbols[LS].Kind = skRoutine) then
+      begin
+        LRun := LS;
+        Break;
+      end;
+    if LRun < 0 then
+      Exit;
+    LNav := TPasNavigator.Create(AProj);
+    try
+      for var LHit in LNav.FindOverrides(LAMid, LRun) do
+        if SameText(ExtractFileName(AProj.ModelFile(LHit.UnitId)), 'UOwn.pas') then
+          Exit(True);
+    finally
+      LNav.Free;
+    end;
+  end;
+
+  function Run(const ALight: TArray<string>; AStaged: Boolean;
+    ADonor: TPasSemaProject = nil;
+    const APins: TArray<string> = nil): TPasSemaProject;
+  begin
+    Result := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+    Result.LightPaths := ALight;
+    for var LPin in APins do
+      Result.PinUnitFile(LPin);
+    if ADonor <> nil then
+      Result.AdoptParseDonor(ADonor);
+    if AStaged then
+      Result.AnalyzeStaged([LAppPath], [])
+    else
+      Result.AnalyzeProject(LAppPath);
+  end;
+
+begin
+  LRoot := TPath.Combine(TPath.GetTempPath, 'pastree_light_units');
+  if TDirectory.Exists(LRoot) then
+    TDirectory.Delete(LRoot, True);
+  LOwn := TPath.Combine(LRoot, 'own');
+  LLib := TPath.Combine(LRoot, 'lib');
+  TDirectory.CreateDirectory(LOwn);
+  TDirectory.CreateDirectory(LLib);
+  LAppPath := TPath.Combine(LOwn, 'App.dpr');
+  TFile.WriteAllText(LAppPath, APP);
+  TFile.WriteAllText(TPath.Combine(LOwn, 'UOwn.pas'), UOWN);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibA.pas'), LIBA);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibB.pas'), LIBB);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibC.pas'), LIBC);
+  try
+    for var LStaged in [False, True] do
+    begin
+      var LTag := 'light project: ';
+      if LStaged then
+        LTag := 'light staged: ';
+      LFull := Run(nil, LStaged);
+      LLight := Run([LLib], LStaged);
+      try
+        Ok(LTag + 'full mode loads LibC',
+          LFull.ModelIdOf(TPath.Combine(LLib, 'LibC.pas')) >= 0);
+        Ok(LTag + 'full mode has no light model', LFull.LightCount = 0);
+        Ok(LTag + 'LibC, reached only through an implementation, not loaded',
+          LLight.ModelIdOf(TPath.Combine(LLib, 'LibC.pas')) = -1);
+        Ok(LTag + 'LibA and LibB are light',
+          ModelLight(LLight, TPath.Combine(LLib, 'LibA.pas')) and
+          ModelLight(LLight, TPath.Combine(LLib, 'LibB.pas')) and
+          (LLight.LightCount = 2));
+        Ok(LTag + 'LibA has no implementation section',
+          not HasImplSection(LLight, TPath.Combine(LLib, 'LibA.pas')) and
+          HasImplSection(LFull, TPath.Combine(LLib, 'LibA.pas')));
+        Ok(LTag + 'IsLightFile: LibA yes, UOwn and App.dpr no',
+          LLight.IsLightFile(TPath.Combine(LLib, 'LibA.pas')) and
+          not LLight.IsLightFile(TPath.Combine(LOwn, 'UOwn.pas')) and
+          not LLight.IsLightFile(LAppPath));
+        Ok(LTag + 'UOwn and App are not light',
+          not ModelLight(LLight, TPath.Combine(LOwn, 'UOwn.pas')) and
+          not ModelLight(LLight, LAppPath));
+        LFullSig := Sig(LFull, TPath.Combine(LOwn, 'UOwn.pas'));
+        LLightSig := Sig(LLight, TPath.Combine(LOwn, 'UOwn.pas'));
+        Ok(LTag + 'UOwn binds the same, by identity',
+          (LFullSig <> '') and (LFullSig = LLightSig));
+        Ok(LTag + 'both Twice overloads called, in both modes',
+          (TwiceTargets(LFull) = 2) and (TwiceTargets(LLight) = 2));
+        Ok(LTag + 'the override links to TBase.Run, in both modes',
+          OverrideLinked(LFull) and OverrideLinked(LLight));
+        Ok(LTag + 'UOwn has no diagnostics, in both modes',
+          (Length(LFull.Model(LFull.ModelIdOf(
+             TPath.Combine(LOwn, 'UOwn.pas'))).Diags) = 0) and
+          (Length(LLight.Model(LLight.ModelIdOf(
+             TPath.Combine(LOwn, 'UOwn.pas'))).Diags) = 0));
+        Ok(LTag + 'the module path refuses a light unit',
+          not LLight.AnalyzeModuleOnly(TPath.Combine(LLib, 'LibA.pas')) and
+          (Pos('module=refused:light', LLight.StageTimings) > 0));
+        Ok(LTag + '...and takes an own unit beside light ones',
+          LLight.AnalyzeModuleOnly(TPath.Combine(LOwn, 'UOwn.pas')) and
+          (Sig(LLight, TPath.Combine(LOwn, 'UOwn.pas')) = LFullSig));
+
+        // Donors: light-ness must agree, whichever way.
+        LP := Run(nil, LStaged, LLight);
+        try
+          Ok(LTag + 'a light donor does not hand LibA to a full run',
+            not ModelLight(LP, TPath.Combine(LLib, 'LibA.pas')) and
+            HasImplSection(LP, TPath.Combine(LLib, 'LibA.pas')) and
+            (LP.ModelIdOf(TPath.Combine(LLib, 'LibC.pas')) >= 0) and
+            (Sig(LP, TPath.Combine(LOwn, 'UOwn.pas')) = LFullSig));
+        finally
+          LP.Free;
+        end;
+        LP := Run([LLib], LStaged, LFull);
+        try
+          Ok(LTag + 'a full donor does not hand LibA to a light run',
+            ModelLight(LP, TPath.Combine(LLib, 'LibA.pas')) and
+            not HasImplSection(LP, TPath.Combine(LLib, 'LibA.pas')) and
+            (Sig(LP, TPath.Combine(LOwn, 'UOwn.pas')) = LFullSig));
+        finally
+          LP.Free;
+        end;
+      finally
+        LFull.Free;
+        LLight.Free;
+      end;
+    end;
+
+    // Exempt: a pinned file under the light tree is own.
+    LP := Run([LLib], True, nil, [TPath.Combine(LLib, 'LibB.pas')]);
+    try
+      Ok('light exempt: a pinned file under the tree is not light',
+        not ModelLight(LP, TPath.Combine(LLib, 'LibB.pas')) and
+        not LP.IsLightFile(TPath.Combine(LLib, 'LibB.pas')) and
+        HasImplSection(LP, TPath.Combine(LLib, 'LibB.pas')));
+      Ok('light exempt: ...its neighbour still is',
+        ModelLight(LP, TPath.Combine(LLib, 'LibA.pas')));
+    finally
+      LP.Free;
+    end;
+    // Exempt: a tree that holds the project directory makes no own unit
+    // light - only what lies outside the project directory.
+    LP := Run([LRoot], True);
+    try
+      Ok('light exempt: the project directory inside the tree stays own',
+        not ModelLight(LP, TPath.Combine(LOwn, 'UOwn.pas')) and
+        not LP.IsLightFile(TPath.Combine(LOwn, 'UOwn.pas')) and
+        ModelLight(LP, TPath.Combine(LLib, 'LibA.pas')));
+    finally
+      LP.Free;
+    end;
+    // No light paths: the project that set an empty list is the project
+    // that never heard of light mode.
+    LFull := Run(nil, True);
+    LP := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+    try
+      LP.LightPaths := [];
+      LP.AnalyzeStaged([LAppPath], []);
+      Ok('light off: the same models',
+        LP.ModelCount = LFull.ModelCount);
+      Ok('light off: the same bindings',
+        Sig(LP, TPath.Combine(LOwn, 'UOwn.pas')) =
+        Sig(LFull, TPath.Combine(LOwn, 'UOwn.pas')));
+      Ok('light off: nothing is light',
+        (LP.LightCount = 0) and
+        not LP.IsLightFile(TPath.Combine(LLib, 'LibA.pas')));
+    finally
+      LP.Free;
+      LFull.Free;
+    end;
+  finally
+    if TDirectory.Exists(LRoot) then
+      TDirectory.Delete(LRoot, True);
+  end;
+end;
+
 // The thread-pool contract (audit B02). ConfigureThreadPool pins the default
 // pool and turns off its past-Max injection, so no pool task may wait on
 // another queued one. Two ways analysis broke that and hung for good:
@@ -14155,6 +14505,7 @@ begin
   TestModuleLifecycle;
   TestHeritageStep;
   TestPoolContract;
+  TestLightUnits;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

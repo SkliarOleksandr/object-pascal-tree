@@ -280,6 +280,16 @@ function PasCompareHitPos(const AF1: string; AL1, AC1: Integer;
   which each left `&1` without a value (audit B4-02). }
 function PasNumLiteralText(const AText: string): string;
 
+{ The ONE definition of "under a directory tree", shared by the navigator's
+  LibraryPaths and the project's LightPaths. PasNormalizeDirTrees turns a
+  host's list into the stored form: full paths, lower case, each with a
+  trailing delimiter, blanks dropped. PasUnderDirTrees tests a file against
+  that form by prefix - the trailing delimiter is what keeps `...\rtl2\x.pas`
+  from passing as under `...\rtl\`. }
+function PasNormalizeDirTrees(const ADirs: TArray<string>): TArray<string>;
+function PasUnderDirTrees(const APath: string;
+  const ATrees: TArray<string>): Boolean;
+
 { Case-insensitive reserved-word lookup over a raw character slice.
   Returns tkIdentifier when the slice is not a reserved word.
   ASCII-only folding is correct here: all keywords are ASCII. }
@@ -349,7 +359,8 @@ implementation
 
 uses
   Winapi.Windows,
-  System.SysUtils;
+  System.SysUtils,
+  System.IOUtils;
 
 procedure PasRecoverStackOverflow;
 var
@@ -516,6 +527,38 @@ begin
     Delete(Result, 1, 1);
   if Pos('_', Result) > 0 then
     Result := StringReplace(Result, '_', '', [rfReplaceAll]);
+end;
+
+function PasNormalizeDirTrees(const ADirs: TArray<string>): TArray<string>;
+var
+  LDir: string;
+  LCount: Integer;
+begin
+  SetLength(Result, Length(ADirs));
+  LCount := 0;
+  for LDir in ADirs do
+  begin
+    if Trim(LDir) = '' then
+      Continue;
+    Result[LCount] := LowerCase(IncludeTrailingPathDelimiter(
+      TPath.GetFullPath(Trim(LDir))));
+    Inc(LCount);
+  end;
+  SetLength(Result, LCount);
+end;
+
+function PasUnderDirTrees(const APath: string;
+  const ATrees: TArray<string>): Boolean;
+var
+  LFull, LDir: string;
+begin
+  Result := False;
+  if (Length(ATrees) = 0) or (APath = '') then
+    Exit;
+  LFull := LowerCase(TPath.GetFullPath(APath));
+  for LDir in ATrees do
+    if LFull.StartsWith(LDir) then
+      Exit(True);
 end;
 
 { Keyword recognition, bucketed by FOLDED FIRST LETTER.

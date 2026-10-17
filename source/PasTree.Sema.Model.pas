@@ -432,6 +432,8 @@ type
     references: whatever the model does next, the view stays whole. }
   TPasSemaDonorView = record
     Demoted: Boolean;
+    // The model's Light flag: its nodes are an interface-only parse.
+    Light: Boolean;
     Nodes: TArray<TPasNode>;
     { The whole token layer. Demoted: the file names, include sites and
       unresolved-guard lists are kept, the text and tokens are not. }
@@ -584,6 +586,15 @@ type
       identity check. DemoteClosedUnits therefore skips them; they keep full
       text. A handful of units against ~3750 demoted. }
     OracleStream: Boolean;
+    { True when the unit is a LIGHT unit (TPasSemaProject.LightPaths): parsed
+      interface-only for good, its typer run like a full model's - no
+      implementation section, no bodies, no implementation `uses`. Set by the
+      loader before the model is registered and never written after it (a
+      promotion swaps in a new model); a plain field, so it survives
+      DemoteText. Status cannot say this: after the cross passes a light
+      model is msCrossReady like any other. Never set on a program, library
+      or package - those parse fully whatever the tree says. }
+    Light: Boolean;
     { The names the oracle was asked for that stream - every `Declared(X)`
       and symbol question (`SizeOf(T)`, a const) the first pass could not
       answer, lower-cased, dotted names split into their segments. Empty
@@ -2721,6 +2732,7 @@ begin
   TMonitor.Enter(Self);
   try
     Result.Demoted := Demoted;
+    Result.Light := Light;
     Result.Nodes := Tree.Nodes;
     Result.Source := Tree.Source;
     Result.VisCount := DemotedVisCount;
@@ -2881,6 +2893,7 @@ procedure TPasSemaModel.CopyLoadState(AFrom: TPasSemaModel);
 begin
   OracleStream := AFrom.OracleStream;
   OracleNames := AFrom.OracleNames;
+  Light := AFrom.Light;
   AddParseDiags(AFrom.ParseDiags);
 end;
 

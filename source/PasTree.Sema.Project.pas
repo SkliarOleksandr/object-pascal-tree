@@ -446,6 +446,22 @@ type
     // tolerates; the driver then exits at its next between-pass check, and
     // the host discards a cancelled project wholesale.
     FCancelCheck: TFunc<Boolean>;
+    // Light mode (docs/library-light-mode.md). FLightPaths: the host's trees,
+    // normalized (PasNormalizeDirTrees); set between runs only. The exempt
+    // snapshot - the files the host pinned, the run's roots (lower-cased
+    // full paths) and the project directory (normalized as a tree) - is
+    // REBUILT at every run start (SnapLightExempt, on the driver thread,
+    // before any worker exists) and only read while workers run: IsLightFile
+    // is called from parse workers. FHostPins records PinUnitFile's paths;
+    // the in-path pins ResolveUnit adds during a run never reach it.
+    FLightPaths: TArray<string>;
+    FHostPins: TDictionary<string, Boolean>;
+    FLightExempt: TDictionary<string, Boolean>;
+    FLightExemptDir: TArray<string>;
+    // The full run's roots, kept for the module path's re-snapshot.
+    FLightRoots: TArray<string>;
+    procedure SetLightPaths(const AValue: TArray<string>);
+    procedure SnapLightExempt(const ARoots: TArray<string>);
     function CancelRequested: Boolean; inline;
     // Runs ABody for 0..AHi - one worker per core, or a plain loop when
     // SingleThreaded (baseline emulation / timing comparison / debugging).
@@ -1098,6 +1114,29 @@ type
     // driver exactly; results are identical either way - the parallel stages
     // are pure per unit). Default False (one worker per core).
     property SingleThreaded: Boolean read FSingleThreaded write FSingleThreaded;
+    { LIGHT MODE (docs/library-light-mode.md): directory TREES whose units
+      are analyzed interface-only for good - no implementation section, so
+      no bodies, no implementation `uses` (units reachable only through one
+      are not loaded), no initialization. Their interfaces are analyzed in
+      full, typer included, so the project's own units bind exactly as in a
+      full analysis. Prefix match on the normalized form the navigator's
+      LibraryPaths uses (PasNormalizeDirTrees). Empty (the default) = no
+      light unit, today's behaviour. Set BEFORE a run; changing it between
+      runs is allowed (a donor of the other kind is not reused). }
+    property LightPaths: TArray<string> read FLightPaths write SetLightPaths;
+    { Whether APath would load as a light unit: under a LightPaths tree and
+      not exempt. Exempt: every file the host pinned (PinUnitFile - own
+      always wins), the run's roots, anything under the project directory
+      (SetProjectDir or the one the driver derived). A unit's own
+      `uses X in 'path'` does not exempt X; a host pin does. During and after
+      a run it answers from that run's exempt snapshot; before the first run,
+      from the pins and directory set so far. A program, library or package
+      under a tree is never light whatever this says (it parses fully). }
+    function IsLightFile(const APath: string): Boolean;
+    // The model's Light flag (TPasSemaModel.Light); False for a bad id.
+    function IsLight(AMid: Integer): Boolean;
+    // How many models are light - for status lines and logs.
+    function LightCount: Integer;
     // The compiler version this project emulates (VERnnn define, CompilerVersion
     // and RTLVersion in $IF); fixed at Create.
     property CompilerVersion: Double read FCompilerVersion;
@@ -2135,6 +2174,8 @@ begin
   ReleaseUsesMemo;
   FByUnitName.Free;
   FSystemUnitLock.Free;
+  FHostPins.Free;
+  FLightExempt.Free;
   ClearHelperIdx;
 {$IFDEF PASTREE_MEMBERSTATS}
   FStatsCalls.Free;
@@ -2305,6 +2346,81 @@ begin
   if APath = '' then
     Exit;
   FSM.PinUnit(TPath.GetFileNameWithoutExtension(APath), APath);
+  // Light mode's exempt set: a host's pin is the project's own file.
+  if FHostPins = nil then
+    FHostPins := TDictionary<string, Boolean>.Create;
+  FHostPins.AddOrSetValue(LowerCase(TPath.GetFullPath(APath)), True);
+end;
+
+procedure TPasSemaProject.SetLightPaths(const AValue: TArray<string>);
+begin
+  FLightPaths := PasNormalizeDirTrees(AValue);
+end;
+
+// AKey (a lower-cased full path) under one of ATrees (normalized trees).
+function KeyUnderTrees(const AKey: string;
+  const ATrees: TArray<string>): Boolean;
+var
+  LDir: string;
+begin
+  for LDir in ATrees do
+    if AKey.StartsWith(LDir) then
+      Exit(True);
+  Result := False;
+end;
+
+procedure TPasSemaProject.SnapLightExempt(const ARoots: TArray<string>);
+var
+  LKey: string;
+begin
+  // A new dictionary each run, never one mutated in place: the previous
+  // run's readers are long gone, and this run's start after this line.
+  FreeAndNil(FLightExempt);
+  FLightExempt := TDictionary<string, Boolean>.Create;
+  if FHostPins <> nil then
+    for LKey in FHostPins.Keys do
+      FLightExempt.AddOrSetValue(LKey, True);
+  for LKey in ARoots do
+    if LKey <> '' then
+      FLightExempt.AddOrSetValue(LowerCase(TPath.GetFullPath(LKey)), True);
+  if FSM.ProjectDir <> '' then
+    FLightExemptDir := PasNormalizeDirTrees([FSM.ProjectDir])
+  else
+    FLightExemptDir := nil;
+end;
+
+function TPasSemaProject.IsLightFile(const APath: string): Boolean;
+var
+  LKey: string;
+begin
+  Result := False;
+  if (Length(FLightPaths) = 0) or not PasFullPathKey(APath, LKey) or
+     not KeyUnderTrees(LKey, FLightPaths) then
+    Exit;
+  if FLightExempt <> nil then
+    Result := not FLightExempt.ContainsKey(LKey) and
+      not KeyUnderTrees(LKey, FLightExemptDir)
+  else
+    // No run yet: the host thread asking, answered from what it set so far.
+    Result := not ((FHostPins <> nil) and FHostPins.ContainsKey(LKey)) and
+      not ((FSM.ProjectDir <> '') and
+           KeyUnderTrees(LKey, PasNormalizeDirTrees([FSM.ProjectDir])));
+end;
+
+function TPasSemaProject.IsLight(AMid: Integer): Boolean;
+begin
+  Result := (AMid >= 0) and (AMid < FModels.Count) and
+    (FModels[AMid] <> nil) and FModels[AMid].Light;
+end;
+
+function TPasSemaProject.LightCount: Integer;
+var
+  LIdx: Integer;
+begin
+  Result := 0;
+  for LIdx := 0 to FModels.Count - 1 do
+    if (FModels[LIdx] <> nil) and FModels[LIdx].Light then
+      Inc(Result);
 end;
 
 procedure TPasSemaProject.SetProjectDir(const ADir: string);
@@ -2642,6 +2758,13 @@ begin
       LView := LDM.TakeDonorView;
       if Length(LView.Nodes) = 0 then
         Exit;
+      // Light-ness must agree (LightPaths may change between runs): a light
+      // donor's nodes are an interface-only parse, never a full model; a
+      // full donor for a now-light unit would cost the memory light mode
+      // exists to save. Light is set on unit roots only.
+      if LView.Light <> (IsLightFile(APath) and
+         (LView.Nodes[0].Kind = nkUnit)) then
+        Exit;
       // A stream with parse-time UNANSWERED $IF questions was re-decided by
       // RunDeclaredPass against the donor generation's models - not reusable
       // (the README's first-pass oracle exclusion, ~a dozen units on the RTL).
@@ -2717,6 +2840,7 @@ begin
       FreeAndNil(Result);
       raise;
     end;
+    Result.Light := LView.Light;
   finally
     if Result <> nil then
       AtomicIncrement(FDonorHits)
@@ -2769,19 +2893,24 @@ function TPasSemaProject.ParseAnalyze(APP: TPasPreprocessor;
 var
   LDiags: TArray<TPasParseDiag>;
   LTree: TPasTree;
+  LLight, LIsUnit: Boolean;
 begin
   // The compiler-provided names are answerable already; anything else a
   // Declared() guard asks is recorded for RunDeclaredPass.
   APP.OnDeclared := SeedDeclaredQuery();
-  LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags, AIntf);
+  // A light unit (LightPaths) parses interface-only in EVERY wave and
+  // driver - it is never upgraded.
+  LLight := IsLightFile(AFull);
+  LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags, AIntf or LLight);
+  LIsUnit := (Length(LTree.Nodes) > 0) and (LTree.Nodes[0].Kind = nkUnit);
   // A model whose parse really did stop at the interface is TRANSIENT
   // (replaced by the full wave) - skip the expression typer, its
   // ExprType/E2010/E2015 output dies with the model. NOT keyed on AIntf
   // alone: a program/library/package ignores the flag, parses fully,
   // registers msFullReady and is never upgraded - skipping ITS typer would
-  // permanently lose its type diagnostics.
-  Result := TPasSemaResolver.Analyze(LTree,
-    AIntf and (Length(LTree.Nodes) > 0) and (LTree.Nodes[0].Kind = nkUnit),
+  // permanently lose its type diagnostics. A LIGHT model is permanent, not
+  // a wave-1 snapshot: its typer runs, as a full model's does.
+  Result := TPasSemaResolver.Analyze(LTree, AIntf and LIsUnit and not LLight,
     FPlatform);
   try
     Result.AddParseDiags(LDiags);
@@ -2789,6 +2918,8 @@ begin
     FreeAndNil(Result);
     raise;
   end;
+  // A program or package under a light tree parsed fully: not light.
+  Result.Light := LLight and LIsUnit;
 end;
 
 procedure TPasSemaProject.NoteLoadFailure(const AFull, AClass, AMsg: string);
@@ -2847,8 +2978,12 @@ begin
       Exit(-1);
     end;
   end;
-  // Full parse + Phase 1 done -> msFullReady (cross passes bump it later).
-  Result := RegisterModel(LModel, LFull, msFullReady);
+  // Full parse + Phase 1 done -> msFullReady (cross passes bump it later);
+  // a light model is an interface parse for good -> msIntfReady.
+  if LModel.Light then
+    Result := RegisterModel(LModel, LFull, msIntfReady)
+  else
+    Result := RegisterModel(LModel, LFull, msFullReady);
   FByPath.Add(LKey, Result);
   RegisterUnitName(Result);
 end;
@@ -5741,9 +5876,13 @@ begin
         LSymLog: TList<TPasOwnSymAnswer>;
         LBase, LNew: TPasSemaModel;
         LRound, LA: Integer;
-        LStable: Boolean;
+        LStable, LLight: Boolean;
       begin
         LDone[AIndex] := nil;
+        // A light candidate re-parses interface-only, and stays light. Read
+        // from the first-pass model: nothing writes FModels until the
+        // sequential commit below.
+        LLight := FModels[LCand[AIndex]].Light;
         LBase := nil;
         LNew := nil;
         LPP := RentPP;
@@ -5767,9 +5906,11 @@ begin
               LPP.OnDeclared := DeclaredQueryFor(LCand[AIndex], LBase, LLog);
               LPP.OnSymbol := SymbolQueryFor(LCand[AIndex], LSymLog);
               LNew := TPasSemaResolver.Analyze(
-                TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags),
+                TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags,
+                  LLight),
                 False, FPlatform);
               LNew.AddParseDiags(LDiags);
+              LNew.Light := LLight;
               LStable := True;
               for LA := 0 to LLog.Count - 1 do
                 if OwnDeclaredBefore(LNew, LLog[LA].NameLower, LLog[LA].Pos) <>
@@ -6374,8 +6515,11 @@ begin
   for LIdx := 0 to High(LTodo) do
     if LDone[LIdx] <> nil then
     begin
-      if AInterfaceOnly and (Length(LDone[LIdx].Tree.Nodes) > 0) and
-         (LDone[LIdx].Tree.Nodes[0].Kind = nkUnit) then
+      // A light model (an interface parse for good) is msIntfReady in a
+      // full batch too.
+      if LDone[LIdx].Light or (AInterfaceOnly and
+         (Length(LDone[LIdx].Tree.Nodes) > 0) and
+         (LDone[LIdx].Tree.Nodes[0].Kind = nkUnit)) then
         LStatus := msIntfReady
       else
         LStatus := msFullReady;
@@ -6737,9 +6881,12 @@ begin
           // A donor-full model registers msFullReady even in the interface
           // wave and thereby skips wave 2 for free - the upgrade seed
           // selects FStatus = msIntfReady only.
-          if AIntfLoads and not LRes.FullDonor and
+          // A light model is msIntfReady in BOTH waves (wave 2's loads pass
+          // AIntfLoads = False); a light donor hit is light too, and Light
+          // is only ever set on an nkUnit root.
+          if LRes.Model.Light or (AIntfLoads and not LRes.FullDonor and
              (Length(LRes.Model.Tree.Nodes) > 0) and
-             (LRes.Model.Tree.Nodes[0].Kind = nkUnit) then
+             (LRes.Model.Tree.Nodes[0].Kind = nkUnit)) then
             LStatus := msIntfReady
           else
             LStatus := msFullReady;
@@ -20453,6 +20600,8 @@ var
 begin
   EnterFullRun('AnalyzeFile');
   DefaultProjectDirFrom(AMainFile);
+  FLightRoots := [AMainFile];
+  SnapLightExempt(FLightRoots);
   // The donor is consumed by exactly THIS run, cancelled/failed exits
   // included: after the build the host frees it, and the only post-build
   // LoadFile routes (the memoized Ensure* pair) must never see a dangling
@@ -22334,6 +22483,8 @@ begin
   if not FRunComplete then
     Exit(Refuse('incomplete-run'));
   EnterAnalysis('AnalyzeModuleOnly');
+  // The full run's exempt rule, with the pins the host holds now.
+  SnapLightExempt(FLightRoots);
   // No `Result := False` here: every exit below goes through Refuse (which
   // returns False and records why) or sets Result explicitly.
   FStageTimings := '';
@@ -22344,6 +22495,13 @@ begin
   LKey := LowerCase(LFull);
   if not FByPath.TryGetValue(LKey, LId) or (LId < 0) then
     Exit(Refuse('unknown-file'));
+  // A light unit, before anything else: after the finalizer it is
+  // msCrossReady like any other, so the status gate below would let it
+  // through, and this path would parse it FULLY - a promotion, which needs
+  // rules of its own (the interface diff's body-derived flags, its
+  // implementation-only units loaded light).
+  if (LId < FModels.Count) and (FModels[LId] <> nil) and FModels[LId].Light then
+    Exit(Refuse('light'));
   if (LId >= FStatus.Count) or (FStatus[LId] < msFullReady) then
     Exit(Refuse('not-full'));
   LOld := FModels[LId];
@@ -22982,6 +23140,8 @@ var
 begin
   EnterFullRun('AnalyzeProject');
   DefaultProjectDirFrom(AMainFile);
+  FLightRoots := [AMainFile];
+  SnapLightExempt(FLightRoots);
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
   try   // donor lifetime - see AnalyzeFile
@@ -23095,6 +23255,9 @@ begin
     end;
     SetLength(LPaths, LPathCount);
     Stage('scan');
+    // The directory's files are the run's roots - none of them is light.
+    FLightRoots := LPaths;
+    SnapLightExempt(FLightRoots);
     LoadFilesParallel(LPaths);
     Stage('load');
     LN := FModels.Count;   // snapshot: only the directory's own units get E2003
@@ -23201,7 +23364,9 @@ var
     begin
       if FStatus[LI] >= msIntfReady then
         Inc(LProgress.IntfDone);
-      if FStatus[LI] >= msFullReady then
+      // A light model never reaches msFullReady before the finalizer, and
+      // is as done as it will get: counted, or the bar sticks short.
+      if (FStatus[LI] >= msFullReady) or IsLight(LI) then
         Inc(LProgress.FullDone);
     end;
   end;
@@ -23221,6 +23386,8 @@ begin
     DefaultProjectDirFrom(ARoots[0])
   else
     RecheckDonorProjectDir;
+  FLightRoots := ARoots;
+  SnapLightExempt(FLightRoots);
   Result := -1;
   FStageTimings := '';
   LProgress := Default(TPasStagedProgress);
@@ -23243,8 +23410,8 @@ begin
         begin
           if FStatus[LI] >= msIntfReady then
             Inc(LProgress.IntfDone);
-          if FStatus[LI] >= msFullReady then
-            Inc(LProgress.FullDone);
+          if (FStatus[LI] >= msFullReady) or IsLight(LI) then
+            Inc(LProgress.FullDone);   // see Recount
         end;
         LProgress.Phase := APhase;
         if Assigned(AOnProgress) then
@@ -23305,7 +23472,9 @@ begin
     Report('full');
     LIds := nil;
     for LIdx := 0 to FStatus.Count - 1 do
-      if FStatus[LIdx] = msIntfReady then
+      // A light unit stays interface-only: never upgraded, so its
+      // implementation `uses` is never discovered either.
+      if (FStatus[LIdx] = msIntfReady) and not FModels[LIdx].Light then
         LIds := LIds + [LIdx];
     if not RunLoadEngine(nil, LIds, {AIntfLoads} False,
       procedure
