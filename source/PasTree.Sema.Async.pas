@@ -71,6 +71,8 @@ type
     // AnalyzeModuleOnly for FModulePath instead of a staged build.
     FModuleMode: Boolean;
     FModulePath: string;
+    // CreateForPromotion: the worker calls PromoteUnit instead.
+    FPromoteMode: Boolean;
     FModuleAccepted: Boolean;       // written before FDoneFlag, read after
     FModuleRebuild: Boolean;        // same discipline - ModuleNeedsFullRebuild
     procedure RunBody;
@@ -110,6 +112,14 @@ type
       before Start and create a new one over the project TakeProject returns,
       whatever the outcome (see TPasNavigator). }
     constructor CreateForModule(AProject: TPasSemaProject;
+      const APath: string);
+    { LIGHT MODE: CreateForModule's contract (ownership, ModuleOutcome, the
+      navigator recreated over the project TakeProject returns), with
+      TPasSemaProject.PromoteUnit as the worker's call - the light unit APath
+      becomes a fully analyzed one. moRefused leaves the project as it was
+      (StageTimings says why; `promote-needs-rebuild` asks for a rebuild,
+      which loads the unit full). }
+    constructor CreateForPromotion(AProject: TPasSemaProject;
       const APath: string);
     { Cancels the worker, waits for it to drain, then frees the project if it
       was never taken. Safe to call at any time. }
@@ -247,6 +257,13 @@ begin
   FModuleRebuild := False;
 end;
 
+constructor TPasAsyncSession.CreateForPromotion(AProject: TPasSemaProject;
+  const APath: string);
+begin
+  CreateForModule(AProject, APath);
+  FPromoteMode := True;
+end;
+
 destructor TPasAsyncSession.Destroy;
 begin
   Cancel;
@@ -348,7 +365,10 @@ begin
         // Cancellation is not offered here: the call is milliseconds, and a
         // half-applied module swap has no meaning (it is one commit point).
         try
-          FModuleAccepted := FProject.AnalyzeModuleOnly(FModulePath);
+          if FPromoteMode then
+            FModuleAccepted := FProject.PromoteUnit(FModulePath)
+          else
+            FModuleAccepted := FProject.AnalyzeModuleOnly(FModulePath);
           if FModuleAccepted then
             FMainResultId := FProject.ModelIdOf(FModulePath);
         finally

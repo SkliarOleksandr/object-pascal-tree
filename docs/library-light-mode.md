@@ -95,9 +95,60 @@ this run's: a light donor's nodes are never handed out as a full model, and a
 full donor is not kept for a unit that is now light.
 
 `AnalyzeModuleOnly` refuses a light unit (`module=refused:light` in
-`StageTimings`): the module path would parse it fully, and turning a light unit
-into a full one needs rules of its own (promotion). An own unit's module run
-beside light units works as before.
+`StageTimings`): an edit would parse it fully, and turning a light unit into a
+full one is promotion's job, with rules of its own (below). An own unit's
+module run beside light units works as before.
+
+## Promotion: a light unit made full on demand
+
+`PromoteUnit(APath)` turns one light unit into a fully analyzed one in place -
+the editor's "the user opened System.pas", go to implementation into a library
+body, the text of a library routine. It is the module path
+(`docs/incremental-analysis.md`) in its second mode: the whole file parsed, its
+bodies bound, the units only its implementation `uses` names loaded beside it
+(light, when they lie under a light tree), the unit's consumers left alone.
+
+- **True**: the unit is fully analyzed now - or already was: an own unit, a
+  unit promoted before (`promote=already-full;`, nothing done).
+- **False**: refused, the project unchanged, the reason in `StageTimings` as
+  `module=refused:<reason>`, the module path's convention: `unknown-file`, the
+  module path's own refusals, and `promote-needs-rebuild(<why>)` (below).
+- `PromotedFiles` / `ForgetPromotions`: the promoted set. `IsLightFile` is
+  False for a promoted file, so a rebuild with the project as parse donor
+  (`AdoptParseDonor` copies the donor's set - the donor is what the last run
+  knew) keeps it full; `ForgetPromotions` makes the next run light again.
+- `TPasAsyncSession.CreateForPromotion(AProject, APath)`: `CreateForModule`'s
+  contract (ownership, `ModuleOutcome`) with `PromoteUnit` as the worker's
+  call. As after any module run, a host recreates its `TPasNavigator` over the
+  project it takes back.
+
+What makes it a one-unit step:
+
+- **No false interface change.** An interface routine gets `sfHasBody` from its
+  implementation, which a light model never parsed; compared, every promotion
+  read as an interface change and redid the unit's consumers (476 of them for
+  one hub unit). The module path's comparison leaves the flag out when the old
+  model is light. On every unit measured nothing else differed - the light
+  parse is a prefix of the full one.
+- **The unit's `$IF` questions are re-decided** as the full analysis's declared
+  pass decides them - `System.pas` and `System.Classes` ask (`Length` of a
+  constant array, `SizeOf` of an interface type), and the module path refuses
+  such a stream for an edit (`unresolved-if`). For a promotion the first-pass
+  model stands in for the unit while the declared pass's rounds and symbol
+  iterations run over it, its `uses` linked. That is exact only when every
+  unit its `uses` names is loaded already: an import that is not
+  (`new-import`) or does not resolve (`unresolved-uses`) refuses with
+  `promote-needs-rebuild(<why>)` and puts the file into `PromotedFiles`, so the
+  host's rebuild loads it full - never a guessed stream.
+- A demoted light model is rehydrated first, as the module path does for any
+  demoted module.
+
+Measured on the 3,782-unit closure in light mode (release build): each of
+seven units - two of the VCL's largest, `System.SysUtils`, `System.pas`,
+`System.Classes` and two of the component suite's - promotes in 37-183 ms with
+`module=1` and no consumer redone, taking in 0-12 implementation-only units;
+every binding of each promoted unit is identical to the full analysis's, and
+every own unit's is unchanged.
 
 ## What a host no longer sees
 
@@ -105,8 +156,8 @@ A host that sets `LightPaths` should say so where it answers from library
 code:
 
 - **Navigation into a library body**: `RoutineImplNode` / `GotoImplementation`
-  on a light unit's routine find no body (`NIL_NODE` / False) - say "not
-  loaded".
+  on a light unit's routine find no body (`NIL_NODE` / False) - promote the
+  unit (`PromoteUnit`), or say "not loaded".
 - **Dispatch from library bodies into own code**: a library body calling a
   virtual or interface method an own class implements, an event handler a
   library assigns, a class created through a class reference. `callers`,
@@ -126,11 +177,14 @@ code:
 Every host already computes its library trees for the navigator
 (`TPasNavigator.LibraryPaths`): the IDE's library and browsing paths plus the
 Studio source trees, minus the project's own trees. That list is the natural
-`LightPaths`. A host switching light mode on by default should wait until it
-can promote a unit to a full parse on demand and until the lint handles light
-units.
+`LightPaths`. A host switching light mode on by default should promote a unit
+when the user opens it or navigates into its bodies, and wait until the lint
+handles light units.
 
 The command-line tool takes `-light:<spec>` (repeatable): `lib` = every `-L`
 path plus the Studio source trees, `studio` = the Studio source trees only,
 anything else = one directory tree; it prints `light: N units` after the
-analysis line.
+analysis line. `-promote:<file>` promotes a light unit (`PromoteUnit`; any
+other goes through `AnalyzeModuleOnly`), `-fpafter:<file>` fingerprints the own
+units again after the promotions, `-fpunit:<file>` adds a library unit to every
+fingerprint.

@@ -142,6 +142,10 @@ type
     Phase: string;       // 'intf' | 'full' | 'cross' | 'done' | 'cancelled'
   end;
 
+  // The module path's two callers: an edit of a module (AnalyzeModuleOnly)
+  // and the promotion of a light unit to a full one (PromoteUnit).
+  TPasModulePathMode = (mpEdit, mpPromote);
+
   { One PROBE session of the expression typer: CrossType run over a subtree
     instead of a whole unit, recording nothing in the model - the mode
     WithTargetTypeX uses, so that a `with` target, a for-in collection, an
@@ -460,6 +464,13 @@ type
     FLightExemptDir: TArray<string>;
     // The full run's roots, kept for the module path's re-snapshot.
     FLightRoots: TArray<string>;
+    // PromotedFiles: lower-cased full paths, never light again. Written on
+    // the driver thread only - by PromoteUnit's commit, AdoptParseDonor and
+    // ForgetPromotions - while no load worker runs; IsLightFile reads it.
+    FPromoted: TDictionary<string, Boolean>;
+    // AnalyzeModuleOnly's body, shared with PromoteUnit (see the mode).
+    function RunModulePath(const APath: string;
+      AMode: TPasModulePathMode): Boolean;
     procedure SetLightPaths(const AValue: TArray<string>);
     procedure SnapLightExempt(const ARoots: TArray<string>);
     function CancelRequested: Boolean; inline;
@@ -550,6 +561,24 @@ type
     function OwnSymbolSite(AM: TPasSemaModel; const ANameLower: string;
       const APos: TPasCondPos; out AFile: string; out AOffset: Integer): Boolean;
     function DeclaredCandidate(AIdx: Integer): Boolean;
+    { One candidate's rounds of the declared pass: re-preprocess AId's file
+      with the oracle until its own-name answers agree with the stream they
+      produced (interface-only when ALight). nil when a round raised. ASymLog
+      collects the own-symbol answers the last round gave. Reads FModels[AId]
+      as the unit's registered model; writes nothing shared. }
+    function RedecideRounds(AId: Integer; ALight: Boolean;
+      out ASymLog: TArray<TPasOwnSymAnswer>): TPasSemaModel;
+    { The declared pass for ONE unit outside a full run - a promotion's
+      unanswered `$IF` questions, decided as RunDeclaredPass decides them in
+      a full analysis: AFirst (the unit's first-pass full model) stands in
+      for the registered model while it runs, its `uses` linked, and the
+      rounds and the symbol iterations follow. nil when the stream is not a
+      candidate (AFirst stands); AWhy non-empty when it cannot be made exact
+      here (an import that is not loaded, a `uses` that does not resolve) -
+      the caller refuses. FModels[AId] is the registered model again on
+      return, whatever happened. }
+    function RedecideStream(AId: Integer; AFirst: TPasSemaModel;
+      out AWhy: string): TPasSemaModel;
     procedure RunDeclaredPass(ACount: Integer);
     procedure InjectGuessedIfDiags(ACount: Integer);
     procedure InjectGuessedIfDiagsOne(AId: Integer);
@@ -1766,6 +1795,29 @@ type
       Single-threaded, like every other driver entry point; do not call it
       while an async session owns this project. }
     function AnalyzeModuleOnly(const APath: string): Boolean;
+    { LIGHT MODE: turns the light unit APath into a fully analyzed one in
+      place - the module path over its whole text (mpPromote), its bodies
+      bound, its implementation-only units loaded (light, if under a light
+      tree) beside it, no consumer redone when its interface is what the
+      light model had (the body-derived sfHasBody is masked in that
+      comparison). True: the unit is fully analyzed now, or already was (an
+      own unit, a promoted one - a no-op, `promote=already-full;`). False:
+      refused, the project UNCHANGED, the reason in StageTimings as
+      `module=refused:<reason>`, as AnalyzeModuleOnly's: `unknown-file`, and
+      `promote-needs-rebuild(...)` where the unit's `$IF` questions cannot be
+      re-decided exactly here - the host rebuilds with the unit kept in
+      PromotedFiles (the rebuild then loads it full). A promoted unit joins
+      PromotedFiles: IsLightFile is False for it from then on. Hosts
+      recreate their TPasNavigator after an accepted promotion, as after a
+      module run. }
+    function PromoteUnit(const APath: string): Boolean;
+    { The files PromoteUnit promoted (and those an adopted donor had), full
+      paths lower-cased: IsLightFile excludes them, so a rebuild loads them
+      full. AdoptParseDonor copies the donor's set - the donor is what the
+      last run knew; ForgetPromotions clears it (the next run is light
+      again for them). }
+    function PromotedFiles: TArray<string>;
+    procedure ForgetPromotions;
     // Analyze every .pas/.dpr under a directory (indexed first).
     procedure AnalyzeDirectory(const ARoot: string);
     { Incremental analysis of ARoots' transitive uses closure, in two waves -
@@ -2176,6 +2228,7 @@ begin
   FSystemUnitLock.Free;
   FHostPins.Free;
   FLightExempt.Free;
+  FPromoted.Free;
   ClearHelperIdx;
 {$IFDEF PASTREE_MEMBERSTATS}
   FStatsCalls.Free;
@@ -2397,6 +2450,9 @@ begin
   if (Length(FLightPaths) = 0) or not PasFullPathKey(APath, LKey) or
      not KeyUnderTrees(LKey, FLightPaths) then
     Exit;
+  // Promoted: full for good (until ForgetPromotions).
+  if (FPromoted <> nil) and FPromoted.ContainsKey(LKey) then
+    Exit;
   if FLightExempt <> nil then
     Result := not FLightExempt.ContainsKey(LKey) and
       not KeyUnderTrees(LKey, FLightExemptDir)
@@ -2405,6 +2461,19 @@ begin
     Result := not ((FHostPins <> nil) and FHostPins.ContainsKey(LKey)) and
       not ((FSM.ProjectDir <> '') and
            KeyUnderTrees(LKey, PasNormalizeDirTrees([FSM.ProjectDir])));
+end;
+
+function TPasSemaProject.PromotedFiles: TArray<string>;
+begin
+  if FPromoted = nil then
+    Exit(nil);
+  Result := FPromoted.Keys.ToArray;
+  TArray.Sort<string>(Result);
+end;
+
+procedure TPasSemaProject.ForgetPromotions;
+begin
+  FreeAndNil(FPromoted);
 end;
 
 function TPasSemaProject.IsLight(AMid: Integer): Boolean;
@@ -2724,6 +2793,15 @@ begin
      FSM.ConfigSignature(FSM.ProjectDir <> '') then
     Exit(False);
   FDonor := ADonor;
+  // The donor is what the last run knew: a unit it promoted stays full in
+  // this one (a host clears that with ForgetPromotions).
+  if ADonor.FPromoted <> nil then
+  begin
+    if FPromoted = nil then
+      FPromoted := TDictionary<string, Boolean>.Create;
+    for var LKey in ADonor.FPromoted.Keys do
+      FPromoted.AddOrSetValue(LKey, True);
+  end;
   Result := True;
 end;
 
@@ -5814,6 +5892,170 @@ begin
   end;
 end;
 
+function TPasSemaProject.RedecideRounds(AId: Integer; ALight: Boolean;
+  out ASymLog: TArray<TPasOwnSymAnswer>): TPasSemaModel;
+var
+  LPP: TPasPreprocessor;
+  LDiags: TArray<TPasParseDiag>;
+  LLog: TList<TPasOwnAnswer>;
+  LSymLog: TList<TPasOwnSymAnswer>;
+  LBase, LNew: TPasSemaModel;
+  LRound, LA: Integer;
+  LStable: Boolean;
+begin
+  ASymLog := nil;
+  LBase := nil;
+  LNew := nil;
+  LPP := RentPP;
+  LLog := TList<TPasOwnAnswer>.Create;
+  LSymLog := TList<TPasOwnSymAnswer>.Create;
+  try
+    try
+      // Rounds, until the unit's own-name answers agree with the stream
+      // they produced. The first answers from the first-pass model; an
+      // earlier guard that this pass flips can add or remove a
+      // declaration a later guard asks about (FMX.Skia.Canvas: a record
+      // declared under `not Declared(RTLVersion132)`, which the first
+      // pass guessed True and the imports answer False, is what a later
+      // `Declared(<that record>)` guard reads), so each further round
+      // answers from the previous one's model. Decisions settle top down
+      // - a guard reads only declarations above it - so a round or two.
+      for LRound := 1 to 4 do
+      begin
+        LLog.Clear;
+        LSymLog.Clear;
+        LPP.OnDeclared := DeclaredQueryFor(AId, LBase, LLog);
+        LPP.OnSymbol := SymbolQueryFor(AId, LSymLog);
+        LNew := TPasSemaResolver.Analyze(
+          TPasParser.ParseFile(LPP.Process(FFiles[AId]), LDiags, ALight),
+          False, FPlatform);
+        LNew.AddParseDiags(LDiags);
+        LNew.Light := ALight;
+        LStable := True;
+        for LA := 0 to LLog.Count - 1 do
+          if OwnDeclaredBefore(LNew, LLog[LA].NameLower, LLog[LA].Pos) <>
+             LLog[LA].Answer then
+          begin
+            LStable := False;
+            Break;
+          end;
+        LBase.Free;   // the previous round's model; nil on the first
+        LBase := LNew;
+        if LStable then
+          Break;
+      end;
+      Result := LBase;
+      ASymLog := LSymLog.ToArray;
+      LBase := nil;
+    except
+      // Keep the first-pass model. A unit that parsed once and throws now
+      // is a defect, but the wrong branch is still better than no unit at
+      // all - an unloadable unit gates every importer.
+      on Exception do
+      begin
+        // A round that raised after its Analyze left LNew owned by
+        // nothing; once handed on it IS LBase.
+        if LNew <> LBase then
+          LNew.Free;
+        LBase.Free;
+        Result := nil;
+        ASymLog := nil;
+      end;
+    end;
+  finally
+    LSymLog.Free;
+    LLog.Free;
+    ReturnPP(LPP);
+  end;
+end;
+
+function TPasSemaProject.RedecideStream(AId: Integer; AFirst: TPasSemaModel;
+  out AWhy: string): TPasSemaModel;
+var
+  LSaved, LDone: TPasSemaModel;
+  LSymLog: TArray<TPasOwnSymAnswer>;
+  LSymAns: TPasOwnSymAnswer;
+  LIter, LSiteOff: Integer;
+  LSite: string;
+  LAgain: Boolean;
+
+  // FModels owns its items: assigning a slot would free what it held. The
+  // stand-in is ours, and so is the registered model while it is out.
+  procedure Install(AModel: TPasSemaModel);
+  begin
+    FModels.OwnsObjects := False;
+    try
+      FModels[AId] := AModel;
+    finally
+      FModels.OwnsObjects := True;
+    end;
+  end;
+
+  // A full analysis links every import before its declared pass; here an
+  // import that is not loaded would be LOADED by ResolveUses - a model
+  // registered before the module path's commit point.
+  function LinkOrWhy(AModel: TPasSemaModel): Boolean;
+  begin
+    if NewImportsOf(AModel, FFiles[AId]) <> nil then
+    begin
+      AWhy := 'new-import';
+      Exit(False);
+    end;
+    ResolveUses(AId);
+    if not AModel.AllUsesResolved then
+    begin
+      AWhy := 'unresolved-uses';
+      Exit(False);
+    end;
+    Result := True;
+  end;
+
+begin
+  Result := nil;
+  AWhy := '';
+  LSaved := FModels[AId];
+  Install(AFirst);
+  try
+    if not LinkOrWhy(AFirst) or not DeclaredCandidate(AId) then
+      Exit;
+    // RunDeclaredPass's iterations for this one unit: re-decide from the
+    // model in the slot; again while an own symbol answer moved (three at
+    // most, as there).
+    LIter := 0;
+    repeat
+      Inc(LIter);
+      LDone := RedecideRounds(AId, False, LSymLog);
+      if LDone = nil then
+        Break;   // a round raised: the previous stream stands, as there
+      LDone.OracleStream := True;
+      if FModels[AId].OracleStream then
+        LDone.OracleNames := FModels[AId].OracleNames + OracleNamesOf(LDone)
+      else
+        LDone.OracleNames := OracleNamesOf(FModels[AId]) +
+          OracleNamesOf(LDone);
+      Install(LDone);
+      Result.Free;   // the previous iteration's; AFirst stays the caller's
+      Result := LDone;
+      if not LinkOrWhy(LDone) then
+        Break;
+      LAgain := False;
+      if LIter < 3 then
+        for LSymAns in LSymLog do
+          if not OwnSymbolSite(LDone, LSymAns.NameLower, LSymAns.Pos, LSite,
+               LSiteOff) or not SameText(LSite, LSymAns.DeclFile) or
+             (LSiteOff <> LSymAns.DeclOffset) then
+          begin
+            LAgain := True;
+            Break;
+          end;
+    until not LAgain;
+  finally
+    Install(LSaved);
+    if AWhy <> '' then
+      FreeAndNil(Result);
+  end;
+end;
+
 procedure TPasSemaProject.RunDeclaredPass(ACount: Integer);
 var
   LCand: TArray<Integer>;
@@ -5869,83 +6111,12 @@ begin
     SetLength(LSymLogs, Length(LCand));
     ForEachIndex(High(LCand), 'declared-pass',
       procedure(AIndex: Integer)
-      var
-        LPP: TPasPreprocessor;
-        LDiags: TArray<TPasParseDiag>;
-        LLog: TList<TPasOwnAnswer>;
-        LSymLog: TList<TPasOwnSymAnswer>;
-        LBase, LNew: TPasSemaModel;
-        LRound, LA: Integer;
-        LStable, LLight: Boolean;
       begin
-        LDone[AIndex] := nil;
         // A light candidate re-parses interface-only, and stays light. Read
         // from the first-pass model: nothing writes FModels until the
         // sequential commit below.
-        LLight := FModels[LCand[AIndex]].Light;
-        LBase := nil;
-        LNew := nil;
-        LPP := RentPP;
-        LLog := TList<TPasOwnAnswer>.Create;
-        LSymLog := TList<TPasOwnSymAnswer>.Create;
-        try
-          try
-            // Rounds, until the unit's own-name answers agree with the stream
-            // they produced. The first answers from the first-pass model; an
-            // earlier guard that this pass flips can add or remove a
-            // declaration a later guard asks about (FMX.Skia.Canvas: a record
-            // declared under `not Declared(RTLVersion132)`, which the first
-            // pass guessed True and the imports answer False, is what a later
-            // `Declared(<that record>)` guard reads), so each further round
-            // answers from the previous one's model. Decisions settle top down
-            // - a guard reads only declarations above it - so a round or two.
-            for LRound := 1 to 4 do
-            begin
-              LLog.Clear;
-              LSymLog.Clear;
-              LPP.OnDeclared := DeclaredQueryFor(LCand[AIndex], LBase, LLog);
-              LPP.OnSymbol := SymbolQueryFor(LCand[AIndex], LSymLog);
-              LNew := TPasSemaResolver.Analyze(
-                TPasParser.ParseFile(LPP.Process(FFiles[LCand[AIndex]]), LDiags,
-                  LLight),
-                False, FPlatform);
-              LNew.AddParseDiags(LDiags);
-              LNew.Light := LLight;
-              LStable := True;
-              for LA := 0 to LLog.Count - 1 do
-                if OwnDeclaredBefore(LNew, LLog[LA].NameLower, LLog[LA].Pos) <>
-                   LLog[LA].Answer then
-                begin
-                  LStable := False;
-                  Break;
-                end;
-              LBase.Free;   // the previous round's model; nil on the first
-              LBase := LNew;
-              if LStable then
-                Break;
-            end;
-            LDone[AIndex] := LBase;
-            LSymLogs[AIndex] := LSymLog.ToArray;
-            LBase := nil;
-          except
-            // Keep the first-pass model. A unit that parsed once and throws now
-            // is a defect, but the wrong branch is still better than no unit at
-            // all - an unloadable unit gates every importer.
-            on Exception do
-            begin
-              // A round that raised after its Analyze left LNew owned by
-              // nothing; once handed on it IS LBase.
-              if LNew <> LBase then
-                LNew.Free;
-              LBase.Free;
-              LDone[AIndex] := nil;
-            end;
-          end;
-        finally
-          LSymLog.Free;
-          LLog.Free;
-          ReturnPP(LPP);
-        end;
+        LDone[AIndex] := RedecideRounds(LCand[AIndex],
+          FModels[LCand[AIndex]].Light, LSymLogs[AIndex]);
       end,
       // This pass walks a CANDIDATE list, so the body index is not a unit id.
       function(AIndex: Integer): Integer
@@ -20782,6 +20953,20 @@ begin
   Result := True;
 end;
 
+{ The symbol flags the interface comparison of the module path leaves out.
+  sfExternalUnresolved always (see IntfPrefixSame). sfHasBody when AOld is a
+  LIGHT model, i.e. the call is a promotion: an interface routine gets the
+  flag from its implementation, which a light model never parsed - compared,
+  every promotion read as an interface change and redid the unit's
+  consumers (476 of them for one hub unit, in the light-mode probe). }
+function IntfFlagMask(AOld: TPasSemaModel): TSemaSymbolFlags;
+begin
+  if AOld.Light then
+    Result := [sfExternalUnresolved, sfHasBody]
+  else
+    Result := [sfExternalUnresolved];
+end;
+
 function TPasSemaProject.IntfPrefixSame(AOld, ANew: TPasSemaModel;
   out ASymN: Integer; out AWhy: string): Boolean;
 var
@@ -20826,8 +21011,9 @@ begin
        // sfExternalUnresolved excluded: ResolveUses CLEARS it on the model it
        // resolved, so the analyzed old model and the raw Phase-1 new one
        // legitimately differ there - and the re-run resolves the new one too.
-       ((LA.Flags - [sfExternalUnresolved]) <>
-        (LB.Flags - [sfExternalUnresolved])) or
+       // sfHasBody too when the old model is LIGHT (a promotion): the flag
+       // comes from the implementation, which a light model never has.
+       ((LA.Flags - IntfFlagMask(AOld)) <> (LB.Flags - IntfFlagMask(AOld))) or
        (LA.Visibility <> LB.Visibility) or (LA.TypeCat <> LB.TypeCat) or
        (LA.NumRank <> LB.NumRank) then
     begin
@@ -21914,9 +22100,10 @@ begin
     LHasPredecessor[LNewIdx] := True;
     LA := AOld.Symbols[LOldIdx];
     LB := ANew.Symbols[LNewIdx];
-    // sfExternalUnresolved excluded for the reason IntfPrefixSame gives.
+    // sfExternalUnresolved (and a light old model's sfHasBody) excluded for
+    // the reasons IntfPrefixSame gives.
     LChanged :=
-      ((LA.Flags - [sfExternalUnresolved]) <> (LB.Flags - [sfExternalUnresolved])) or
+      ((LA.Flags - IntfFlagMask(AOld)) <> (LB.Flags - IntfFlagMask(AOld))) or
       (LA.Visibility <> LB.Visibility) or (LA.TypeCat <> LB.TypeCat) or
       (LA.NumRank <> LB.NumRank) or
       not LinkFollows(LA.TypeSym, LB.TypeSym) or
@@ -22360,12 +22547,33 @@ begin
 end;
 
 function TPasSemaProject.AnalyzeModuleOnly(const APath: string): Boolean;
+begin
+  Result := RunModulePath(APath, mpEdit);
+end;
+
+function TPasSemaProject.PromoteUnit(const APath: string): Boolean;
+var
+  LMid: Integer;
+begin
+  // Already full - an own unit, a promoted one: nothing to do, nothing
+  // consumed (an adopted donor stays for the next run).
+  LMid := ModelIdOf(APath);
+  if (LMid >= 0) and not IsLight(LMid) then
+  begin
+    FStageTimings := 'promote=already-full;';
+    Exit(True);
+  end;
+  Result := RunModulePath(APath, mpPromote);
+end;
+
+function TPasSemaProject.RunModulePath(const APath: string;
+  AMode: TPasModulePathMode): Boolean;
 var
   LFull, LKey: string;
   LId, LOldSymN, LNewSymN, LScopeN, LImplScope, LIdx, LRadius: Integer;
   LIds, LReach, LUntouched: TArray<Integer>;
   LUntouchedKeys: TArray<TPasRenumberKeys>;
-  LOld, LNew: TPasSemaModel;
+  LOld, LNew, LRedecided: TPasSemaModel;
   LConsOf: TArray<TPasSemaModel>;
   LPre: TPasPreprocessed;
   LDiags: TArray<TPasParseDiag>;
@@ -22497,11 +22705,15 @@ begin
     Exit(Refuse('unknown-file'));
   // A light unit, before anything else: after the finalizer it is
   // msCrossReady like any other, so the status gate below would let it
-  // through, and this path would parse it FULLY - a promotion, which needs
-  // rules of its own (the interface diff's body-derived flags, its
-  // implementation-only units loaded light).
-  if (LId < FModels.Count) and (FModels[LId] <> nil) and FModels[LId].Light then
+  // through, and an edit would parse it FULLY - a promotion, which is the
+  // other mode's job (the interface diff's body-derived flags, the `$IF`
+  // re-decision). PromoteUnit answers a full unit itself; one reaching here
+  // anyway is not this mode's either.
+  if (AMode = mpEdit) and (LId < FModels.Count) and (FModels[LId] <> nil) and
+     FModels[LId].Light then
     Exit(Refuse('light'));
+  if (AMode = mpPromote) and not IsLight(LId) then
+    Exit(Refuse('not-light'));
   if (LId >= FStatus.Count) or (FStatus[LId] < msFullReady) then
     Exit(Refuse('not-full'));
   LOld := FModels[LId];
@@ -22541,7 +22753,29 @@ begin
     // exclusion the parse donor makes, for the same reason.
     if (Length(LNew.Tree.Source.UnresolvedDeclared) > 0) or
        (Length(LNew.Tree.Source.UnresolvedSymbols) > 0) then
-      Exit(Refuse('unresolved-if'));
+    begin
+      if AMode = mpEdit then
+        Exit(Refuse('unresolved-if'));
+      // A promotion re-decides them for this one unit, as the full
+      // analysis's declared pass would (System.pas, System.Classes ask).
+      // Where that cannot be exact here, the host rebuilds with the unit in
+      // PromotedFiles - never a guessed stream.
+      LRedecided := RedecideStream(LId, LNew, LWhy);
+      if LWhy <> '' then
+      begin
+        if FPromoted = nil then
+          FPromoted := TDictionary<string, Boolean>.Create;
+        FPromoted.AddOrSetValue(LKey, True);
+        Exit(Refuse('promote-needs-rebuild(' + LWhy + ')'));
+      end;
+      if LRedecided <> nil then
+      begin
+        LNew.Free;
+        LNew := LRedecided;
+      end;
+      FStageTimings := FStageTimings +
+        Format('redecide=%d;', [LSW.ElapsedMilliseconds]);
+    end;
     LWhy := InPathChange;
     if LWhy <> '' then
       Exit(Refuse('in-path-changed(' + LWhy + ')'));
@@ -22730,6 +22964,14 @@ begin
       Inc(FModelGeneration);
       FModels[LId] := LNew;
       LNew := nil;
+      // A promoted unit is full for good: IsLightFile excludes it now, so a
+      // rebuild with this project as donor keeps it full.
+      if AMode = mpPromote then
+      begin
+        if FPromoted = nil then
+          FPromoted := TDictionary<string, Boolean>.Create;
+        FPromoted.AddOrSetValue(LKey, True);
+      end;
       Fault('swap');
       LRepointed := 0;
       if LInstancesMove then
@@ -22752,8 +22994,14 @@ begin
       SetLength(LAddIds, Length(LAddModels));
       for LIdx := 0 to High(LAddModels) do
       begin
-        LAddIds[LIdx] := RegisterModel(LAddModels[LIdx], LAddPaths[LIdx],
-          msFullReady);
+        // A light newcomer (a promoted unit's implementation-only import
+        // under a light tree) is an interface parse for good.
+        if LAddModels[LIdx].Light then
+          LAddIds[LIdx] := RegisterModel(LAddModels[LIdx], LAddPaths[LIdx],
+            msIntfReady)
+        else
+          LAddIds[LIdx] := RegisterModel(LAddModels[LIdx], LAddPaths[LIdx],
+            msFullReady);
         LAddModels[LIdx] := nil;   // FModels owns it now
         FByPath.Add(LowerCase(LAddPaths[LIdx]), LAddIds[LIdx]);
         RegisterUnitName(LAddIds[LIdx]);

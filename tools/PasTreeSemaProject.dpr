@@ -73,8 +73,11 @@ program PasTreeSemaProject;
   -demotelib  at the end, DemoteText keeping the own units: held memory and
          the time it took (the MCP server's resident state).
 
-  -promote:<file> (repeatable)  AnalyzeModuleOnly over the file, timed, with
-         its stage timings and what the module holds after.
+  -promote:<file> (repeatable)  PromoteUnit over a light unit (AnalyzeModuleOnly
+         over any other), timed, with its stage timings and what the module
+         holds after. -fpafter:<file> writes the -fp fingerprint again after
+         them (a promotion must not move an own binding). -fpunit:<file>
+         (repeatable) puts a library unit into every fingerprint as well.
 
   -refset:<unit> (repeatable)  the units whose bodies could refer to a symbol
          of the unit: a unit-level name's candidates and a member's, by
@@ -159,6 +162,8 @@ var
   GDemoteLib: Boolean;        // -demotelib
   GFp: string;                // -fp:<file>
   GFpDetail: Boolean;         // -fpdetail
+  GFpAfter: string;           // -fpafter:<file>, the fingerprint after -promote
+  GFpUnits: TArray<string>;  // -fpunit:<file>, repeatable: a library unit in -fp too
   GRefSets: TArray<string>;   // -refset:<unit>, repeatable
   GPromotes: TArray<string>;  // -promote:<file>, repeatable
   GLightSpecs: TArray<string>; // -light:<spec>, repeatable; see LightTrees
@@ -733,7 +738,8 @@ begin
   try
     for LMid := 0 to GProj.ModelCount - 1 do
     begin
-      if UnitCat(GProj.ModelFile(LMid)) > 1 then
+      if (UnitCat(GProj.ModelFile(LMid)) > 1) and
+         not MatchText(GProj.ModelFile(LMid), GFpUnits) then
         Continue;
       LM := GProj.Model(LMid);
       FillChar(LH, SizeOf(LH), 0);
@@ -915,16 +921,24 @@ end;
 procedure ReportPromote(const AFile: string);
 var
   LBefore, LMid, LImpl, LBodyRefs, LI: Integer;
-  LOk: Boolean;
+  LOk, LWasLight: Boolean;
   LM: TPasSemaModel;
   LSW: TStopwatch;
 begin
   LBefore := GProj.ModelCount;
   LSW := TStopwatch.StartNew;
-  LOk := GProj.AnalyzeModuleOnly(AFile);
+  // A light unit is promoted (PromoteUnit); any other goes through the
+  // module path as an unchanged edit, as before light mode.
+  LMid := GProj.ModelIdOf(AFile);
+  LWasLight := GProj.IsLight(LMid);
+  if LWasLight then
+    LOk := GProj.PromoteUnit(AFile)
+  else
+    LOk := GProj.AnalyzeModuleOnly(AFile);
   LSW.Stop;
-  Writeln(ErrOutput, Format('  promote %s: %s in %d ms',
-    [TPath.GetFileName(AFile), BoolToStr(LOk, True), LSW.ElapsedMilliseconds]));
+  Writeln(ErrOutput, Format('  promote %s: %s in %d ms (%s)',
+    [TPath.GetFileName(AFile), BoolToStr(LOk, True), LSW.ElapsedMilliseconds,
+     IfThen(LWasLight, 'PromoteUnit', 'AnalyzeModuleOnly')]));
   if GProj.StageTimings <> '' then
     Writeln(ErrOutput, '    stages: ', GProj.StageTimings);
   LMid := GProj.ModelIdOf(AFile);
@@ -981,6 +995,8 @@ begin
     ReportRefSet(LRS);
   for var LPF in GPromotes do
     ReportPromote(LPF);
+  if GFpAfter <> '' then
+    ReportFingerprint(GFpAfter, False);
 end;
 
 procedure RunDProj(const APath: string);
@@ -1400,12 +1416,17 @@ begin
         GDemoteLib := True
       else if SameText(ParamStr(GIdx), '-fpdetail') then
         GFpDetail := True
+      else if ParamStr(GIdx).StartsWith('-fpafter:', True) then
+        GFpAfter := TPath.GetFullPath(Copy(ParamStr(GIdx), 10, MaxInt))
       else if ParamStr(GIdx).StartsWith('-fp:', True) then
         GFp := TPath.GetFullPath(Copy(ParamStr(GIdx), 5, MaxInt))
       else if ParamStr(GIdx).StartsWith('-refset:', True) then
         GRefSets := GRefSets + [Copy(ParamStr(GIdx), 9, MaxInt)]
       else if ParamStr(GIdx).StartsWith('-light:', True) then
         GLightSpecs := GLightSpecs + [Copy(ParamStr(GIdx), 8, MaxInt)]
+      else if ParamStr(GIdx).StartsWith('-fpunit:', True) then
+        GFpUnits := GFpUnits +
+          [TPath.GetFullPath(Copy(ParamStr(GIdx), 9, MaxInt))]
       else if ParamStr(GIdx).StartsWith('-promote:', True) then
         GPromotes := GPromotes +
           [TPath.GetFullPath(Copy(ParamStr(GIdx), 10, MaxInt))]

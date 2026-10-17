@@ -6577,8 +6577,23 @@ const
     '  I := LB_MAX + 1;'#13#10 +
     'end;'#13#10 +
     'end.'#13#10;
+  // LibD's implementation asks two `$IF` questions only its own `uses` can
+  // answer (LibC's constant, LibB's record size): a promotion re-decides them
+  // as the full analysis's declared pass does.
+  LIBD =
+    'unit LibD;'#13#10'interface'#13#10'uses LibB;'#13#10 +
+    'function LibDVal: Integer;'#13#10 +
+    'implementation'#13#10 +
+    'uses LibC;'#13#10 +
+    '{$IF Declared(LC_VAL)}'#13#10'const DQ_YES = 1;'#13#10 +
+    '{$ELSE}'#13#10'const DQ_NO = 1;'#13#10'{$IFEND}'#13#10 +
+    '{$IF SizeOf(TItem) > 4}'#13#10'const SZ_BIG = 1;'#13#10 +
+    '{$ELSE}'#13#10'const SZ_SMALL = 1;'#13#10'{$IFEND}'#13#10 +
+    'function LibDVal: Integer;'#13#10'begin'#13#10 +
+    '  Result := LC_VAL;'#13#10'end;'#13#10 +
+    'end.'#13#10;
   APP =
-    'program App;'#13#10'uses UOwn, LibA;'#13#10'begin'#13#10'  Go;'#13#10 +
+    'program App;'#13#10'uses UOwn, LibA, LibD;'#13#10'begin'#13#10'  Go;'#13#10 +
     'end.'#13#10;
 var
   LRoot, LOwn, LLib, LAppPath: string;
@@ -6725,6 +6740,153 @@ var
       Result.AnalyzeProject(LAppPath);
   end;
 
+  function ConstCount(AProj: TPasSemaProject; const AFile,
+    AName: string): Integer;
+  begin
+    Result := SymCountOf(AProj.Model(AProj.ModelIdOf(AFile)), AName, skConst);
+  end;
+
+  // LibA's body reference to LC_VAL, bound into LibC.
+  function BodyBindsLibC(AProj: TPasSemaProject): Boolean;
+  var
+    LM: TPasSemaModel;
+  begin
+    Result := False;
+    LM := AProj.Model(AProj.ModelIdOf(TPath.Combine(LLib, 'LibA.pas')));
+    for var LPr in LM.ExtRefMap do
+      if SameText(ExtractFileName(AProj.ModelFile(LPr.Value.UnitId)),
+           'LibC.pas') and
+         (AProj.Model(LPr.Value.UnitId).Symbols[LPr.Value.Sym].NameLower =
+           'lc_val') then
+        Exit(True);
+  end;
+
+  { Promotion (PromoteUnit): a light unit becomes a fully analyzed one in
+    place - its body bound, its implementation-only units loaded light
+    beside it, nobody else redone, the own units' bindings untouched; its
+    `$IF` questions re-decided as the full analysis decides them, or a
+    refusal that asks for the rebuild which loads it full. }
+  procedure TestPromotion;
+  var
+    LFullP, LPP, LP2: TPasSemaProject;
+    LOwnModel: TPasSemaModel;
+    LAPath, LDPath, LUPath: string;
+    LCount: Integer;
+  begin
+    LAPath := TPath.Combine(LLib, 'LibA.pas');
+    LDPath := TPath.Combine(LLib, 'LibD.pas');
+    LUPath := TPath.Combine(LOwn, 'UOwn.pas');
+    LFullP := Run(nil, True);
+    LPP := Run([LLib], True);
+    try
+      // LibD first: LibC is not loaded yet, and LibD's questions need it
+      // linked - not exact here, so a refusal naming the rebuild.
+      LCount := LPP.ModelCount;
+      Ok('promote: a unit whose questions need an unloaded import refuses',
+        not LPP.PromoteUnit(LDPath) and
+        (Pos('module=refused:promote-needs-rebuild(new-import)',
+           LPP.StageTimings) > 0));
+      Ok('promote: ...the project unchanged',
+        (LPP.ModelCount = LCount) and LPP.IsLight(LPP.ModelIdOf(LDPath)) and
+        (LPP.ModelIdOf(TPath.Combine(LLib, 'LibC.pas')) = -1));
+      Ok('promote: ...and the unit in PromotedFiles, for the rebuild',
+        (Length(LPP.PromotedFiles) = 1) and
+        SameText(LPP.PromotedFiles[0], LDPath) and
+        not LPP.IsLightFile(LDPath));
+      LP2 := Run([LLib], True, LPP);
+      try
+        Ok('promote: the rebuild loads it full, branches as a full analysis',
+          not LP2.IsLight(LP2.ModelIdOf(LDPath)) and
+          HasImplSection(LP2, LDPath) and
+          (ConstCount(LP2, LDPath, 'dq_yes') = 1) and
+          (ConstCount(LP2, LDPath, 'sz_big') = 1) and
+          (ConstCount(LFullP, LDPath, 'dq_yes') = 1) and
+          (ConstCount(LFullP, LDPath, 'sz_big') = 1));
+      finally
+        LP2.Free;
+      end;
+      LPP.ForgetPromotions;
+      Ok('promote: ForgetPromotions empties the set',
+        (LPP.PromotedFiles = nil) and LPP.IsLightFile(LDPath));
+
+      // LibA: its body binds, LibC comes in light beside it, nobody redone.
+      LOwnModel := LPP.Model(LPP.ModelIdOf(LUPath));
+      Ok('promote: LibA promotes',
+        LPP.PromoteUnit(LAPath) and (Pos('module=1;', LPP.StageTimings) > 0));
+      Ok('promote: ...no interface change, no consumer redone',
+        (Pos('intfchanged', LPP.StageTimings) = 0) and
+        (Pos('reach=', LPP.StageTimings) = 0));
+      Ok('promote: ...an implementation section, not light',
+        HasImplSection(LPP, LAPath) and not LPP.IsLight(LPP.ModelIdOf(LAPath)) and
+        not LPP.IsLightFile(LAPath));
+      Ok('promote: ...LibC loaded light beside it, the body bound into it',
+        LPP.IsLight(LPP.ModelIdOf(TPath.Combine(LLib, 'LibC.pas'))) and
+        BodyBindsLibC(LPP));
+      Ok('promote: ...UOwn the same model object, its bindings unchanged',
+        (LPP.Model(LPP.ModelIdOf(LUPath)) = LOwnModel) and
+        (Sig(LPP, LUPath) = Sig(LFullP, LUPath)));
+      Ok('promote: ...LibA binds as in the full analysis',
+        Sig(LPP, LAPath) = Sig(LFullP, LAPath));
+      // LibD now: LibC is loaded, so its questions are re-decided here.
+      Ok('promote: LibD''s questions re-decided in place',
+        LPP.PromoteUnit(LDPath) and (Pos('redecide=', LPP.StageTimings) > 0) and
+        (ConstCount(LPP, LDPath, 'dq_yes') = 1) and
+        (ConstCount(LPP, LDPath, 'sz_big') = 1) and
+        (ConstCount(LPP, LDPath, 'dq_no') = 0) and
+        (ConstCount(LPP, LDPath, 'sz_small') = 0));
+      Ok('promote: ...binding as in the full analysis',
+        Sig(LPP, LDPath) = Sig(LFullP, LDPath));
+      Ok('promote: an own unit is already full',
+        LPP.PromoteUnit(LUPath) and
+        (LPP.StageTimings = 'promote=already-full;'));
+      Ok('promote: ...and so is a promoted one',
+        LPP.PromoteUnit(LAPath) and
+        (LPP.StageTimings = 'promote=already-full;'));
+      Ok('promote: a file outside the closure refuses',
+        not LPP.PromoteUnit(TPath.Combine(LLib, 'NoSuch.pas')) and
+        (Pos('module=refused:unknown-file', LPP.StageTimings) > 0));
+      Ok('promote: the module path still refuses an edit of a light unit',
+        not LPP.AnalyzeModuleOnly(TPath.Combine(LLib, 'LibB.pas')) and
+        (Pos('module=refused:light', LPP.StageTimings) > 0));
+
+      // The promoted set rides the donor: a rebuild keeps LibA full;
+      // forgotten, the next rebuild is light again.
+      LP2 := Run([LLib], True, LPP);
+      try
+        Ok('promote: a rebuild with it as donor keeps LibA full',
+          not LP2.IsLight(LP2.ModelIdOf(LAPath)) and HasImplSection(LP2, LAPath) and
+          (Length(LP2.PromotedFiles) = 2));
+      finally
+        LP2.Free;
+      end;
+      LPP.ForgetPromotions;
+      LP2 := Run([LLib], True, LPP);
+      try
+        Ok('promote: ...ForgetPromotions, and the next rebuild is light',
+          LP2.IsLight(LP2.ModelIdOf(LAPath)) and
+          not HasImplSection(LP2, LAPath) and (LP2.PromotedFiles = nil));
+      finally
+        LP2.Free;
+      end;
+    finally
+      LPP.Free;
+      LFullP.Free;
+    end;
+
+    // A demoted light unit promotes (hydrated first).
+    LPP := Run([LLib], True);
+    try
+      LPP.DemoteText([LUPath, LAppPath]);
+      Ok('promote: a demoted light unit was demoted',
+        LPP.Model(LPP.ModelIdOf(TPath.Combine(LLib, 'LibB.pas'))).Demoted);
+      Ok('promote: ...and promotes',
+        LPP.PromoteUnit(TPath.Combine(LLib, 'LibB.pas')) and
+        HasImplSection(LPP, TPath.Combine(LLib, 'LibB.pas')));
+    finally
+      LPP.Free;
+    end;
+  end;
+
 begin
   LRoot := TPath.Combine(TPath.GetTempPath, 'pastree_light_units');
   if TDirectory.Exists(LRoot) then
@@ -6739,6 +6901,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LLib, 'LibA.pas'), LIBA);
   TFile.WriteAllText(TPath.Combine(LLib, 'LibB.pas'), LIBB);
   TFile.WriteAllText(TPath.Combine(LLib, 'LibC.pas'), LIBC);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibD.pas'), LIBD);
   try
     for var LStaged in [False, True] do
     begin
@@ -6753,10 +6916,11 @@ begin
         Ok(LTag + 'full mode has no light model', LFull.LightCount = 0);
         Ok(LTag + 'LibC, reached only through an implementation, not loaded',
           LLight.ModelIdOf(TPath.Combine(LLib, 'LibC.pas')) = -1);
-        Ok(LTag + 'LibA and LibB are light',
+        Ok(LTag + 'LibA, LibB and LibD are light',
           ModelLight(LLight, TPath.Combine(LLib, 'LibA.pas')) and
           ModelLight(LLight, TPath.Combine(LLib, 'LibB.pas')) and
-          (LLight.LightCount = 2));
+          ModelLight(LLight, TPath.Combine(LLib, 'LibD.pas')) and
+          (LLight.LightCount = 3));
         Ok(LTag + 'LibA has no implementation section',
           not HasImplSection(LLight, TPath.Combine(LLib, 'LibA.pas')) and
           HasImplSection(LFull, TPath.Combine(LLib, 'LibA.pas')));
@@ -6836,6 +7000,7 @@ begin
     finally
       LP.Free;
     end;
+    TestPromotion;
     // No light paths: the project that set an empty list is the project
     // that never heard of light mode.
     LFull := Run(nil, True);

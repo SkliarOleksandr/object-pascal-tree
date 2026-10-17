@@ -337,8 +337,10 @@ usable.
   bodies, no implementation `uses` - while the project's own units are
   analyzed exactly as before. Measured on a 3,782-unit closure: 3.1 -> 1.8 s,
   2.3 -> 1.5 GB held, 1.5 GB -> 0.87 GB after `DemoteText`, every binding of
-  the own units identical. What a host stops seeing, and the exempt rules:
-  `docs/library-light-mode.md`.
+  the own units identical. `PromoteUnit` (0.114.0) turns one light unit into
+  a fully analyzed one in place - System.pas included - in tens of
+  milliseconds, nobody else redone. What a host stops seeing, the exempt
+  rules and promotion: `docs/library-light-mode.md`.
 
 ## Current features
 

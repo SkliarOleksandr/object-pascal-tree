@@ -540,8 +540,30 @@ begin
         end);
       Ok('light progress: the full wave ends at FullDone = Total',
         (LLastFull.Total > 0) and (LLastFull.FullDone = LLastFull.Total));
-    finally
+    except
       LProj.Free;
+      raise;
+    end;
+    // Promotion through the session: LibL becomes full, LibM (its
+    // implementation's import) comes in beside it.
+    var LPromo := TPasAsyncSession.CreateForPromotion(LProj,
+      TPath.Combine(LLib, 'LibL.pas'));
+    try
+      LPromo.Start;
+      LPromo.WaitFor;
+      Ok('light promotion session: moAccepted',
+        (LPromo.ModuleOutcome = moAccepted) and (LPromo.LastError = ''));
+      var LTaken := LPromo.TakeProject;
+      try
+        Ok('light promotion session: LibL full, LibM loaded',
+          (LTaken <> nil) and
+          not LTaken.IsLight(LTaken.ModelIdOf(TPath.Combine(LLib, 'LibL.pas'))) and
+          (LTaken.ModelIdOf(TPath.Combine(LLib, 'LibM.pas')) >= 0));
+      finally
+        LTaken.Free;
+      end;
+    finally
+      LPromo.Free;
     end;
   end;
 

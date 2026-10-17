@@ -440,6 +440,40 @@ three units (`newunits=3(...)`) in 38 ms; a body edit of a unit taken in is an
 ordinary module step. `-selftest` catches the newcomer missing on the
 incremental side.
 
+## 2c. Promotion: a light unit made full (0.114.0)
+
+Light mode (`docs/library-light-mode.md`) analyzes library units
+interface-only; `PromoteUnit` turns one of them into a fully analyzed unit,
+and it is this path in a second mode (`RunModulePath(mpPromote)`;
+`AnalyzeModuleOnly` is `mpEdit`, which refuses a light unit). Three rules
+differ from an edit:
+
+- **The interface comparison masks `sfHasBody`** when the old model is light
+  (`IntfFlagMask`, read by `IntfPrefixSame` and `DiffInterface`): the flag
+  comes from the implementation the light model never parsed. Without the mask
+  every promotion was an interface change - one hub unit redid 476 consumers
+  in the light-mode probe. A light model is never the old model of an edit, so
+  `mpEdit` compares exactly as before.
+- **An unanswered `$IF` question is re-decided, not refused.** `RedecideStream`
+  runs the declared pass for the one unit: its first-pass model stands in for
+  the registered (light) one, `uses` linked, through `RedecideRounds` - the
+  per-candidate body of `RunDeclaredPass`, shared - and the pass's symbol
+  iterations. It refuses (`promote-needs-rebuild(new-import)`,
+  `(unresolved-uses)`) where the full pass would have loaded a unit first,
+  because loading one would register a model before the commit point; the
+  file then joins `PromotedFiles`, and the host's rebuild loads it full.
+- **Newcomers are loaded light** when they lie under a light tree
+  (`LoadNewcomers` -> `ComputeLoad` -> `ParseAnalyze`) and registered
+  `msIntfReady` like any light load; the commit puts the file into
+  `PromotedFiles`.
+
+Measured on the frozen client closure in light mode, release build:
+each unit promoted alone in its own run: `Vcl.Controls` 80 ms, `Vcl.Forms` 80,
+`System.SysUtils` 80, two component suite units 38 and 119, `System.pas` 98
+(82 of them the re-decision), `System.Classes` 181; each `module=1`, no `intfchanged`, every binding of the
+promoted unit identical to the full analysis's (`-fpunit`), every own unit's
+unchanged (`-fpafter`).
+
 ## 3. What it costs (measured, every step verified identical to a full build)
 
 | closure | body edit | interface edit | full rebuild |
