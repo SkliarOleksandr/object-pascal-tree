@@ -221,6 +221,23 @@ object frmMain: TfrmMain
       OnChange = cbTypeColorChange
       OnGetColors = cbTypeColorGetColors
     end
+    object chkLightLibs: TCheckBox
+      Left = 1046
+      Top = 12
+      Width = 130
+      Height = 17
+      Hint = 
+        'Light libraries: units under the IDE'#39's library and browsing paths' +
+        ' and the Studio sources are analyzed interface-only - much faster' +
+        ' and lighter; the project'#39's own units bind exactly as before. A' +
+        ' library file opened in a tab is promoted to a full analysis (wi' +
+        'th Incremental on). Re-analyzes when toggled.'
+      Caption = 'Light libraries'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 16
+      OnClick = chkLightLibsClick
+    end
   end
   object vstFiles: TVirtualStringTree
     Left = 0

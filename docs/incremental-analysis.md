@@ -54,6 +54,15 @@ used, so a demotable stream is reproducible) and grafts the donor's nodes
 onto that stream if it is identical to the one they were parsed from. The
 donor is never rehydrated by the rebuild.
 
+Light mode (`docs/library-light-mode.md`): a donor model is reused only when
+its light-ness agrees with this run's (`TPasSemaDonorView.Light` against
+`IsLightFile`) - a light donor's nodes are an interface-only parse, never a
+full model. A light demoted donor's stream is re-preprocessed with the same
+stop at the implementation `uses` it was loaded with, and so is a light
+model's rehydration (`EnsureHydrated`): every preprocess of a unit goes
+through `ProcessUnit`, which reads the model's `Light` flag. A donor's
+promoted set (`PromotedFiles`) is copied by the adoption.
+
 The donor may keep serving its host's navigation while the rebuild runs, and
 navigation on a demoted model rehydrates it. So the rebuild's workers never
 read a donor model field by field: each takes one copy of what it needs

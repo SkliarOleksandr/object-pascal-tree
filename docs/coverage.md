@@ -29,6 +29,12 @@ parse keeps only in a token, which a consumer still reads there
 section), and the parser-fidelity findings still open with what the checks
 against dcc cannot see (`docs/parser-fidelity.md`).
 
+Not listed either: what light mode leaves out on purpose
+(`TPasSemaProject.LightPaths` - a library unit analyzed interface-only, its
+text read to the end of its implementation `uses`). That is a host's choice
+of less work, not a gap in following the language; its consequences are in
+`docs/library-light-mode.md`. Every entry below holds in both modes.
+
 ---
 
 ## 01-program-structure.md

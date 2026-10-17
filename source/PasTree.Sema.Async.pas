@@ -118,9 +118,11 @@ type
       TPasSemaProject.PromoteUnit as the worker's call - the light unit APath
       becomes a fully analyzed one. moRefused leaves the project as it was
       (StageTimings says why; `promote-needs-rebuild` asks for a rebuild,
-      which loads the unit full). }
-    constructor CreateForPromotion(AProject: TPasSemaProject;
-      const APath: string);
+      which loads the unit full). A class function, not a constructor: one
+      with CreateForModule's parameters would be inaccessible from C++
+      (W1029). }
+    class function CreateForPromotion(AProject: TPasSemaProject;
+      const APath: string): TPasAsyncSession;
     { Cancels the worker, waits for it to drain, then frees the project if it
       was never taken. Safe to call at any time. }
     destructor Destroy; override;
@@ -257,11 +259,11 @@ begin
   FModuleRebuild := False;
 end;
 
-constructor TPasAsyncSession.CreateForPromotion(AProject: TPasSemaProject;
-  const APath: string);
+class function TPasAsyncSession.CreateForPromotion(AProject: TPasSemaProject;
+  const APath: string): TPasAsyncSession;
 begin
-  CreateForModule(AProject, APath);
-  FPromoteMode := True;
+  Result := TPasAsyncSession.CreateForModule(AProject, APath);
+  Result.FPromoteMode := True;
 end;
 
 destructor TPasAsyncSession.Destroy;

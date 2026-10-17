@@ -90,7 +90,7 @@ interface section and parses fully whatever the tree says.
 - **The uses graph is exact where it can be**: every implementation edge of
   a light unit into a loaded unit is there; the `UNIT_NOT_LOADED` ones point
   at a unit once something loads it (a promotion's newcomer, a unit the
-  ` Declared()` pass brings in - `RelinkNotLoaded`).
+  `$IF Declared()` pass brings in - `RelinkNotLoaded`).
 - **Its interface is analyzed in full**, the expression typer included - a
   light model is permanent, not the staged driver's transient interface wave.
 - **Its diagnostics are its interface's only.**
@@ -153,9 +153,10 @@ bodies bound, the units only its implementation `uses` names loaded beside it
   False for a promoted file, so a rebuild with the project as parse donor
   (`AdoptParseDonor` copies the donor's set - the donor is what the last run
   knew) keeps it full; `ForgetPromotions` makes the next run light again.
-- `TPasAsyncSession.CreateForPromotion(AProject, APath)`: `CreateForModule`'s
-  contract (ownership, `ModuleOutcome`) with `PromoteUnit` as the worker's
-  call. As after any module run, a host recreates its `TPasNavigator` over the
+- `TPasAsyncSession.CreateForPromotion(AProject, APath)` (a class function -
+  a second constructor with `CreateForModule`'s parameters is W1029):
+  `CreateForModule`'s contract (ownership, `ModuleOutcome`) with
+  `PromoteUnit` as the worker's call. As after any module run, a host recreates its `TPasNavigator` over the
   project it takes back.
 
 What makes it a one-unit step:
@@ -181,7 +182,7 @@ What makes it a one-unit step:
 
 Measured on the 3,782-unit closure in light mode (release build): each of
 seven units - two of the VCL's largest, `System.SysUtils`, `System.pas`,
-`System.Classes` and two of the component suite's - promotes in 37-183 ms with
+`System.Classes` and two of the component suite's - promotes in 37-198 ms with
 `module=1` and no consumer redone, taking in 0-12 implementation-only units;
 every binding of each promoted unit is identical to the full analysis's, and
 every own unit's is unchanged.
@@ -231,7 +232,7 @@ units light, and they may be needed in turn - until the answer is empty,
 recreates its navigator and lints. A promotion that asks for a rebuild
 (`promote-needs-rebuild`) gets one, with the project as parse donor.
 
-Measured on the 3,782-unit closure, the client's 1,566 listed units: full mode
+Measured on the 3,782-unit closure, its 1,566 listed units: full mode
 12,098 unused entries and 137 unreferenced units; light with the promotions -
 four rounds, 111 units promoted, two refused, then one rebuild - the same 137
 units and the same 12,098 entries with the same doubts, row for row (0.115.0,
@@ -252,10 +253,36 @@ Studio source trees, minus the project's own trees. That list is the natural
 the user opens it or navigates into its bodies, and runs `LintPromotions`
 before the lint.
 
+## In the demo
+
+The `Light libraries` checkbox (persisted, off by default) analyzes the units
+under the IDE's library and browsing paths and the Studio sources light -
+the navigator's library set plus the Studio source tree, minus every tree
+that holds the project directory or a file the `.dproj` lists. Toggling it
+re-analyzes; the message log's `Light libraries: N of M units` line says how
+many are light. Opening a light unit in a tab promotes it in the background
+(`CreateForPromotion`, with `Incremental` on - a build with it off released
+the maps the module path needs); `promote-needs-rebuild` rebuilds with the
+project as donor, so the unit comes back full. Find All > Unused Units and
+Units Nobody Uses run `LintPromotions` and promote first, on the UI thread.
+
+## The tool
+
 The command-line tool takes `-light:<spec>` (repeatable): `lib` = every `-L`
 path plus the Studio source trees, `studio` = the Studio source trees only,
 anything else = one directory tree; it prints `light: N units` after the
 analysis line. `-promote:<file>` promotes a light unit (`PromoteUnit`; any
 other goes through `AnalyzeModuleOnly`), `-fpafter:<file>` fingerprints the own
 units again after the promotions, `-fpunit:<file>` adds a library unit to every
-fingerprint.
+fingerprint, and `-lintpromote` (with `-unused`) runs the host's preparation
+step - `LintPromotions` and `PromoteUnit` until nothing is left, a rebuild with
+the project as donor when a promotion asks for one - before the lint.
+
+## What is still open
+
+- References inside library bodies (a library symbol's uses in other library
+  units' implementations): not searched; a host would promote the units that
+  can hold one first - the candidate rule is a visibility question for the
+  spec before it is code.
+- Promotion re-decides a unit's `$IF` questions in place only when every unit
+  its `uses` names is loaded; otherwise it asks for a rebuild.

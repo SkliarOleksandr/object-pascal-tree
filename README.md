@@ -351,6 +351,12 @@ usable.
   kicks off analysis on a worker thread (see [Asynchronous
   analysis](#asynchronous-analysis)); the demo shows live `phase done/total`
   progress and swaps in the finished model without ever freezing the editor.
+- **Light library units** - the demo's `Light libraries` checkbox analyzes
+  the IDE's library and Studio sources interface-only (`LightPaths`): the
+  analysis takes about half the time and the memory, the project's own
+  units bind exactly as before, a library file opened in a tab is promoted to
+  a full analysis in the background, and the uses lint promotes what it needs
+  first (`docs/library-light-mode.md`).
 - **Syntax highlighting for SynEdit** (`TPasTreeSynHighlighter`) - a real
   `TSynCustomHighlighter` driven by PasTree's own lexer/preprocessor/parser,
   not a regex approximation: keyword/identifier/number/string/comment/

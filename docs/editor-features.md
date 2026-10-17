@@ -1357,3 +1357,28 @@ A diagnostic per row (hint severity, `DiagnosticTag.Unnecessary` greys the
 entry out) or a code action "remove unused unit" - the row's range is the
 entry's name; a row with `Doubts` should not offer the quick fix, or offer
 it with the doubt in its title.
+
+## 13. Light library units (`TPasSemaProject.LightPaths` + demo wiring)
+
+With library units analyzed interface-only (`docs/library-light-mode.md`;
+the demo's `Light libraries` checkbox) every feature above answers for the
+project's own units exactly as in a full analysis, and for library code from
+its interfaces:
+
+- **Go-to-declaration** into a library unit lands on its interface
+  declaration, as before. **Go to implementation** of a library routine and
+  anything reading a library body (hover over a body, semantic types inside
+  it) needs the unit promoted: the demo promotes a light unit when its file
+  opens in a tab (`TPasAsyncSession.CreateForPromotion`), and the tab's marks
+  refresh when the promotion lands.
+- **Find References / callers** of a library symbol: own code and library
+  interfaces; library bodies are not searched. Dispatch FROM a library body
+  into an own override is not seen.
+- **Find All Defines, Defines at cursor, Options at cursor** on a light
+  unit's file see its interface and its implementation `uses` - the text a
+  light unit is preprocessed to.
+- **Unused Units** (12) - a light lint is on the safe side by itself; the
+  demo runs `LintPromotions` and promotes what it names first, after which
+  the rows are the full analysis's.
+- **Rename** of a library identifier is refused whatever the mode (it is
+  under `LibraryPaths`).

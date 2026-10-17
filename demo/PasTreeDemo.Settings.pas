@@ -19,6 +19,7 @@ unit PasTreeDemo.Settings;
       Highlighter=1
       Threading=1
       HighlightColor=16032864
+      LightLibraries=0
 
       [Recent]
       Project0=C:\Repos\...\Some.dproj
@@ -56,6 +57,13 @@ type
     procedure WriteInt(const AName: string; AValue: Integer);
     function ReadString(const AName, ADefault: string): string;
     procedure WriteString(const AName, AValue: string);
+    { The Light libraries checkbox (TPasSemaProject.LightPaths): library
+      units interface-only. Default OFF - the demo shows the analyzer whole
+      unless asked; [Settings] LightLibraries=1. }
+    function GetLightLibraries: Boolean;
+    procedure SetLightLibraries(AValue: Boolean);
+    property LightLibraries: Boolean read GetLightLibraries
+      write SetLightLibraries;
 
     { Moves AProjectFile to the front, or inserts it there. Existence is NOT
       checked here: a project on a disconnected network share is still the last
@@ -83,6 +91,7 @@ const
   SEC_SETTINGS = 'Settings';
   SEC_RECENT = 'Recent';
   KEY_PROJECT = 'Project';
+  SET_LIGHTLIBRARIES = 'LightLibraries';
 
 function DefaultSettingsFile: string;
 begin
@@ -153,6 +162,16 @@ end;
 procedure TDemoSettings.WriteString(const AName, AValue: string);
 begin
   FIni.WriteString(SEC_SETTINGS, AName, AValue);
+end;
+
+function TDemoSettings.GetLightLibraries: Boolean;
+begin
+  Result := ReadInt(SET_LIGHTLIBRARIES, 0) <> 0;
+end;
+
+procedure TDemoSettings.SetLightLibraries(AValue: Boolean);
+begin
+  WriteInt(SET_LIGHTLIBRARIES, Ord(AValue));
 end;
 
 procedure TDemoSettings.AddRecent(const AProjectFile: string);

@@ -124,6 +124,8 @@ begin
     Ok('capped at RECENT_MAX', Length(LSet.Recent) = RECENT_MAX);
 
     LSet.WriteInt('Threading', 1);
+    Ok('Light libraries: off by default', not LSet.LightLibraries);
+    LSet.LightLibraries := True;
     LSet.Save;
   finally
     LSet.Free;
@@ -139,6 +141,10 @@ begin
         [RECENT_MAX + 5]));
     Ok('a stored value round-trips', LSet.ReadInt('Threading', 0) = 1);
     Ok('an absent value falls back', LSet.ReadInt('NoSuchKey', 42) = 42);
+    Ok('Light libraries round-trips', LSet.LightLibraries);
+    LSet.LightLibraries := False;
+    Ok('...and turns off again', not LSet.LightLibraries and
+      (LSet.ReadInt('LightLibraries', 7) = 0));
   finally
     LSet.Free;
   end;

@@ -206,6 +206,12 @@ type
       they touch): most of the memory saving without giving up the
       incremental paths. }
     chkIncremental: TCheckBox;
+    { Light library units (TPasSemaProject.LightPaths): the units under the
+      IDE's library and browsing paths and the Studio sources are analyzed
+      interface-only - LightTrees says which trees. Opening one of them in a
+      tab promotes it to a full analysis (TryPromoteOpenTab); the uses lint
+      promotes what it needs first (PrepareLint). Persisted, default off. }
+    chkLightLibs: TCheckBox;
     cbHighlightColor: TColorBox; // background color for "same identifier" highlight
     cbTypeColor: TColorBox;      // foreground color of a TYPE name (semantic)
     splLeft: TSplitter;
@@ -327,6 +333,7 @@ type
     procedure cbHighlightColorChange(Sender: TObject);
     procedure cbHighlightColorGetColors(Sender: TCustomColorBox; Items: TStrings);
     procedure cbTypeColorChange(Sender: TObject);
+    procedure chkLightLibsClick(Sender: TObject);
     procedure cbTypeColorGetColors(Sender: TCustomColorBox; Items: TStrings);
     procedure FindActionUpdate(Sender: TObject);
     procedure FindActionExecute(Sender: TObject);
@@ -465,6 +472,12 @@ type
       a refusal starts an ordinary rebuild. See chkIncremental. }
     FAsyncModule: Boolean;
     FAsyncModulePath: string;
+    { ...and that module run is a PROMOTION of a light library unit opened in
+      a tab (CreateForPromotion), not an edit. FPromoteTried: the files whose
+      promotion was refused for good (not `promote-needs-rebuild`, which
+      rebuilds), lower-cased - not asked again until the next build. }
+    FAsyncPromote: Boolean;
+    FPromoteTried: TDictionary<string, Boolean>;
     { Files edited since the last COMPLETED analysis. The fast path applies to
       exactly one changed unit; two dirty tabs go straight to a rebuild (the
       library offers no multi-module entry point, and looping the single-module
@@ -675,6 +688,13 @@ type
       caller must do an ordinary rebuild. True only means the session STARTED
       - the guards may still refuse, which AsyncTimerTick handles. }
     function TryModuleReanalyze(const APath: string): Boolean;
+    // The light trees for the next analysis: none unless chkLightLibs.
+    function LightTrees: TArray<string>;
+    // Starts the promotion of the first open tab whose unit is light.
+    procedure TryPromoteOpenTab;
+    // Promotes what the uses lint over AMids would otherwise answer as not
+    // known (LintPromotions), synchronously; the navigator is rebuilt.
+    procedure PrepareLint(const AMids: TArray<Integer>);
     procedure CancelAsync;
     procedure AsyncTimerTick(Sender: TObject);
     procedure EditorChange(Sender: TObject);
@@ -1927,6 +1947,7 @@ begin
   LMid := FNav.ModelIdOf(LFilePath);
   if LMid < 0 then
     Exit;
+  PrepareLint([LMid]);
   LRows := FindUnusedUses(FNav, [LMid]);
   LTab := SearchTabFor(LMid, -6, stkUnused);
   PopulateFindRefTab(LTab, Format('Unused units in %s (%d)',
@@ -1956,6 +1977,7 @@ begin
       LMids := LMids + [LMid];
   Screen.Cursor := crHourGlass;
   try
+    PrepareLint(LMids);
     LRows := FindUnusedUses(FNav, LMids);
   finally
     Screen.Cursor := crDefault;
@@ -1990,6 +2012,7 @@ begin
       LMids := LMids + [LMid];
   Screen.Cursor := crHourGlass;
   try
+    PrepareLint(LMids);
     LRows := FindUnreferencedUnits(FNav, LMids);
   finally
     Screen.Cursor := crDefault;
@@ -2951,6 +2974,7 @@ begin
   FFileList := TStringList.Create;
   FOpenFiles := TStringList.Create;
   FRenameBuffers := TDictionary<string, string>.Create;
+  FPromoteTried := TDictionary<string, Boolean>.Create;
   FDirtyFiles := TStringList.Create;   // edits since the last analysis
   FMsgLog := TList<TPasMsgRow>.Create;
   FMsgVisible := TList<Integer>.Create;
@@ -3012,6 +3036,7 @@ begin
   FOpenFiles.Free;
   FDirtyFiles.Free;
   FRenameBuffers.Free;
+  FPromoteTried.Free;
   FFileList.Free;
 end;
 
@@ -3881,7 +3906,13 @@ begin
       FReparseTimer.Enabled := False;
       FReparseTimer.Enabled := True;
     end;
-  end;
+  end
+  // A light library unit (chkLightLibs) has no bodies: opening it promotes
+  // it to a full analysis, in the background. A build in flight first lands
+  // (AsyncTimerTick asks again).
+  else if Assigned(FSemaProject) and not Assigned(FAsyncSession) and
+     FSemaProject.IsLight(FSemaProject.ModelIdOf(LTab.FilePath)) then
+    TryPromoteOpenTab;
 end;
 
 { go-to-declaration }
@@ -4404,6 +4435,7 @@ begin
     // toggling it stays instant instead of costing a re-analysis.
     FSemaProject.ReportUnresolvedMembers := True;
     FSemaProject.ReportGuessedIfs := True;   // same philosophy: show the guesses
+    FSemaProject.LightPaths := LightTrees;   // chkLightLibs
     // The .dproj's DCC_* switches and console target, as msbuild hands them
     // to dcc: $IFOPT and CONSOLE read them.
     if Assigned(FDProj) then
@@ -4600,6 +4632,9 @@ begin
   // speed is, and an EOutOfMemory reads as an analyzer defect unless the
   // figure that explains it is on screen. AllocatedBytes is what the analysis
   // HOLDS (models, token streams, node arenas) - see its own comment.
+  if FSemaProject.LightCount > 0 then
+    Log(Format('Light libraries: %d of %d units analyzed interface-only.',
+      [FSemaProject.LightCount, FSemaProject.ModelCount]));
   if LDiagListed = LDiagTotal then
     Log(Format('Done: %d units, %d diagnostics in %s, %s held (%s).',
       [FSemaProject.ModelCount, LDiagTotal, ElapsedText(AElapsedMs),
@@ -4741,6 +4776,7 @@ begin
   FAsyncSession.SetSingleThreadedInner(cbThreading.ItemIndex = 0);
   FAsyncSession.SetReportUnresolvedMembers(True);   // see the synchronous path
   FAsyncSession.SetReportGuessedIfs(True);
+  FAsyncSession.SetLightPaths(LightTrees);   // chkLightLibs
   if Assigned(FDProj) then   // see the synchronous path
   begin
     FAsyncSession.SetSwitchStart(PasStartOptState(FDProj.Switches));
@@ -4858,6 +4894,166 @@ begin
   Result := True;
 end;
 
+{ Light library units (chkLightLibs). The trees are the navigator's library
+  set - the IDE's library and browsing paths and the bare RTL sources
+  (ExtraSearchPaths) - plus the Studio source tree whole, minus every tree
+  that holds the project's own sources: the project directory and the files
+  the .dproj lists (PasTree exempts the project directory itself, but a file
+  the .dproj lists from elsewhere is only safe if no tree holds it). }
+function TfrmMain.LightTrees: TArray<string>;
+var
+  LTrees, LOwn: TArray<string>;
+  LOwnTree: Boolean;
+begin
+  Result := nil;
+  if not chkLightLibs.Checked then
+    Exit;
+  LTrees := ExtraSearchPaths;
+  if FStudioRoot <> '' then
+    LTrees := LTrees + [TPath.Combine(FStudioRoot, 'source')];
+  LOwn := nil;
+  if FProjectDir <> '' then
+    LOwn := [IncludeTrailingPathDelimiter(FProjectDir) + 'x.pas'];
+  if Assigned(FDProj) then
+    LOwn := LOwn + FDProj.Files;
+  for var LTree in PasNormalizeDirTrees(LTrees) do
+  begin
+    LOwnTree := False;
+    for var LFile in LOwn do
+      if PasUnderDirTrees(LFile, [LTree]) then
+      begin
+        LOwnTree := True;
+        Break;
+      end;
+    if not LOwnTree then
+      Result := Result + [LTree];
+  end;
+end;
+
+procedure TfrmMain.chkLightLibsClick(Sender: TObject);
+begin
+  // Another closure: a rebuild, loud - its Done line says how many units are
+  // light now.
+  if Assigned(FSemaProject) and (FMainSource <> '') then
+    StartAsyncAnalyze('', {ALoud} True);
+end;
+
+{ Promotion of a light unit opened in a tab - CreateForPromotion, on the
+  module path's terms: the session owns FSemaProject while it runs (see
+  TryModuleReanalyze), and AsyncTimerTick takes it back. Only with
+  incremental analysis on: a build with it off released the maps the module
+  path needs (DemoteClosedUnits), and the promotion would be refused. }
+procedure TfrmMain.TryPromoteOpenTab;
+var
+  LPath: string;
+  LTab: TSourceTab;
+begin
+  if not Assigned(FSemaProject) or Assigned(FAsyncSession) or
+     (FSemaProject.LightCount = 0) then
+    Exit;
+  LPath := '';
+  for var LIdx := 0 to FOpenFiles.Count - 1 do
+  begin
+    LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
+    if FSemaProject.IsLight(FSemaProject.ModelIdOf(LTab.FilePath)) and
+       not FPromoteTried.ContainsKey(LowerCase(LTab.FilePath)) then
+    begin
+      LPath := LTab.FilePath;
+      Break;
+    end;
+  end;
+  if LPath = '' then
+    Exit;
+  if not chkIncremental.Checked then
+  begin
+    FPromoteTried.AddOrSetValue(LowerCase(LPath), True);
+    Log(TPath.GetFileName(LPath) + ' is analyzed interface-only (Light ' +
+      'libraries); turn on Incremental to analyze its bodies when it opens.');
+    Exit;
+  end;
+  ClearLink;
+  FreeAndNil(FNav);            // rebuilt after the swap, over the new models
+  InvalidateComplPipeline;
+  FAsyncModule := True;
+  FAsyncPromote := True;
+  FAsyncModulePath := LPath;
+  FAsyncLoud := False;
+  FAnalyzing := True;          // see TryModuleReanalyze
+  FAsyncSession := TPasAsyncSession.CreateForPromotion(FSemaProject, LPath);
+  for var LIdx := 0 to FOpenFiles.Count - 1 do
+  begin
+    LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
+    FAsyncSession.SetBuffer(LTab.FilePath, LTab.Editor.Text);
+  end;
+  for var LRen in FRenameBuffers do
+    if FOpenFiles.IndexOf(LRen.Key) < 0 then
+      FAsyncSession.SetBuffer(LRen.Key, LRen.Value);
+  FAnalyzeOverhead := '';
+  FAsyncEditSerial := FEditSerial;
+  FAsyncStart := TStopwatch.StartNew;
+  FAsyncSession.Start;
+  lblProgress.Caption := 'promoting...';
+  FAsyncTimer.Enabled := True;
+end;
+
+{ The uses lint reads library bodies and initializations a light unit does
+  not have. LintPromotions names the units it would answer as not known;
+  promoting them (on this thread - the lint itself is synchronous here too)
+  makes the answer exact. A promotion asking for a rebuild leaves its doubts
+  on the rows, and the log says so. }
+procedure TfrmMain.PrepareLint(const AMids: TArray<Integer>);
+var
+  LNav: TPasNavigator;
+  LNeed: TArray<string>;
+  LTried: TDictionary<string, Boolean>;
+  LMore: Boolean;
+  LDone, LRefused: Integer;
+begin
+  if not Assigned(FSemaProject) or (FSemaProject.LightCount = 0) or
+     Assigned(FAsyncSession) then
+    Exit;
+  LDone := 0;
+  LRefused := 0;
+  LTried := TDictionary<string, Boolean>.Create;
+  try
+    repeat
+      LMore := False;
+      LNav := NewNavigator;
+      try
+        LNeed := LintPromotions(LNav, AMids);
+      finally
+        LNav.Free;
+      end;
+      for var LFile in LNeed do
+        if LTried.TryAdd(LowerCase(LFile), True) then
+        begin
+          if LDone = 0 then
+          begin
+            ClearLink;
+            FreeAndNil(FNav);   // the promotions replace models it holds
+          end;
+          if FSemaProject.PromoteUnit(LFile) then
+          begin
+            Inc(LDone);
+            LMore := True;
+          end
+          else
+            Inc(LRefused);
+        end;
+    until not LMore;
+  finally
+    LTried.Free;
+  end;
+  if not Assigned(FNav) then
+  begin
+    FNav := NewNavigator;
+    RefreshSemanticTokens;
+  end;
+  if LDone + LRefused > 0 then
+    Log(Format('Lint: %d light unit(s) promoted first, %d refused - the rows ' +
+      'naming those say what is not known.', [LDone, LRefused]));
+end;
+
 // The Stop button: user-requested cancellation of the in-flight analysis.
 // Cancellation is cooperative and now lands MID-PASS (see FCancelCheck in
 // TPasSemaProject), so the drain inside CancelAsync is short even on a big
@@ -4890,6 +5086,7 @@ begin
       FSemaProject := FAsyncSession.TakeProject;
       FAnalyzing := False;
       FAsyncModule := False;
+      FAsyncPromote := False;
       if Assigned(FSemaProject) and not Assigned(FNav) then
       begin
         FNav := NewNavigator;
@@ -4946,6 +5143,35 @@ begin
     end;
     if LError <> '' then
       Log('Module reanalysis error: ' + LError);
+    if FAsyncPromote then
+    begin
+      FAsyncPromote := False;
+      if LAccepted then
+      begin
+        DemoteLibraryText;
+        lblProgress.Caption := 'done';
+        Log(Format('Promoted %s to a full analysis - %d ms (%s)',
+          [TPath.GetFileName(FAsyncModulePath), FAsyncStart.ElapsedMilliseconds,
+           LTimings]));
+        TryPromoteOpenTab;   // another light tab may be waiting
+      end
+      else if Pos('promote-needs-rebuild', LTimings) > 0 then
+      begin
+        // Its `` questions need a rebuild to be decided exactly; the
+        // project, its parse donor, keeps the unit full in it.
+        Log('Promotion of ' + TPath.GetFileName(FAsyncModulePath) +
+          ' needs a rebuild (' + LTimings + ') - rebuilding.');
+        StartAsyncAnalyze(FAsyncModulePath, {ALoud} False);
+      end
+      else
+      begin
+        FPromoteTried.AddOrSetValue(LowerCase(FAsyncModulePath), True);
+        lblProgress.Caption := 'done';
+        Log('Could not promote ' + TPath.GetFileName(FAsyncModulePath) +
+          ' (' + LTimings + ') - its bodies stay unanalyzed.');
+      end;
+      Exit;
+    end;
     if LAccepted then
     begin
       // The run rehydrated what it needed (the edited unit, redone
@@ -5033,6 +5259,11 @@ begin
     Log('Background analysis error: ' + LError);
   if FAsyncLoud and Assigned(FSemaProject) then
     ReportProjectResult(FAsyncStart.ElapsedMilliseconds);
+  // A new build: a refused promotion may go through now; a light tab opened
+  // meanwhile gets its body.
+  FPromoteTried.Clear;
+  if not Assigned(FAsyncSession) and not FReparseTimer.Enabled then
+    TryPromoteOpenTab;
 end;
 
 procedure TfrmMain.ReparseTimerTick(Sender: TObject);
@@ -5449,6 +5680,13 @@ begin
     Ord(chkShowErrors.Checked)) <> 0;
   chkShowSyntax.Checked := FSettings.ReadInt(SET_SHOWSYNTAX,
     Ord(chkShowSyntax.Checked)) <> 0;
+  // Before any project opens (LoadSettings runs first): no analysis to redo.
+  chkLightLibs.OnClick := nil;
+  try
+    chkLightLibs.Checked := FSettings.LightLibraries;
+  finally
+    chkLightLibs.OnClick := chkLightLibsClick;
+  end;
   // The remembered RAD Studio, matched by BDS version so a stale .ini (the
   // install was removed) falls back to PopulateStudios' default silently.
   var LStudio := FSettings.ReadString(SET_STUDIO, '');
@@ -5474,6 +5712,7 @@ begin
   FSettings.WriteInt(SET_TYPECOLOR, Integer(FTypeColor));
   FSettings.WriteInt(SET_SHOWERRORS, Ord(chkShowErrors.Checked));
   FSettings.WriteInt(SET_SHOWSYNTAX, Ord(chkShowSyntax.Checked));
+  FSettings.LightLibraries := chkLightLibs.Checked;
   if (cbStudio.ItemIndex >= 0) and (cbStudio.ItemIndex <= High(FStudios)) then
     FSettings.WriteString(SET_STUDIO, FormatFloat('0.0',
       FStudios[cbStudio.ItemIndex].Version, TFormatSettings.Invariant));
