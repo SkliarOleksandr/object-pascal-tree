@@ -6837,6 +6837,24 @@ begin
     (Length(LScan.IntfUses) = 2) and (LScan.IntfUses[0] = 'A.B') and
     (LScan.IntfUses[1] = 'C') and (Length(LScan.ImplUses) = 1) and
     (LScan.ImplUses[0] = 'D'));
+  LScan := PasScanWords('unit U;'#13#10'interface'#13#10 +
+    'uses A, {$IFDEF X}B1, B2{$ELSE}C{$ENDIF}, D;'#13#10 +
+    'implementation'#13#10'end.'#13#10, False);
+  Ok('word scan: conditional `uses` alternatives with no comma between',
+    string.Join(',', LScan.IntfUses) = 'A,B1,B2,C,D');
+  LScan := PasScanWords(
+    'unit U;'#13#10'interface'#13#10'uses A.B, C in ''c.pas'';'#13#10 +
+    'const IntfOnly = 1;'#13#10 +
+    '{ implementation in a comment }'#13#10 +
+    'implementation'#13#10 +
+    'uses D;'#13#10 +
+    '{$I Body.inc}'#13#10'(*$INCLUDE ''Two.inc''*)'#13#10'{$I+}'#13#10 +
+    'procedure P;'#13#10'begin'#13#10 +
+    '  // LineComment'#13#10 +
+    '  S := ''InString'' + #13#10 + Code1;'#13#10 +
+    '  X := $FF + 1e5 + &Begin;'#13#10 +
+    '  { BraceComment } (* ParenComment *)'#13#10 +
+    'end;'#13#10'end.'#13#10, False);
   Ok('word scan: the include arguments, not the $I+ switch',
     (Length(LScan.Includes) = 2) and (LScan.Includes[0] = 'Body.inc') and
     (LScan.Includes[1] = 'Two.inc'));
@@ -6882,10 +6900,12 @@ procedure TestLightDemand;
 const
   LIBU =
     'unit LibU;'#13#10'interface'#13#10'type'#13#10 +
-    '  TFoo = class'#13#10'    procedure M;'#13#10'  end;'#13#10 +
+    '  TFoo = class'#13#10'    procedure M;'#13#10 +
+    '    procedure V; virtual;'#13#10'  end;'#13#10 +
     'procedure UProc;'#13#10'const'#13#10'  UK = 1;'#13#10 +
     'implementation'#13#10 +
     'procedure TFoo.M;'#13#10'begin'#13#10'end;'#13#10 +
+    'procedure TFoo.V;'#13#10'begin'#13#10'end;'#13#10 +
     'procedure UProc;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10;
   LIBV =
     'unit LibV;'#13#10'interface'#13#10'uses LibU;'#13#10 +
@@ -6900,11 +6920,15 @@ const
     'unit LibW;'#13#10'interface'#13#10'procedure WProc;'#13#10 +
     'implementation'#13#10'uses LibU;'#13#10 +
     'procedure WProc;'#13#10'begin'#13#10 +
-    '  UProc;'#13#10'  TFoo.Create.M;'#13#10'end;'#13#10'end.'#13#10;
+    '  UProc;'#13#10'  TFoo.Create.M;'#13#10'end;'#13#10 +
+    'type'#13#10'  TWImpl = class(TFoo)'#13#10'  end;'#13#10'end.'#13#10;
   LIBX =
     'unit LibX;'#13#10'interface'#13#10'uses LibV;'#13#10 +
     'procedure XProc;'#13#10 +
-    'implementation'#13#10 +
+    'implementation'#13#10'uses LibU;'#13#10 +
+    'type'#13#10'  TXImpl = class(TFoo)'#13#10 +
+    '    procedure V; override;'#13#10'  end;'#13#10 +
+    'procedure TXImpl.V;'#13#10'begin'#13#10'end;'#13#10 +
     'procedure XProc;'#13#10'begin'#13#10 +
     '  { UProc is only named in this comment }'#13#10 +
     '  GetFoo.M;'#13#10'end;'#13#10'end.'#13#10;
@@ -6913,7 +6937,9 @@ const
     'const'#13#10'  YC = 2;'#13#10'procedure YProc;'#13#10 +
     'implementation'#13#10 +
     'procedure YProc;'#13#10'var'#13#10'  S: string;'#13#10'begin'#13#10 +
-    '  S := ''UProc'';'#13#10'end;'#13#10'end.'#13#10;
+    '  S := ''UProc'';'#13#10'end;'#13#10 +
+    '{$DEFINE YDEF}'#13#10'{$IFDEF YDEF}'#13#10'const'#13#10'  YD = 1;'#13#10 +
+    '{$ENDIF}'#13#10'end.'#13#10;
   LIBZ =
     'unit LibZ;'#13#10'interface'#13#10'procedure ZProc;'#13#10 +
     'implementation'#13#10'uses LibQ;'#13#10 +
@@ -6928,8 +6954,8 @@ const
     'unit LibR;'#13#10'interface'#13#10'uses LibU;'#13#10 +
     'procedure RProc;'#13#10 +
     'implementation'#13#10 +
-    'procedure RProc;'#13#10'begin'#13#10'  UProc;'#13#10'end;'#13#10 +
-    'end.'#13#10;
+    'procedure RProc;'#13#10'begin'#13#10'  UProc;'#13#10 +
+    '  if Length(''ab'') > 0 then;'#13#10'end;'#13#10'end.'#13#10;
   UOWN2 =
     'unit UOwn2;'#13#10'interface'#13#10'procedure Go2;'#13#10 +
     'implementation'#13#10'uses LibV, LibX, LibY, LibZ;'#13#10 +
@@ -7155,6 +7181,65 @@ begin
     Ok('batch: ...LibZ still light, V''s body bound',
       LLight.IsLight(LLight.ModelIdOf(Lib('LibZ.pas'))) and
       (Pos('libv.pas|9|13', Refs(LNav, 'TFoo')) > 0));
+    // The hierarchy, the defines and the built-ins, on a fresh light project.
+    FreeAndNil(LNav);
+    FreeAndNil(LLight);
+    LLight := Run(True);
+    LNav := TPasNavigator.Create(LLight);
+    Ok('hierarchy: light misses the bodies'' descendants, and says so',
+      (Length(LNav.FindDescendants(LLight.ModelIdOf(LUPath),
+        FileSym(LLight, LUPath, 'TFoo'))) = 1) and (LNav.NotSearched > 0) and
+      (Length(LFullNav.FindDescendants(LFull.ModelIdOf(LUPath),
+        FileSym(LFull, LUPath, 'TFoo'))) = 3));
+    Ok('hierarchy: ensured, FindDescendants as the full analysis',
+      PasEnsureDemand(LNav,
+        function(ANav: TPasNavigator): TPasDemand
+        begin
+          Result := ANav.DemandDescendants(ANav.Project.ModelIdOf(LUPath),
+            FileSym(ANav.Project, LUPath, 'TFoo'));
+        end, LRes, LRounds) and
+      (Length(LNav.FindDescendants(LLight.ModelIdOf(LUPath),
+        FileSym(LLight, LUPath, 'TFoo'))) = 3) and (LNav.NotSearched = 0));
+    Ok('hierarchy: ...and FindOverrides of TFoo.V',
+      PasEnsureDemand(LNav,
+        function(ANav: TPasNavigator): TPasDemand
+        begin
+          Result := ANav.DemandOverrides(ANav.Project.ModelIdOf(LUPath),
+            FileSym(ANav.Project, LUPath, 'V'));
+        end, LRes, LRounds) and
+      (Length(LNav.FindOverrides(LLight.ModelIdOf(LUPath),
+        FileSym(LLight, LUPath, 'V'))) = 2) and (LNav.NotSearched = 0));
+    Ok('defines: light misses a define past the stop, and says so',
+      (Length(LNav.FindDefineReferences('YDEF')) = 0) and
+      (LNav.NotSearched = 1) and
+      (Length(LFullNav.FindDefineReferences('YDEF')) = 2));
+    Ok('defines: the preprocess-only completion finds it, LibY stays light',
+      PasEnsureDemand(LNav,
+        function(ANav: TPasNavigator): TPasDemand
+        begin
+          Result := ANav.DemandDefineReferences('YDEF');
+        end, LRes, LRounds) and (LRes.Preprocessed = 1) and
+      (LRes.Promoted = 0) and LLight.IsLight(LLight.ModelIdOf(Lib('LibY.pas'))) and
+      (Length(LNav.FindDefineReferences('YDEF')) = 2) and
+      (LNav.NotSearched = 0));
+    Ok('defines: ...FindDefines as the full analysis',
+      PasEnsureDemand(LNav,
+        function(ANav: TPasNavigator): TPasDemand
+        begin
+          Result := ANav.DemandDefines;
+        end, LRes, LRounds) and
+      (Length(LNav.FindDefines) = Length(LFullNav.FindDefines)) and
+      (LNav.NotSearched = 0));
+    Ok('builtins: FindBuiltinReferences as the full analysis',
+      PasEnsureDemand(LNav,
+        function(ANav: TPasNavigator): TPasDemand
+        begin
+          Result := ANav.DemandBuiltin('Length');
+        end, LRes, LRounds) and
+      (Length(LNav.FindBuiltinReferences('Length')) =
+       Length(LFullNav.FindBuiltinReferences('Length'))) and
+      (Length(LFullNav.FindBuiltinReferences('Length')) > 0) and
+      (LNav.NotSearched = 0));
     // The lint's demand is LintPromotions'.
     Ok('lint: DemandLint is LintPromotions as a demand',
       Length(DemandLint(LNav, [LLight.ModelIdOf(TPath.Combine(LOwn,

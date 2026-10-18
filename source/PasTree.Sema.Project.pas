@@ -167,6 +167,14 @@ type
     UnitId: Integer;
     Scope: TPasDemandScope;
     Words: TArray<string>;
+    // Words are tested against the words inside compiler directives.
+    Directives: Boolean;
+    // The answer needs a unit's preprocessing only (its directives), not its
+    // analysis: a light unit goes to TPasDemand.Preprocess, not Full.
+    Preprocess: Boolean;
+    // Not '': this one file, whatever the scope - loaded or not (a file a
+    // host opens that only the full closure has: taken in when it is).
+    FilePath: string;
   end;
 
   { What a query needs analyzed in full before it can answer as a full
@@ -181,6 +189,10 @@ type
   TPasDemand = record
     Full: TArray<string>;
     LoadOnly: TArray<string>;
+    // Light units whose whole text a query needs only preprocessed - their
+    // conditional symbols past the light stream's stop (EnsureFull's
+    // preprocess-only completion, DefineSide).
+    Preprocess: TArray<string>;
     NotSearched: Integer;
     LightUnits: Integer;
     NotLoadedUnits: Integer;
@@ -205,10 +217,24 @@ type
   TPasEnsureResult = record
     Outcome: TPasEnsureOutcome;
     Promoted: Integer;     // light units made full
+    Preprocessed: Integer; // light units given their preprocess-only completion
     Loaded: Integer;       // units the closure had not loaded, taken in
     Refused: TArray<string>;   // 'file: reason'
     Ms: Int64;
     Note: string;          // the escalation's or the rebuild's reason
+  end;
+
+  { A conditional-symbol site (`$DEFINE`, `$IFDEF` ...) of a light unit,
+    recorded by the preprocess-only completion (EnsureFull over
+    TPasDemand.Preprocess): the unit's whole text preprocessed as a full
+    analysis would, its define references kept beside the model (whose
+    stream stays stopped - the rehydration identity holds), each with the
+    position a navigator's hit needs. }
+  TPasSideDefine = record
+    Ref: TPasDefineRef;
+    FilePath: string;
+    Line, Col: Integer;
+    Snippet: string;
   end;
 
   { The implementation word index's entry for one file (PasTree.WordIndex):
@@ -220,6 +246,7 @@ type
     covers the whole text; Unreadable - no text: every word matches. }
   TPasWordEntry = record
     Words: TArray<Cardinal>;
+    DirWords: TArray<Cardinal>;   // inside directives (PasTree.WordIndex)
     UsedNames: TArray<string>;
     UsedPaths: TArray<string>;
     UsedResolved: Boolean;
@@ -557,9 +584,19 @@ type
     // Host thread only, like every other call on a finished project.
     FWordIdx: TDictionary<string, TPasWordEntry>;
     FNotLoadedPath: TDictionary<string, string>;
+    // The preprocess-only completion's rows, by lower-cased path.
+    FDefineSide: TDictionary<string, TArray<TPasSideDefine>>;
     FEnsuredVolume: Int64;
     FLightTotal: Int64;
     FEscalationPercent: Integer;
+    function HasDefineSide(AMid: Integer): Boolean;
+    { Preprocesses APaths' (light units') whole texts in parallel as a full
+      analysis would and keeps their define references (FDefineSide). A
+      unit whose stream asks a `$IF` question only the full analysis's
+      declared pass answers is returned in ANeedFull instead - a promotion
+      gives it its exact stream. }
+    procedure PreprocessSide(const APaths: TArray<string>;
+      out ANeedFull: TArray<string>; out ADone: Integer);
     // AnalyzeModuleOnly's body, shared with PromoteUnit (see the mode).
     function RunModulePath(const APath: string;
       AMode: TPasModulePathMode): Boolean;
@@ -2010,6 +2047,9 @@ type
       - built as a demand would build it, its implementation for a loaded
       unit, the whole text otherwise - spells AWord. }
     function WordIndexHas(const APath, AWord: string): Boolean;
+    { The preprocess-only completion of light unit AMid, when EnsureFull made
+      one (False for any other model: a full unit's stream holds them all). }
+    function DefineSide(AMid: Integer; out ARows: TArray<TPasSideDefine>): Boolean;
     // Analyze every .pas/.dpr under a directory (indexed first).
     procedure AnalyzeDirectory(const ARoot: string);
     { Incremental analysis of ARoots' transitive uses closure, in two waves -
@@ -2420,6 +2460,7 @@ begin
   ReleaseUsesMemo;
   FWordIdx.Free;
   FNotLoadedPath.Free;
+  FDefineSide.Free;
   FByUnitName.Free;
   FSystemUnitLock.Free;
   FHostPins.Free;
@@ -22975,7 +23016,7 @@ end;
 
 function TPasDemand.IsEmpty: Boolean;
 begin
-  Result := (Full = nil) and (LoadOnly = nil);
+  Result := (Full = nil) and (LoadOnly = nil) and (Preprocess = nil);
 end;
 
 procedure TPasSemaProject.EnsureWords(const APaths: TArray<string>;
@@ -23011,8 +23052,8 @@ var
   end;
 
   // AFile's words with every include under it, transitively.
-  procedure AddIncludes(const AKey: string; var AWords: TArray<Cardinal>;
-    var AUses: TArray<string>; AVisited: TDictionary<string, Boolean>);
+  procedure AddIncludes(const AKey: string; var AEntry: TPasWordEntry;
+    AVisited: TDictionary<string, Boolean>);
   var
     LI: string;
     LScan: TPasWordScan;
@@ -23023,9 +23064,10 @@ var
     for LI in LSub do
       if AVisited.TryAdd(LI, True) and LIncScans.TryGetValue(LI, LScan) then
       begin
-        AWords := PasWordSetUnion(AWords, LScan.Words);
-        AUses := AUses + LScan.IntfUses + LScan.ImplUses;
-        AddIncludes(LI, AWords, AUses, AVisited);
+        AEntry.Words := PasWordSetUnion(AEntry.Words, LScan.Words);
+        AEntry.DirWords := PasWordSetUnion(AEntry.DirWords, LScan.DirWords);
+        AEntry.UsedNames := AEntry.UsedNames + LScan.IntfUses + LScan.ImplUses;
+        AddIncludes(LI, AEntry, AVisited);
       end;
   end;
 
@@ -23124,12 +23166,12 @@ begin
       else
       begin
         LEntry.Words := LScans[LIdx].Words;
+        LEntry.DirWords := LScans[LIdx].DirWords;
         LEntry.UsedNames := LScans[LIdx].IntfUses + LScans[LIdx].ImplUses;
         LEntry.Size := LSizes[LIdx];
         var LVisited := TDictionary<string, Boolean>.Create;
         try
-          AddIncludes(LowerCase(LTodo[LIdx]), LEntry.Words, LEntry.UsedNames,
-            LVisited);
+          AddIncludes(LowerCase(LTodo[LIdx]), LEntry, LVisited);
         finally
           LVisited.Free;
         end;
@@ -23204,7 +23246,7 @@ var
   LWave, LNext, LLightPaths: TArray<string>;
   LWaveNodes, LNextNodes: TArray<Integer>;
   LRevAllStart, LRevAll, LRevIntfStart, LRevIntf: TArray<Integer>;
-  LWanted, LIn, LInI, LNeeded: TArray<Boolean>;
+  LWanted, LWantedPP, LIn, LInI, LNeeded: TArray<Boolean>;
   LQueue: TArray<Integer>;
   LHashes: TArray<Cardinal>;
   LEntry: TPasWordEntry;
@@ -23384,62 +23426,78 @@ begin
       Result.TotalVolume := FLightTotal;
     FLightTotal := Result.TotalVolume;
     SetLength(LWanted, LN);
+    SetLength(LWantedPP, LN);
     for var LAsk in AAsks do
     begin
-      if (LAsk.UnitId < 0) or (LAsk.UnitId >= LCount) or
-         (FModels[LAsk.UnitId] = nil) then
-        Continue;
       LScope := LAsk.Scope;
-      // Every unit uses System and SysInit without naming them.
-      if (FModels[LAsk.UnitId].UnitNameLower = 'system') or
-         (FModels[LAsk.UnitId].UnitNameLower = 'sysinit') then
-        LScope := dsAll;
-      SetLength(LIn, 0);
-      SetLength(LIn, LN);
-      case LScope of
-        dsSelf:
-          LIn[LAsk.UnitId] := True;
-        dsUnit:
-          begin
+      if LAsk.FilePath <> '' then
+      begin
+        SetLength(LIn, 0);
+        SetLength(LIn, LN);
+        LKey := LowerCase(TPath.GetFullPath(LAsk.FilePath));
+        if FByPath.TryGetValue(LKey, LT) and (LT >= 0) then
+          LIn[LT] := True
+        else if LNL.TryGetValue(LKey, LT) then
+          LIn[LT] := True;
+      end
+      else
+      begin
+        // dsAll needs no declaring unit (a compiler-provided name has none).
+        if (LScope <> dsAll) and ((LAsk.UnitId < 0) or
+           (LAsk.UnitId >= LCount) or (FModels[LAsk.UnitId] = nil)) then
+          Continue;
+        // Every unit uses System and SysInit without naming them.
+        if (LScope <> dsAll) and
+           ((FModels[LAsk.UnitId].UnitNameLower = 'system') or
+            (FModels[LAsk.UnitId].UnitNameLower = 'sysinit')) then
+          LScope := dsAll;
+        SetLength(LIn, 0);
+        SetLength(LIn, LN);
+        case LScope of
+          dsSelf:
             LIn[LAsk.UnitId] := True;
-            for LIdx := LRevAllStart[LAsk.UnitId] to
-                LRevAllStart[LAsk.UnitId + 1] - 1 do
-              LIn[LRevAll[LIdx]] := True;
-          end;
-        dsMember:
-          begin
-            // I(U): backwards over interface edges alone.
-            SetLength(LInI, 0);
-            SetLength(LInI, LN);
-            SetLength(LQueue, LN);
-            LInI[LAsk.UnitId] := True;
-            LQueue[0] := LAsk.UnitId;
-            LQLen := 1;
-            LSet := 0;
-            while LSet < LQLen do
+          dsUnit:
             begin
-              LNode := LQueue[LSet];
-              Inc(LSet);
-              for LIdx := LRevIntfStart[LNode] to LRevIntfStart[LNode + 1] - 1 do
-                if not LInI[LRevIntf[LIdx]] then
-                begin
-                  LInI[LRevIntf[LIdx]] := True;
-                  LQueue[LQLen] := LRevIntf[LIdx];
-                  Inc(LQLen);
-                end;
-            end;
-            // ... and every unit with an edge into it.
-            for LSet := 0 to LQLen - 1 do
-            begin
-              LNode := LQueue[LSet];
-              LIn[LNode] := True;
-              for LIdx := LRevAllStart[LNode] to LRevAllStart[LNode + 1] - 1 do
+              LIn[LAsk.UnitId] := True;
+              for LIdx := LRevAllStart[LAsk.UnitId] to
+                  LRevAllStart[LAsk.UnitId + 1] - 1 do
                 LIn[LRevAll[LIdx]] := True;
             end;
-          end;
-        dsAll:
-          for LNode := 0 to LN - 1 do
-            LIn[LNode] := True;
+          dsMember:
+            begin
+              // I(U): backwards over interface edges alone.
+              SetLength(LInI, 0);
+              SetLength(LInI, LN);
+              SetLength(LQueue, LN);
+              LInI[LAsk.UnitId] := True;
+              LQueue[0] := LAsk.UnitId;
+              LQLen := 1;
+              LSet := 0;
+              while LSet < LQLen do
+              begin
+                LNode := LQueue[LSet];
+                Inc(LSet);
+                for LIdx := LRevIntfStart[LNode] to LRevIntfStart[LNode + 1] - 1 do
+                  if not LInI[LRevIntf[LIdx]] then
+                  begin
+                    LInI[LRevIntf[LIdx]] := True;
+                    LQueue[LQLen] := LRevIntf[LIdx];
+                    Inc(LQLen);
+                  end;
+              end;
+              // ... and every unit with an edge into it.
+              for LSet := 0 to LQLen - 1 do
+              begin
+                LNode := LQueue[LSet];
+                LIn[LNode] := True;
+                for LIdx := LRevAllStart[LNode] to LRevAllStart[LNode + 1] - 1 do
+                  LIn[LRevAll[LIdx]] := True;
+              end;
+            end;
+          dsAll:
+            for LNode := 0 to LN - 1 do
+              LIn[LNode] := True;
+        end;
       end;
       LHashes := nil;
       for LWord in LAsk.Words do
@@ -23447,6 +23505,10 @@ begin
       for LNode := 0 to LN - 1 do
       begin
         if not LIn[LNode] or LWanted[LNode] or not IsCandidate(LNode) then
+          Continue;
+        // Its preprocess-only completion is enough, and done or asked.
+        if LAsk.Preprocess and (LWantedPP[LNode] or
+           ((LNode < LCount) and HasDefineSide(LNode))) then
           Continue;
         LMatch := LAsk.Words = nil;
         if not LMatch then
@@ -23456,6 +23518,15 @@ begin
             LMatch := True
           else if LEntry.Unreadable then
             LMatch := True
+          else if LAsk.Directives then
+          begin
+            for var LH in LHashes do
+              if PasWordSetHas(LEntry.DirWords, LH) then
+              begin
+                LMatch := True;
+                Break;
+              end;
+          end
           else
             for var LH in LHashes do
               if PasWordSetHas(LEntry.Words, LH) then
@@ -23465,9 +23536,16 @@ begin
               end;
         end;
         if LMatch then
-          LWanted[LNode] := True;
+          if LAsk.Preprocess then
+            LWantedPP[LNode] := True
+          else
+            LWanted[LNode] := True;
       end;
     end;
+    // A unit both asks want is made full: that covers its preprocessing.
+    for LNode := 0 to LN - 1 do
+      if LWanted[LNode] then
+        LWantedPP[LNode] := False;
     // The light units: made full where they are.
     LDemandedNL := 0;
     for LNode := 0 to LCount - 1 do
@@ -23476,6 +23554,11 @@ begin
         Result.Full := Result.Full + [LPaths[LNode]];
         Inc(Result.LightUnits);
         Inc(Result.Volume, SizeOf_(LNode));
+      end
+      else if LWantedPP[LNode] then
+      begin
+        Result.Preprocess := Result.Preprocess + [LPaths[LNode]];
+        Inc(Result.LightUnits);
       end;
     // The units nobody loaded: reachable only through the not-loaded units
     // above them - those are needed too, to be loaded on the way.
@@ -23483,10 +23566,11 @@ begin
     SetLength(LQueue, LN);
     LQLen := 0;
     for LNode := LCount to LN - 1 do
-      if LWanted[LNode] then
+      if LWanted[LNode] or LWantedPP[LNode] then
       begin
         Inc(LDemandedNL);
-        Inc(Result.Volume, SizeOf_(LNode));
+        if LWanted[LNode] then
+          Inc(Result.Volume, SizeOf_(LNode));
         LNeeded[LNode] := True;
         LQueue[LQLen] := LNode;
         Inc(LQLen);
@@ -23933,6 +24017,80 @@ begin
   end;
 end;
 
+function TPasSemaProject.HasDefineSide(AMid: Integer): Boolean;
+begin
+  Result := (FDefineSide <> nil) and (AMid >= 0) and (AMid < FModels.Count) and
+    FDefineSide.ContainsKey(LowerCase(FFiles[AMid]));
+end;
+
+function TPasSemaProject.DefineSide(AMid: Integer;
+  out ARows: TArray<TPasSideDefine>): Boolean;
+begin
+  ARows := nil;
+  Result := IsLight(AMid) and (FDefineSide <> nil) and
+    FDefineSide.TryGetValue(LowerCase(FFiles[AMid]), ARows);
+end;
+
+procedure TPasSemaProject.PreprocessSide(const APaths: TArray<string>;
+  out ANeedFull: TArray<string>; out ADone: Integer);
+var
+  LRows: TArray<TArray<TPasSideDefine>>;
+  LFull: TArray<Boolean>;
+begin
+  ANeedFull := nil;
+  ADone := 0;
+  SetLength(LRows, Length(APaths));
+  SetLength(LFull, Length(APaths));
+  ParallelFor(High(APaths),
+    procedure(AIdx: Integer)
+    var
+      LPP: TPasPreprocessor;
+      LPre: TPasPreprocessed;
+      LRow: TPasSideDefine;
+    begin
+      LPP := RentPP;
+      try
+        try
+          LPP.OnDeclared := SeedDeclaredQuery();
+          LPre := ProcessUnit(LPP, APaths[AIdx], False);
+          if (Length(LPre.UnresolvedDeclared) > 0) or
+             (Length(LPre.UnresolvedSymbols) > 0) then
+          begin
+            LFull[AIdx] := True;
+            Exit;
+          end;
+          for var LRef in LPre.DefineRefs do
+          begin
+            if (LRef.FileId < 0) or (LRef.FileId > High(LPre.Files)) then
+              Continue;
+            LRow.Ref := LRef;
+            LRow.FilePath := LPre.FileNames[LRef.FileId];
+            LPre.Files[LRef.FileId].OffsetToLineCol(LRef.Start, LRow.Line,
+              LRow.Col);
+            LRow.Snippet := LPre.Files[LRef.FileId].LineText(LRow.Line);
+            LRows[AIdx] := LRows[AIdx] + [LRow];
+          end;
+        except
+          // Unreadable now: a promotion says why, or refuses.
+          LFull[AIdx] := True;
+        end;
+      finally
+        ReturnPP(LPP);
+      end;
+    end);
+  if FDefineSide = nil then
+    FDefineSide := TDictionary<string, TArray<TPasSideDefine>>.Create;
+  for var LIdx := 0 to High(APaths) do
+    if LFull[LIdx] then
+      ANeedFull := ANeedFull + [APaths[LIdx]]
+    else
+    begin
+      FDefineSide.AddOrSetValue(LowerCase(TPath.GetFullPath(APaths[LIdx])),
+        LRows[LIdx]);
+      Inc(ADone);
+    end;
+end;
+
 function TPasSemaProject.EnsureFull(const ADemand: TPasDemand): TPasEnsureResult;
 var
   LSW: TStopwatch;
@@ -24008,6 +24166,24 @@ begin
     end;
     if LFull <> nil then
       PromoteBatch(LFull, Result);
+    // The preprocess-only completions; a stream that needs the declared
+    // pass is a promotion's.
+    LFull := nil;
+    for var LF in ADemand.Preprocess do
+    begin
+      LMid := ModelIdOf(LF);
+      if (LMid >= 0) and IsLight(LMid) and not HasDefineSide(LMid) then
+        LFull := LFull + [LF];
+    end;
+    if LFull <> nil then
+    begin
+      var LNeedFull: TArray<string>;
+      var LDone: Integer;
+      PreprocessSide(LFull, LNeedFull, LDone);
+      Inc(Result.Preprocessed, LDone);
+      if LNeedFull <> nil then
+        PromoteBatch(LNeedFull, Result);
+    end;
   finally
     LFullSet.Free;
   end;

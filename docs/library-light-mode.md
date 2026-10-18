@@ -106,8 +106,10 @@ interface section and parses fully whatever the tree says.
   cut it). An `implementation` coming from an include stops the unit there.
   What lies after the stop is not recorded: Find All Defines, Options at
   cursor and the `defines` answers see a light unit's interface and its
-  implementation `uses` only, and a conditional left open across the stop is
-  not reported. A `$IF` written in its implementation is never asked - the
+  implementation `uses` only until their demand is met (`DemandDefines`,
+  `DemandPosition` - a preprocess-only completion beside the model, or the
+  unit promoted), and a conditional left open across the stop is not
+  reported. A `$IF` written in its implementation is never asked - the
   full analysis answers it, the light one has nothing to answer it about.
   Every preprocess of a light unit takes the same stop - its load, the
   declared pass's rounds, a rehydration after `DemoteText`, a demoted parse
@@ -219,8 +221,10 @@ fourth checks it:
 
 1. **Demand** - per query, the units whose bodies can change its answer:
    `TPasNavigator.DemandReferences` / `DemandReferencesOfAll` /
-   `DemandCreations` / `DemandDestructions` / `DemandFile`,
-   `PasTree.Sema.Lint.DemandLint`; underneath,
+   `DemandCreations` / `DemandDestructions` / `DemandFile` and the rest
+   of the families table below, `DemandFilePath` for a library file the
+   light closure has not loaded (taken in when the full closure would have
+   it), `PasTree.Sema.Lint.DemandLint`; underneath,
    `TPasSemaProject.DemandOf(asks)` and `DemandOfFiles(files)`. A
    `TPasDemand` lists the files to make fully analyzed (`Full`), the units
    to load light on the way to one (`LoadOnly`), and how many units the
@@ -325,17 +329,17 @@ nothing.
 
 | family | queries | demand | since |
 | --- | --- | --- | --- |
-| references | `FindReferences`, `FindAssignments`, `CollectReferencesOfAll` | each symbol (each link of a property's redeclaration chain) by its scope, its name spelled | 0.118.0 |
-| creations | `FindCreations` | `dsMember` of the class's unit, one of the class's constructor names spelled | 0.118.0 |
-| destructions | `FindDestructions` | `dsMember` of the class's unit, `Free`/`Destroy`/`FreeAndNil`/`Release` spelled | 0.118.0 |
-| uses lint | `FindUnusedUses`, `FindUnreferencedUnits` | `DemandLint` = `LintPromotions` (0.115.0) | 0.118.0 |
-| one library file | outline, `SemanticTokens`, `GotoImplementation`, `RoutineImplNode` in a library file | `DemandFile`: the unit itself | 0.118.0 |
-| interface-level | `IdentAt`, `SymbolAt`, `ResolveDecl`, `GotoDeclaration`, completion, hover, `ProjectOutline` | none: a light unit's interface is analyzed in full | - |
-| hierarchy | `FindDescendants`, `FindOverrides`, `FindImplementations`, `FindInterfaceImplementors`, `RenameFamily` | not wired yet (an implementation-section class is not seen) | next |
-| defines and options | `FindDefines`, `FindDefineReferences`, `DefinesAt`, `OptionsAt` in a library file | not wired yet (the preprocessor stops at a light unit's implementation) | next |
-| built-in names | `FindBuiltinReferences` | not wired yet | next |
-| unit references | `FindUnitReferences` | none needed: a light unit's implementation `uses` entries are recorded | - |
-| renames | `PlanRename`, `PlanUnitRename` | own symbols: the references rule; library symbols are refused anyway | next |
+| references | `FindReferences`, `FindAssignments`, `CollectReferencesOfAll` | `DemandReferences` / `DemandReferencesOfAll`: each symbol (each link of a property's redeclaration chain) by its scope, its name spelled | 0.118.0 |
+| creations | `FindCreations` | `DemandCreations`: `dsMember` of the class's unit, one of the class's constructor names spelled | 0.118.0 |
+| destructions | `FindDestructions` | `DemandDestructions`: `dsMember` of the class's unit, `Free`/`Destroy`/`FreeAndNil`/`Release` spelled | 0.118.0 |
+| uses lint | `FindUnusedUses`, `FindUnreferencedUnits`, `LintPromotions` | `DemandLint` = `LintPromotions` (0.115.0) | 0.118.0 |
+| one library file | `SemanticTokens`, `RoutineImplNode`, a library file's outline | `DemandFile`: the unit itself | 0.118.0 |
+| positions | `IdentAt`, `SymbolAt`, `SymbolAtFile`, `ResolveDecl`, `GotoDeclaration`, `GotoImplementation`, `GotoBareInherited`, `MethodAt`, `InterfaceMethodAt`, `InterfaceAt`, `TypeAt`, `AssignableAt`, `ClassAt`, `UnitAt`, `BuiltinNameAt`, `DefineAt`, `DefineSpanAt`, `IfNameAt`, `GotoDefine`, `DefinesAt`, `OptionsAt` | `DemandPosition`: the file when it is light, and the unit of the symbol there when it is light (Go to Implementation lands in its body) | 0.119.0 |
+| hierarchy | `FindDescendants`, `FindOverrides`, `FindImplementations`, `FindInterfaceImplementors`, `RenameFamily` | `DemandDescendants` / `DemandOverrides` / `DemandImplementations` / `DemandInterfaceImplementors` / `DemandRenameFamily`: every type below the question's types over the heritage edges, by name and alias, in `dsMember` of its unit; an implicit root (`TObject`, `IInterface`, `IDispatch`) by `class` / `interface` / `dispinterface` - an escalation | 0.119.0 |
+| defines | `FindDefines`, `FindDefineReferences` | `DemandDefines` / `DemandDefineReferences`: the light units with a `$DEFINE` (the name) in a directive past their stop - a preprocess-only completion, no promotion; units nobody loaded taken in light first | 0.119.0 |
+| built-in names | `FindBuiltinReferences` | `DemandBuiltin`: every light and not-loaded unit spelling the name | 0.119.0 |
+| renames | `PlanRename` | `DemandRename`: the references of the rename family and a property's chain, and the family's hierarchy (a library symbol is refused anyway) | 0.119.0 |
+| none needed | `FindUnitReferences`, `UnitDeclHit`, `UnitHeaderTarget`, `PlanUnitRename` (a light unit's implementation `uses` entries are recorded); `DeclHit`, `ProjectOutline`, completion, hover, `IsProjectDefined`, `IsUnderLibraryPath`, `RenameBlockReason`, `ModelIdOf`, `IncludeSiteTarget` (interfaces and project facts, analyzed in full); `FindFormSites`, `FormRoleOf`, `DescribeForm` (the form files) | - | - |
 
 A query without a row here is a defect: every new public query of
 `TPasNavigator` or `PasTree.Sema.Lint` gets one - a demand, or "none,
@@ -356,6 +360,39 @@ Of 3,704 own symbols asked, two escalated - a property redeclared in an own
 class, whose chain reaches the VCL's `Font`. Every answer of every wired
 family equal to the full analysis's, `NotSearched` 0, on this closure and on
 the demo's (209 units).
+
+With every family wired (0.119.0), the same closure, 25,273 questions over
+27 families, every answer equal and `NotSearched` 0 (and on the demo's
+closure, 82,590 questions; the two spring4d packages, 38,674). What the
+light side paid, per family, for the questions whose demand did anything
+(an escalation is answered by the rebuild without light paths - a full
+analysis, about 3.3 s on this closure - and is counted, not timed):
+
+- **Find All Defines**: one question, the preprocess-only completion of
+  1,623 light units in five rounds, 21 units promoted (their streams ask a
+  `$IF` only the declared pass answers) and 541 taken in, 1.2 s - no unit
+  made full for its directives alone.
+- **Define references**: 13 names, five with work - 68 completions, one
+  promotion, at most 83 ms.
+- **Built-in references**: 10 names (`Length`, `Inc`, `Exit`, `SizeOf`, ...);
+  nine are spelled across the library and escalate, one promoted 315 units
+  in 2.2 s.
+- **Hierarchy**: of 211 types asked for descendants, nine needed bodies and
+  seven escalated (`TObject`, `IInterface` and the hubs below them); of 1,438
+  methods asked for overrides, 47 - 33 escalated, mostly `Destroy` and the
+  other slots `TObject` introduces - the rest promoted at most 2.7 s worth;
+  rename families six, five escalated; interface implementors one escalation
+  (`IInterface`).
+- **Positions** and **one library file**: one unit promoted per question,
+  at most 0.3 s.
+- **Renames** of 3,600 own symbols: nothing beyond the references' demand
+  of the same symbols, asked first.
+
+A refusal of `RenameFamily` with several refusals in the family is the one
+at the type declared first in the source (file, line, column): it was the
+first the walk met, and the walk's order follows model numbering, which a
+light closure does not share - two client renames named a different
+overloaded type in the two modes.
 
 An own symbol's demand is the same rule, and it is empty unless a library
 unit's implementation lists an own unit - the patched library copies a
@@ -440,8 +477,11 @@ a library sample (`-sym:Unit.Type.Member`, a default set of RTL and VCL
 names; each on a fresh light project unless `-shared`), and every n-th
 position of the sample's library files (`-libpos:<n>`, the one-library-file
 family). The light side meets each question's demand first, as a host does
-(`PasEnsureDemand`, a rebuild with the donor on `eoNeedsRebuild`, one
-without light paths on `eoEscalate`). Answers are compared by identity -
+(`PasEnsureDemand`, a rebuild with the donor on `eoNeedsRebuild`; on
+`eoEscalate` the host's rebuild without light paths is a full analysis of
+the same configuration - the full side, which G2 holds byte-identical to
+it - so the question is answered there and the light project is started
+again for the next one). Answers are compared by identity -
 file, line, column, kind, name - never by model id. It prints per family the
 questions, the equal and differing answers and the light answers whose
 `NotSearched` was not 0, then what each question cost the light side
@@ -451,12 +491,8 @@ a family not wired yet is listed as an expected difference with its counts.
 
 ## What is still open
 
-- The hierarchy family (`FindDescendants` and the override and
-  implementation queries - a class an implementation section declares),
-  defines and options in a light unit's implementation (the preprocessor
-  stops there; a preprocess-only completion records them aside), built-in
-  names, and renames: their demands are the next stage; until then the
-  smoke tool reports them as expected differences.
+- Every public query has its demand (0.119.0, the table above); the smoke
+  tool reports no expected difference any more.
 - The hosts (demo, language server, MCP server) still promote one unit at a
   time and run `LintPromotions`; they move to `PasEnsureDemand` before every
   Find All / references / callers / related query, with progress, cancel and

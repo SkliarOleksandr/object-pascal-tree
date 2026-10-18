@@ -347,7 +347,10 @@ usable.
   an implementation word index), `EnsureFull` promotes them in one batch -
   or says a full rebuild is cheaper - and the answer is the full analysis's,
   with `NotSearched` counting what a query run without it left out;
-  `tools/PasTreeLightSmoke` checks that query by query. What a host stops
+  `tools/PasTreeLightSmoke` checks that query by query. Since 0.119.0 every
+  public query has its demand - the hierarchy, the conditional symbols (a
+  preprocess-only completion that leaves the light unit light), the
+  built-ins, positions and renames included. What a host stops
   seeing, the exempt rules, promotion, the lint and the demand:
   `docs/library-light-mode.md`.
 

@@ -9,9 +9,10 @@ program PasTreeLightSmoke;
   symbols, units, names and positions. The light side first meets each
   question's DEMAND (TPasNavigator.Demand*, PasTree.Sema.Lint.DemandLint)
   the way a host does - PasEnsureDemand, a rebuild with the project as
-  parse donor when EnsureFull asks for one, a rebuild without light paths
-  when it escalates - and then asks. Answers are compared by IDENTITY - file,
-  line, column, kind, name - never by model id (the two closures number
+  parse donor when EnsureFull asks for one; when it escalates, the host's
+  rebuild without light paths is the full side itself, which answers - and
+  then asks. Answers are compared by IDENTITY - file, line, column, kind,
+  name - never by model id (the two closures number
   their models differently). A family whose demand is wired must answer
   exactly what the full analysis answers, with NotSearched = 0; a family not
   wired yet is reported as an expected difference with its counts, never
@@ -85,11 +86,16 @@ type
     Wired: Boolean;
     Queries, Equal, Diff, NotSearchedBad, FullRows, LightRows: Integer;
     Samples: TArray<string>;
+    // What meeting the family's demands cost the light side: the questions
+    // whose demand did something (Worked), and its sums.
+    Worked, Rounds, Promoted, Loaded, Preprocessed, Rebuilds,
+      Escalations: Integer;
+    EnsureMs, MaxMs: Int64;
   end;
 
   TCostRow = record
     Text: string;
-    Rounds, Promoted, Loaded, Rebuilds, Escalations: Integer;
+    Rounds, Promoted, Loaded, Preprocessed, Rebuilds, Escalations: Integer;
     Ms: Int64;
     Refused: Integer;
   end;
@@ -111,6 +117,8 @@ var
   GLightRuns: Integer;       // light analyses run (the first one included)
   GWordMs: Int64;            // the first demand's cost: the word index
   GWordBytes: Int64;
+  GEscalatedQ: Boolean;     // the current question escalated: see EnsureLight
+  GResets: Integer;         // light projects started again after an escalation
 
 { ---- configuration -------------------------------------------------------- }
 
@@ -441,6 +449,7 @@ begin
     Inc(GCur.Rounds, LRounds);
     Inc(GCur.Promoted, LRes.Promoted);
     Inc(GCur.Loaded, LRes.Loaded);
+    Inc(GCur.Preprocessed, LRes.Preprocessed);
     Inc(GCur.Refused, Length(LRes.Refused));
     Inc(GCur.Ms, LSW.ElapsedMilliseconds);
     if GVerbose then
@@ -457,10 +466,16 @@ begin
         end;
       eoEscalate:
         begin
+          // The host's answer is a rebuild without light paths - a full
+          // analysis of the same configuration, which the full side is
+          // (G2 holds the two runs byte-identical). This question is
+          // answered from it; the light project stays as it is.
           Inc(GCur.Escalations);
           if GVerbose then
             Writeln(ErrOutput, '      ', LRes.Note);
-          ReplaceLight(NewProject(False, GLight, False));
+          GEscalatedQ := True;
+          Inc(GCur.Ms, LSW.ElapsedMilliseconds);
+          Exit;
         end;
     else
       Inc(GCur.Ms, LSW.ElapsedMilliseconds);
@@ -472,11 +487,38 @@ end;
 
 { One question to both sides. ADemand nil: a family not wired yet - the
   light side answers as it is. }
+procedure NoteCost(const AFamily: string; const ABefore: TCostRow);
+var
+  LStat: TFamilyStat;
+  LMs: Int64;
+begin
+  if not GStats.TryGetValue(AFamily, LStat) then
+    Exit;
+  if (GCur.Promoted = ABefore.Promoted) and (GCur.Loaded = ABefore.Loaded) and
+     (GCur.Preprocessed = ABefore.Preprocessed) and
+     (GCur.Rebuilds = ABefore.Rebuilds) and
+     (GCur.Escalations = ABefore.Escalations) then
+    Exit;
+  LMs := GCur.Ms - ABefore.Ms;
+  Inc(LStat.Worked);
+  Inc(LStat.Rounds, GCur.Rounds - ABefore.Rounds);
+  Inc(LStat.Promoted, GCur.Promoted - ABefore.Promoted);
+  Inc(LStat.Loaded, GCur.Loaded - ABefore.Loaded);
+  Inc(LStat.Preprocessed, GCur.Preprocessed - ABefore.Preprocessed);
+  Inc(LStat.Rebuilds, GCur.Rebuilds - ABefore.Rebuilds);
+  Inc(LStat.Escalations, GCur.Escalations - ABefore.Escalations);
+  Inc(LStat.EnsureMs, LMs);
+  if LMs > LStat.MaxMs then
+    LStat.MaxMs := LMs;
+  GStats[AFamily] := LStat;
+end;
+
 procedure Ask(const AFamily, ALabel: string; const AQuery: TQueryFn;
   const ADemand: TPasDemandFunc);
 var
   LFull, LLight: TArray<string>;
   LNotSearched: Integer;
+  LBefore: TCostRow;
 begin
   if not Wanted(AFamily) then
     Exit;
@@ -486,12 +528,23 @@ begin
     on E: Exception do
       LFull := ['raised ' + E.ClassName + ': ' + E.Message];
   end;
+  GEscalatedQ := False;
+  LBefore := GCur;
   if Assigned(ADemand) then
     EnsureLight(ADemand);
   try
-    GLightNav.NotSearched := 0;
-    LLight := AQuery(GLightNav);
-    LNotSearched := GLightNav.NotSearched;
+    if GEscalatedQ then
+    begin
+      GFullNav.NotSearched := 0;
+      LLight := AQuery(GFullNav);
+      LNotSearched := GFullNav.NotSearched;
+    end
+    else
+    begin
+      GLightNav.NotSearched := 0;
+      LLight := AQuery(GLightNav);
+      LNotSearched := GLightNav.NotSearched;
+    end;
   except
     on E: Exception do
     begin
@@ -500,6 +553,14 @@ begin
     end;
   end;
   Note(AFamily, Assigned(ADemand), LFull, LLight, LNotSearched, ALabel);
+  NoteCost(AFamily, LBefore);
+  // An escalation means the light project has promoted most of what it
+  // may: every later question would escalate at once. A light one again.
+  if GEscalatedQ and (GLight.LightCount > 0) and (GLight.PromotedFiles <> nil) then
+  begin
+    ReplaceLight(NewProject(True, GLight, False));
+    Inc(GResets);
+  end;
 end;
 
 { ---- the questions -------------------------------------------------------- }
@@ -511,7 +572,80 @@ begin
   Result := FindSym(ANav.Project, AId, AMid, ASym);
 end;
 
-procedure AskSymbol(const AId: TSymId);
+{ A family whose answer needs no library body: wired, with an empty demand. }
+function NoDemand: TPasDemandFunc;
+begin
+  Result :=
+    function(ANav: TPasNavigator): TPasDemand
+    begin
+      Result := Default(TPasDemand);
+    end;
+end;
+
+// A symbol question's demand, the symbol resolved in the navigator's project.
+function SymDemand(const AId: TSymId; const AKind: string): TPasDemandFunc;
+begin
+  Result :=
+    function(ANav: TPasNavigator): TPasDemand
+    var
+      LM, LS: Integer;
+    begin
+      // Not in this closure (yet): its unit first, when the full closure
+      // has it (DemandFilePath).
+      if not FindSym(ANav.Project, AId, LM, LS) then
+        Exit(ANav.DemandFilePath(AId.MainFile));
+      Result := Default(TPasDemand);
+      if AKind = 'descendants' then
+        Result := ANav.DemandDescendants(LM, LS)
+      else if AKind = 'implementors' then
+        Result := ANav.DemandInterfaceImplementors(LM, LS)
+      else if AKind = 'overrides' then
+        Result := ANav.DemandOverrides(LM, LS)
+      else if AKind = 'implementations' then
+        Result := ANav.DemandImplementations(LM, LS)
+      else if AKind = 'rename-family' then
+        Result := ANav.DemandRenameFamily(LM, LS)
+      else if AKind = 'rename' then
+        Result := ANav.DemandRename(LM, LS)
+      else if AKind = 'file' then
+        Result := ANav.DemandFile(LM);
+    end;
+end;
+
+function PosDemand(const AFile: string; ALine, ACol: Integer): TPasDemandFunc;
+begin
+  Result :=
+    function(ANav: TPasNavigator): TPasDemand
+    begin
+      if ANav.ModelIdOf(AFile) < 0 then
+        Result := ANav.DemandFilePath(AFile)
+      else
+        Result := ANav.DemandPosition(ANav.ModelIdOf(AFile), ALine, ACol);
+    end;
+end;
+
+function DefinesDemand(const AName: string): TPasDemandFunc;
+begin
+  Result :=
+    function(ANav: TPasNavigator): TPasDemand
+    begin
+      if AName = '' then
+        Result := ANav.DemandDefines
+      else
+        Result := ANav.DemandDefineReferences(AName);
+    end;
+end;
+
+function BuiltinDemand(const AName: string): TPasDemandFunc;
+begin
+  Result :=
+    function(ANav: TPasNavigator): TPasDemand
+    begin
+      Result := ANav.DemandBuiltin(AName);
+    end;
+end;
+
+procedure AskSymbol(const AId: TSymId; AOwn: Boolean = False);
 var
   LKind: TSemaSymbolKind;
   LMid, LSym: Integer;
@@ -545,7 +679,7 @@ begin
       if Resolve(ANav, AId, LM, LS) then
         Result := ANav.DemandReferences(LM, LS)
       else
-        Result := Default(TPasDemand);
+        Result := ANav.DemandFilePath(AId.MainFile);
     end);
   if LKind in [skVar, skField, skProperty] then
     Ask('assignments', LLabel,
@@ -568,7 +702,7 @@ begin
         if Resolve(ANav, AId, LM, LS) then
           Result := ANav.DemandReferences(LM, LS)
         else
-          Result := Default(TPasDemand);
+          Result := ANav.DemandFilePath(AId.MainFile);
       end);
   if LIsClass then
   begin
@@ -589,7 +723,7 @@ begin
         if Resolve(ANav, AId, LM, LS) then
           Result := ANav.DemandCreations(LM, LS)
         else
-          Result := Default(TPasDemand);
+          Result := ANav.DemandFilePath(AId.MainFile);
       end);
     Ask('destructions', LLabel,
       function(ANav: TPasNavigator): TArray<string>
@@ -608,7 +742,7 @@ begin
         if Resolve(ANav, AId, LM, LS) then
           Result := ANav.DemandDestructions(LM, LS)
         else
-          Result := Default(TPasDemand);
+          Result := ANav.DemandFilePath(AId.MainFile);
       end);
   end;
   // A type's members at once: CollectReferencesOfAll.
@@ -646,7 +780,7 @@ begin
         LRefs := nil;
         var LM, LS: Integer;
         if not Resolve(ANav, AId, LM, LS) then
-          Exit(Default(TPasDemand));
+          Exit(ANav.DemandFilePath(AId.MainFile));
         var LModel := ANav.Project.Model(LM);
         for var LX := 0 to LModel.SymCount - 1 do
           if LModel.Symbols[LX].Scope = LModel.Symbols[LS].MemberScope then
@@ -657,8 +791,7 @@ begin
           end;
         Result := ANav.DemandReferencesOfAll(LRefs);
       end);
-  // Not wired yet (S11): asked as they are, reported as expected
-  // differences.
+  // The hierarchy family, the library file's bodies, the rename plan.
   if LKind = skType then
     Ask('descendants', LLabel,
       function(ANav: TPasNavigator): TArray<string>
@@ -671,7 +804,7 @@ begin
             Result := Result + [HitText(LH.Hit) + '|' + LH.TypeName + '|' +
               LH.ParentTypeName + '|' + IntToStr(Ord(LH.Kind)) + '|' +
               IntToStr(LH.Depth)];
-      end, nil);
+      end, SymDemand(AId, 'descendants'));
   if LIsIntf then
     Ask('interface-implementors', LLabel,
       function(ANav: TPasNavigator): TArray<string>
@@ -683,7 +816,7 @@ begin
           for var LH in ANav.FindInterfaceImplementors(LM, LS) do
             Result := Result + [HitText(LH.Hit) + '|' + LH.TypeName + '|' +
               LH.ViaTypeName + '|' + IntToStr(Ord(LH.Kind))];
-      end, nil);
+      end, SymDemand(AId, 'implementors'));
   if LIsRoutine then
   begin
     Ask('overrides', LLabel,
@@ -696,7 +829,7 @@ begin
           for var LH in ANav.FindOverrides(LM, LS) do
             Result := Result + [HitText(LH.Hit) + '|' + LH.TypeName + '|' +
               IntToStr(Ord(LH.Kind))];
-      end, nil);
+      end, SymDemand(AId, 'overrides'));
     Ask('implementations', LLabel,
       function(ANav: TPasNavigator): TArray<string>
       var
@@ -707,7 +840,7 @@ begin
           for var LH in ANav.FindImplementations(LM, LS) do
             Result := Result + [HitText(LH.Hit) + '|' + LH.TypeName + '|' +
               LH.ViaTypeName + '|' + IntToStr(Ord(LH.Kind))];
-      end, nil);
+      end, SymDemand(AId, 'implementations'));
     Ask('rename-family', LLabel,
       function(ANav: TPasNavigator): TArray<string>
       var
@@ -724,7 +857,7 @@ begin
             Result := Result + [HitText(LMem.Hit) + '|' + LMem.TypeName + '|' +
               IntToStr(Ord(LMem.Why))];
         end;
-      end, nil);
+      end, SymDemand(AId, 'rename-family'));
     Ask('routine-impl', LLabel,
       function(ANav: TPasNavigator): TArray<string>
       var
@@ -739,8 +872,27 @@ begin
                LLine, LCol) then
             Result := [Format('%s|%d|%d', [LowerCase(LFile), LLine, LCol])];
         end;
-      end, nil);
+      end, SymDemand(AId, 'file'));
   end;
+  // A rename of an own symbol (a library one is refused in both modes).
+  if AOwn and (LKind in [skType, skVar, skConst, skField, skRoutine,
+     skProperty]) then
+    Ask('rename-plan', LLabel,
+      function(ANav: TPasNavigator): TArray<string>
+      var
+        LM, LS: Integer;
+        LEdits: TArray<TPasRenameEdit>;
+        LErr: string;
+      begin
+        Result := nil;
+        if not Resolve(ANav, AId, LM, LS) then
+          Exit(One('unresolved'));
+        if not ANav.PlanRename(LM, LS, AId.Name + 'Rn', LEdits, LErr) then
+          Exit(One('refused: ' + LErr));
+        for var LE in LEdits do
+          Result := Result + [Format('%s|%d|%d|%s|%s', [LowerCase(LE.FilePath),
+            LE.Line, LE.Col, LE.OldText, LE.NewText])];
+      end, SymDemand(AId, 'rename'));
   Ask('decl-hit', LLabel,
     function(ANav: TPasNavigator): TArray<string>
     var
@@ -750,7 +902,7 @@ begin
       Result := nil;
       if Resolve(ANav, AId, LM, LS) and ANav.DeclHit(LM, LS, LHit) then
         Result := [HitText(LHit)];
-    end, nil);
+    end, SymDemand(AId, 'none'));
   Ask('form-sites', LLabel,
     function(ANav: TPasNavigator): TArray<string>
     var
@@ -761,7 +913,7 @@ begin
         for var LSite in ANav.FindFormSites(LM, LS) do
           Result := Result + [Format('%s|%d|%d|%d', [LowerCase(LSite.FilePath),
             LSite.Line, LSite.Col, Ord(LSite.Kind)])];
-    end, nil);
+    end, SymDemand(AId, 'none'));
 end;
 
 { A unit's questions: unit-level, then every n-th position of its text
@@ -786,7 +938,7 @@ begin
     LDemand :=
       function(ANav: TPasNavigator): TPasDemand
       begin
-        Result := ANav.DemandFile(ANav.ModelIdOf(LFile));
+        Result := ANav.DemandFilePath(LFile);
       end;
     Ask('library-file-tokens', TPath.GetFileName(LFile),
       function(ANav: TPasNavigator): TArray<string>
@@ -831,7 +983,7 @@ begin
       if LMid < 0 then
         Exit(One('unresolved'));
       Result := HitsText(ANav.FindUnitReferences(LMid));
-    end, nil);
+    end, NoDemand());
   Ask('unit-decl', TPath.GetFileName(LFile),
     function(ANav: TPasNavigator): TArray<string>
     var
@@ -846,7 +998,7 @@ begin
         Result := Result + [HitText(LHit)];
       if ANav.UnitHeaderTarget(LMid, LTarget) then
         Result := Result + [TargetText(LTarget)];
-    end, nil);
+    end, NoDemand());
   Ask('semantic-tokens', TPath.GetFileName(LFile),
     function(ANav: TPasNavigator): TArray<string>
     begin
@@ -857,7 +1009,7 @@ begin
       for var LT in ANav.SemanticTokens(LMid) do
         Result := Result + [Format('%d|%d|%s', [LT.RawToken, Ord(LT.Kind),
           BoolToStr(LT.IsDecl, True)])];
-    end, nil);
+    end, NoDemand());
   end;
   if AStride <= 0 then
     Exit;
@@ -940,7 +1092,7 @@ begin
               for var LO in ANav.OptionsAt(LMid, LL, LC) do
                 Result := Result + [Format('options-at|%s|%s|%d', [LO.Name,
                   LO.Value, Ord(LO.Origin)])];
-            end, LDemand);
+            end, PosDemand(LFile, LL, LC));
         end;
         while (LCol <= Length(LS)) and PasIsIdentChar(LS[LCol]) do
           Inc(LCol);
@@ -997,7 +1149,7 @@ begin
       for var LE in ANav.ProjectOutline(OwnMids(ANav)) do
         Result := Result + [LE.Head + '|' + LE.Owner + '|' + LE.Name + '|' +
           LE.UnitName + '|' + LE.Detail];
-    end, nil);
+    end, NoDemand());
   Ask('defines', 'all',
     function(ANav: TPasNavigator): TArray<string>
     begin
@@ -1005,9 +1157,10 @@ begin
       for var LD in ANav.FindDefines do
         Result := Result + [HitText(LD.Hit) + '|' + LD.Name + '|' +
           IntToStr(Ord(LD.Origin)) + '|' + BoolToStr(LD.Active, True)];
-    end, nil);
+    end, DefinesDemand(''));
   for var LName in ['MSWINDOWS', 'WIN64', 'WIN32', 'DEBUG', 'RELEASE',
-    'UNICODE', 'CPUX64', 'NEXTGEN'] do
+    'UNICODE', 'CPUX64', 'NEXTGEN', 'PUREPASCAL', 'X86ASM', 'POSIX',
+    'LINUX', 'ASSEMBLER'] do
     Ask('define-references', LName,
       function(ANav: TPasNavigator): TArray<string>
       begin
@@ -1015,14 +1168,14 @@ begin
         for var LD in ANav.FindDefineReferences(LName) do
           Result := Result + [HitText(LD.Hit) + '|' + IntToStr(Ord(LD.Kind)) +
             '|' + BoolToStr(LD.Active, True)];
-      end, nil);
+      end, DefinesDemand(LName));
   for var LName in ['Length', 'Inc', 'Exit', 'SizeOf', 'Assigned', 'High',
     'Ord', 'Copy', 'Integer', 'string'] do
     Ask('builtin-references', LName,
       function(ANav: TPasNavigator): TArray<string>
       begin
         Result := HitsText(ANav.FindBuiltinReferences(LName));
-      end, nil);
+      end, BuiltinDemand(LName));
 end;
 
 { ---- the report ----------------------------------------------------------- }
@@ -1038,7 +1191,7 @@ begin
   begin
     LStat := GStats[LName];
     Writeln(Format('%-24s %-6s %8d %8d %8d %8d %10d %10d', [LStat.Name,
-      IfThen(LStat.Wired, 'S10', 'S11'), LStat.Queries, LStat.Equal,
+      IfThen(LStat.Wired, 'yes', 'NO'), LStat.Queries, LStat.Equal,
       LStat.Diff, LStat.NotSearchedBad, LStat.FullRows, LStat.LightRows]));
     if LStat.Wired and ((LStat.Diff > 0) or (LStat.NotSearchedBad > 0)) then
       Result := False;
@@ -1051,9 +1204,23 @@ begin
     if LStat.Wired then
       Writeln('--- ', LStat.Name, ': DIFFERENCES (wired - a defect)')
     else
-      Writeln('--- ', LStat.Name, ': expected differences (S11)');
+      Writeln('--- ', LStat.Name, ': differences, demand not wired yet');
     for var LS in LStat.Samples do
       Writeln('  ', LS);
+  end;
+  Writeln('--- cost per family (light side: the questions whose demand did ' +
+    'something; an escalation is answered by the full analysis, its rebuild ' +
+    'not timed here) ---');
+  Writeln(Format('%-24s %8s %6s %8s %6s %8s %8s %8s %10s %8s', ['family',
+    'worked', 'rounds', 'promoted', 'loaded', 'preproc.', 'rebuilds',
+    'escal.', 'ensure ms', 'max ms']));
+  for var LName in GFamilyOrder do
+  begin
+    LStat := GStats[LName];
+    Writeln(Format('%-24s %8d %6d %8d %6d %8d %8d %8d %10d %8d', [LStat.Name,
+      LStat.Worked, LStat.Rounds, LStat.Promoted, LStat.Loaded,
+      LStat.Preprocessed, LStat.Rebuilds, LStat.Escalations, LStat.EnsureMs,
+      LStat.MaxMs]));
   end;
   Writeln('--- cost per question (light side) ---');
   Writeln(Format('%-48s %6s %8s %6s %8s %8s %8s %8s', ['question', 'rounds',
@@ -1065,7 +1232,8 @@ begin
   Writeln(Format('word index: first demand %d ms, %s held by it (measured ' +
     'as the allocation delta around the first demand)',
     [GWordMs, MemoryText(Max(0, GWordBytes))]));
-  Writeln(Format('light analyses: %d', [GLightRuns]));
+  Writeln(Format('light analyses: %d (%d after an escalation)', [GLightRuns,
+    GResets]));
 end;
 
 { ---- main ----------------------------------------------------------------- }
@@ -1149,7 +1317,7 @@ begin
       LSW := TStopwatch.StartNew;
       for var LI := 0 to LOwnIds.Count - 1 do
       begin
-        AskSymbol(LOwnIds[LI]);
+        AskSymbol(LOwnIds[LI], True);
         // An escalation left the light side a full analysis: the questions
         // after it would compare full with full. A light one again.
         if GLight.LightCount = 0 then
@@ -1191,7 +1359,10 @@ begin
           'System.Math.Max', 'System.StrUtils.IfThen', 'System.IOUtils.TPath',
           'System.IOUtils.TPath.Combine', 'Vcl.Controls.TControl.Visible',
           'Vcl.Forms.TForm', 'Winapi.Windows.GetTickCount',
-          'System.TypInfo.GetEnumName', 'System.Zip.TZipFile'];
+          'System.TypInfo.GetEnumName', 'System.Zip.TZipFile',
+          'System.IInterface', 'System.TInterfacedObject',
+          'System.Classes.TPersistent.Assign', 'System.Classes.TStrings',
+          'System.Classes.TThread.Execute', 'System.SysUtils.Exception.Create'];
       LLibIds := nil;
       for var LText in GSymArgs do
         if ResolveQualified(GFull, LText, LId) then
@@ -1221,7 +1392,8 @@ begin
       try
         for LId in LLibIds do
           if LDone.TryAdd(LowerCase(LId.MainFile), True) and
-             GLight.IsLightFile(LId.MainFile) then
+             (GLight.IsLightFile(LId.MainFile) or
+              (GLight.ModelIdOf(LId.MainFile) < 0)) then
           begin
             if not GShared then
               ReplaceLight(NewProject(True, GLight, False));

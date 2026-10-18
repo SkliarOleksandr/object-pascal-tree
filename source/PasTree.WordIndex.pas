@@ -47,6 +47,10 @@ type
     { The arguments of every `$I` / `$INCLUDE` directive, as written
       (quotes dropped), in text order - resolving them is the caller's. }
     Includes: TArray<string>;
+    { The identifiers inside compiler directives, over the same part of the
+      text as Words - the names a `$DEFINE`, `$IFDEF` or `Defined()`
+      spells, which Words leaves out with every other comment. }
+    DirWords: TPasWordSet;
   end;
 
 { The FNV-1a hash of an identifier's folded spelling (PasFoldChar, `&`
@@ -154,6 +158,7 @@ type
     Text: string;
     Pos, Len: Integer;                   // 1-based cursor
     Words: TList<Cardinal>;
+    DirWords: TList<Cardinal>;
     Collect: Boolean;                    // words are being recorded
     SeenImpl: Boolean;                   // past the first `implementation`
     Scan: TPasWordScan;
@@ -190,6 +195,21 @@ var
   LName, LArg: string;
   LIdx: Integer;
 begin
+  if Collect then
+  begin
+    LIdx := AStart;
+    while LIdx < AEnd do
+      if PasIsIdentStart(Text[LIdx]) then
+      begin
+        LName := '';
+        var LFrom := LIdx;
+        while (LIdx < AEnd) and PasIsIdentChar(Text[LIdx]) do
+          Inc(LIdx);
+        DirWords.Add(HashSlice(@Text[LFrom], LIdx - LFrom));
+      end
+      else
+        Inc(LIdx);
+  end;
   LIdx := AStart;
   while (LIdx < AEnd) and CharInSet(Text[LIdx], ['A'..'Z', 'a'..'z', '_']) do
     Inc(LIdx);
@@ -450,14 +470,13 @@ begin
     end;
     if (LName <> '') and not LAfterDot then
     begin
-      // `X in 'path'` - the word after the name is `in`; anything else is a
-      // clause this reader does not understand: stop at it, its words are
-      // scanned as ordinary text.
+      // `X in 'path'` - the word after the name is `in`. Any other word is a
+      // name of its own: conditional alternatives need no comma between
+      // them (`{$IFDEF A}mdb{$ELSE}DB{$ENDIF}, Next`), and stopping there
+      // lost every entry after them.
       if SameText(Copy(Text, LStart, LLen), 'in') then
         Continue;
       Flush;
-      Pos := LStart;
-      Exit;
     end;
     if LAfterDot then
       LName := LName + '.' + Copy(Text, LStart, LLen)
@@ -506,11 +525,27 @@ begin
   end;
 end;
 
+// AList sorted, duplicates dropped.
+function SortedSet(AList: TArray<Cardinal>): TArray<Cardinal>;
+var
+  LN: Integer;
+begin
+  TArray.Sort<Cardinal>(AList);
+  LN := 0;
+  for var LIdx := 0 to High(AList) do
+    if (LN = 0) or (AList[LN - 1] <> AList[LIdx]) then
+    begin
+      AList[LN] := AList[LIdx];
+      Inc(LN);
+    end;
+  SetLength(AList, LN);
+  Result := AList;
+end;
+
 function PasScanWords(const AText: string; AWholeText: Boolean): TPasWordScan;
 var
   LS: TWordScanner;
-  LArr: TArray<Cardinal>;
-  LIdx, LN: Integer;
+  LArr, LDir: TArray<Cardinal>;
 begin
   LS := Default(TWordScanner);
   LS.Text := AText;
@@ -518,6 +553,7 @@ begin
   LS.Len := Length(AText);
   LS.Collect := AWholeText;
   LS.Words := TList<Cardinal>.Create;
+  LS.DirWords := TList<Cardinal>.Create;
   try
     LS.Run;
     // No `implementation` keyword: the whole text is the answer.
@@ -527,24 +563,20 @@ begin
       LS.Pos := 1;
       LS.SeenImpl := False;
       LS.Collect := True;
+      LS.Words.Clear;
+      LS.DirWords.Clear;
       LS.Run;
       LS.Scan.FromImplementation := False;
     end;
-    LArr := LS.Words.ToArray;
+    LArr := SortedSet(LS.Words.ToArray);
+    LDir := SortedSet(LS.DirWords.ToArray);
   finally
+    LS.DirWords.Free;
     LS.Words.Free;
   end;
-  TArray.Sort<Cardinal>(LArr);
-  LN := 0;
-  for LIdx := 0 to High(LArr) do
-    if (LN = 0) or (LArr[LN - 1] <> LArr[LIdx]) then
-    begin
-      LArr[LN] := LArr[LIdx];
-      Inc(LN);
-    end;
-  SetLength(LArr, LN);
   Result := LS.Scan;
   Result.Words := LArr;
+  Result.DirWords := LDir;
   if AWholeText then
     Result.FromImplementation := False;
 end;

@@ -1377,11 +1377,14 @@ its interfaces:
   `PasEnsureDemand` - `docs/library-light-mode.md`, "Full answers in light
   mode"); without it library bodies are not searched and `NotSearched` says
   how many units were left out. Find All Assignments, Creations and
-  Destructions alike. Dispatch FROM a library body into an own override is
-  the hierarchy family, not wired yet.
+  Destructions alike; overrides and implementations in library bodies through
+  the hierarchy family's demand (`DemandOverrides`, 0.119.0).
 - **Find All Defines, Defines at cursor, Options at cursor** on a light
   unit's file see its interface and its implementation `uses` - the text a
-  light unit is preprocessed to.
+  light unit is preprocessed to - until their demand is met (`DemandDefines`,
+  `DemandDefineReferences`, `DemandPosition`): the whole text then, as in a
+  full analysis. Find Descendants, Overrides, Implementations, built-in
+  references and Rename have theirs too (`docs/library-light-mode.md`).
 - **Unused Units** (12) - a light lint is on the safe side by itself; the
   demo runs `LintPromotions` and promotes what it names first, after which
   the rows are the full analysis's.

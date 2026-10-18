@@ -791,6 +791,31 @@ const
     '  {$ENDIF}'#10 +                                         // 8
     'end.'#10;                                                // 9
 
+  { Two refusals in one family (0.119.0): a rename of TFq2.Go meets TFq2's
+    overload first, then - through IFq - TFq1's; the answer is the refusal
+    at the type declared first, whatever order the walk met them in. }
+  UNIT_FAM3 =
+    'unit NavFam3;'#10 +                                  // 1
+    'interface'#10 +                                      // 2
+    'type'#10 +                                           // 3
+    '  IFq = interface'#10 +                              // 4
+    '    procedure Go;'#10 +                              // 5
+    '  end;'#10 +                                         // 6
+    '  TFq1 = class(TObject, IFq)'#10 +                   // 7
+    '    procedure Go; overload;'#10 +                    // 8
+    '    procedure Go(A: Integer); overload;'#10 +        // 9
+    '  end;'#10 +                                         // 10
+    '  TFq2 = class(TObject, IFq)'#10 +                   // 11
+    '    procedure Go; overload;'#10 +                    // 12 Go col 15
+    '    procedure Go(A: Integer); overload;'#10 +        // 13
+    '  end;'#10 +                                         // 14
+    'implementation'#10 +                                 // 15
+    'procedure TFq1.Go; begin end;'#10 +                  // 16
+    'procedure TFq1.Go(A: Integer); begin end;'#10 +      // 17
+    'procedure TFq2.Go; begin end;'#10 +                  // 18
+    'procedure TFq2.Go(A: Integer); begin end;'#10 +      // 19
+    'end.'#10;                                            // 20
+
   UNIT_FAM2 =
     'unit NavFam2;'#10 +                                  // 1
     'interface'#10 +                                      // 2
@@ -4008,6 +4033,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavFam.pas'), UNIT_FAM);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavFam2.pas'), UNIT_FAM2);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavFam3.pas'), UNIT_FAM3);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavIfd.pas'), UNIT_IFD);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavIfdU.pas'), UNIT_IFDU);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDef.pas'), UNIT_DEF);
@@ -5142,6 +5168,14 @@ begin
         not GNav.PlanRename(LRTMid, LRSym, 'Walk', {out} LEdits,
           {out} LCarried, {out} LFamily, {out} LErr) and
         (Length(LEdits) = 0) and (Pos('overloaded', LErr) > 0));
+      // Two refusals: the one at the type declared first.
+      GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavFam3.pas')), 12, 15,
+        {out} LRTMid, {out} LRSym, {out} LRName);
+      Ok('family: of two refusals, the type declared first (TFq1)',
+        SameText(LRName, 'Go') and
+        not GNav.PlanRename(LRTMid, LRSym, 'Walk', {out} LEdits,
+          {out} LCarried, {out} LFamily, {out} LErr) and
+        (Length(LEdits) = 0) and LErr.StartsWith('TFq1.Go is overloaded'));
       // The empty case: a method nothing is tied to has no family.
       Ok('family: SymbolAt TRP.Take',
         GNav.SymbolAt(GNav.ModelIdOf(TPath.Combine(LDir, 'NavRenP.pas')), 5,

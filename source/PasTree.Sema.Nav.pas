@@ -442,6 +442,8 @@ type
     FGeneration: Integer;
     // See NotSearched.
     FNotSearched: Integer;
+    // DemandRenameFamily runs RenameFamily, which would ask the demand again.
+    FInDemand: Boolean;
     procedure CheckGeneration;
     { The demand question for a use of (AMid, ASym): its scope by where it
       is declared (spec 03 sec. 3.3.2) and the words a use spells - see
@@ -450,6 +452,10 @@ type
     // The NotSearched of a query whose demand is ADemand, AOnlyMid as the
     // query's (>= 0: only that model's rows were asked for).
     function NotSearchedOf(const ADemand: TPasDemand; AOnlyMid: Integer): Integer;
+    // DemandDescendants and the rest: the walk from ASeeds and its asks.
+    function HierarchyDemand(const ASeeds: TArray<TPasExtRef>): TPasDemand;
+    // The struct a member (a method, a property) is declared in, or NIL_SYM.
+    function MemberStruct(AMid, ASym: Integer): Integer;
     function FormBinder: TPasFormBinder;
     function CacheOf(AMid: Integer): TNavCache;
     function TargetFromNode(AMid, ANode: Integer; const AName: string;
@@ -1347,6 +1353,56 @@ type
     { One library file - its own outline, its bodies' navigation, semantic
       tokens, go to implementation: the unit itself when it is light. }
     function DemandFile(AMid: Integer): TPasDemand;
+    { DemandFile by path, for a file this light closure may not have loaded:
+      a library unit the full closure reaches only through library
+      implementations (a host opening it, asking about one of its
+      declarations) - taken in when it is reachable, the units on the way
+      loaded light; nothing when no full closure would have it either. }
+    function DemandFilePath(const APath: string): TPasDemand;
+    { The hierarchy family - FindDescendants, FindOverrides,
+      FindImplementations, FindInterfaceImplementors, RenameFamily: every
+      type a downward walk from the question's types reaches over the
+      heritage edges (descendant classes, implementing classes, extending
+      interfaces) can have more below it in a light body. Each is asked by
+      its name and its loaded aliases' names in the units that can name a
+      member of its unit (a heritage clause names the type) - and an
+      implicit root by the word that declares a type deriving from it: the
+      `class` of a heritage-less class for System's TObject, `interface` for
+      IInterface, `dispinterface` for IDispatch (practically the whole
+      library: EnsureFull escalates). The seeds: the type itself; a
+      method's or a property's class at the root of its slot; an interface
+      method's interface; every type of a rename family. }
+    function DemandDescendants(ATMid, ASym: Integer): TPasDemand;
+    function DemandOverrides(ATMid, ASym: Integer): TPasDemand;
+    function DemandImplementations(ATMid, ASym: Integer): TPasDemand;
+    function DemandInterfaceImplementors(ATMid, ASym: Integer): TPasDemand;
+    function DemandRenameFamily(ATMid, ASym: Integer): TPasDemand;
+    { FindBuiltinReferences: every light unit (and every unit nobody loaded)
+      spelling the name - a compiler-provided name has no unit to start a
+      visibility set from. }
+    function DemandBuiltin(const AName: string): TPasDemand;
+    { FindDefines and FindDefineReferences: the light units whose text past
+      the light stream's stop holds a $DEFINE (or the name, in any
+      directive) - each preprocessed whole, as a full analysis would, its
+      define sites kept beside the model (TPasDemand.Preprocess; a stream
+      needing the declared pass is promoted instead), and the units nobody
+      loaded that may hold one, taken in light first. Defines at cursor,
+      Options at cursor and Go to Define in a library file are its own:
+      DemandFile. }
+    function DemandDefines: TPasDemand;
+    { A position's questions (IdentAt, SymbolAt, GotoDeclaration,
+      GotoImplementation, DefinesAt, OptionsAt, the *At family): the file
+      itself when it is light (its bodies, its directives past the stop),
+      and the unit of the symbol there when it is light (Go to
+      Implementation lands in its body). }
+    function DemandPosition(AMid, ALine, ACol: Integer): TPasDemand;
+    { PlanRename of an own symbol: the references of every symbol the
+      rename changes (its rename family, a property's redeclaration chain)
+      and the family's hierarchy. A library symbol's rename is refused
+      whatever the mode. PlanUnitRename needs none: the uses entries of a
+      light unit are recorded. }
+    function DemandRename(ATMid, ASym: Integer): TPasDemand;
+    function DemandDefineReferences(const AName: string): TPasDemand;
     { How many units the last query of a wired family (the references
       family, FindCreations, FindDestructions, and PasTree.Sema.Lint's
       reports) could not search: the units of its demand that were not fully
@@ -1373,6 +1429,10 @@ type
 function PasEnsureDemand(var ANav: TPasNavigator; const ADemand: TPasDemandFunc;
   out AResult: TPasEnsureResult; out ARounds: Integer;
   AMaxRounds: Integer = 32): Boolean;
+
+{ Two demands as one: the files of both, NotSearched and the volumes added
+  (an over-count only makes EnsureFull escalate sooner). }
+function PasMergeDemand(const A, B: TPasDemand): TPasDemand;
 
 // True when AName is a legal, unescaped Object Pascal identifier that is not
 // a reserved word - PlanRename's own name test, exposed so a host can gate
@@ -3097,6 +3157,8 @@ var
   LM: TPasSemaModel;
   LHit: TPasRefHit;
 begin
+  // Light mode: what the scan below cannot see (empty in a full analysis).
+  FNotSearched := NotSearchedOf(DemandBuiltin(AName), AOnlyMid);
   LHits := TList<TPasRefHit>.Create;
   try
     for LMi := 0 to FProj.ModelCount - 1 do
@@ -3286,6 +3348,7 @@ var
   LKey: Int64;
   LRow: TPasDefineRow;
   LRef: TPasDefineRef;
+  LSide: TArray<TPasSideDefine>;
 begin
   LRows := TList<TPasDefineRow>.Create;
   LFileIds := TDictionary<string, Integer>.Create;
@@ -3345,6 +3408,45 @@ begin
         LSites.Add(LKey, LRows.Count);
         LRows.Add(LRow);
       end;
+      // A light unit's sites past its stream's stop, when EnsureFull made
+      // its preprocess-only completion: the same rows, the same dedup.
+      if FProj.DefineSide(LMi, LSide) then
+        for var LSd in LSide do
+        begin
+          if ADefinesOnly then
+          begin
+            if LSd.Ref.Kind <> drDefine then
+              Continue;
+          end
+          else if not PasSameName(LSd.Ref.Name, AName) then
+            Continue;
+          if not LFileIds.TryGetValue(UpperCase(LSd.FilePath), LFile) then
+          begin
+            LFile := LFileIds.Count;
+            LFileIds.Add(UpperCase(LSd.FilePath), LFile);
+          end;
+          LKey := (Int64(LFile) shl 32) or Cardinal(LSd.Ref.Start);
+          if LSites.TryGetValue(LKey, LAt) then
+          begin
+            if LSd.Ref.Active then
+              LRows.List[LAt].Site.Active := True;
+            Continue;
+          end;
+          LRow.Site.Hit.FilePath := LSd.FilePath;
+          LRow.Site.Hit.Line := LSd.Line;
+          LRow.Site.Hit.Col := LSd.Col;
+          LRow.Site.Hit.Snippet := LSd.Snippet;
+          LRow.Site.Hit.HiFrom := LSd.Col - 1;
+          LRow.Site.Hit.HiTo := LSd.Col - 1 + LSd.Ref.Len;
+          LRow.Site.Hit.Implicit := False;
+          LRow.Site.Hit.IndexNode := 0;
+          LRow.Site.Name := LSd.Ref.Name;
+          LRow.Site.Origin := doUnit;
+          LRow.Site.Active := LSd.Ref.Active;
+          LRow.Kind := LSd.Ref.Kind;
+          LSites.Add(LKey, LRows.Count);
+          LRows.Add(LRow);
+        end;
     end;
     Result := LRows.ToArray;
   finally
@@ -3368,6 +3470,7 @@ function TPasNavigator.FindDefineReferences(
 var
   LRows: TArray<TPasDefineRow>;
 begin
+  FNotSearched := DemandDefineReferences(AName).NotSearched;
   LRows := CollectDefineRows(AName, False);
   SetLength(Result, Length(LRows));
   for var LIdx := 0 to High(LRows) do
@@ -3493,6 +3596,7 @@ function TPasNavigator.FindDefines: TArray<TPasDefineSite>;
 var
   LRows: TArray<TPasDefineRow>;
 begin
+  FNotSearched := DemandDefines.NotSearched;
   LRows := CollectDefineRows('', True);
   SetLength(Result, Length(LRows));
   for var LIdx := 0 to High(LRows) do
@@ -4767,6 +4871,7 @@ var
   LChain: TArray<TPasExtRef>;
   LOv: TPasOverrideHit;
 begin
+  FNotSearched := DemandOverrides(ATMid, ASym).NotSearched;
   Result := nil;
   // A property: the redeclaration chain, root first, every other link a
   // pokRedeclared row. Rows carry the declaring class the way method rows
@@ -4923,6 +5028,7 @@ var
   LScope, LIntfSym, LDepth, LBMid, LBSym: Integer;
   LNameLower, LVia: string;
 begin
+  FNotSearched := DemandImplementations(ATMid, ASym).NotSearched;
   Result := nil;
   if (ATMid < 0) or (ATMid >= FProj.ModelCount) then
     Exit;
@@ -5008,6 +5114,7 @@ var
   LDecl: Integer;
   LRow: TPasImplHit;
 begin
+  FNotSearched := DemandInterfaceImplementors(ATMid, ASym).NotSearched;
   Result := nil;
   if OvInterfaceDefNode(ATMid, ASym) = NIL_NODE then
     Exit;
@@ -5109,6 +5216,7 @@ var
   LAxis: TOvAxis;
   LStart: TPasExtRef;
 begin
+  FNotSearched := DemandDescendants(ATMid, ASym).NotSearched;
   Result := nil;
   // For a class: ANCESTOR edges to classes only - a class LISTING an
   // interface is not its descendant. For an interface: every interface
@@ -7114,12 +7222,367 @@ begin
   Result := FProj.DemandOf([LAsk]);
 end;
 
+function TPasNavigator.DemandFilePath(const APath: string): TPasDemand;
+var
+  LAsk: TPasDemandAsk;
+  LMid: Integer;
+begin
+  CheckGeneration;
+  LMid := ModelIdOf(APath);
+  if LMid >= 0 then
+    Exit(DemandFile(LMid));
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LAsk := Default(TPasDemandAsk);
+  LAsk.UnitId := -1;
+  LAsk.Scope := dsAll;
+  LAsk.FilePath := APath;
+  Result := FProj.DemandOf([LAsk]);
+end;
+
 function TPasNavigator.DemandFile(AMid: Integer): TPasDemand;
 begin
   CheckGeneration;
   if not FProj.IsLight(AMid) then
     Exit(Default(TPasDemand));
   Result := FProj.DemandOfFiles([FProj.ModelFile(AMid)]);
+end;
+
+function TPasNavigator.MemberStruct(AMid, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+begin
+  Result := NIL_SYM;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) then
+    Exit;
+  LScope := LM.Symbols[ASym].Scope;
+  if (LScope >= 0) and (LScope < LM.Scopes.Count) and
+     (LM.Scopes[LScope].Kind = sckStruct) then
+    Result := LM.Scopes[LScope].StructSym;
+end;
+
+function TPasNavigator.HierarchyDemand(
+  const ASeeds: TArray<TPasExtRef>): TPasDemand;
+var
+  LIndex: TOvIndex;
+  LSeen: TDictionary<Int64, Boolean>;
+  LTypes: TList<TPasExtRef>;
+  LAliases: TDictionary<Int64, TArray<string>>;
+  LKids: TList<TOvEdge>;
+  LRef: TPasExtRef;
+  LAsks: TArray<TPasDemandAsk>;
+  LAsk: TPasDemandAsk;
+  LNames: TArray<string>;
+  LIdx, LMid, LSym: Integer;
+  LUnit, LName: string;
+
+  procedure Add(AMid, ASym: Integer);
+  var
+    LR: TPasExtRef;
+  begin
+    if (AMid < 0) or (ASym < 0) or not LSeen.TryAdd(OvKey(AMid, ASym), True) then
+      Exit;
+    LR.UnitId := AMid;
+    LR.Sym := ASym;
+    LTypes.Add(LR);
+  end;
+
+begin
+  CheckGeneration;
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LIndex := OvBuildTypeEdges;
+  LSeen := TDictionary<Int64, Boolean>.Create;
+  LTypes := TList<TPasExtRef>.Create;
+  LAliases := TDictionary<Int64, TArray<string>>.Create;
+  try
+    for LRef in ASeeds do
+    begin
+      LMid := LRef.UnitId;
+      LSym := LRef.Sym;
+      if (LMid < 0) or (LMid >= FProj.ModelCount) or (LSym < 0) then
+        Continue;
+      OvUnalias(LMid, LSym);
+      Add(LMid, LSym);
+    end;
+    // Downward over every heritage edge: descendants, implementors,
+    // extending interfaces - the superset of what any of the queries walks.
+    LIdx := 0;
+    while LIdx < LTypes.Count do
+    begin
+      LRef := LTypes[LIdx];
+      Inc(LIdx);
+      if LIndex.TryGetValue(OvKey(LRef.UnitId, LRef.Sym), LKids) then
+        for var LK := 0 to LKids.Count - 1 do
+          Add(LKids.List[LK].UnitId, LKids.List[LK].Sym);
+    end;
+    // The loaded aliases of each: a heritage clause may name one.
+    for var LMi := 0 to FProj.ModelCount - 1 do
+      for var LS := 0 to FProj.Model(LMi).SymCount - 1 do
+        if FProj.Model(LMi).Symbols[LS].Kind = skType then
+        begin
+          LMid := LMi;
+          LSym := LS;
+          OvUnalias(LMid, LSym);
+          if ((LMid <> LMi) or (LSym <> LS)) and
+             LSeen.ContainsKey(OvKey(LMid, LSym)) then
+          begin
+            if not LAliases.TryGetValue(OvKey(LMid, LSym), LNames) then
+              LNames := nil;
+            LAliases.AddOrSetValue(OvKey(LMid, LSym),
+              LNames + [FProj.Model(LMi).Symbols[LS].Name]);
+          end;
+        end;
+    LAsks := nil;
+    for LRef in LTypes do
+    begin
+      LAsk := RefAsk(LRef.UnitId, LRef.Sym);
+      if LAsk.UnitId < 0 then
+        Continue;
+      // A heritage clause may name it through an alias in another unit.
+      if LAsk.Scope = dsUnit then
+        LAsk.Scope := dsMember;
+      if LAliases.TryGetValue(OvKey(LRef.UnitId, LRef.Sym), LNames) then
+        LAsk.Words := LAsk.Words + LNames;
+      // An implicit root is named by no heritage clause.
+      LUnit := FProj.Model(LRef.UnitId).UnitNameLower;
+      LName := FProj.Model(LRef.UnitId).Symbols[LRef.Sym].NameLower;
+      if LUnit = 'system' then
+        if LName = 'tobject' then
+          LAsk.Words := LAsk.Words + ['class']
+        else if LName = 'iinterface' then
+          LAsk.Words := LAsk.Words + ['interface']
+        else if LName = 'idispatch' then
+          LAsk.Words := LAsk.Words + ['dispinterface'];
+      LAsks := LAsks + [LAsk];
+    end;
+    Result := FProj.DemandOf(LAsks);
+  finally
+    LAliases.Free;
+    LTypes.Free;
+    LSeen.Free;
+    LIndex.Free;
+  end;
+end;
+
+function TPasNavigator.DemandDescendants(ATMid, ASym: Integer): TPasDemand;
+var
+  LSeed: TPasExtRef;
+begin
+  // FindDescendants answers for a class or an interface alone.
+  if (OvInterfaceDefNode(ATMid, ASym) = NIL_NODE) and
+     (OvClassDefNode(ATMid, ASym) = NIL_NODE) then
+    Exit(Default(TPasDemand));
+  LSeed.UnitId := ATMid;
+  LSeed.Sym := ASym;
+  Result := HierarchyDemand([LSeed]);
+end;
+
+function TPasNavigator.DemandOverrides(ATMid, ASym: Integer): TPasDemand;
+var
+  LSeed: TPasExtRef;
+  LMid, LStruct: Integer;
+begin
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LSeed.UnitId := ATMid;
+  LStruct := MemberStruct(ATMid, ASym);
+  // FindOverrides answers for a method of a class or a property alone.
+  if not OvStructOfMethod(ATMid, ASym, LStruct) and
+     not OvStructOfProperty(ATMid, ASym, LStruct) then
+    Exit(Default(TPasDemand));
+  // A method: its slot's root class, as FindOverrides climbs to it; a
+  // property: its class (the redeclarations are below it).
+  if OvStructOfMethod(ATMid, ASym, LStruct) then
+  begin
+    LMid := ATMid;
+    OvClimbToRoot(LMid, LStruct, ASym,
+      FProj.Model(ATMid).Symbols[ASym].NameLower);
+    LSeed.UnitId := LMid;
+  end;
+  LSeed.Sym := LStruct;
+  Result := HierarchyDemand([LSeed]);
+end;
+
+function TPasNavigator.DemandImplementations(ATMid, ASym: Integer): TPasDemand;
+var
+  LSeed: TPasExtRef;
+begin
+  LSeed.UnitId := ATMid;
+  LSeed.Sym := MemberStruct(ATMid, ASym);
+  // FindImplementations answers for an interface's method alone.
+  if (LSeed.Sym = NIL_SYM) or
+     (OvInterfaceDefNode(ATMid, LSeed.Sym) = NIL_NODE) then
+    Exit(Default(TPasDemand));
+  Result := HierarchyDemand([LSeed]);
+end;
+
+function TPasNavigator.DemandInterfaceImplementors(ATMid,
+  ASym: Integer): TPasDemand;
+begin
+  if OvInterfaceDefNode(ATMid, ASym) = NIL_NODE then
+    Exit(Default(TPasDemand));
+  Result := DemandDescendants(ATMid, ASym);
+end;
+
+function TPasNavigator.DemandRenameFamily(ATMid, ASym: Integer): TPasDemand;
+var
+  LMembers: TArray<TPasRenameFamilyMember>;
+  LErr: string;
+  LSeeds: TArray<TPasExtRef>;
+  LSeed: TPasExtRef;
+  LNot: Integer;
+begin
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LSeeds := nil;
+  LSeed.UnitId := ATMid;
+  LSeed.Sym := MemberStruct(ATMid, ASym);
+  LSeeds := LSeeds + [LSeed];
+  LNot := FNotSearched;
+  FInDemand := True;
+  try
+    if RenameFamily(ATMid, ASym, LMembers, LErr) then
+      for var LMem in LMembers do
+      begin
+        LSeed.UnitId := LMem.UnitId;
+        LSeed.Sym := MemberStruct(LMem.UnitId, LMem.Sym);
+        LSeeds := LSeeds + [LSeed];
+      end;
+  finally
+    FInDemand := False;
+    FNotSearched := LNot;
+  end;
+  Result := HierarchyDemand(LSeeds);
+end;
+
+function TPasNavigator.DemandDefines: TPasDemand;
+begin
+  Result := DemandDefineReferences('');
+end;
+
+function TPasNavigator.DemandDefineReferences(const AName: string): TPasDemand;
+var
+  LAsk: TPasDemandAsk;
+begin
+  CheckGeneration;
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LAsk := Default(TPasDemandAsk);
+  LAsk.UnitId := -1;
+  LAsk.Scope := dsAll;
+  LAsk.Directives := True;
+  LAsk.Preprocess := True;
+  // FindDefines lists the $DEFINEs: the directive's own word.
+  if AName = '' then
+    LAsk.Words := ['DEFINE']
+  else
+    LAsk.Words := [AName];
+  Result := FProj.DemandOf([LAsk]);
+end;
+
+function PasMergeDemand(const A, B: TPasDemand): TPasDemand;
+
+  function Union(const X, Y: TArray<string>): TArray<string>;
+  begin
+    Result := X;
+    for var LY in Y do
+    begin
+      var LHas := False;
+      for var LX in X do
+        if SameText(LX, LY) then
+        begin
+          LHas := True;
+          Break;
+        end;
+      if not LHas then
+        Result := Result + [LY];
+    end;
+  end;
+
+begin
+  Result.Full := Union(A.Full, B.Full);
+  Result.LoadOnly := Union(A.LoadOnly, B.LoadOnly);
+  Result.Preprocess := Union(A.Preprocess, B.Preprocess);
+  Result.NotSearched := A.NotSearched + B.NotSearched;
+  Result.LightUnits := A.LightUnits + B.LightUnits;
+  Result.NotLoadedUnits := A.NotLoadedUnits + B.NotLoadedUnits;
+  Result.Volume := A.Volume + B.Volume;
+  if A.TotalVolume > B.TotalVolume then
+    Result.TotalVolume := A.TotalVolume
+  else
+    Result.TotalVolume := B.TotalVolume;
+end;
+
+function TPasNavigator.DemandPosition(AMid, ALine, ACol: Integer): TPasDemand;
+var
+  LFiles: TArray<string>;
+  LTMid, LSym: Integer;
+  LName: string;
+  LNot: Integer;
+begin
+  CheckGeneration;
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LFiles := nil;
+  if FProj.IsLight(AMid) then
+    LFiles := LFiles + [FProj.ModelFile(AMid)];
+  LNot := FNotSearched;
+  if SymbolAt(AMid, ALine, ACol, LTMid, LSym, LName) and
+     FProj.IsLight(LTMid) and (LTMid <> AMid) then
+    LFiles := LFiles + [FProj.ModelFile(LTMid)];
+  FNotSearched := LNot;
+  Result := FProj.DemandOfFiles(LFiles);
+end;
+
+function TPasNavigator.DemandRename(ATMid, ASym: Integer): TPasDemand;
+var
+  LMembers: TArray<TPasRenameFamilyMember>;
+  LErr: string;
+  LRefs, LChain: TArray<TPasExtRef>;
+  LRef: TPasExtRef;
+  LNot: Integer;
+begin
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LRef.UnitId := ATMid;
+  LRef.Sym := ASym;
+  LRefs := [LRef];
+  LNot := FNotSearched;
+  FInDemand := True;
+  try
+    if RenameFamily(ATMid, ASym, LMembers, LErr) then
+      for var LMem in LMembers do
+      begin
+        LRef.UnitId := LMem.UnitId;
+        LRef.Sym := LMem.Sym;
+        LRefs := LRefs + [LRef];
+      end;
+  finally
+    FInDemand := False;
+    FNotSearched := LNot;
+  end;
+  LChain := PropertyChain(ATMid, ASym);
+  Result := PasMergeDemand(DemandReferencesOfAll(LRefs + LChain),
+    DemandRenameFamily(ATMid, ASym));
+end;
+
+function TPasNavigator.DemandBuiltin(const AName: string): TPasDemand;
+var
+  LAsk: TPasDemandAsk;
+begin
+  CheckGeneration;
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LAsk := Default(TPasDemandAsk);
+  LAsk.UnitId := -1;
+  LAsk.Scope := dsAll;
+  LAsk.Words := [AName];
+  Result := FProj.DemandOf([LAsk]);
 end;
 
 function PasEnsureDemand(var ANav: TPasNavigator; const ADemand: TPasDemandFunc;
@@ -7150,6 +7613,7 @@ begin
     LRound := LProj.EnsureFull(LDemand);
     Inc(AResult.Promoted, LRound.Promoted);
     Inc(AResult.Loaded, LRound.Loaded);
+    Inc(AResult.Preprocessed, LRound.Preprocessed);
     Inc(AResult.Ms, LRound.Ms);
     AResult.Refused := AResult.Refused + LRound.Refused;
     if LRound.Note <> '' then
@@ -7171,7 +7635,8 @@ begin
     end;
     AResult.Outcome := eoDone;
     // Nothing moved: the refused units stay refused.
-    if (LRound.Promoted = 0) and (LRound.Loaded = 0) then
+    if (LRound.Promoted = 0) and (LRound.Loaded = 0) and
+       (LRound.Preprocessed = 0) then
     begin
       AResult.Outcome := eoPartial;
       Exit(False);
@@ -7600,8 +8065,11 @@ end;
   overrides, an implementation brings the other implementations of its
   interface method. False with AError for the refusals PlanRename names (an
   overloaded name somewhere in the family, a slot whose root overrides a
-  method with no source here). True and no members for anything that is no
-  method of a class, object or interface.
+  method with no source here); with several in the family, the one at the
+  type declared first in the source - never the walk's first, whose order
+  follows model numbering (0.119.0: a light closure numbers its models
+  otherwise). True and no members for anything that is no method of a
+  class, object or interface.
 
   The edges are the reverse-heritage index FindOverrides and
   FindImplementations build, built once here for every hop. Unlike
@@ -7628,6 +8096,7 @@ var
   LDirs: TPasOvDirs;
   LAnc: TSemaXType;
   LRootHit: TPasRefHit;
+  LRefKey, LRefErr: string;
 
   function Key(AMid, ASym: Integer): Int64;
   begin
@@ -7675,18 +8144,41 @@ var
         LM.Symbols[ASym].DeclNode));
   end;
 
-  // False, with the refusal, for an overloaded name at one type of the
-  // family: its members pair by signature there, which a name cannot tell.
+  // A refusal at type AStruct. The walk goes on, and the answer is the
+  // refusal at the type declared first in the source (file, line, column):
+  // the walk's order follows model numbering, which another closure of the
+  // same sources - a light one, after its demand - does not share, and the
+  // answer must not depend on it.
+  procedure Refuse(AMid, AStruct: Integer; const AMsg: string);
+  var
+    LHit: TPasRefHit;
+    LKey: string;
+  begin
+    if DeclHit(AMid, AStruct, LHit) then
+      LKey := Format('%s|%.9d|%.9d|', [LowerCase(LHit.FilePath), LHit.Line,
+        LHit.Col]) + AMsg
+    else
+      LKey := #$FFFF + AMsg;
+    if (LRefErr = '') or (LKey < LRefKey) then
+    begin
+      LRefKey := LKey;
+      LRefErr := AMsg;
+    end;
+  end;
+
+  // A refusal (Refuse) for an overloaded name at one type of the family:
+  // its members pair by signature there, which a name cannot tell. True
+  // whatever it finds - the walk goes on with the first of them.
   function Single(AMid, AStruct: Integer;
     const ASyms: TArray<Integer>): Boolean;
   begin
-    Result := Length(ASyms) <= 1;
-    if not Result then
-      AError := Format('%s.%s is overloaded, and a rename of %s must take ' +
-        'along the methods tied to it by name (overrides, interface ' +
-        'implementations, a bare inherited) - which pair by signature, ' +
-        'not checked here; rename refused, nothing planned.',
-        [TypeNameOf(AMid, AStruct), LShown, LShown]);
+    Result := True;
+    if Length(ASyms) > 1 then
+      Refuse(AMid, AStruct, Format('%s.%s is overloaded, and a rename of %s ' +
+        'must take along the methods tied to it by name (overrides, ' +
+        'interface implementations, a bare inherited) - which pair by ' +
+        'signature, not checked here; rename refused, nothing planned.',
+        [TypeNameOf(AMid, AStruct), LShown, LShown]));
   end;
 
   function Holds(const ASyms: TArray<Integer>; ASym: Integer): Boolean;
@@ -7821,6 +8313,8 @@ var
   end;
 
 begin
+  if not FInDemand then
+    FNotSearched := DemandRenameFamily(ATMid, ASym).NotSearched;
   Result := False;
   AMembers := nil;
   AError := '';
@@ -7882,11 +8376,11 @@ begin
           if OvDirsNamed(LRMid, LRoot, LName, LDirs) and
              (odOverride in LDirs) then
           begin
-            AError := Format('%s.%s overrides a method declared where this ' +
-              'analysis has no source (a compiled unit) - its name is not ' +
-              'this rename''s to change; rename refused, nothing planned.',
-              [TypeNameOf(LRMid, LRoot), LShown]);
-            Exit;
+            Refuse(LRMid, LRoot, Format('%s.%s overrides a method declared ' +
+              'where this analysis has no source (a compiled unit) - its ' +
+              'name is not this rename''s to change; rename refused, ' +
+              'nothing planned.', [TypeNameOf(LRMid, LRoot), LShown]));
+            Continue;
           end;
           // A slot a library introduced: said as that, before its whole
           // chain is searched - `Destroy` would otherwise answer with some
@@ -7896,11 +8390,11 @@ begin
              (Length(LSyms) > 0) and DeclHit(LRMid, LSyms[0], LRootHit) and
              (RenameBlockReason(LRootHit.FilePath) <> '') then
           begin
-            AError := Format('%s.%s overrides %s.%s, which a rename of it ' +
-              'must take along - and cannot: %s', [TypeNameOf(LCur.UnitId,
-              LT), LShown, TypeNameOf(LRMid, LRoot), LShown,
-              RenameBlockReason(LRootHit.FilePath)]);
-            Exit;
+            Refuse(LCur.UnitId, LT, Format('%s.%s overrides %s.%s, which a ' +
+              'rename of it must take along - and cannot: %s',
+              [TypeNameOf(LCur.UnitId, LT), LShown, TypeNameOf(LRMid, LRoot),
+              LShown, RenameBlockReason(LRootHit.FilePath)]));
+            Continue;
           end;
           for var LC in SlotBelow(LRMid, LRoot) do
           begin
@@ -8004,6 +8498,11 @@ begin
               Add(LOMid, LImpl[0], rfwInterface);
             end;
       end;
+    end;
+    if LRefErr <> '' then
+    begin
+      AError := LRefErr;
+      Exit;
     end;
     AMembers := LList.ToArray;
     Result := True;
