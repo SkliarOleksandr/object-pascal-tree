@@ -440,7 +440,16 @@ type
     FForms: TPasFormBinder;
     // FProj.ModelGeneration at Create - see Create's lifetime rule.
     FGeneration: Integer;
+    // See NotSearched.
+    FNotSearched: Integer;
     procedure CheckGeneration;
+    { The demand question for a use of (AMid, ASym): its scope by where it
+      is declared (spec 03 sec. 3.3.2) and the words a use spells - see
+      DemandReferences for the uses spelled without the name. }
+    function RefAsk(AMid, ASym: Integer): TPasDemandAsk;
+    // The NotSearched of a query whose demand is ADemand, AOnlyMid as the
+    // query's (>= 0: only that model's rows were asked for).
+    function NotSearchedOf(const ADemand: TPasDemand; AOnlyMid: Integer): Integer;
     function FormBinder: TPasFormBinder;
     function CacheOf(AMid: Integer): TNavCache;
     function TargetFromNode(AMid, ANode: Integer; const AName: string;
@@ -1298,7 +1307,72 @@ type
       method no ancestor declares is a legal no-op, with nothing to go to. }
     function GotoBareInherited(AMid, ALine, ACol: Integer;
       out ATarget: TPasNavTarget): Boolean;
+    { ---- LIGHT MODE: full answers (docs/library-light-mode.md) -------------
+      A query over the closure answers what the analyzed bodies hold, and a
+      light unit has none: a use of a library symbol in another library
+      unit's implementation, a class an implementation section declares,
+      are not there. Each family has its DEMAND - the light units (and the
+      units only their implementations import, not loaded at all) whose
+      bodies can change its answer, as TPasSemaProject.DemandOf computes it
+      - for the host to pass to TPasSemaProject.EnsureFull, recreate this
+      navigator (the models changed), and ask again until it is empty (a
+      promotion loads units that may be needed in turn). Then the query
+      answers exactly what a full analysis answers. PasEnsureDemand is that
+      loop. Every demand is empty, at no cost, when no unit is light.
+
+      The references family - FindReferences, FindAssignments,
+      CollectReferencesOfAll: the units that can name the symbol (each link
+      of a property's redeclaration chain): its unit and the units listing
+      it for a unit-level declaration, I(U) and the units with an edge into
+      it for a member or an enum value, its own unit for an implementation-
+      section or local one - those spelling its name in their
+      implementation, or `inherited` (a bare inherited call names no
+      method), or `in` for GetEnumerator / MoveNext / Current (a for-in);
+      an attribute class also by its name without `Attribute`; and with no
+      spelling test at all a default array property (`L[I]`) and a class
+      operator. An own symbol's demand is the same rule - empty unless a
+      library unit's implementation lists an own unit (a patched library
+      copy the project keeps in its tree). }
+    function DemandReferences(ATMid, ASym: Integer): TPasDemand;
+    function DemandReferencesOfAll(const ASyms: TArray<TPasExtRef>): TPasDemand;
+    { FindCreations: a class's construction is written `TFoo.Create`, the
+      class or an alias of it before any constructor name the class has -
+      the units that can name a member of its unit (an alias may be declared
+      in any of them), spelling one of those constructor names. }
+    function DemandCreations(ATMid, ASym: Integer): TPasDemand;
+    { FindDestructions: a value of the class released by `Free`, `Destroy`,
+      `FreeAndNil` or a form's `Release` - the units that can reach a value
+      of it (its unit's member scope), spelling one of those names. }
+    function DemandDestructions(ATMid, ASym: Integer): TPasDemand;
+    { One library file - its own outline, its bodies' navigation, semantic
+      tokens, go to implementation: the unit itself when it is light. }
+    function DemandFile(AMid: Integer): TPasDemand;
+    { How many units the last query of a wired family (the references
+      family, FindCreations, FindDestructions, and PasTree.Sema.Lint's
+      reports) could not search: the units of its demand that were not fully
+      analyzed when it ran. 0 in a full analysis and after EnsureFull; a host
+      that skips EnsureFull shows the gap ("library implementations not
+      searched: N units"). The other queries do not set it yet. }
+    property NotSearched: Integer read FNotSearched write FNotSearched;
   end;
+
+  { A query's demand, for PasEnsureDemand: asked of the CURRENT navigator
+    each round. }
+  TPasDemandFunc = reference to function(ANav: TPasNavigator): TPasDemand;
+
+  { The host's loop around a query (docs/library-light-mode.md): the demand,
+    EnsureFull, a navigator over the changed models (ANav is freed and
+    replaced, its LibraryPaths kept), again - until the demand is empty
+    (True) or EnsureFull cannot go on here (False): AResult.Outcome is then
+    eoNeedsRebuild (rebuild with the project as parse donor - it carries the
+    promoted set - and call again) or eoEscalate (rebuild with LightPaths
+    cleared), or eoPartial (a unit refused; the answer leaves it out).
+    AResult sums the rounds' counts and times; ARounds counts them.
+    AMaxRounds bounds a demand that keeps moving (each round loads units
+    the closure had not loaded, so it ends; the bound is a guard). }
+function PasEnsureDemand(var ANav: TPasNavigator; const ADemand: TPasDemandFunc;
+  out AResult: TPasEnsureResult; out ARounds: Integer;
+  AMaxRounds: Integer = 32): Boolean;
 
 // True when AName is a legal, unescaped Object Pascal identifier that is not
 // a reserved word - PlanRename's own name test, exposed so a host can gate
@@ -2409,6 +2483,8 @@ var
   end;
 
 begin
+  // Light mode: what the scan below cannot see (empty in a full analysis).
+  FNotSearched := NotSearchedOf(DemandReferencesOfAll(ASyms), AOnlyMid);
   LCount := FProj.ModelCount;
   SetLength(LWanted, LCount);
   LAllPrivate := True;
@@ -5228,6 +5304,7 @@ var
 
 begin
   Result := nil;
+  FNotSearched := DemandCreations(ATMid, ASym).NotSearched;
   if OvClassDefNode(ATMid, ASym) = NIL_NODE then
     Exit;
   LHits := TList<TPasRefHit>.Create;
@@ -5386,6 +5463,7 @@ var
 
 begin
   Result := nil;
+  FNotSearched := DemandDestructions(ATMid, ASym).NotSearched;
   if OvClassDefNode(ATMid, ASym) = NIL_NODE then
     Exit;
   LHits := TList<TPasRefHit>.Create;
@@ -6882,6 +6960,222 @@ begin
   finally
     LPlaces.Free;
     LSeen.Free;
+  end;
+end;
+
+{ ---- light mode: demands (docs/library-light-mode.md) --------------------- }
+
+function TPasNavigator.RefAsk(AMid, ASym: Integer): TPasDemandAsk;
+var
+  LM: TPasSemaModel;
+  LSym: TSemaSymbol;
+  LStruct: Integer;
+  LOwner: string;
+
+  procedure AddAttributeName(const AName: string);
+  begin
+    // `[Foo]` and `[Foo(1)]` name FooAttribute and its constructor (19.3.2).
+    if (Length(AName) > 9) and AName.EndsWith('attribute', True) then
+      Result.Words := Result.Words + [Copy(AName, 1, Length(AName) - 9)];
+  end;
+
+begin
+  Result := Default(TPasDemandAsk);
+  Result.UnitId := -1;
+  if (AMid < 0) or (AMid >= FProj.ModelCount) then
+    Exit;
+  LM := FProj.Model(AMid);
+  if (ASym < 0) or (ASym >= LM.SymCount) then
+    Exit;
+  Result.UnitId := AMid;
+  LSym := LM.Symbols[ASym];
+  // Spec 03 sec. 3.3.2, "What a unit can reach of a unit it does not use".
+  if UnitPrivate(AMid, ASym) then
+    Result.Scope := dsSelf
+  else if (LSym.Scope >= 0) and (LSym.Scope < LM.Scopes.Count) and
+     (LM.Scopes[LSym.Scope].Kind = sckUnit) and (LSym.Kind <> skEnumValue) then
+    Result.Scope := dsUnit
+  else
+    Result.Scope := dsMember;
+  // Used without its name: `L[I]` through a default array property, an
+  // operator through its symbol - no spelling test.
+  if (sfDefaultArrayProp in LSym.Flags) or
+     ((LSym.Kind = skRoutine) and LM.DeclaresOperator(LSym.Scope,
+       LSym.NameLower)) then
+    Exit;
+  Result.Words := [LSym.Name];
+  // A for-in calls these without naming them.
+  if (LSym.NameLower = 'getenumerator') or (LSym.NameLower = 'movenext') or
+     (LSym.NameLower = 'current') then
+    Result.Words := Result.Words + ['in'];
+  AddAttributeName(LSym.Name);
+  if FProj.IsConstructorSym(AMid, ASym) and
+     OvStructOfMethod(AMid, ASym, LStruct) then
+  begin
+    LOwner := LM.Symbols[LStruct].Name;
+    AddAttributeName(LOwner);
+  end;
+end;
+
+function TPasNavigator.NotSearchedOf(const ADemand: TPasDemand;
+  AOnlyMid: Integer): Integer;
+var
+  LFile: string;
+begin
+  if AOnlyMid < 0 then
+    Exit(ADemand.NotSearched);
+  Result := 0;
+  if not FProj.IsLight(AOnlyMid) then
+    Exit;
+  LFile := FProj.ModelFile(AOnlyMid);
+  for var LF in ADemand.Full do
+    if SameText(LF, LFile) then
+      Exit(1);
+end;
+
+function TPasNavigator.DemandReferences(ATMid, ASym: Integer): TPasDemand;
+var
+  LChain: TArray<TPasExtRef>;
+begin
+  CheckGeneration;
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  // The property redeclaration chain is one property (see FindReferences).
+  LChain := PropertyChain(ATMid, ASym);
+  if Length(LChain) <= 1 then
+  begin
+    SetLength(LChain, 1);
+    LChain[0].UnitId := ATMid;
+    LChain[0].Sym := ASym;
+  end;
+  Result := DemandReferencesOfAll(LChain);
+end;
+
+function TPasNavigator.DemandReferencesOfAll(
+  const ASyms: TArray<TPasExtRef>): TPasDemand;
+var
+  LAsks: TArray<TPasDemandAsk>;
+  LAsk: TPasDemandAsk;
+begin
+  CheckGeneration;
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LAsks := nil;
+  for var LRef in ASyms do
+  begin
+    LAsk := RefAsk(LRef.UnitId, LRef.Sym);
+    if LAsk.UnitId >= 0 then
+      LAsks := LAsks + [LAsk];
+  end;
+  Result := FProj.DemandOf(LAsks);
+end;
+
+function TPasNavigator.DemandCreations(ATMid, ASym: Integer): TPasDemand;
+var
+  LAsk: TPasDemandAsk;
+  LNames: TDictionary<string, Boolean>;
+begin
+  CheckGeneration;
+  if (FProj.LightCount = 0) or (OvClassDefNode(ATMid, ASym) = NIL_NODE) then
+    Exit(Default(TPasDemand));
+  LAsk := Default(TPasDemandAsk);
+  LAsk.UnitId := ATMid;
+  LAsk.Scope := dsMember;
+  // `TFoo.Create(...)` spells a constructor's name, whatever alias the
+  // class is written with: every constructor the class has.
+  LNames := TDictionary<string, Boolean>.Create;
+  try
+    LNames.Add('create', True);
+    FProj.EnumMembersX(ATMid, XPlain(ATMid, ASym),
+      procedure(AMid, AMemSym, ACtx: Integer)
+      begin
+        if FProj.IsConstructorSym(AMid, AMemSym) then
+          LNames.AddOrSetValue(FProj.Model(AMid).Symbols[AMemSym].NameLower,
+            True);
+      end);
+    LAsk.Words := LNames.Keys.ToArray;
+  finally
+    LNames.Free;
+  end;
+  Result := FProj.DemandOf([LAsk]);
+end;
+
+function TPasNavigator.DemandDestructions(ATMid, ASym: Integer): TPasDemand;
+var
+  LAsk: TPasDemandAsk;
+begin
+  CheckGeneration;
+  if (FProj.LightCount = 0) or (OvClassDefNode(ATMid, ASym) = NIL_NODE) then
+    Exit(Default(TPasDemand));
+  LAsk := Default(TPasDemandAsk);
+  LAsk.UnitId := ATMid;
+  LAsk.Scope := dsMember;
+  LAsk.Words := ['Free', 'Destroy', 'FreeAndNil', 'Release'];
+  Result := FProj.DemandOf([LAsk]);
+end;
+
+function TPasNavigator.DemandFile(AMid: Integer): TPasDemand;
+begin
+  CheckGeneration;
+  if not FProj.IsLight(AMid) then
+    Exit(Default(TPasDemand));
+  Result := FProj.DemandOfFiles([FProj.ModelFile(AMid)]);
+end;
+
+function PasEnsureDemand(var ANav: TPasNavigator; const ADemand: TPasDemandFunc;
+  out AResult: TPasEnsureResult; out ARounds: Integer;
+  AMaxRounds: Integer): Boolean;
+var
+  LDemand: TPasDemand;
+  LRound: TPasEnsureResult;
+  LProj: TPasSemaProject;
+  LLib: TArray<string>;
+begin
+  AResult := Default(TPasEnsureResult);
+  AResult.Outcome := eoNothing;
+  ARounds := 0;
+  while True do
+  begin
+    LDemand := ADemand(ANav);
+    if LDemand.IsEmpty then
+      Exit(True);
+    if ARounds >= AMaxRounds then
+    begin
+      AResult.Outcome := eoPartial;
+      AResult.Note := AResult.Note + Format('rounds>%d;', [AMaxRounds]);
+      Exit(False);
+    end;
+    Inc(ARounds);
+    LProj := ANav.Project;
+    LRound := LProj.EnsureFull(LDemand);
+    Inc(AResult.Promoted, LRound.Promoted);
+    Inc(AResult.Loaded, LRound.Loaded);
+    Inc(AResult.Ms, LRound.Ms);
+    AResult.Refused := AResult.Refused + LRound.Refused;
+    if LRound.Note <> '' then
+      AResult.Note := AResult.Note + LRound.Note + ';';
+    // Models replaced: this navigator would refuse to serve.
+    if LProj.ModelGeneration <> ANav.FGeneration then
+    begin
+      LLib := ANav.LibraryPaths;
+      FreeAndNil(ANav);
+      ANav := TPasNavigator.Create(LProj);
+      ANav.LibraryPaths := LLib;
+    end;
+    case LRound.Outcome of
+      eoNeedsRebuild, eoEscalate:
+        begin
+          AResult.Outcome := LRound.Outcome;
+          Exit(False);
+        end;
+    end;
+    AResult.Outcome := eoDone;
+    // Nothing moved: the refused units stay refused.
+    if (LRound.Promoted = 0) and (LRound.Loaded = 0) then
+    begin
+      AResult.Outcome := eoPartial;
+      Exit(False);
+    end;
   end;
 end;
 

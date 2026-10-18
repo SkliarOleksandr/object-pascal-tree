@@ -166,6 +166,7 @@
         <DCCReference Include="..\source\PasTree.Sema.Builtins.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Types.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Resolver.pas"/>
+        <DCCReference Include="..\source\PasTree.WordIndex.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Project.pas"/>
         <DCCReference Include="..\source\PasTree.Dfm.pas"/>
         <DCCReference Include="..\source\PasTree.Sema.Dfm.pas"/>

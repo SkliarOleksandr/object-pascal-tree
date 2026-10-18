@@ -116,6 +116,16 @@ function FindUnusedUses(ANav: TPasNavigator;
 function LintPromotions(ANav: TPasNavigator; const AMids: TArray<Integer>;
   AOptions: TPasLintOptions = []): TArray<string>;
 
+{ LintPromotions as the uses lint's DEMAND (TPasNavigator's light-mode
+  family, docs/library-light-mode.md): the same light units, for
+  TPasSemaProject.EnsureFull / PasEnsureDemand - which promote them in one
+  batch, take in what their implementations import and ask again until
+  nothing is left. Empty, at no cost, when no unit is light. Both reports
+  set ANav.NotSearched: the light units their answer had to treat as
+  unknown (0 after the demand is met). }
+function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions = []): TPasDemand;
+
 implementation
 
 uses
@@ -1856,6 +1866,7 @@ begin
   LLint := TUsesLint.Create(ANav);
   try
     Result := UnreferencedRows(LLint, AMids, AOptions);
+    ANav.NotSearched := LLint.FLightNeeded.Count;
   finally
     LLint.Free;
   end;
@@ -1894,6 +1905,14 @@ begin
   TArray.Sort<string>(Result, TIStringComparer.Ordinal);
 end;
 
+function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions): TPasDemand;
+begin
+  if ANav.Project.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  Result := ANav.Project.DemandOfFiles(LintPromotions(ANav, AMids, AOptions));
+end;
+
 function FindUnusedUses(ANav: TPasNavigator;
   const AMids: TArray<Integer>;
   AOptions: TPasLintOptions): TArray<TPasUnusedUse>;
@@ -1907,6 +1926,7 @@ begin
       if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
         LLint.CheckUnit(LMid);
     Result := LLint.FRows.ToArray;
+    ANav.NotSearched := LLint.FLightNeeded.Count;
   finally
     LLint.Free;
   end;

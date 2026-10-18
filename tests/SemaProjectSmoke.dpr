@@ -31,6 +31,8 @@ uses
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
+  PasTree.Sema.Lint in '..\source\PasTree.Sema.Lint.pas',
+  PasTree.WordIndex in '..\source\PasTree.WordIndex.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
 var
@@ -6718,6 +6720,377 @@ end;
   a record parameter, an inline function, both overloads of a library
   routine, a library constant - binds to the same declarations in both
   modes, by identity (file + symbol name + declaring node). }
+{ The implementation word index's scanner (PasTree.WordIndex): what it
+  counts as spelled - identifiers outside comments, strings and directives,
+  from the first `implementation` on unless asked for the whole text - and
+  the `uses` names and include arguments it hands the demand. }
+procedure TestWordScan;
+var
+  LScan: TPasWordScan;
+
+  function Has(const AName: string): Boolean;
+  begin
+    Result := PasWordSetHas(LScan.Words, PasWordHash(AName));
+  end;
+
+begin
+  LScan := PasScanWords(
+    'unit U;'#13#10'interface'#13#10'uses A.B, C in ''c.pas'';'#13#10 +
+    'const IntfOnly = 1;'#13#10 +
+    '{ implementation in a comment }'#13#10 +
+    'implementation'#13#10 +
+    'uses D;'#13#10 +
+    '{$I Body.inc}'#13#10'(*$INCLUDE ''Two.inc''*)'#13#10'{$I+}'#13#10 +
+    'procedure P;'#13#10'begin'#13#10 +
+    '  // LineComment'#13#10 +
+    '  S := ''InString'' + #13#10 + Code1;'#13#10 +
+    '  X := $FF + 1e5 + &Begin;'#13#10 +
+    '  { BraceComment } (* ParenComment *)'#13#10 +
+    'end;'#13#10'end.'#13#10, False);
+  Ok('word scan: from `implementation` on',
+    LScan.FromImplementation and Has('implementation') and Has('Code1') and
+    Has('p') and not Has('IntfOnly'));
+  Ok('word scan: comments, strings, numbers left out',
+    not Has('LineComment') and not Has('InString') and
+    not Has('BraceComment') and not Has('ParenComment') and not Has('FF') and
+    not Has('e5'));
+  Ok('word scan: an escaped keyword is its word, case-folded',
+    Has('begin') and Has('CODE1'));
+  Ok('word scan: both `uses` clauses, dotted, `in` dropped',
+    (Length(LScan.IntfUses) = 2) and (LScan.IntfUses[0] = 'A.B') and
+    (LScan.IntfUses[1] = 'C') and (Length(LScan.ImplUses) = 1) and
+    (LScan.ImplUses[0] = 'D'));
+  Ok('word scan: the include arguments, not the $I+ switch',
+    (Length(LScan.Includes) = 2) and (LScan.Includes[0] = 'Body.inc') and
+    (LScan.Includes[1] = 'Two.inc'));
+  LScan := PasScanWords('unit U;'#13#10'interface'#13#10'const K = 1;'#13#10 +
+    'implementation'#13#10'end.'#13#10, True);
+  Ok('word scan: the whole text when asked', Has('K') and
+    not LScan.FromImplementation);
+  LScan := PasScanWords('program P;'#13#10'begin'#13#10'  Run;'#13#10'end.',
+    False);
+  Ok('word scan: no implementation - every word', Has('Run') and Has('P'));
+  // A text block runs to its closing line; a plain literal ends at the line.
+  LScan := PasScanWords('implementation'#13#10'const S = '''''''#13#10 +
+    '  Hidden text'#13#10'  '''''';'#13#10'T = ''open'#13#10'Seen;', False);
+  Ok('word scan: a text block is a string, an unclosed literal ends at its line',
+    not Has('Hidden') and Has('Seen') and Has('T'));
+  Ok('word scan: set union',
+    Length(PasWordSetUnion([1, 3, 5], [2, 3, 6])) = 5);
+end;
+
+// The first routine or type named AName in AFile's model (-1: none).
+function FileSym(AProj: TPasSemaProject; const AFile, AName: string): Integer;
+var
+  LMid: Integer;
+begin
+  Result := -1;
+  LMid := AProj.ModelIdOf(AFile);
+  if LMid < 0 then
+    Exit;
+  for var LS := 0 to AProj.Model(LMid).SymCount - 1 do
+    if SameText(AProj.Model(LMid).Symbols[LS].Name, AName) and
+       (AProj.Model(LMid).Symbols[LS].Kind in [skRoutine, skType]) then
+      Exit(LS);
+end;
+
+{ Full answers in light mode (TPasSemaProject.DemandOf / EnsureFull, the
+  navigator's Demand*, PasEnsureDemand): a light project whose demand is met
+  answers Find References exactly as the full analysis does - uses in light
+  bodies (promoted), in a unit only a light implementation imports (taken
+  in, full), and in one reachable only through such a unit (the unit between
+  loaded light first) - with NotSearched 0; the word filter keeps the units
+  that only mention the name in a comment or a string out. }
+procedure TestLightDemand;
+const
+  LIBU =
+    'unit LibU;'#13#10'interface'#13#10'type'#13#10 +
+    '  TFoo = class'#13#10'    procedure M;'#13#10'  end;'#13#10 +
+    'procedure UProc;'#13#10'const'#13#10'  UK = 1;'#13#10 +
+    'implementation'#13#10 +
+    'procedure TFoo.M;'#13#10'begin'#13#10'end;'#13#10 +
+    'procedure UProc;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10;
+  LIBV =
+    'unit LibV;'#13#10'interface'#13#10'uses LibU;'#13#10 +
+    'function GetFoo: TFoo;'#13#10 +
+    'implementation'#13#10'uses LibW;'#13#10 +
+    'function GetFoo: TFoo;'#13#10'begin'#13#10 +
+    '  Result := TFoo.Create;'#13#10'  Result.M;'#13#10 +
+    '{$I LibVBody.inc}'#13#10 +
+    'end;'#13#10'end.'#13#10;
+  LIBVBODY = '  UProc;'#13#10;
+  LIBW =
+    'unit LibW;'#13#10'interface'#13#10'procedure WProc;'#13#10 +
+    'implementation'#13#10'uses LibU;'#13#10 +
+    'procedure WProc;'#13#10'begin'#13#10 +
+    '  UProc;'#13#10'  TFoo.Create.M;'#13#10'end;'#13#10'end.'#13#10;
+  LIBX =
+    'unit LibX;'#13#10'interface'#13#10'uses LibV;'#13#10 +
+    'procedure XProc;'#13#10 +
+    'implementation'#13#10 +
+    'procedure XProc;'#13#10'begin'#13#10 +
+    '  { UProc is only named in this comment }'#13#10 +
+    '  GetFoo.M;'#13#10'end;'#13#10'end.'#13#10;
+  LIBY =
+    'unit LibY;'#13#10'interface'#13#10'uses LibU;'#13#10 +
+    'const'#13#10'  YC = 2;'#13#10'procedure YProc;'#13#10 +
+    'implementation'#13#10 +
+    'procedure YProc;'#13#10'var'#13#10'  S: string;'#13#10'begin'#13#10 +
+    '  S := ''UProc'';'#13#10'end;'#13#10'end.'#13#10;
+  LIBZ =
+    'unit LibZ;'#13#10'interface'#13#10'procedure ZProc;'#13#10 +
+    'implementation'#13#10'uses LibQ;'#13#10 +
+    'procedure ZProc;'#13#10'begin'#13#10'  QProc;'#13#10'end;'#13#10 +
+    'end.'#13#10;
+  LIBQ =
+    'unit LibQ;'#13#10'interface'#13#10'procedure QProc;'#13#10 +
+    'implementation'#13#10'uses LibR;'#13#10 +
+    'procedure QProc;'#13#10'begin'#13#10'  RProc;'#13#10'end;'#13#10 +
+    'end.'#13#10;
+  LIBR =
+    'unit LibR;'#13#10'interface'#13#10'uses LibU;'#13#10 +
+    'procedure RProc;'#13#10 +
+    'implementation'#13#10 +
+    'procedure RProc;'#13#10'begin'#13#10'  UProc;'#13#10'end;'#13#10 +
+    'end.'#13#10;
+  UOWN2 =
+    'unit UOwn2;'#13#10'interface'#13#10'procedure Go2;'#13#10 +
+    'implementation'#13#10'uses LibV, LibX, LibY, LibZ;'#13#10 +
+    'procedure Go2;'#13#10'begin'#13#10 +
+    '  XProc;'#13#10'  GetFoo.M;'#13#10'  YProc;'#13#10'  ZProc;'#13#10 +
+    'end;'#13#10'end.'#13#10;
+  APP2 =
+    'program App2;'#13#10'uses UOwn2;'#13#10'begin'#13#10'  Go2;'#13#10 +
+    'end.'#13#10;
+var
+  LRoot, LOwn, LLib, LAppPath: string;
+  LFull, LLight: TPasSemaProject;
+  LFullNav, LNav: TPasNavigator;
+  LDemand: TPasDemand;
+  LRes: TPasEnsureResult;
+  LRounds: Integer;
+  LUPath: string;
+
+  function Lib(const AName: string): string;
+  begin
+    Result := TPath.Combine(LLib, AName);
+  end;
+
+  function Run(ALight: Boolean; ADonor: TPasSemaProject = nil): TPasSemaProject;
+  begin
+    Result := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+    if ALight then
+      Result.LightPaths := [LLib];
+    // A fixture this small is a share of any bound: never escalate here.
+    Result.EscalationPercent := 0;
+    if ADonor <> nil then
+      Result.AdoptParseDonor(ADonor);
+    Result.AnalyzeStaged([LAppPath], []);
+  end;
+
+  // A symbol of LibU by name, and a member of TFoo when AMember.
+  function USym(AProj: TPasSemaProject; const AName: string;
+    out AMid: Integer): Integer;
+  var
+    LM: TPasSemaModel;
+  begin
+    Result := -1;
+    AMid := AProj.ModelIdOf(Lib('LibU.pas'));
+    if AMid < 0 then
+      Exit;
+    LM := AProj.Model(AMid);
+    for var LS := 0 to LM.SymCount - 1 do
+      if SameText(LM.Symbols[LS].Name, AName) and
+         (LM.Symbols[LS].Kind in [skRoutine, skType]) then
+        Exit(LS);
+  end;
+
+  // Find References of LibU's AName as text rows, file|line|col, sorted.
+  function Refs(ANav: TPasNavigator; const AName: string): string;
+  var
+    LMid, LSym: Integer;
+    LRows: TArray<string>;
+  begin
+    LSym := USym(ANav.Project, AName, LMid);
+    if LSym < 0 then
+      Exit('<none>');
+    LRows := nil;
+    for var LH in ANav.FindReferences(LMid, LSym) do
+      LRows := LRows + [Format('%s|%d|%d', [LowerCase(ExtractFileName(
+        LH.FilePath)), LH.Line, LH.Col])];
+    TArray.Sort<string>(LRows);
+    Result := string.Join(';', LRows);
+  end;
+
+  function Contains(const AList: TArray<string>; const AFile: string): Boolean;
+  begin
+    for var LF in AList do
+      if SameText(ExtractFileName(LF), AFile) then
+        Exit(True);
+    Result := False;
+  end;
+
+  function Recreate(var ANav: TPasNavigator; AProj: TPasSemaProject):
+    TPasNavigator;
+  begin
+    FreeAndNil(ANav);
+    ANav := TPasNavigator.Create(AProj);
+    Result := ANav;
+  end;
+
+begin
+  LRoot := TPath.Combine(TPath.GetTempPath, 'pastree_light_demand');
+  if TDirectory.Exists(LRoot) then
+    TDirectory.Delete(LRoot, True);
+  LOwn := TPath.Combine(LRoot, 'own');
+  LLib := TPath.Combine(LRoot, 'lib');
+  TDirectory.CreateDirectory(LOwn);
+  TDirectory.CreateDirectory(LLib);
+  LAppPath := TPath.Combine(LOwn, 'App2.dpr');
+  TFile.WriteAllText(LAppPath, APP2);
+  TFile.WriteAllText(TPath.Combine(LOwn, 'UOwn2.pas'), UOWN2);
+  LUPath := Lib('LibU.pas');
+  TFile.WriteAllText(LUPath, LIBU);
+  TFile.WriteAllText(Lib('LibV.pas'), LIBV);
+  TFile.WriteAllText(Lib('LibVBody.inc'), LIBVBODY);
+  TFile.WriteAllText(Lib('LibW.pas'), LIBW);
+  TFile.WriteAllText(Lib('LibX.pas'), LIBX);
+  TFile.WriteAllText(Lib('LibY.pas'), LIBY);
+  TFile.WriteAllText(Lib('LibZ.pas'), LIBZ);
+  TFile.WriteAllText(Lib('LibQ.pas'), LIBQ);
+  TFile.WriteAllText(Lib('LibR.pas'), LIBR);
+  LFull := Run(False);
+  LFullNav := TPasNavigator.Create(LFull);
+  LLight := nil;
+  LNav := nil;
+  try
+    Ok('demand: the fixture - full loads every unit',
+      (LFull.ModelIdOf(Lib('LibR.pas')) >= 0) and (LFull.LightCount = 0));
+    Ok('demand: full mode finds UProc in V''s include, W and R',
+      Refs(LFullNav, 'UProc') = 'libr.pas|8|3;libvbody.inc|1|3;libw.pas|8|3');
+    Ok('demand: a full analysis has no demand, NotSearched 0',
+      LFullNav.DemandReferences(LFull.ModelIdOf(Lib('LibU.pas')),
+        USym(LFull, 'UProc', LRounds)).IsEmpty and
+      (LFullNav.NotSearched = 0));
+
+    LLight := Run(True);
+    LNav := TPasNavigator.Create(LLight);
+    Ok('demand: light leaves W, Q and R unloaded',
+      (LLight.ModelIdOf(Lib('LibW.pas')) < 0) and
+      (LLight.ModelIdOf(Lib('LibQ.pas')) < 0) and
+      (LLight.ModelIdOf(Lib('LibR.pas')) < 0) and (LLight.LightCount = 5));
+    // The word index, as a demand builds it.
+    Ok('word index: a light unit''s implementation, its includes in it',
+      LLight.WordIndexHas(Lib('LibV.pas'), 'UProc') and
+      LLight.WordIndexHas(Lib('LibX.pas'), 'GetFoo') and
+      not LLight.WordIndexHas(Lib('LibY.pas'), 'YC'));
+    Ok('word index: a comment and a string spell nothing',
+      not LLight.WordIndexHas(Lib('LibX.pas'), 'UProc') and
+      not LLight.WordIndexHas(Lib('LibY.pas'), 'UProc'));
+    Ok('word index: a unit nobody loaded - its whole text',
+      LLight.WordIndexHas(Lib('LibW.pas'), 'WProc') and
+      LLight.WordIndexHas(Lib('LibW.pas'), 'UProc'));
+    // Before EnsureFull: the bodies' uses are missing, and said so.
+    Ok('demand: light answers without the bodies...',
+      Refs(LNav, 'UProc') = '');
+    Ok('demand: ...and NotSearched says how many it left out',
+      LNav.NotSearched = 4);
+    LDemand := LNav.DemandReferences(LLight.ModelIdOf(Lib('LibU.pas')),
+      USym(LLight, 'UProc', LRounds));
+    Ok('demand: UProc - U and V (light), W (taken in), Q on the way to R',
+      (Length(LDemand.Full) = 3) and Contains(LDemand.Full, 'LibU.pas') and
+      Contains(LDemand.Full, 'LibV.pas') and
+      Contains(LDemand.Full, 'LibW.pas') and
+      (Length(LDemand.LoadOnly) = 1) and
+      Contains(LDemand.LoadOnly, 'LibQ.pas'));
+    Ok('demand: ...X (a comment), Y (a string), Z (no edge) left out',
+      not Contains(LDemand.Full, 'LibX.pas') and
+      not Contains(LDemand.Full, 'LibY.pas') and
+      not Contains(LDemand.Full, 'LibZ.pas'));
+    Ok('demand: ...the counts', (LDemand.LightUnits = 2) and
+      (LDemand.NotLoadedUnits = 2) and (LDemand.NotSearched = 4) and
+      (LDemand.Volume > 0) and (LDemand.TotalVolume >= LDemand.Volume));
+    Ok('ensure: the host loop meets it',
+      PasEnsureDemand(LNav,
+        function(ANav: TPasNavigator): TPasDemand
+        begin
+          Result := ANav.DemandReferences(ANav.Project.ModelIdOf(LUPath),
+            FileSym(ANav.Project, LUPath, 'UProc'));
+        end, LRes, LRounds) and (LRounds = 2));
+    Ok('ensure: ...U and V promoted, W and Q taken in, then R',
+      (LRes.Promoted = 2) and (LRes.Loaded = 3) and
+      not LLight.IsLight(LLight.ModelIdOf(Lib('LibV.pas'))) and
+      not LLight.IsLight(LLight.ModelIdOf(Lib('LibW.pas'))) and
+      LLight.IsLight(LLight.ModelIdOf(Lib('LibQ.pas'))) and
+      not LLight.IsLight(LLight.ModelIdOf(Lib('LibR.pas'))));
+    Ok('ensure: Find References answers as the full analysis',
+      Refs(LNav, 'UProc') = Refs(LFullNav, 'UProc'));
+    Ok('ensure: ...with NotSearched 0', LNav.NotSearched = 0);
+    // A member: through I(U) - X reaches TFoo.M through V's GetFoo.
+    Ok('ensure: TFoo.M, a member, reached through V by X',
+      PasEnsureDemand(LNav,
+        function(ANav: TPasNavigator): TPasDemand
+        var
+          LMid, LM: Integer;
+        begin
+          LM := -1;
+          LMid := ANav.Project.ModelIdOf(LUPath);
+          for var LS := 0 to ANav.Project.Model(LMid).SymCount - 1 do
+            if ANav.Project.Model(LMid).Symbols[LS].NameLower = 'm' then
+              LM := LS;
+          Result := ANav.DemandReferences(LMid, LM);
+        end, LRes, LRounds) and
+      not LLight.IsLight(LLight.ModelIdOf(Lib('LibX.pas'))) and
+      LLight.IsLight(LLight.ModelIdOf(Lib('LibY.pas'))));
+    Ok('ensure: ...and the creations of TFoo as the full analysis',
+      Length(LNav.FindCreations(LLight.ModelIdOf(Lib('LibU.pas')),
+        USym(LLight, 'TFoo', LRounds))) =
+      Length(LFullNav.FindCreations(LFull.ModelIdOf(Lib('LibU.pas')),
+        USym(LFull, 'TFoo', LRounds))));
+    Ok('ensure: an empty demand does nothing',
+      LLight.EnsureFull(Default(TPasDemand)).Outcome = eoNothing);
+
+    // Escalation: a demand over too much of the library is a rebuild.
+    FreeAndNil(LNav);
+    FreeAndNil(LLight);
+    LLight := Run(True);
+    LNav := TPasNavigator.Create(LLight);
+    LLight.EscalationPercent := 1;
+    LDemand := LNav.DemandReferences(LLight.ModelIdOf(Lib('LibU.pas')),
+      USym(LLight, 'UProc', LRounds));
+    LRes := LLight.EnsureFull(LDemand);
+    Ok('escalate: over the bound, eoEscalate and nothing done',
+      (LRes.Outcome = eoEscalate) and (LRes.Promoted = 0) and
+      (LLight.LightCount = 5) and (Pos('escalate(', LRes.Note) = 1));
+    LLight.EscalationPercent := 0;
+    // The batch: four light units promoted together.
+    LDemand := LLight.DemandOfFiles([Lib('LibU.pas'), Lib('LibV.pas'),
+      Lib('LibX.pas'), Lib('LibY.pas'), TPath.Combine(LOwn, 'UOwn2.pas')]);
+    Ok('batch: the demand of four light files (an own one adds nothing)',
+      (Length(LDemand.Full) = 4) and (LDemand.NotSearched = 4));
+    LRes := LLight.EnsureFull(LDemand);
+    Recreate(LNav, LLight);
+    Ok('batch: promoted in one commit, V''s import W taken in with it',
+      (LRes.Outcome = eoDone) and (LRes.Promoted = 4) and
+      (Pos('ensure=batch:4', LLight.StageTimings) = 1) and
+      (LLight.ModelIdOf(Lib('LibW.pas')) >= 0) and
+      LLight.IsLight(LLight.ModelIdOf(Lib('LibW.pas'))));
+    Ok('batch: ...LibZ still light, V''s body bound',
+      LLight.IsLight(LLight.ModelIdOf(Lib('LibZ.pas'))) and
+      (Pos('libv.pas|9|13', Refs(LNav, 'TFoo')) > 0));
+    // The lint's demand is LintPromotions'.
+    Ok('lint: DemandLint is LintPromotions as a demand',
+      Length(DemandLint(LNav, [LLight.ModelIdOf(TPath.Combine(LOwn,
+        'UOwn2.pas'))]).Full) = Length(LintPromotions(LNav,
+        [LLight.ModelIdOf(TPath.Combine(LOwn, 'UOwn2.pas'))])));
+  finally
+    LNav.Free;
+    LLight.Free;
+    LFullNav.Free;
+    LFull.Free;
+  end;
+end;
+
 procedure TestLightUnits;
 const
   LIBB =
@@ -7023,6 +7396,7 @@ var
     LOwnModel: TPasSemaModel;
     LAPath, LDPath, LUPath: string;
     LCount: Integer;
+    LEnsured: TPasEnsureResult;
   begin
     LAPath := TPath.Combine(LLib, 'LibA.pas');
     LDPath := TPath.Combine(LLib, 'LibD.pas');
@@ -7119,6 +7493,24 @@ var
       finally
         LP2.Free;
       end;
+    finally
+      LPP.Free;
+      LFullP.Free;
+    end;
+
+    // EnsureFull takes LibD's new import in first and then re-decides its
+    // questions - what PromoteUnit asks a rebuild for.
+    LFullP := Run(nil, True);
+    LPP := Run([LLib], True);
+    try
+      LEnsured := LPP.EnsureFull(LPP.DemandOfFiles([LDPath]));
+      Ok('ensure: LibD - its import taken in, then re-decided, no rebuild',
+        (LEnsured.Outcome = eoDone) and (LEnsured.Promoted = 1) and
+        (LEnsured.Loaded >= 1) and not LPP.IsLight(LPP.ModelIdOf(LDPath)) and
+        (ConstCount(LPP, LDPath, 'dq_yes') = 1) and
+        (ConstCount(LPP, LDPath, 'sz_big') = 1));
+      Ok('ensure: ...binding as in the full analysis',
+        Sig(LPP, LDPath) = Sig(LFullP, LDPath));
     finally
       LPP.Free;
       LFullP.Free;
@@ -14943,6 +15335,8 @@ begin
   TestPoolContract;
   TestLightUnits;
   TestLightStop;
+  TestWordScan;
+  TestLightDemand;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

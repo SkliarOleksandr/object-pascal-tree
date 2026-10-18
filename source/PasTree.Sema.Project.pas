@@ -146,6 +146,88 @@ type
   // and the promotion of a light unit to a full one (PromoteUnit).
   TPasModulePathMode = (mpEdit, mpPromote);
 
+  { LIGHT MODE, full answers (docs/library-light-mode.md, "Full answers in
+    light mode"). Which units can name a declaration of unit U - spec 03
+    sec. 3.3.2, "What a unit can reach of a unit it does not use":
+    dsSelf - U alone (an implementation-section or local declaration);
+    dsUnit - U and every unit listing U in a `uses` clause (a unit-level
+             declaration of U's interface);
+    dsMember - I(U), U and every unit whose interface `uses` reach U
+             through interface `uses` alone, plus every unit with a `uses`
+             entry into I(U) (a member of U's types, an enum value);
+    dsAll - every unit. U = System or SysInit is dsAll whatever is asked:
+             every unit uses them. }
+  TPasDemandScope = (dsSelf, dsUnit, dsMember, dsAll);
+
+  { One question of a demand: the light units whose bodies may name a
+    declaration of UnitId, within Scope, spelling one of Words (any; folded,
+    `&` dropped) in their implementation - nil Words: no spelling test, for a
+    use written without the name (a default array property, an operator). }
+  TPasDemandAsk = record
+    UnitId: Integer;
+    Scope: TPasDemandScope;
+    Words: TArray<string>;
+  end;
+
+  { What a query needs analyzed in full before it can answer as a full
+    analysis does (TPasSemaProject.DemandOf, the navigator's Demand*).
+    Full: the files to make fully analyzed - light units (promoted) and units
+    the closure has not loaded yet (taken in full); LoadOnly: units to load
+    light because a needed unit lies only behind them. NotSearched: how many
+    units the answer needs whose bodies are not analyzed now - what a query
+    run without EnsureFull leaves out; 0 once EnsureFull made them full.
+    Volume: source characters of the needed units; TotalVolume: of every
+    light and not-loaded unit (EnsureFull's escalation measure). }
+  TPasDemand = record
+    Full: TArray<string>;
+    LoadOnly: TArray<string>;
+    NotSearched: Integer;
+    LightUnits: Integer;
+    NotLoadedUnits: Integer;
+    Volume: Int64;
+    TotalVolume: Int64;
+    function IsEmpty: Boolean;
+  end;
+
+  { EnsureFull's outcome:
+    eoNothing - the demand was empty;
+    eoDone - every unit of the demand is fully analyzed now (Promoted /
+             Loaded > 0: the models changed - recreate the navigator);
+    eoPartial - some unit was refused for a reason a rebuild would not
+             change (Refused names it): the answer still leaves it out;
+    eoNeedsRebuild - a unit can be made full only by a rebuild with this
+             project as parse donor (it is in PromotedFiles now);
+    eoEscalate - the demand is cheaper as a full analysis: the host rebuilds
+             with LightPaths cleared (nothing was done). }
+  TPasEnsureOutcome = (eoNothing, eoDone, eoPartial, eoNeedsRebuild,
+    eoEscalate);
+
+  TPasEnsureResult = record
+    Outcome: TPasEnsureOutcome;
+    Promoted: Integer;     // light units made full
+    Loaded: Integer;       // units the closure had not loaded, taken in
+    Refused: TArray<string>;   // 'file: reason'
+    Ms: Int64;
+    Note: string;          // the escalation's or the rebuild's reason
+  end;
+
+  { The implementation word index's entry for one file (PasTree.WordIndex):
+    Words - the identifiers of its implementation (a light unit) or of its
+    whole text (a unit the closure has not loaded), its include files'
+    included; Uses - a not-loaded unit's `uses` names, both clauses (every
+    edge counts as an interface edge: the safe side), with UsedPaths their
+    resolutions once asked for; Size - its text's length; Whole - Words
+    covers the whole text; Unreadable - no text: every word matches. }
+  TPasWordEntry = record
+    Words: TArray<Cardinal>;
+    UsedNames: TArray<string>;
+    UsedPaths: TArray<string>;
+    UsedResolved: Boolean;
+    Size: Int64;
+    Whole: Boolean;
+    Unreadable: Boolean;
+  end;
+
   { One PROBE session of the expression typer: CrossType run over a subtree
     instead of a whole unit, recording nothing in the model - the mode
     WithTargetTypeX uses, so that a `with` target, a for-in collection, an
@@ -468,9 +550,54 @@ type
     // the driver thread only - by PromoteUnit's commit, AdoptParseDonor and
     // ForgetPromotions - while no load worker runs; IsLightFile reads it.
     FPromoted: TDictionary<string, Boolean>;
+    // Light mode, full answers: the implementation word index (lower-cased
+    // path -> entry, built lazily by EnsureWords), the resolutions of the
+    // UNIT_NOT_LOADED entries ('file|name' -> path, '' unresolved), the
+    // source volume EnsureFull made full so far, and its escalation bound.
+    // Host thread only, like every other call on a finished project.
+    FWordIdx: TDictionary<string, TPasWordEntry>;
+    FNotLoadedPath: TDictionary<string, string>;
+    FEnsuredVolume: Int64;
+    FLightTotal: Int64;
+    FEscalationPercent: Integer;
     // AnalyzeModuleOnly's body, shared with PromoteUnit (see the mode).
     function RunModulePath(const APath: string;
       AMode: TPasModulePathMode): Boolean;
+    { Scans every file of APaths the index lacks (or holds for less than the
+      whole text when AWhole) - in parallel, the include files they name
+      after them, sequentially resolved. }
+    procedure EnsureWords(const APaths: TArray<string>; AWhole: Boolean);
+    function NotLoadedPathOf(AMid, AUse: Integer): string;
+    procedure ResolveWordUses(const AKey, APath: string);
+    { The batch promotion of EnsureFull: every unit of AIds (light models)
+      parsed in parallel and, where the one-unit path would accept it with no
+      consumer redone and no `$IF` to re-decide, swapped in together - their
+      implementation-only imports loaded once, the module passes run once
+      over the whole set. The rest go through RunModulePath one by one. }
+    procedure PromoteBatch(const APaths: TArray<string>;
+      var AResult: TPasEnsureResult);
+    { Loads APaths - units the closure has not loaded, each a real
+      UNIT_NOT_LOADED import of a loaded light unit - with every unit they
+      pull in, as the module path takes in a new import: light or full by
+      IsLightFile, registered, linked and put through the module passes.
+      Nothing else is redone (no loaded model resolves through them). False
+      with AWhy when the module path's take-in rules refuse. }
+    function TakeInUnits(const APaths: TArray<string>;
+      out ALoaded: Integer; out AWhy: string): Boolean;
+    { NewcomersAdmissible over a SET of redone units (AIds with their fresh
+      models ANews; both empty for a take-in with no importer redone). }
+    function NewcomersAdmissibleSet(const AIds: TArray<Integer>;
+      const ANews: TArray<TPasSemaModel>; const AModels: TArray<TPasSemaModel>;
+      const APaths: TArray<string>; out AWhy: string;
+      AOracleOk: Boolean = False): Boolean;
+    { AOracleOk's other half: after the newcomers AIds are registered, the
+      `$IF` questions of those whose streams ask any are re-decided as the
+      declared pass of a full run decides them (RedecideStream, a light
+      newcomer's stream stopped as at its load), leaves first. False, with
+      the first reason in AWhy, when one cannot be made exact here: it keeps
+      its first-pass stream, and the caller asks for a rebuild. }
+    function RedecideNewcomers(const AIds: TArray<Integer>;
+      out AWhy: string): Boolean;
     procedure SetLightPaths(const AValue: TArray<string>);
     procedure SnapLightExempt(const ARoots: TArray<string>);
     function CancelRequested: Boolean; inline;
@@ -1836,6 +1963,53 @@ type
       again for them). }
     function PromotedFiles: TArray<string>;
     procedure ForgetPromotions;
+    { LIGHT MODE, full answers (docs/library-light-mode.md): the units a
+      query must have fully analyzed to answer as a full analysis does -
+      for each ask, the units of its scope (spec 03 sec. 3.3.2, "What a unit
+      can reach of a unit it does not use") over the uses graph that would
+      be the full closure's - the loaded models' `uses` (a light unit's
+      implementation entries included), and past a UNIT_NOT_LOADED entry the
+      `uses` names the word index scans in the units nobody loaded (every
+      name, conditional or not, as an interface edge: a superset) - those
+      that are light or not loaded, and spell one of the ask's words
+      (TPasWordEntry; nil words: all of them). A unit nobody loads is needed
+      only when it is reachable: EnsureFull takes it in from a light unit's
+      UNIT_NOT_LOADED entry (the demand's frontier), the units in between
+      first (LoadOnly), and asks again. Over-approximates (more units made
+      full, the answer still exact), never misses. Empty, at no cost, when
+      no unit is light. Builds the word index on first use - for every
+      light unit at once, in parallel. }
+    function DemandOf(const AAsks: TArray<TPasDemandAsk>): TPasDemand;
+    { The demand for these files themselves (light units only count) - the
+      uses lint's (PasTree.Sema.Lint) and a host's "this library file".
+      Cheap: no graph, no word index; its volumes are what an earlier
+      DemandOf measured (none before one: EnsureFull does not escalate). }
+    function DemandOfFiles(const AFiles: TArray<string>): TPasDemand;
+    { Makes ADemand's units fully analyzed: the not-loaded ones taken in
+      (TakeInUnits - full for ADemand.Full, light for LoadOnly), the light
+      ones promoted in one batch (parse and Phase 1 in parallel, one commit,
+      the module passes once over the set; a unit whose `$IF` must be
+      re-decided, or whose interface reads differently, goes through
+      PromoteUnit - which loads its new imports first and then re-decides,
+      so a hub unit asking `$IF` questions of a unit not loaded yet no
+      longer needs a rebuild). Escalates instead - eoEscalate, nothing done
+      - when the volume made full so far plus this demand's passes
+      EscalationPercent of TotalVolume: a rebuild without LightPaths is
+      cheaper then, and the project stays full for the session. As after
+      any module run, a host recreates its TPasNavigator after eoDone and
+      eoPartial, and asks the demand again until it is empty: a promotion
+      loads its unit's implementation-only units, which a query may need in
+      turn. Host thread only, on a finished project. }
+    function EnsureFull(const ADemand: TPasDemand): TPasEnsureResult;
+    { EnsureFull's escalation bound, percent of the light and not-loaded
+      source volume (default 40; 0 or less never escalates; 100 or more
+      escalates nothing short of the whole). }
+    property EscalationPercent: Integer read FEscalationPercent
+      write FEscalationPercent;
+    { The word index (TESTS and the light smoke tool): whether APath's entry
+      - built as a demand would build it, its implementation for a loaded
+      unit, the whole text otherwise - spells AWord. }
+    function WordIndexHas(const APath, AWord: string): Boolean;
     // Analyze every .pas/.dpr under a directory (indexed first).
     procedure AnalyzeDirectory(const ARoot: string);
     { Incremental analysis of ARoots' transitive uses closure, in two waves -
@@ -1984,7 +2158,8 @@ uses
   System.Generics.Defaults,
   PasTree.Parser,
   PasTree.Sema.Resolver,
-  PasTree.Sema.Diagnostics;
+  PasTree.Sema.Diagnostics,
+  PasTree.WordIndex;
 
 const
   { Overlay tombstone: "this node's committed ExtRefMap entry must go away".
@@ -2237,11 +2412,14 @@ begin
   FSysInitUnitId := -1;
   FSysInitUnitResolved := False;
   FSystemUnitLock := TObject.Create;
+  FEscalationPercent := 40;
 end;
 
 destructor TPasSemaProject.Destroy;
 begin
   ReleaseUsesMemo;
+  FWordIdx.Free;
+  FNotLoadedPath.Free;
   FByUnitName.Free;
   FSystemUnitLock.Free;
   FHostPins.Free;
@@ -6103,7 +6281,7 @@ begin
     LIter := 0;
     repeat
       Inc(LIter);
-      LDone := RedecideRounds(AId, False, LSymLog);
+      LDone := RedecideRounds(AId, AFirst.Light, LSymLog);
       if LDone = nil then
         Break;   // a round raised: the previous stream stands, as there
       LDone.OracleStream := True;
@@ -21482,6 +21660,10 @@ begin
       if not FSM.ResolveUnit(AModel.UsesList[LIdx].NameFull,
         AModel.UsesList[LIdx].InPath, AFromFile, LPath) then
         Continue;
+      // A light model's implementation import stays not loaded (the load
+      // engine's rule): no import of it. A full model follows every entry.
+      if not FollowsUse(AModel, LIdx, LPath) then
+        Continue;
       LPath := TPath.GetFullPath(LPath);
       LKey := LowerCase(LPath);
       // Loaded, or tried and known bad: either way ResolveUses answers it as
@@ -21585,10 +21767,18 @@ end;
 function TPasSemaProject.NewcomersAdmissible(AId: Integer;
   ANew: TPasSemaModel; const AModels: TArray<TPasSemaModel>;
   const APaths: TArray<string>; out AWhy: string): Boolean;
+begin
+  Result := NewcomersAdmissibleSet([AId], [ANew], AModels, APaths, AWhy);
+end;
+
+function TPasSemaProject.NewcomersAdmissibleSet(const AIds: TArray<Integer>;
+  const ANews: TArray<TPasSemaModel>; const AModels: TArray<TPasSemaModel>;
+  const APaths: TArray<string>; out AWhy: string; AOracleOk: Boolean): Boolean;
 var
   LNewPaths: TDictionary<string, Boolean>;   // the newcomers' paths, lower
   LDeclared: TDictionary<string, Boolean>;   // their declared names
   LNames: TDictionary<string, Boolean>;      // every name that reaches one
+  LRedone: TDictionary<Integer, Boolean>;    // AIds
   LIdx, LU, LMid: Integer;
   LName, LNs: string;
 
@@ -21612,13 +21802,17 @@ begin
   LNewPaths := TDictionary<string, Boolean>.Create;
   LDeclared := TDictionary<string, Boolean>.Create;
   LNames := TDictionary<string, Boolean>.Create;
+  LRedone := TDictionary<Integer, Boolean>.Create;
   try
+    for LIdx := 0 to High(AIds) do
+      LRedone.AddOrSetValue(AIds[LIdx], True);
     for LIdx := 0 to High(APaths) do
       LNewPaths.AddOrSetValue(LowerCase(APaths[LIdx]), True);
     for LIdx := 0 to High(AModels) do
     begin
-      if (Length(AModels[LIdx].Tree.Source.UnresolvedDeclared) > 0) or
-         (Length(AModels[LIdx].Tree.Source.UnresolvedSymbols) > 0) then
+      if not AOracleOk and
+         ((Length(AModels[LIdx].Tree.Source.UnresolvedDeclared) > 0) or
+          (Length(AModels[LIdx].Tree.Source.UnresolvedSymbols) > 0)) then
       begin
         AWhy := 'new-dependency-oracle(' + AModels[LIdx].UnitNameLower + ')';
         Exit(False);
@@ -21638,7 +21832,8 @@ begin
         if (LNs <> '') and LName.StartsWith(PasFoldName(LNs) + '.') then
           LNames.AddOrSetValue(Copy(LName, Length(LNs) + 2, MaxInt), True);
     end;
-    AddEntryNames(ANew, FFiles[AId]);
+    for LIdx := 0 to High(AIds) do
+      AddEntryNames(ANews[LIdx], FFiles[AIds[LIdx]]);
     for LIdx := 0 to High(AModels) do
       AddEntryNames(AModels[LIdx], APaths[LIdx]);
     // The edited unit is redone whatever it names; everyone else keeps the
@@ -21646,7 +21841,7 @@ begin
     // resolved entries included: a pin redirects those as well.
     for LMid := 0 to FModels.Count - 1 do
     begin
-      if (LMid = AId) or (FModels[LMid] = nil) then
+      if LRedone.ContainsKey(LMid) or (FModels[LMid] = nil) then
         Continue;
       for LU := 0 to High(FModels[LMid].UsesList) do
         // A light unit's not-loaded implementation import binds nothing:
@@ -21662,6 +21857,7 @@ begin
     end;
     Result := True;
   finally
+    LRedone.Free;
     LNames.Free;
     LDeclared.Free;
     LNewPaths.Free;
@@ -22664,6 +22860,1052 @@ begin
     Exit(True);
   end;
   Result := RunModulePath(APath, mpPromote);
+end;
+
+{ ---- light mode: full answers (docs/library-light-mode.md) ---------------- }
+
+function TPasDemand.IsEmpty: Boolean;
+begin
+  Result := (Full = nil) and (LoadOnly = nil);
+end;
+
+procedure TPasSemaProject.EnsureWords(const APaths: TArray<string>;
+  AWhole: Boolean);
+const
+  // An include nested deeper than this is not followed (dcc's own limit is
+  // far below any real nesting; a cycle stops here too).
+  MAX_INCLUDE_DEPTH = 8;
+var
+  LTodo, LIncTodo, LIncNext: TArray<string>;
+  LTodoSet: TDictionary<string, Boolean>;
+  LScans: TArray<TPasWordScan>;
+  LSizes: TArray<Int64>;
+  LBad: TArray<Boolean>;
+  LIncScans: TDictionary<string, TPasWordScan>;   // include path (lower) -> scan
+  LIncOf: TDictionary<string, TArray<string>>;    // a file (lower) -> its includes (lower)
+  LEntry: TPasWordEntry;
+  LKey, LInc, LResolved: string;
+  LIdx, LDepth: Integer;
+
+  // The includes of AFile, resolved from AUnit (the unit compiled), lower.
+  function ResolveIncludes(const AUnit, AFile: string;
+    const ANames: TArray<string>): TArray<string>;
+  var
+    LName, LFull: string;
+  begin
+    Result := nil;
+    for LName in ANames do
+      // A name nothing resolves is in a branch the build does not compile
+      // (or the unit does not compile at all): it adds no text.
+      if FSM.ResolveInclude(AUnit, AFile, LName, LFull) then
+        Result := Result + [LowerCase(TPath.GetFullPath(LFull))];
+  end;
+
+  // AFile's words with every include under it, transitively.
+  procedure AddIncludes(const AKey: string; var AWords: TArray<Cardinal>;
+    var AUses: TArray<string>; AVisited: TDictionary<string, Boolean>);
+  var
+    LI: string;
+    LScan: TPasWordScan;
+    LSub: TArray<string>;
+  begin
+    if not LIncOf.TryGetValue(AKey, LSub) then
+      Exit;
+    for LI in LSub do
+      if AVisited.TryAdd(LI, True) and LIncScans.TryGetValue(LI, LScan) then
+      begin
+        AWords := PasWordSetUnion(AWords, LScan.Words);
+        AUses := AUses + LScan.IntfUses + LScan.ImplUses;
+        AddIncludes(LI, AWords, AUses, AVisited);
+      end;
+  end;
+
+begin
+  if FWordIdx = nil then
+    FWordIdx := TDictionary<string, TPasWordEntry>.Create;
+  LTodo := nil;
+  LTodoSet := TDictionary<string, Boolean>.Create;
+  LIncScans := TDictionary<string, TPasWordScan>.Create;
+  LIncOf := TDictionary<string, TArray<string>>.Create;
+  try
+    for LResolved in APaths do
+    begin
+      LKey := LowerCase(LResolved);
+      if FWordIdx.TryGetValue(LKey, LEntry) and (LEntry.Whole or not AWhole) then
+        Continue;
+      if LTodoSet.TryAdd(LKey, True) then
+        LTodo := LTodo + [LResolved];
+    end;
+    if LTodo = nil then
+      Exit;
+    // The files themselves, on the worker pool: LoadText reads only, the
+    // scan is pure.
+    SetLength(LScans, Length(LTodo));
+    SetLength(LSizes, Length(LTodo));
+    SetLength(LBad, Length(LTodo));
+    ParallelFor(High(LTodo),
+      procedure(AIdx: Integer)
+      var
+        LText: string;
+      begin
+        try
+          LText := FSM.LoadText(LTodo[AIdx]);
+          LScans[AIdx] := PasScanWords(LText, AWhole);
+          LSizes[AIdx] := Length(LText);
+        except
+          LBad[AIdx] := True;
+        end;
+      end);
+    // Their includes, wave by wave: resolved here (the source manager's
+    // memos are not thread-safe), scanned whole in parallel.
+    LIncTodo := nil;
+    for LIdx := 0 to High(LTodo) do
+      if not LBad[LIdx] and (LScans[LIdx].Includes <> nil) then
+      begin
+        LIncOf.AddOrSetValue(LowerCase(LTodo[LIdx]),
+          ResolveIncludes(LTodo[LIdx], LTodo[LIdx], LScans[LIdx].Includes));
+        for LInc in LIncOf[LowerCase(LTodo[LIdx])] do
+          if not LIncScans.ContainsKey(LInc) then
+          begin
+            LIncScans.Add(LInc, Default(TPasWordScan));
+            LIncTodo := LIncTodo + [LInc];
+          end;
+      end;
+    LDepth := 0;
+    while (LIncTodo <> nil) and (LDepth < MAX_INCLUDE_DEPTH) do
+    begin
+      Inc(LDepth);
+      var LWave := LIncTodo;
+      var LWaveScans: TArray<TPasWordScan>;
+      SetLength(LWaveScans, Length(LWave));
+      ParallelFor(High(LWave),
+        procedure(AIdx: Integer)
+        begin
+          try
+            LWaveScans[AIdx] := PasScanWords(FSM.LoadText(LWave[AIdx]), True);
+          except
+            LWaveScans[AIdx] := Default(TPasWordScan);
+          end;
+        end);
+      LIncNext := nil;
+      for LIdx := 0 to High(LWave) do
+      begin
+        LIncScans[LWave[LIdx]] := LWaveScans[LIdx];
+        if LWaveScans[LIdx].Includes = nil then
+          Continue;
+        // An include's own includes resolve from the file that includes them
+        // (the unit itself first - dcc's order, which ResolveInclude keeps).
+        LIncOf.AddOrSetValue(LWave[LIdx],
+          ResolveIncludes(LWave[LIdx], LWave[LIdx], LWaveScans[LIdx].Includes));
+        for LInc in LIncOf[LWave[LIdx]] do
+          if not LIncScans.ContainsKey(LInc) then
+          begin
+            LIncScans.Add(LInc, Default(TPasWordScan));
+            LIncNext := LIncNext + [LInc];
+          end;
+      end;
+      LIncTodo := LIncNext;
+    end;
+    for LIdx := 0 to High(LTodo) do
+    begin
+      LEntry := Default(TPasWordEntry);
+      LEntry.Whole := AWhole;
+      if LBad[LIdx] then
+        LEntry.Unreadable := True
+      else
+      begin
+        LEntry.Words := LScans[LIdx].Words;
+        LEntry.UsedNames := LScans[LIdx].IntfUses + LScans[LIdx].ImplUses;
+        LEntry.Size := LSizes[LIdx];
+        var LVisited := TDictionary<string, Boolean>.Create;
+        try
+          AddIncludes(LowerCase(LTodo[LIdx]), LEntry.Words, LEntry.UsedNames,
+            LVisited);
+        finally
+          LVisited.Free;
+        end;
+      end;
+      FWordIdx.AddOrSetValue(LowerCase(LTodo[LIdx]), LEntry);
+    end;
+  finally
+    LIncOf.Free;
+    LIncScans.Free;
+    LTodoSet.Free;
+  end;
+end;
+
+procedure TPasSemaProject.ResolveWordUses(const AKey, APath: string);
+var
+  LEntry: TPasWordEntry;
+  LName, LFull: string;
+begin
+  if not FWordIdx.TryGetValue(AKey, LEntry) or LEntry.UsedResolved then
+    Exit;
+  LEntry.UsedPaths := nil;
+  for LName in LEntry.UsedNames do
+    if FSM.ResolveUnit(LName, '', APath, LFull) and FSM.SourceExists(LFull) then
+      LEntry.UsedPaths := LEntry.UsedPaths + [TPath.GetFullPath(LFull)];
+  LEntry.UsedResolved := True;
+  FWordIdx[AKey] := LEntry;
+end;
+
+function TPasSemaProject.NotLoadedPathOf(AMid, AUse: Integer): string;
+var
+  LKey, LFull: string;
+  LUse: TPasUsesRef;
+begin
+  LUse := FModels[AMid].UsesList[AUse];
+  LKey := LowerCase(FFiles[AMid]) + '|' + PasFoldName(LUse.NameFull);
+  if FNotLoadedPath = nil then
+    FNotLoadedPath := TDictionary<string, string>.Create;
+  if FNotLoadedPath.TryGetValue(LKey, Result) then
+    Exit;
+  Result := '';
+  if FSM.ResolveUnit(LUse.NameFull, LUse.InPath, FFiles[AMid], LFull) and
+     FSM.SourceExists(LFull) then
+    Result := TPath.GetFullPath(LFull);
+  FNotLoadedPath.Add(LKey, Result);
+end;
+
+function TPasSemaProject.WordIndexHas(const APath, AWord: string): Boolean;
+var
+  LEntry: TPasWordEntry;
+  LKey: string;
+begin
+  LKey := LowerCase(TPath.GetFullPath(APath));
+  EnsureWords([TPath.GetFullPath(APath)], ModelIdOf(APath) < 0);
+  Result := FWordIdx.TryGetValue(LKey, LEntry) and
+    (LEntry.Unreadable or PasWordSetHas(LEntry.Words, PasWordHash(AWord)));
+end;
+
+function TPasSemaProject.DemandOf(
+  const AAsks: TArray<TPasDemandAsk>): TPasDemand;
+type
+  TEdge = record
+    From, Target: Integer;
+    Intf: Boolean;
+  end;
+var
+  LCount, LN, LMid, LU, LNode, LIdx, LT, LSet, LQLen: Integer;
+  LM: TPasSemaModel;
+  LPaths: TList<string>;               // node -> full path
+  LNL: TDictionary<string, Integer>;   // a not-loaded node by lower path
+  LFrontier: TList<Boolean>;           // node -> a loaded unit's real import
+  LEdges: TList<TEdge>;
+  LWave, LNext, LLightPaths: TArray<string>;
+  LWaveNodes, LNextNodes: TArray<Integer>;
+  LRevAllStart, LRevAll, LRevIntfStart, LRevIntf: TArray<Integer>;
+  LWanted, LIn, LInI, LNeeded: TArray<Boolean>;
+  LQueue: TArray<Integer>;
+  LHashes: TArray<Cardinal>;
+  LEntry: TPasWordEntry;
+  LPath, LKey, LWord: string;
+  LEdge: TEdge;
+  LScope: TPasDemandScope;
+  LAnyFrontier, LMatch: Boolean;
+  LDemandedNL: Integer;
+
+  function SizeOf_(ANode: Integer): Int64;
+  var
+    LE: TPasWordEntry;
+  begin
+    if FWordIdx.TryGetValue(LowerCase(LPaths[ANode]), LE) then
+      Result := LE.Size
+    else
+      Result := 0;
+  end;
+
+  function NodeOfNL(const APath: string; out ANew: Boolean): Integer;
+  var
+    LK: string;
+  begin
+    LK := LowerCase(APath);
+    ANew := not LNL.TryGetValue(LK, Result);
+    if ANew then
+    begin
+      Result := LPaths.Count;
+      LPaths.Add(APath);
+      LFrontier.Add(False);
+      LNL.Add(LK, Result);
+    end;
+  end;
+
+  procedure AddEdge(AFrom, ATarget: Integer; AIntf: Boolean);
+  var
+    LE: TEdge;
+  begin
+    LE.From := AFrom;
+    LE.Target := ATarget;
+    LE.Intf := AIntf;
+    LEdges.Add(LE);
+  end;
+
+  // Reverse adjacency in CSR form: AStart[n]..AStart[n+1]-1 index AList.
+  procedure BuildReverse(AIntfOnly: Boolean; out AStart, AList: TArray<Integer>);
+  var
+    LE: TEdge;
+    LFill: TArray<Integer>;
+    LI: Integer;
+  begin
+    SetLength(AStart, LN + 1);
+    for LE in LEdges do
+      if not AIntfOnly or LE.Intf then
+        Inc(AStart[LE.Target + 1]);
+    for LI := 1 to LN do
+      Inc(AStart[LI], AStart[LI - 1]);
+    SetLength(AList, AStart[LN]);
+    LFill := Copy(AStart, 0, LN);
+    for LE in LEdges do
+      if not AIntfOnly or LE.Intf then
+      begin
+        AList[LFill[LE.Target]] := LE.From;
+        Inc(LFill[LE.Target]);
+      end;
+  end;
+
+  function IsCandidate(ANode: Integer): Boolean;
+  begin
+    Result := (ANode >= LCount) or IsLight(ANode);
+  end;
+
+begin
+  Result := Default(TPasDemand);
+  LCount := FModels.Count;
+  LLightPaths := nil;
+  for LMid := 0 to LCount - 1 do
+    if IsLight(LMid) then
+      LLightPaths := LLightPaths + [FFiles[LMid]];
+  // No light unit: every body is analyzed, nothing is ever needed.
+  if LLightPaths = nil then
+    Exit;
+  // The light units' implementation words, all at once on first use.
+  EnsureWords(LLightPaths, False);
+  LPaths := TList<string>.Create;
+  LNL := TDictionary<string, Integer>.Create;
+  LFrontier := TList<Boolean>.Create;
+  LEdges := TList<TEdge>.Create;
+  try
+    for LMid := 0 to LCount - 1 do
+    begin
+      LPaths.Add(FFiles[LMid]);
+      LFrontier.Add(False);
+    end;
+    // The loaded models' edges; a not-loaded import starts the part of the
+    // full closure this one has not loaded.
+    LWaveNodes := nil;
+    LWave := nil;
+    for LMid := 0 to LCount - 1 do
+    begin
+      LM := FModels[LMid];
+      if LM = nil then
+        Continue;
+      for LU := 0 to High(LM.UsesList) do
+      begin
+        LT := LM.UsesList[LU].UnitId;
+        if LT >= 0 then
+          AddEdge(LMid, LT, not IsImplUsesEntry(LM, LU))
+        else if LT = UNIT_NOT_LOADED then
+        begin
+          LPath := NotLoadedPathOf(LMid, LU);
+          if LPath = '' then
+            Continue;
+          if FByPath.TryGetValue(LowerCase(LPath), LT) then
+          begin
+            if LT >= 0 then
+              AddEdge(LMid, LT, not LM.UsesList[LU].InImpl);
+            Continue;
+          end;
+          var LNew: Boolean;
+          LNode := NodeOfNL(LPath, LNew);
+          LFrontier[LNode] := True;
+          AddEdge(LMid, LNode, not LM.UsesList[LU].InImpl);
+          if LNew then
+          begin
+            LWaveNodes := LWaveNodes + [LNode];
+            LWave := LWave + [LPath];
+          end;
+        end;
+      end;
+    end;
+    // Past them, the units nobody loaded, by the names their text lists.
+    while LWaveNodes <> nil do
+    begin
+      EnsureWords(LWave, True);
+      LNextNodes := nil;
+      LNext := nil;
+      for LIdx := 0 to High(LWaveNodes) do
+      begin
+        LKey := LowerCase(LWave[LIdx]);
+        ResolveWordUses(LKey, LWave[LIdx]);
+        if not FWordIdx.TryGetValue(LKey, LEntry) then
+          Continue;
+        for LPath in LEntry.UsedPaths do
+        begin
+          if FByPath.TryGetValue(LowerCase(LPath), LT) then
+          begin
+            // A known-bad file (-1) is no unit a full closure has either.
+            if LT >= 0 then
+              AddEdge(LWaveNodes[LIdx], LT, True);
+            Continue;
+          end;
+          var LNew: Boolean;
+          LNode := NodeOfNL(LPath, LNew);
+          AddEdge(LWaveNodes[LIdx], LNode, True);
+          if LNew then
+          begin
+            LNextNodes := LNextNodes + [LNode];
+            LNext := LNext + [LPath];
+          end;
+        end;
+      end;
+      LWaveNodes := LNextNodes;
+      LWave := LNext;
+    end;
+    LN := LPaths.Count;
+    BuildReverse(False, LRevAllStart, LRevAll);
+    BuildReverse(True, LRevIntfStart, LRevIntf);
+    for LNode := 0 to LN - 1 do
+      if IsCandidate(LNode) then
+        Inc(Result.TotalVolume, SizeOf_(LNode));
+    // The measure stays the closure's library volume: what EnsureFull made
+    // full is no longer light, and a total that shrank with it would make
+    // every later demand look like a larger share.
+    Inc(Result.TotalVolume, FEnsuredVolume);
+    if Result.TotalVolume < FLightTotal then
+      Result.TotalVolume := FLightTotal;
+    FLightTotal := Result.TotalVolume;
+    SetLength(LWanted, LN);
+    for var LAsk in AAsks do
+    begin
+      if (LAsk.UnitId < 0) or (LAsk.UnitId >= LCount) or
+         (FModels[LAsk.UnitId] = nil) then
+        Continue;
+      LScope := LAsk.Scope;
+      // Every unit uses System and SysInit without naming them.
+      if (FModels[LAsk.UnitId].UnitNameLower = 'system') or
+         (FModels[LAsk.UnitId].UnitNameLower = 'sysinit') then
+        LScope := dsAll;
+      SetLength(LIn, 0);
+      SetLength(LIn, LN);
+      case LScope of
+        dsSelf:
+          LIn[LAsk.UnitId] := True;
+        dsUnit:
+          begin
+            LIn[LAsk.UnitId] := True;
+            for LIdx := LRevAllStart[LAsk.UnitId] to
+                LRevAllStart[LAsk.UnitId + 1] - 1 do
+              LIn[LRevAll[LIdx]] := True;
+          end;
+        dsMember:
+          begin
+            // I(U): backwards over interface edges alone.
+            SetLength(LInI, 0);
+            SetLength(LInI, LN);
+            SetLength(LQueue, LN);
+            LInI[LAsk.UnitId] := True;
+            LQueue[0] := LAsk.UnitId;
+            LQLen := 1;
+            LSet := 0;
+            while LSet < LQLen do
+            begin
+              LNode := LQueue[LSet];
+              Inc(LSet);
+              for LIdx := LRevIntfStart[LNode] to LRevIntfStart[LNode + 1] - 1 do
+                if not LInI[LRevIntf[LIdx]] then
+                begin
+                  LInI[LRevIntf[LIdx]] := True;
+                  LQueue[LQLen] := LRevIntf[LIdx];
+                  Inc(LQLen);
+                end;
+            end;
+            // ... and every unit with an edge into it.
+            for LSet := 0 to LQLen - 1 do
+            begin
+              LNode := LQueue[LSet];
+              LIn[LNode] := True;
+              for LIdx := LRevAllStart[LNode] to LRevAllStart[LNode + 1] - 1 do
+                LIn[LRevAll[LIdx]] := True;
+            end;
+          end;
+        dsAll:
+          for LNode := 0 to LN - 1 do
+            LIn[LNode] := True;
+      end;
+      LHashes := nil;
+      for LWord in LAsk.Words do
+        LHashes := LHashes + [PasWordHash(LWord)];
+      for LNode := 0 to LN - 1 do
+      begin
+        if not LIn[LNode] or LWanted[LNode] or not IsCandidate(LNode) then
+          Continue;
+        LMatch := LAsk.Words = nil;
+        if not LMatch then
+        begin
+          if not FWordIdx.TryGetValue(LowerCase(LPaths[LNode]), LEntry) then
+            // Never scanned (a light unit loaded since): the safe side.
+            LMatch := True
+          else if LEntry.Unreadable then
+            LMatch := True
+          else
+            for var LH in LHashes do
+              if PasWordSetHas(LEntry.Words, LH) then
+              begin
+                LMatch := True;
+                Break;
+              end;
+        end;
+        if LMatch then
+          LWanted[LNode] := True;
+      end;
+    end;
+    // The light units: made full where they are.
+    LDemandedNL := 0;
+    for LNode := 0 to LCount - 1 do
+      if LWanted[LNode] then
+      begin
+        Result.Full := Result.Full + [LPaths[LNode]];
+        Inc(Result.LightUnits);
+        Inc(Result.Volume, SizeOf_(LNode));
+      end;
+    // The units nobody loaded: reachable only through the not-loaded units
+    // above them - those are needed too, to be loaded on the way.
+    SetLength(LNeeded, LN);
+    SetLength(LQueue, LN);
+    LQLen := 0;
+    for LNode := LCount to LN - 1 do
+      if LWanted[LNode] then
+      begin
+        Inc(LDemandedNL);
+        Inc(Result.Volume, SizeOf_(LNode));
+        LNeeded[LNode] := True;
+        LQueue[LQLen] := LNode;
+        Inc(LQLen);
+      end;
+    LSet := 0;
+    while LSet < LQLen do
+    begin
+      LNode := LQueue[LSet];
+      Inc(LSet);
+      for LIdx := LRevAllStart[LNode] to LRevAllStart[LNode + 1] - 1 do
+        if (LRevAll[LIdx] >= LCount) and not LNeeded[LRevAll[LIdx]] then
+        begin
+          LNeeded[LRevAll[LIdx]] := True;
+          LQueue[LQLen] := LRevAll[LIdx];
+          Inc(LQLen);
+        end;
+    end;
+    LAnyFrontier := False;
+    for LNode := LCount to LN - 1 do
+      if LNeeded[LNode] and LFrontier[LNode] then
+      begin
+        LAnyFrontier := True;
+        if LWanted[LNode] then
+          Result.Full := Result.Full + [LPaths[LNode]]
+        else
+          Result.LoadOnly := Result.LoadOnly + [LPaths[LNode]];
+      end;
+    Result.NotLoadedUnits := LDemandedNL;
+    // With no frontier left no needed unit can be reached from the loaded
+    // closure - so none is in the full one either.
+    Result.NotSearched := Result.LightUnits;
+    if LAnyFrontier then
+      Inc(Result.NotSearched, LDemandedNL);
+  finally
+    LEdges.Free;
+    LFrontier.Free;
+    LNL.Free;
+    LPaths.Free;
+  end;
+end;
+
+function TPasSemaProject.DemandOfFiles(const AFiles: TArray<string>): TPasDemand;
+var
+  LMid: Integer;
+  LEntry: TPasWordEntry;
+begin
+  // No graph and no word index for named files: the volumes come from what
+  // an earlier demand measured. Before any, TotalVolume is 0 and EnsureFull
+  // does not escalate - a host naming files knows what it asks for.
+  Result := Default(TPasDemand);
+  Result.TotalVolume := FLightTotal;
+  for var LFile in AFiles do
+  begin
+    LMid := ModelIdOf(LFile);
+    if (LMid < 0) or not IsLight(LMid) then
+      Continue;
+    Result.Full := Result.Full + [FFiles[LMid]];
+    Inc(Result.LightUnits);
+    Inc(Result.NotSearched);
+    if (FWordIdx <> nil) and
+       FWordIdx.TryGetValue(LowerCase(FFiles[LMid]), LEntry) then
+      Inc(Result.Volume, LEntry.Size);
+  end;
+end;
+
+function TPasSemaProject.RedecideNewcomers(const AIds: TArray<Integer>;
+  out AWhy: string): Boolean;
+var
+  LIdx, LId: Integer;
+  LM, LRe: TPasSemaModel;
+  LWhy: string;
+begin
+  AWhy := '';
+  // Discovery order puts an importer before what it imports: the reverse
+  // answers a question about an import from its decided stream.
+  for LIdx := High(AIds) downto 0 do
+  begin
+    LId := AIds[LIdx];
+    LM := FModels[LId];
+    if (Length(LM.Tree.Source.UnresolvedDeclared) = 0) and
+       (Length(LM.Tree.Source.UnresolvedSymbols) = 0) then
+      Continue;
+    LRe := RedecideStream(LId, LM, LWhy);
+    if LWhy <> '' then
+    begin
+      if AWhy = '' then
+        AWhy := Format('newcomer-redecide(%s:%s)', [LM.UnitNameLower, LWhy]);
+      Continue;
+    end;
+    if LRe <> nil then
+      FModels[LId] := LRe;   // the owning list frees the first-pass model
+  end;
+  Result := AWhy = '';
+end;
+
+function TPasSemaProject.TakeInUnits(const APaths: TArray<string>;
+  out ALoaded: Integer; out AWhy: string): Boolean;
+var
+  LModels: TArray<TPasSemaModel>;
+  LPaths: TArray<string>;
+  LAddIds: TArray<Integer>;
+  LIdx: Integer;
+  LRedecideWhy: string;
+begin
+  ALoaded := 0;
+  AWhy := '';
+  Result := False;
+  if FTransientReleased then
+    AWhy := 'released-maps'
+  else if FNeedsFullRebuild then
+    AWhy := 'needs-full-rebuild'
+  else if not FRunComplete then
+    AWhy := 'incomplete-run';
+  if AWhy <> '' then
+    Exit;
+  FSM.SavePins;
+  LModels := nil;
+  try
+    FinishDonor({AReport} False);
+    EnterAnalysis('AnalyzeModuleOnly');
+    SnapLightExempt(FLightRoots);
+    if not LoadNewcomers(APaths, LModels, LPaths, AWhy) or
+       not NewcomersAdmissibleSet(nil, nil, LModels, LPaths, AWhy,
+         {AOracleOk} True) then
+      Exit;
+    if LModels = nil then
+      Exit(True);
+    FSM.DropSavedPins;   // no refusal past here
+    try
+      Inc(FModelGeneration);
+      SetLength(LAddIds, Length(LModels));
+      for LIdx := 0 to High(LModels) do
+      begin
+        if LModels[LIdx].Light then
+          LAddIds[LIdx] := RegisterModel(LModels[LIdx], LPaths[LIdx],
+            msIntfReady)
+        else
+          LAddIds[LIdx] := RegisterModel(LModels[LIdx], LPaths[LIdx],
+            msFullReady);
+        LModels[LIdx] := nil;   // FModels owns it now
+        FByPath.Add(LowerCase(LPaths[LIdx]), LAddIds[LIdx]);
+        RegisterUnitName(LAddIds[LIdx]);
+      end;
+      // The light units naming them in their implementation point at them.
+      RelinkNotLoaded;
+      if not RedecideNewcomers(LAddIds, LRedecideWhy) then
+        AWhy := LRedecideWhy;
+      RunModulePasses(LAddIds, LAddIds[0], nil);
+      for LIdx := 0 to High(LAddIds) do
+        SetModuleStatus(LAddIds[LIdx], msCrossReady);
+    except
+      on E: Exception do
+      begin
+        FNeedsFullRebuild := True;
+        FStageTimings := 'module=half-committed:' + E.ClassName;
+        raise;
+      end;
+    end;
+    ALoaded := Length(LAddIds);
+    // Taken in, but a newcomer's stream is a guess: the caller rebuilds.
+    Result := AWhy = '';
+  finally
+    for LIdx := 0 to High(LModels) do
+      LModels[LIdx].Free;
+    FSM.RestorePins;   // a no-op once DropSavedPins ran
+    TrimPreprocessors;
+  end;
+end;
+
+procedure TPasSemaProject.PromoteBatch(const APaths: TArray<string>;
+  var AResult: TPasEnsureResult);
+var
+  LIds: TArray<Integer>;
+  LFiles, LKeys: TArray<string>;
+  LWasPromoted: TArray<Boolean>;
+  LNews: TArray<TPasSemaModel>;
+  LErr: TArray<string>;
+  LSeedsOf: TArray<TArray<string>>;
+  LSingle, LBatch: TArray<Integer>;   // slots
+  LBIds, LAddIds: TArray<Integer>;
+  LBNews, LAddModels: TArray<TPasSemaModel>;
+  LSeeds, LAddPaths: TArray<string>;
+  LSeen: TDictionary<string, Boolean>;
+  LAdded: TDictionary<string, Byte>;
+  LChanged: TArray<Boolean>;
+  LMap: TArray<Integer>;
+  LOld, LNew: TPasSemaModel;
+  LId, LSlot, LIdx, LOldSymN, LLoaded: Integer;
+  LKey, LWhy, LCounts, LGate: string;
+  LHelpers, LAnyChange, LOk: Boolean;
+  LSW: TStopwatch;
+
+  procedure Refused(ASlot: Integer; const AWhy: string);
+  begin
+    AResult.Refused := AResult.Refused + [LFiles[ASlot] + ': ' + AWhy];
+    if Pos('promote-needs-rebuild', AWhy) > 0 then
+      AResult.Outcome := eoNeedsRebuild;
+  end;
+
+  // A slot taken out of the batch gives back the promoted mark it was given
+  // for its parse: the one-unit path sets it itself where it should stay.
+  procedure Unmark(ASlot: Integer);
+  begin
+    if not LWasPromoted[ASlot] and (FPromoted <> nil) then
+      FPromoted.Remove(LKeys[ASlot]);
+  end;
+
+begin
+  LSW := TStopwatch.StartNew;
+  LIds := nil;
+  LFiles := nil;
+  LKeys := nil;
+  for var LPath in APaths do
+  begin
+    LKey := LowerCase(TPath.GetFullPath(LPath));
+    if FByPath.TryGetValue(LKey, LId) and (LId >= 0) and IsLight(LId) then
+    begin
+      LIds := LIds + [LId];
+      LFiles := LFiles + [FFiles[LId]];
+      LKeys := LKeys + [LKey];
+    end;
+  end;
+  if LIds = nil then
+    Exit;
+  SetLength(LWasPromoted, Length(LIds));
+  SetLength(LNews, Length(LIds));
+  SetLength(LErr, Length(LIds));
+  SetLength(LSeedsOf, Length(LIds));
+  LSingle := nil;
+  LBatch := nil;
+  LAddModels := nil;
+  LGate := '';
+  if FTransientReleased then
+    LGate := 'released-maps'
+  else if FNeedsFullRebuild then
+    LGate := 'needs-full-rebuild'
+  else if not FRunComplete then
+    LGate := 'incomplete-run';
+  if LGate <> '' then
+  begin
+    for LSlot := 0 to High(LIds) do
+      Refused(LSlot, 'module=refused:' + LGate);
+    Exit;
+  end;
+  FSM.SavePins;
+  try
+    FinishDonor({AReport} False);
+    EnterAnalysis('AnalyzeModuleOnly');
+    SnapLightExempt(FLightRoots);
+    // A demoted light model comes back first, as the module path's does.
+    HydrateModels(LIds);
+    // The full parses, in parallel - the load engine's worker body; the
+    // promoted mark makes IsLightFile answer False for them.
+    if FPromoted = nil then
+      FPromoted := TDictionary<string, Boolean>.Create;
+    for LSlot := 0 to High(LIds) do
+    begin
+      LWasPromoted[LSlot] := FPromoted.ContainsKey(LKeys[LSlot]);
+      FPromoted.AddOrSetValue(LKeys[LSlot], True);
+    end;
+    ParallelFor(High(LIds),
+      procedure(ASlot: Integer)
+      var
+        LClass, LMsg: string;
+        LFullDonor: Boolean;
+      begin
+        if FModels[LIds[ASlot]].Demoted then
+          Exit;   // not rehydrated: the one-unit path refuses it, named
+        LNews[ASlot] := ComputeLoad(LFiles[ASlot], False, LClass, LMsg,
+          LFullDonor);
+        if LNews[ASlot] = nil then
+          LErr[ASlot] := LClass + ': ' + LMsg;
+      end);
+    // The decisions, as the one-unit path takes them: what it would accept
+    // with no consumer redone joins the batch; the rest go to it.
+    for LSlot := 0 to High(LIds) do
+    begin
+      LNew := LNews[LSlot];
+      if LNew = nil then
+      begin
+        LSingle := LSingle + [LSlot];
+        Continue;
+      end;
+      LSeedsOf[LSlot] := NewImportsOf(LNew, LFiles[LSlot]);
+      LOld := FModels[LIds[LSlot]];
+      LOk := (Length(LNew.Tree.Source.UnresolvedDeclared) = 0) and
+        (Length(LNew.Tree.Source.UnresolvedSymbols) = 0) and
+        IntfPrefixSame(LOld, LNew, LOldSymN, LWhy);
+      if LOk then
+      begin
+        SetLength(LMap, LOld.SymCount);
+        for LIdx := 0 to High(LMap) do
+          LMap[LIdx] := LIdx;
+        LAdded := TDictionary<string, Byte>.Create;
+        try
+          DiffInterface(LOld, LNew, LOldSymN, LOldSymN, LMap, LChanged, LAdded,
+            LHelpers, LAnyChange, LCounts);
+        finally
+          LAdded.Free;
+        end;
+        LOk := not LAnyChange and InstancesSafeFor(LIds[LSlot], LOldSymN);
+      end;
+      if LOk then
+        LBatch := LBatch + [LSlot]
+      else
+        LSingle := LSingle + [LSlot];
+    end;
+    // The batch's implementation-only imports, loaded once for all of it.
+    LBIds := nil;
+    LBNews := nil;
+    for LSlot in LBatch do
+    begin
+      LBIds := LBIds + [LIds[LSlot]];
+      LBNews := LBNews + [LNews[LSlot]];
+    end;
+    LSeeds := nil;
+    LSeen := TDictionary<string, Boolean>.Create;
+    try
+      for LSlot in LBatch do
+        for var LS in LSeedsOf[LSlot] do
+          if LSeen.TryAdd(LowerCase(LS), True) then
+            LSeeds := LSeeds + [LS];
+    finally
+      LSeen.Free;
+    end;
+    LAddPaths := nil;
+    if (LBatch <> nil) and (LSeeds <> nil) then
+      if not LoadNewcomers(LSeeds, LAddModels, LAddPaths, LWhy) or
+         not NewcomersAdmissibleSet(LBIds, LBNews, LAddModels, LAddPaths,
+           LWhy, {AOracleOk} True) then
+      begin
+        // The one-unit path takes each in with its own rules.
+        for LIdx := 0 to High(LAddModels) do
+          FreeAndNil(LAddModels[LIdx]);
+        LAddModels := nil;
+        LAddPaths := nil;
+        LSingle := LSingle + LBatch;
+        LBatch := nil;
+        LBIds := nil;
+        AResult.Note := AResult.Note + 'batch-newcomers:' + LWhy + ';';
+      end;
+    if LBatch <> nil then
+    begin
+      FSM.DropSavedPins;   // no refusal past here
+      try
+        // THE COMMIT POINT, as the one-unit path's: the owning list frees
+        // each old model; the navigator must be recreated.
+        Inc(FModelGeneration);
+        for LSlot in LBatch do
+        begin
+          FModels[LIds[LSlot]] := LNews[LSlot];
+          LNews[LSlot] := nil;   // FModels owns it now
+        end;
+        SetLength(LAddIds, Length(LAddModels));
+        for LIdx := 0 to High(LAddModels) do
+        begin
+          if LAddModels[LIdx].Light then
+            LAddIds[LIdx] := RegisterModel(LAddModels[LIdx], LAddPaths[LIdx],
+              msIntfReady)
+          else
+            LAddIds[LIdx] := RegisterModel(LAddModels[LIdx], LAddPaths[LIdx],
+              msFullReady);
+          LAddModels[LIdx] := nil;
+          FByPath.Add(LowerCase(LAddPaths[LIdx]), LAddIds[LIdx]);
+          RegisterUnitName(LAddIds[LIdx]);
+        end;
+        if LAddIds <> nil then
+          RelinkNotLoaded;
+        if not RedecideNewcomers(LAddIds, LWhy) then
+        begin
+          // A guessed stream stays: the host rebuilds, the unit kept full.
+          AResult.Refused := AResult.Refused + ['newcomers: ' + LWhy];
+          AResult.Outcome := eoNeedsRebuild;
+        end;
+        for LId in LBIds do
+          if LId <= High(FWorkBuilt) then
+            FWorkBuilt[LId] := False;
+        RunModulePasses(LBIds + LAddIds, LBIds[0], nil);
+        for LId in LBIds do
+          SetModuleStatus(LId, msCrossReady);
+        for LId in LAddIds do
+          SetModuleStatus(LId, msCrossReady);
+      except
+        on E: Exception do
+        begin
+          FNeedsFullRebuild := True;
+          FStageTimings := 'module=half-committed:' + E.ClassName;
+          raise;
+        end;
+      end;
+      Inc(AResult.Promoted, Length(LBIds));
+      Inc(AResult.Loaded, Length(LAddIds));
+    end;
+  finally
+    for LIdx := 0 to High(LNews) do
+      FreeAndNil(LNews[LIdx]);
+    for LIdx := 0 to High(LAddModels) do
+      LAddModels[LIdx].Free;
+    FSM.RestorePins;
+    TrimPreprocessors;
+  end;
+  FStageTimings := Format('ensure=batch:%d,%dms;newunits=%d;',
+    [Length(LBIds), LSW.ElapsedMilliseconds, Length(LAddIds)]);
+  // The rest, one by one: the `$IF` re-decision, an interface that reads
+  // differently, a parse that failed - the one-unit path's rules.
+  for LSlot in LSingle do
+  begin
+    Unmark(LSlot);
+    if LErr[LSlot] <> '' then
+    begin
+      Refused(LSlot, 'module=refused:parse-failed(' + LErr[LSlot] + ')');
+      Continue;
+    end;
+    LOk := RunModulePath(LFiles[LSlot], mpPromote);
+    // A unit whose `$IF` questions name a unit not loaded yet: its imports
+    // first, then the re-decision - not the rebuild PromoteUnit asks for.
+    if not LOk and
+       (Pos('promote-needs-rebuild(new-import)', FStageTimings) > 0) and
+       (LSeedsOf[LSlot] <> nil) then
+    begin
+      LSeeds := nil;
+      LWhy := '';
+      for var LS in LSeedsOf[LSlot] do
+        if ModelIdOf(LS) < 0 then
+          LSeeds := LSeeds + [LS];
+      Unmark(LSlot);
+      if (LSeeds <> nil) and TakeInUnits(LSeeds, LLoaded, LWhy) then
+      begin
+        Inc(AResult.Loaded, LLoaded);
+        LOk := RunModulePath(LFiles[LSlot], mpPromote);
+      end
+      else
+      begin
+        // As PromoteUnit left it: the rebuild loads the unit full.
+        FPromoted.AddOrSetValue(LKeys[LSlot], True);
+        if LWhy <> '' then
+          FStageTimings := FStageTimings + 'take-in:' + LWhy + ';';
+      end;
+    end;
+    if LOk then
+      Inc(AResult.Promoted)
+    else
+      Refused(LSlot, FStageTimings);
+  end;
+end;
+
+function TPasSemaProject.EnsureFull(const ADemand: TPasDemand): TPasEnsureResult;
+var
+  LSW: TStopwatch;
+  LIn, LFull: TArray<string>;
+  LFullSet: TDictionary<string, Boolean>;
+  LLoaded, LMid: Integer;
+  LWhy, LKey: string;
+  LInFull, LOk: Boolean;
+begin
+  Result := Default(TPasEnsureResult);
+  LSW := TStopwatch.StartNew;
+  if ADemand.IsEmpty then
+  begin
+    Result.Outcome := eoNothing;
+    Exit;
+  end;
+  // A demand over this much of the library is a full analysis's work: one
+  // rebuild without light paths beats promoting it unit by unit.
+  if (FEscalationPercent > 0) and (ADemand.TotalVolume > 0) and
+     ((FEnsuredVolume + ADemand.Volume) * 100 >
+      Int64(FEscalationPercent) * ADemand.TotalVolume) then
+  begin
+    Result.Outcome := eoEscalate;
+    Result.Note := Format('escalate(%d+%d of %d chars > %d%%)',
+      [FEnsuredVolume, ADemand.Volume, ADemand.TotalVolume,
+       FEscalationPercent]);
+    Result.Ms := LSW.ElapsedMilliseconds;
+    Exit;
+  end;
+  Result.Outcome := eoDone;
+  LFullSet := TDictionary<string, Boolean>.Create;
+  try
+    for var LF in ADemand.Full do
+      LFullSet.AddOrSetValue(LowerCase(LF), True);
+    // The units nobody loaded: taken in - full when the answer needs their
+    // bodies (promoted: a rebuild then loads them full through their light
+    // importers too), light when they only lie on the way.
+    LIn := nil;
+    LInFull := False;
+    for var LF in ADemand.Full + ADemand.LoadOnly do
+      if ModelIdOf(LF) < 0 then
+      begin
+        LKey := LowerCase(TPath.GetFullPath(LF));
+        if LFullSet.ContainsKey(LowerCase(LF)) then
+        begin
+          if FPromoted = nil then
+            FPromoted := TDictionary<string, Boolean>.Create;
+          FPromoted.AddOrSetValue(LKey, True);
+          LInFull := True;
+        end;
+        LIn := LIn + [LF];
+      end;
+    if LIn <> nil then
+    begin
+      LOk := TakeInUnits(LIn, LLoaded, LWhy);
+      Inc(Result.Loaded, LLoaded);
+      if not LOk then
+      begin
+        Result.Refused := Result.Refused + ['take-in: ' + LWhy];
+        if LInFull then
+          Result.Outcome := eoNeedsRebuild
+        else
+          Result.Outcome := eoPartial;
+      end;
+    end;
+    // The light ones: promoted, in one batch where the module path allows.
+    LFull := nil;
+    for var LF in ADemand.Full do
+    begin
+      LMid := ModelIdOf(LF);
+      if (LMid >= 0) and IsLight(LMid) then
+        LFull := LFull + [LF];
+    end;
+    if LFull <> nil then
+      PromoteBatch(LFull, Result);
+  finally
+    LFullSet.Free;
+  end;
+  if (Result.Outcome = eoDone) and (Result.Refused <> nil) then
+    Result.Outcome := eoPartial;
+  Inc(FEnsuredVolume, ADemand.Volume);
+  Result.Ms := LSW.ElapsedMilliseconds;
 end;
 
 function TPasSemaProject.RunModulePath(const APath: string;

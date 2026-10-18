@@ -1372,8 +1372,13 @@ its interfaces:
   opens in a tab (`TPasAsyncSession.CreateForPromotion`), and the tab's marks
   refresh when the promotion lands.
 - **Find References / callers** of a library symbol: own code and library
-  interfaces; library bodies are not searched. Dispatch FROM a library body
-  into an own override is not seen.
+  interfaces, plus every library body after the query's demand is met
+  (`TPasNavigator.DemandReferences` + `TPasSemaProject.EnsureFull`, or
+  `PasEnsureDemand` - `docs/library-light-mode.md`, "Full answers in light
+  mode"); without it library bodies are not searched and `NotSearched` says
+  how many units were left out. Find All Assignments, Creations and
+  Destructions alike. Dispatch FROM a library body into an own override is
+  the hierarchy family, not wired yet.
 - **Find All Defines, Defines at cursor, Options at cursor** on a light
   unit's file see its interface and its implementation `uses` - the text a
   light unit is preprocessed to.

@@ -45,6 +45,7 @@ uses
   PasTree.Sema.Builtins in '..\source\PasTree.Sema.Builtins.pas',
   PasTree.Sema.Types in '..\source\PasTree.Sema.Types.pas',
   PasTree.Sema.Resolver in '..\source\PasTree.Sema.Resolver.pas',
+  PasTree.WordIndex in '..\source\PasTree.WordIndex.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.Dfm in '..\source\PasTree.Dfm.pas',
   PasTree.Sema.Dfm in '..\source\PasTree.Sema.Dfm.pas',

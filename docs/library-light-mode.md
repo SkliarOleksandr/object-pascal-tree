@@ -189,8 +189,9 @@ every own unit's is unchanged.
 
 ## What a host no longer sees
 
-A host that sets `LightPaths` should say so where it answers from library
-code:
+Without the demand step of the next section, a host that sets `LightPaths`
+should say so where it answers from library code (every query of a wired
+family says how much it left out: `TPasNavigator.NotSearched`):
 
 - **Navigation into a library body**: `RoutineImplNode` / `GotoImplementation`
   on a light unit's routine find no body (`NIL_NODE` / False) - promote the
@@ -208,6 +209,158 @@ code:
 - **Diagnostics of library units**: interface only.
 - **The uses lint** reads library implementations - see below: on its own it
   answers them on the safe side, with `LintPromotions` exactly.
+
+## Full answers in light mode (0.118.0)
+
+The rule: every query answers in light mode exactly what it answers in a full
+analysis. Light mode may cost time when a question needs library bodies; it
+may never answer less, and never silently. Three steps make it so, and a
+fourth checks it:
+
+1. **Demand** - per query, the units whose bodies can change its answer:
+   `TPasNavigator.DemandReferences` / `DemandReferencesOfAll` /
+   `DemandCreations` / `DemandDestructions` / `DemandFile`,
+   `PasTree.Sema.Lint.DemandLint`; underneath,
+   `TPasSemaProject.DemandOf(asks)` and `DemandOfFiles(files)`. A
+   `TPasDemand` lists the files to make fully analyzed (`Full`), the units
+   to load light on the way to one (`LoadOnly`), and how many units the
+   query would leave out now (`NotSearched`). Empty, at no cost, when no
+   unit is light.
+2. **Ensure** - `TPasSemaProject.EnsureFull(demand)` makes them full:
+   light units promoted in one batch, units nobody loaded taken in.
+3. **Completeness** - every query of a wired family sets
+   `TPasNavigator.NotSearched` (the lint's two reports too): the units of its
+   demand that were not fully analyzed when it ran - 0 in a full analysis and
+   after `EnsureFull`, the gap otherwise ("library implementations not
+   searched: N units").
+4. **The oracle** - `tools/PasTreeLightSmoke` (below) runs every public query
+   full and light-with-demand over a sample and requires equal answers.
+
+`PasEnsureDemand(nav, demandFunc, result, rounds)` is the host's loop: ask
+the demand of the current navigator, `EnsureFull`, recreate the navigator
+over the changed models (its `LibraryPaths` kept), again until the demand is
+empty - a promotion loads its unit's implementation-only units, and a query
+may need those in turn. It stops with `eoNeedsRebuild` (rebuild with the
+project as parse donor - it carries the promoted set - and call again),
+`eoEscalate` (rebuild with `LightPaths` cleared; the session stays full) or
+`eoPartial` (a unit refused; the answer leaves it out and `NotSearched` says
+so).
+
+### Who can name a declaration
+
+The demand of a reference query is a visibility question, settled in the spec
+(`03` sec. 3.3.2, "What a unit can reach of a unit it does not use"; dcc64
+37.0 probes): a unit-level declaration of unit U is named only in U and in the
+units that list U in a `uses` clause (every unit for `System` and `SysInit`);
+a member of U's types - and an enum value written after its type - also
+through any type another unit's interface declares or republishes: an inline
+`var` inferred from a function result, a `with`, a `TList<TFoo>`, a
+descendant class, an alias, a helper, over any number of interface hops; never
+through a unit that uses U only in its implementation. So:
+
+- `dsUnit` - U and its listers, for a unit-level declaration of U's
+  interface;
+- `dsMember` - I(U), U and every unit whose interface `uses` reach U through
+  interface `uses` alone, plus every unit with a `uses` entry into I(U), for a
+  member or an enum value;
+- `dsSelf` - U alone, for an implementation-section or local declaration;
+- `dsAll` - every unit.
+
+The graph is the one the full closure would have: the loaded models' `uses`
+(a light unit's implementation entries included, 0.116.0) and, past a
+`UNIT_NOT_LOADED` entry, the `uses` names the word index scans in the units
+nobody loaded - every name, conditional or not, counted as an interface edge.
+Over-approximating only promotes more; the answer stays exact.
+
+### The implementation word index
+
+A unit in the set can hold a use only if it spells the name. Per light unit
+the index holds the identifiers of its implementation (from its first
+`implementation` keyword on, the include files it names merged in); per unit
+nobody loaded, those of its whole text and its `uses` names
+(`PasTree.WordIndex`: sorted 32-bit hashes of the folded spelling, a scanner
+that skips comments, strings and directives and evaluates no conditional, so a
+dead branch only adds words; a collision only promotes one more unit). Built
+lazily, on the first demand, for every light unit at once on the worker pool.
+Uses written without the name are not filtered by it: a default array
+property (`L[I]`) and a class operator have no word test at all, the for-in
+methods (`GetEnumerator`, `MoveNext`, `Current`) match the word `in`, and an
+attribute class also matches its name without `Attribute`. A bare
+`inherited` needs no word of its own: the method it sits in spells the name.
+
+A unit nobody loaded is needed only when it is reachable: `EnsureFull` takes
+it in from a light unit's `UNIT_NOT_LOADED` entry (the demand's frontier) -
+full when its body is needed, light (`LoadOnly`) when it only lies on the
+way to one - and the next round's demand reaches past it. With no frontier
+left, a needed unit is not in the full closure either, and counts for
+nothing.
+
+### EnsureFull
+
+- **The batch**: the light units are parsed and Phase-1'd in parallel (the
+  load engine's worker body); every one whose interface reads as its light
+  model's (`sfHasBody` masked, as a promotion does) and whose stream asks no
+  `$IF` question is swapped in together, their implementation-only imports
+  loaded once, and the module passes run once over the whole set. The rest
+  take the one-unit path (`PromoteUnit`'s).
+- **Newcomers' `$IF` questions**: a newcomer whose stream asks one (a unit
+  under a `{$IF Declared(...)}`) no longer refuses (`new-dependency-oracle`,
+  which cost a rebuild): it is registered and its questions are re-decided as
+  a full run's declared pass decides them (`RedecideStream`, a light
+  newcomer's stream stopped as at its load).
+- **New imports, then the re-decision**: a unit whose `$IF` questions name a
+  unit not loaded yet - `promote-needs-rebuild(new-import)` for
+  `PromoteUnit` - has its imports taken in first and is then re-decided in
+  place.
+- **Escalation**: when the volume made full so far plus the demand's passes
+  `EscalationPercent` (default 40) of the library's source volume,
+  `EnsureFull` returns `eoEscalate` without doing anything: a rebuild without
+  `LightPaths` is cheaper then. `TObject`'s descendants, `Free`'s references
+  and most questions about a hub class's members end here.
+- `PromoteUnit` itself is unchanged: it refuses as before, and its contract
+  ("False: the project unchanged") stands. `EnsureFull` may load units even
+  when it ends in `eoPartial` or `eoNeedsRebuild`: recreate the navigator.
+
+### The families
+
+| family | queries | demand | since |
+| --- | --- | --- | --- |
+| references | `FindReferences`, `FindAssignments`, `CollectReferencesOfAll` | each symbol (each link of a property's redeclaration chain) by its scope, its name spelled | 0.118.0 |
+| creations | `FindCreations` | `dsMember` of the class's unit, one of the class's constructor names spelled | 0.118.0 |
+| destructions | `FindDestructions` | `dsMember` of the class's unit, `Free`/`Destroy`/`FreeAndNil`/`Release` spelled | 0.118.0 |
+| uses lint | `FindUnusedUses`, `FindUnreferencedUnits` | `DemandLint` = `LintPromotions` (0.115.0) | 0.118.0 |
+| one library file | outline, `SemanticTokens`, `GotoImplementation`, `RoutineImplNode` in a library file | `DemandFile`: the unit itself | 0.118.0 |
+| interface-level | `IdentAt`, `SymbolAt`, `ResolveDecl`, `GotoDeclaration`, completion, hover, `ProjectOutline` | none: a light unit's interface is analyzed in full | - |
+| hierarchy | `FindDescendants`, `FindOverrides`, `FindImplementations`, `FindInterfaceImplementors`, `RenameFamily` | not wired yet (an implementation-section class is not seen) | next |
+| defines and options | `FindDefines`, `FindDefineReferences`, `DefinesAt`, `OptionsAt` in a library file | not wired yet (the preprocessor stops at a light unit's implementation) | next |
+| built-in names | `FindBuiltinReferences` | not wired yet | next |
+| unit references | `FindUnitReferences` | none needed: a light unit's implementation `uses` entries are recorded | - |
+| renames | `PlanRename`, `PlanUnitRename` | own symbols: the references rule; library symbols are refused anyway | next |
+
+A query without a row here is a defect: every new public query of
+`TPasNavigator` or `PasTree.Sema.Lint` gets one - a demand, or "none,
+because".
+
+Measured with the oracle (release build), the 3,782-unit closure in light
+mode (3,086 units, 1,391 light): the word index's first build - every light
+unit's implementation and the 700-odd units nobody loaded, the graph with
+them - 1.3 s and 12 MB. A question about a leaf library routine
+(`TPath.Combine`): one round, 10 units promoted and 21 taken in, 1.1 s. A
+mid-size one (`IntToStr`, `Max`, `TControl.Visible`): 2-3 rounds, 230-330
+promoted and 300-390 taken in, 2.6-2.8 s. A hub (`TObject`, `Free`,
+`TStrings.Add`, `TComponent.Create`, `TList.Count`, `FreeAndNil`):
+escalated at once - the rebuild without light paths and the question, about
+4.3 s. The uses lint over the 1,566 listed units: three rounds, 113 units
+promoted and 88 taken in, the same 12,098 and 137 rows as the full analysis.
+Of 3,704 own symbols asked, two escalated - a property redeclared in an own
+class, whose chain reaches the VCL's `Font`. Every answer of every wired
+family equal to the full analysis's, `NotSearched` 0, on this closure and on
+the demo's (209 units).
+
+An own symbol's demand is the same rule, and it is empty unless a library
+unit's implementation lists an own unit - the patched library copies a
+project keeps in its own tree (S2 loads them; their symbols' demand promotes
+the library units that use them).
 
 ## The uses lint in light mode
 
@@ -278,11 +431,33 @@ fingerprint, and `-lintpromote` (with `-unused`) runs the host's preparation
 step - `LintPromotions` and `PromoteUnit` until nothing is left, a rebuild with
 the project as donor when a promotion asks for one - before the lint.
 
+`tools/PasTreeLightSmoke` is the oracle of "Full answers in light mode": it
+analyzes a `.dproj` twice in one process - full, and light - and asks both
+every public query of `TPasNavigator` and `PasTree.Sema.Lint` over a sample:
+every n-th symbol of the project's own units (`-own:<n>`), their units and
+every n-th identifier position of their text (`-ownunits:<n>`, `-pos:<n>`),
+a library sample (`-sym:Unit.Type.Member`, a default set of RTL and VCL
+names; each on a fresh light project unless `-shared`), and every n-th
+position of the sample's library files (`-libpos:<n>`, the one-library-file
+family). The light side meets each question's demand first, as a host does
+(`PasEnsureDemand`, a rebuild with the donor on `eoNeedsRebuild`, one
+without light paths on `eoEscalate`). Answers are compared by identity -
+file, line, column, kind, name - never by model id. It prints per family the
+questions, the equal and differing answers and the light answers whose
+`NotSearched` was not 0, then what each question cost the light side
+(rounds, units promoted and taken in, rebuilds, escalations, time). A family
+whose demand is wired must be equal with `NotSearched` 0 (exit 1 otherwise);
+a family not wired yet is listed as an expected difference with its counts.
+
 ## What is still open
 
-- References inside library bodies (a library symbol's uses in other library
-  units' implementations): not searched; a host would promote the units that
-  can hold one first - the candidate rule is a visibility question for the
-  spec before it is code.
-- Promotion re-decides a unit's `$IF` questions in place only when every unit
-  its `uses` names is loaded; otherwise it asks for a rebuild.
+- The hierarchy family (`FindDescendants` and the override and
+  implementation queries - a class an implementation section declares),
+  defines and options in a light unit's implementation (the preprocessor
+  stops there; a preprocess-only completion records them aside), built-in
+  names, and renames: their demands are the next stage; until then the
+  smoke tool reports them as expected differences.
+- The hosts (demo, language server, MCP server) still promote one unit at a
+  time and run `LintPromotions`; they move to `PasEnsureDemand` before every
+  Find All / references / callers / related query, with progress, cancel and
+  `NotSearched` shown.
