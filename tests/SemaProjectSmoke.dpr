@@ -6720,6 +6720,83 @@ end;
   a record parameter, an inline function, both overloads of a library
   routine, a library constant - binds to the same declarations in both
   modes, by identity (file + symbol name + declaring node). }
+{ Spec 15.3.3: with no helper for a type active in the referring unit, a
+  variable or field carries the helper active in its DECLARING unit's
+  interface - another used unit's helper there wins over the type's own
+  unit's (dcc64 37.0, local/probe-s10 R1-R6). }
+procedure TestHelperCarrier;
+const
+  UU =
+    'unit UU;'#13#10'interface'#13#10'type'#13#10'  TE = (eA, eB);'#13#10 +
+    '  TEH = record helper for TE'#13#10'    function IsA: Boolean;'#13#10 +
+    '  end;'#13#10'implementation'#13#10 +
+    'function TEH.IsA: Boolean; begin Result := Self = eA; end;'#13#10 +
+    'end.'#13#10;
+  UK =
+    'unit UK;'#13#10'interface'#13#10'uses UU;'#13#10'type'#13#10 +
+    '  TEHK = record helper for TE'#13#10'    function KOnly: Boolean;'#13#10 +
+    '  end;'#13#10'implementation'#13#10 +
+    'function TEHK.KOnly: Boolean; begin Result := True; end;'#13#10 +
+    'end.'#13#10;
+  UW =
+    'unit UW;'#13#10'interface'#13#10'uses UU, UK;'#13#10 +
+    'type'#13#10'  TRW = record F: TE; end;'#13#10 +
+    'var'#13#10'  GW: TE;'#13#10'  GRW: TRW;'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  UW3 =
+    'unit UW3;'#13#10'interface'#13#10'uses UU;'#13#10 +
+    'var'#13#10'  GW3: TE;'#13#10'implementation'#13#10'uses UK;'#13#10 +
+    'end.'#13#10;
+  PRG =
+    'program PC;'#13#10'uses UW, UW3;'#13#10'begin'#13#10 +
+    '  if GW.KOnly then;'#13#10'  if GRW.F.KOnly then;'#13#10 +
+    '  if GW3.IsA then;'#13#10'  if GW.IsA then;'#13#10'end.'#13#10;
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LM: TPasSemaModel;
+  LMid: Integer;
+
+  // The helper unit each use of AName in the program binds to, in order.
+  function Bound(const AName: string): string;
+  var
+    LExt: TPasExtRef;
+  begin
+    Result := '';
+    for var LN := 0 to High(LM.Tree.Nodes) do
+      if (LM.Tree.Nodes[LN].Kind = nkIdent) and
+         (LM.Tree.NodeNameLower(LN) = AName) then
+      begin
+        if LM.ExtRefMap.TryGetValue(LN, LExt) then
+          Result := Result + LProj.Model(LExt.UnitId).UnitNameLower + ';'
+        else
+          Result := Result + '-;';
+      end;
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_helper_carrier');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UU.pas'), UU);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UK.pas'), UK);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UW.pas'), UW);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UW3.pas'), UW3);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PC.dpr'), PRG);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LMid := LProj.AnalyzeProject(TPath.Combine(LDir, 'PC.dpr'));
+    LM := LProj.Model(LMid);
+    Ok('helper carrier: a variable and a field carry their unit''s helper',
+      Bound('konly') = 'uk;uk;');
+    Ok('helper carrier: ...an implementation-only one does not count',
+      Bound('isa') = 'uu;-;');
+  finally
+    LProj.Free;
+  end;
+end;
+
 { The implementation word index's scanner (PasTree.WordIndex): what it
   counts as spelled - identifiers outside comments, strings and directives,
   from the first `implementation` on unless asked for the whole text - and
@@ -15337,6 +15414,7 @@ begin
   TestLightStop;
   TestWordScan;
   TestLightDemand;
+  TestHelperCarrier;
 
   if GCounter.Finish('SemaProjectSmoke') then
     ExitCode := 1;

@@ -11198,10 +11198,65 @@ end;
 // reached by the nkHelperType branch of the main walk instead, which only
 // fires when the walk STARTS at a helper (a helper is never another type's
 // heritage).
+{ The unit a member access's base was DECLARED in, when the base is a
+  variable or a field, for the one FindMemberX the cross-type pass runs on
+  it - -1 everywhere else. Spec 15.3.3: with no helper for the type active
+  in the referring unit, a variable or field carries the helper active for
+  it in its declaring unit's interface (and every other base carries none;
+  that half is left lenient - a unit relying on it does not compile). Per
+  thread: the pass runs one worker per core. }
+threadvar
+  GHelperCarrier: Integer;   // the model id + 1; 0 (a threadvar's start) = none
+
 function TPasSemaProject.ActiveHelperOf(AFromMid: Integer;
   const ACur: TSemaXType; out AExt: TPasExtRef): Boolean;
 var
   LOwn: Integer;
+
+  function Matches(const AReg: TPasHelperReg): Boolean;
+  begin
+    if not AReg.Exported then
+      Exit(False);
+    if (AReg.TargetUnit = ACur.UnitId) and (AReg.TargetSym = ACur.Sym) then
+      Exit(True);
+    for var LA in AReg.Aliases do
+      if (LA.UnitId = ACur.UnitId) and (LA.Sym = ACur.Sym) then
+        Exit(True);
+    Result := (AReg.TargetUnit = NIL_SYM) and (AReg.TargetName <> '') and
+      (FModels[ACur.UnitId].Symbols[ACur.Sym].Kind = skBuiltinType) and
+      (FModels[ACur.UnitId].Symbols[ACur.Sym].NameLower = AReg.TargetName);
+  end;
+
+  // The last interface helper of unit AMid for the type.
+  function DeclaredIn(AMid: Integer): Boolean;
+  begin
+    Result := False;
+    if (AMid < 0) or (AMid > High(FModelHelpers)) then
+      Exit;
+    for var LIdx := High(FModelHelpers[AMid]) downto 0 do
+      if Matches(FModelHelpers[AMid][LIdx]) then
+      begin
+        AExt.UnitId := FModelHelpers[AMid][LIdx].HelperMid;
+        AExt.Sym := FModelHelpers[AMid][LIdx].Sym;
+        Exit(True);
+      end;
+  end;
+
+  // The helper active for the type in the carrier's interface: its own,
+  // then its interface `uses`, the last entry first (15.3.3).
+  function CarrierHelper(ACarrier: Integer): Boolean;
+  var
+    LM: TPasSemaModel;
+  begin
+    if DeclaredIn(ACarrier) then
+      Exit(True);
+    LM := FModels[ACarrier];
+    for var LU := High(LM.UsesList) downto 0 do
+      if not IsImplUsesEntry(LM, LU) and (LM.UsesList[LU].UnitId >= 0) and
+         DeclaredIn(LM.UsesList[LU].UnitId) then
+        Exit(True);
+    Result := False;
+  end;
 
   // The type's own unit's last exported helper for it. A unit declares a
   // handful of helpers at most, and most none, so the scan is the cheap
@@ -11257,6 +11312,11 @@ begin
            HelperKey(AFromMid, LOwn), AExt) then
         Exit(True);
     end;
+    // A variable or a field: the helper of the unit declaring it, not the
+    // type's own unit's (another used unit's helper there wins).
+    if (GHelperCarrier > 0) and (GHelperCarrier <= FModels.Count) and
+       (GHelperCarrier - 1 <> AFromMid) then
+      Exit(CarrierHelper(GHelperCarrier - 1));
     Exit(OwnUnitHelper);
   end;
   Result := True;
@@ -12836,6 +12896,55 @@ var
     if LNewExt.TryGetValue(N, AExt) then
       Exit(AExt.UnitId <> EXT_TOMBSTONE_UNIT);
     Result := LM.ExtRefMap.TryGetValue(N, AExt);
+  end;
+
+  // The model declaring the member access base ABase when it is a variable
+  // or a field - `V` or `R.F` - else -1: the unit whose helper the base
+  // carries (spec 15.3.3, ActiveHelperOf).
+  function CarrierOf(ABase: Integer): Integer;
+  var
+    LNameN, LS: Integer;
+    LE: TPasExtRef;
+  begin
+    Result := -1;
+    LNameN := ABase;
+    if LM.Tree.Nodes[ABase].Kind = nkMember then
+    begin
+      LNameN := LM.Tree.Nodes[ABase].FirstChild;
+      if LNameN <> NIL_NODE then
+        LNameN := LM.Tree.Nodes[LNameN].NextSibling;
+      if LNameN = NIL_NODE then
+        Exit;
+    end;
+    if LM.Tree.Nodes[LNameN].Kind <> nkIdent then
+      Exit;
+    LS := RefAt(LNameN);
+    if LS <> NIL_SYM then
+    begin
+      if LM.Symbols[LS].Kind in [skVar, skField] then
+        Result := AId;
+    end
+    else if ExtOf(LNameN, LE) and (LE.UnitId >= 0) and
+       (LE.UnitId < FModels.Count) and
+       (FModels[LE.UnitId].Symbols[LE.Sym].Kind in [skVar, skField]) then
+      Result := LE.UnitId;
+  end;
+
+  // FindMemberX for the member ANameN of base ABase typed ABX, the base's
+  // carrier set for the helper lookup.
+  function CarriedMember(ABase: Integer; const ABX: TSemaXType;
+    ANameN: Integer; out AMemMid, AMemSym, ACtx: Integer): Boolean;
+  var
+    LSaved: Integer;
+  begin
+    LSaved := GHelperCarrier;
+    GHelperCarrier := CarrierOf(ABase) + 1;
+    try
+      Result := FindMemberX(AId, ABX, PasNodeKey(LM.Tree, ANameN), AMemMid,
+        AMemSym, ACtx);
+    finally
+      GHelperCarrier := LSaved;
+    end;
   end;
 
   { A constructor call's type: the class CONSTRUCTED. Through a class
@@ -14857,8 +14966,8 @@ var
             SetXAt(N, MemberTypeX(LExt.UnitId, LExt.Sym, LMemCtx, LBX));
             SetCtxAt(N, LMemCtx);
           end
-          else if XValid(LBX) and FindMemberX(AId, LBX,
-            PasNodeKey(LM.Tree, LName), LMemMid, LMemSym, LCtx) then
+          else if XValid(LBX) and CarriedMember(LBase, LBX, LName, LMemMid,
+            LMemSym, LCtx) then
           begin
             // The member walk stops at the FIRST declaration of the name; in
             // a value position that is the parameterless overload when there
