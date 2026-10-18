@@ -495,7 +495,9 @@ analysis has no `LightPaths` once `WS.Escalated`.
 | pastree-lsp | `PrepareLint` and every "library not analyzed" branch | the dispatcher owns the workspace: lint through `WS.FindUnusedUses`, references / callers / implementation / typeHierarchy through the workspace entries, definition / hover / semanticTokens through `WS.At<T>` / `WS.InFile<T>`; `$/progress` from `Options.OnProgress`, `$/cancelRequest` sets the flag `Options.Cancelled` reads |
 | pastree-mcp | its own promotion loops; the "calls inside library bodies are not analyzed (light mode)" notes | tools through the workspace (`references`, `callers` over `WS.FindReferences`, `related` over the hierarchy entries, `lint` over the lint entries, `source` / `callees` over `WS.InFile<T>`); the notes become `Status.NotSearched` when it is not 0 |
 
-Raise `cMinPasTreeVersion` to 0.120.0 in pastree-lsp and pastree-mcp.
+Raise `cMinPasTreeVersion` to 0.121.0 in pastree-lsp and pastree-mcp: 0.121.0
+adds the `PlanRename` overload with `AInactive` (the old name in branches
+the defines leave out), which every host's rename shows.
 
 ## The uses lint in light mode
 
@@ -552,8 +554,26 @@ re-analyzes; the message log's `Light libraries: N of M units` line says how
 many are light. Opening a light unit in a tab promotes it in the background
 (`CreateForPromotion`, with `Incremental` on - a build with it off released
 the maps the module path needs); `promote-needs-rebuild` rebuilds with the
-project as donor, so the unit comes back full. Find All > Unused Units and
-Units Nobody Uses run `LintPromotions` and promote first, on the UI thread.
+project as donor, so the unit comes back full.
+
+The demo's analysis lives in one `TPasWorkspace` (since 0.121.0): every
+analysis is adopted into it, a module session (an edit, a tab's promotion)
+takes the project with `Release` and gives it back with `Adopt`, a
+background rebuild with the project as parse donor runs between `Lend` and
+`EndLend`. Every Find All entry - references (a symbol, a built-in, a
+define), overrides, implementations, descendants, assignments, creations,
+destructions, Find All Defines, Defines and Options at cursor, Unused Units,
+Units Nobody Uses - and Rename asks the workspace, so in light mode it
+answers what the full analysis answers. While a query meets its demand the
+status line shows its progress (a promotion round, a rebuild), the Stop
+button cancels it - the answer then covers what was analyzed and the log
+says `Library implementations not searched: N unit(s)` - and an escalation
+is logged before it runs (decision D8); after it the project stays full
+(D9) until `Light libraries` is toggled or another project is opened. The
+log says what each query made full (`Library bodies for this answer: ...`).
+A query arriving while a background analysis has the project as its parse
+donor and would have to change it is refused with a log line - ask again
+when the analysis has landed.
 
 ## The tool
 
@@ -593,8 +613,9 @@ family must be equal with `NotSearched` 0 (exit 1 otherwise).
 
 - Every public query has its demand (0.119.0, the table above); the smoke
   tool reports no expected difference any more.
-- The hosts (demo, language server, MCP server) still promote one unit at a
-  time and run `LintPromotions`; they move onto the workspace (0.120.0, "Host
-  migration" above), with progress, cancel and `NotSearched` shown.
+- The demo asks through the workspace (0.121.0, "In the demo"); the
+  language server and the MCP server move onto it in their own
+  repositories ("Host migration" above), with progress, cancel and
+  `NotSearched` shown.
 - `EnsureFull` is not cancellable inside one round: `Options.Cancelled` is
   polled between rounds and inside a rebuild.

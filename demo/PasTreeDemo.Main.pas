@@ -34,7 +34,7 @@ uses
   PasTree.Sema.Diagnostics, PasTree.Sema.Model, PasTree.Sema.Builtins,
   PasTree.Sema.Types, PasTree.Sema.Resolver, PasTree.Sema.Project,
   PasTree.Sema.Nav, PasTree.Sema.Lint, PasTree.Sema.Async,
-  PasTree.Sema.Complete,
+  PasTree.Sema.Workspace, PasTree.Sema.Complete,
   PasTree.Sema.Dump, PasTree.Version, VirtualTrees.BaseAncestorVCL, VirtualTrees.BaseTree, VirtualTrees.AncestorVCL, SynEditCodeFolding,
   PasTreeDemo.Highlighter, PasTreeDemo.Settings, PasTreeDemo.NavHistory,
   PasTreeDemo.Includes, PasTreeDemo.UnitList, PasTreeDemo.UnitPicker,
@@ -209,8 +209,9 @@ type
     { Light library units (TPasSemaProject.LightPaths): the units under the
       IDE's library and browsing paths and the Studio sources are analyzed
       interface-only - LightTrees says which trees. Opening one of them in a
-      tab promotes it to a full analysis (TryPromoteOpenTab); the uses lint
-      promotes what it needs first (PrepareLint). Persisted, default off. }
+      tab promotes it to a full analysis (TryPromoteOpenTab); every Find All
+      query makes the library bodies its answer needs full first, through
+      the workspace (RunQuery). Persisted, default off. }
     chkLightLibs: TCheckBox;
     cbHighlightColor: TColorBox; // background color for "same identifier" highlight
     cbTypeColor: TColorBox;      // foreground color of a TYPE name (semantic)
@@ -437,8 +438,28 @@ type
     FConfigOverride: string;
     FPlatform: TPasPlatform;
     FSynPasHL: TSynPasSyn;   // shared SynEdit built-in highlighter (A/B compare)
-    FSemaProject: TPasSemaProject; // kept alive after RunParse (navigation)
-    FNav: TPasNavigator;           // go-to-declaration over FSemaProject
+    { The analysis. FWS owns the project and its navigator; FSemaProject and
+      FNav are its Project and Nav, mirrored for the many readers here
+      (SyncWS) - never freed or created by anything but the workspace calls
+      (SetAnalysis, Release/Adopt around a module session, Lend/EndLend
+      around a session with it as parse donor). A query a light unit's body
+      can change runs through FWS (RunQuery), which may promote units or
+      rebuild the project: FNav is nil while it runs and re-read after. }
+    FWS: TPasWorkspace;
+    FSemaProject: TPasSemaProject; // FWS.Project (kept alive after RunParse)
+    FNav: TPasNavigator;           // FWS.Nav: go-to-declaration over FSemaProject
+    FWSLent: Boolean;              // FWS.Lend for FAsyncSession's parse donor
+    { A workspace query is running (RunQuery). Its parallel passes pump the
+      message queue, so every path that would replace the analysis (a timer,
+      Run Parse, another query) waits or refuses while it is set.
+      FQueryCancel: the Stop button's request, read by the query's Cancelled
+      on worker threads too (a Boolean, written once). }
+    FQueryRunning: Boolean;
+    FQueryCancel: Boolean;
+    { An escalation made the analysis full (decision D9: it stays full):
+      LightTrees is empty until Light libraries is toggled or another
+      project is opened. }
+    FStayFull: Boolean;
     FLinkTab: TObject;             // TSourceTab currently showing a link
     // The sub-span of the NEXT link, as absolute buffer offsets, or -1 for
     // the whole token range - written by the resolver that found the link
@@ -667,11 +688,6 @@ type
     procedure PopulateStudios;
     procedure ApplyStudio(AIndex: Integer);
     function ExtraSearchPaths: TArray<string>;
-    // TPasNavigator + the rename gate its LibraryPaths carries: the IDE's
-    // registry library/browsing paths are somebody ELSE's sources (RTL, VCL,
-    // installed third-party), and the project's own directories deliberately
-    // are not in that set - see TPasNavigator.RenameBlockReason.
-    function NewNavigator: TPasNavigator;
 
     procedure OpenProject(const AProjectFile: string);
     procedure PopulateTree;
@@ -692,9 +708,27 @@ type
     function LightTrees: TArray<string>;
     // Starts the promotion of the first open tab whose unit is light.
     procedure TryPromoteOpenTab;
-    // Promotes what the uses lint over AMids would otherwise answer as not
-    // known (LintPromotions), synchronously; the navigator is rebuilt.
-    procedure PrepareLint(const AMids: TArray<Integer>);
+    // The workspace: see FWS. SetAnalysis takes a new analysis (nil: none),
+    // SyncWS re-reads FSemaProject/FNav, RunQuery runs one workspace query
+    // with progress, Stop and the escalation logged, QueryDone reports it.
+    procedure SetAnalysis(AProject: TPasSemaProject);
+    // Not while a workspace query runs (its passes pump the message queue,
+    // a close would free the analysis under it): Stop is pressed for you.
+    procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
+    procedure SyncWS;
+    function NewConfiguredProject(APlatform: TPasPlatform;
+      const ASearchPaths, ADefines: TArray<string>): TPasSemaProject;
+    function QueryOptions: TPasQueryOptions;
+    function RunQuery(const AQuery: TProc): Boolean;
+    procedure QueryDone;
+    function SymKey(AMid, ASym: Integer): TPasSymbolKey;
+    function ProjectUnitFiles: TArray<string>;
+    function PlanSymbolRename(const AKey: TPasSymbolKey;
+      const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+      out ACarried: TArray<TPasCarriedRename>;
+      out AFamily: TArray<TPasRenameFamilyMember>;
+      out AInactive: TArray<TPasInactiveUse>; out AError: string): Boolean;
+    procedure EndLendDonor;
     procedure CancelAsync;
     procedure AsyncTimerTick(Sender: TObject);
     procedure EditorChange(Sender: TObject);
@@ -1287,14 +1321,24 @@ var
   LHits: TArray<TPasRefHit>;
   LDefHits: TArray<TPasDefineHit>;
   LPrefixes: TArray<string>;
+  LKey: TPasSymbolKey;
 begin
   LBuiltinName := '';
   LPrefixes := nil;
   LCaption := '';
   if ActiveSymbolTarget(LTMid, LSym, LName) then
   begin
-    LHasDecl := FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
-    LHits := FNav.FindReferences(LTMid, LSym);
+    // Through the workspace (RunQuery): ids taken before it may be stale
+    // after it, so the declaration row is read through the key afterwards.
+    LKey := SymKey(LTMid, LSym);
+    if not RunQuery(
+      procedure
+      begin
+        LHits := FWS.FindReferences(LKey);
+      end) then
+      Exit;
+    LHasDecl := LKey.Resolve(FSemaProject, LTMid, LSym) and
+      FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
   end
   else if ActiveUnitTarget(LTMid, LName) then
   begin
@@ -1313,7 +1357,12 @@ begin
     LSym := -2;
     LBuiltinName := LName;
     LHasDecl := False;   // a builtin has no declaration site anywhere
-    LHits := FNav.FindBuiltinReferences(LName);
+    if not RunQuery(
+      procedure
+      begin
+        LHits := FWS.FindBuiltinReferences(LName);
+      end) then
+      Exit;
   end
   else if ActiveDefineTarget(LName) then
   begin
@@ -1325,7 +1374,12 @@ begin
     LSym := -3;
     LBuiltinName := LName;
     LHasDecl := False;
-    LDefHits := FNav.FindDefineReferences(LName);
+    if not RunQuery(
+      procedure
+      begin
+        LDefHits := FWS.FindDefineReferences(LName);
+      end) then
+      Exit;
     SetLength(LHits, Length(LDefHits));
     SetLength(LPrefixes, Length(LDefHits));
     for LIdx := 0 to High(LDefHits) do
@@ -1412,6 +1466,7 @@ var
   LHits: TArray<TPasRefHit>;
   LPrefixes: TArray<string>;
   LDeclHit: TPasRefHit;
+  LKey: TPasSymbolKey;
 begin
   if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
@@ -1421,7 +1476,14 @@ begin
   if not FNav.MethodAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
     Exit;
-  LOvs := FNav.FindOverrides(LTMid, LSym);
+  LKey := SymKey(LTMid, LSym);
+  if not RunQuery(
+    procedure
+    begin
+      LOvs := FWS.FindOverrides(LKey);
+    end) then
+    Exit;
+  LKey.Resolve(FSemaProject, LTMid, LSym);   // the page's key
   LDeclHit := Default(TPasRefHit);   // never read: AHasDecl is False below
   SetLength(LHits, Length(LOvs));
   SetLength(LPrefixes, Length(LOvs));
@@ -1484,6 +1546,8 @@ var
   LHits: TArray<TPasRefHit>;
   LPrefixes: TArray<string>;
   LDeclHit: TPasRefHit;
+  LKey: TPasSymbolKey;
+  LOfIntf: Boolean;
 begin
   if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
@@ -1492,12 +1556,23 @@ begin
     Exit;
   if FNav.InterfaceMethodAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
-    LImps := FNav.FindImplementations(LTMid, LSym)
+    LOfIntf := False
   else if FNav.InterfaceAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
-    LImps := FNav.FindInterfaceImplementors(LTMid, LSym)
+    LOfIntf := True
   else
     Exit;
+  LKey := SymKey(LTMid, LSym);
+  if not RunQuery(
+    procedure
+    begin
+      if LOfIntf then
+        LImps := FWS.FindInterfaceImplementors(LKey)
+      else
+        LImps := FWS.FindImplementations(LKey);
+    end) then
+    Exit;
+  LKey.Resolve(FSemaProject, LTMid, LSym);   // the page's key
   LDeclHit := Default(TPasRefHit);   // never read: AHasDecl is False below
   SetLength(LHits, Length(LImps));
   SetLength(LPrefixes, Length(LImps));
@@ -1541,6 +1616,7 @@ var
   LHits: TArray<TPasRefHit>;
   LPrefixes: TArray<string>;
   LDeclHit: TPasRefHit;
+  LKey: TPasSymbolKey;
 begin
   if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
@@ -1550,7 +1626,14 @@ begin
   if not FNav.TypeAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
     Exit;
-  LDs := FNav.FindDescendants(LTMid, LSym);
+  LKey := SymKey(LTMid, LSym);
+  if not RunQuery(
+    procedure
+    begin
+      LDs := FWS.FindDescendants(LKey);
+    end) then
+    Exit;
+  LKey.Resolve(FSemaProject, LTMid, LSym);   // the page's key
   LDeclHit := Default(TPasRefHit);   // never read: AHasDecl is False below
   SetLength(LHits, Length(LDs));
   SetLength(LPrefixes, Length(LDs));
@@ -1602,6 +1685,7 @@ var
   LHits: TArray<TPasRefHit>;
   LDeclHit: TPasRefHit;
   LHasDecl: Boolean;
+  LKey: TPasSymbolKey;
 begin
   if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
@@ -1611,8 +1695,15 @@ begin
   if not FNav.AssignableAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
     Exit;
-  LHasDecl := FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
-  LHits := FNav.FindAssignments(LTMid, LSym);
+  LKey := SymKey(LTMid, LSym);
+  if not RunQuery(
+    procedure
+    begin
+      LHits := FWS.FindAssignments(LKey);
+    end) then
+    Exit;
+  LHasDecl := LKey.Resolve(FSemaProject, LTMid, LSym) and
+    FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
   LTab := SearchTabFor(LTMid, LSym, stkAssigns);
   PopulateFindRefTab(LTab, Format('Assignments to ''%s'' (%d in %d units)',
     [LName, Length(LHits), DistinctFileCount(LHits)]), LHits, LHasDecl,
@@ -1648,6 +1739,7 @@ var
   LHits: TArray<TPasRefHit>;
   LDeclHit: TPasRefHit;
   LHasDecl: Boolean;
+  LKey: TPasSymbolKey;
 begin
   if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
@@ -1657,8 +1749,15 @@ begin
   if not FNav.ClassAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
     Exit;
-  LHasDecl := FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
-  LHits := FNav.FindCreations(LTMid, LSym);
+  LKey := SymKey(LTMid, LSym);
+  if not RunQuery(
+    procedure
+    begin
+      LHits := FWS.FindCreations(LKey);
+    end) then
+    Exit;
+  LHasDecl := LKey.Resolve(FSemaProject, LTMid, LSym) and
+    FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
   LTab := SearchTabFor(LTMid, LSym, stkCreations);
   PopulateFindRefTab(LTab, Format('Creations of ''%s'' (%d in %d units)',
     [LName, Length(LHits), DistinctFileCount(LHits)]), LHits, LHasDecl,
@@ -1680,6 +1779,7 @@ var
   LHits: TArray<TPasRefHit>;
   LDeclHit: TPasRefHit;
   LHasDecl: Boolean;
+  LKey: TPasSymbolKey;
 begin
   if not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
@@ -1689,8 +1789,15 @@ begin
   if not FNav.ClassAt(LMid, LLine, LCol, {out} LTMid, {out} LSym,
     {out} LName) then
     Exit;
-  LHasDecl := FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
-  LHits := FNav.FindDestructions(LTMid, LSym);
+  LKey := SymKey(LTMid, LSym);
+  if not RunQuery(
+    procedure
+    begin
+      LHits := FWS.FindDestructions(LKey);
+    end) then
+    Exit;
+  LHasDecl := LKey.Resolve(FSemaProject, LTMid, LSym) and
+    FNav.DeclHit(LTMid, LSym, {out} LDeclHit);
   LTab := SearchTabFor(LTMid, LSym, stkDestructions);
   PopulateFindRefTab(LTab, Format('Destructions of ''%s'' (%d in %d units)',
     [LName, Length(LHits), DistinctFileCount(LHits)]), LHits, LHasDecl,
@@ -1759,9 +1866,12 @@ var
   LTab: TFindRefTab;
   LIdx, LUnit, LProject, LPlatform: Integer;
 begin
-  if not Assigned(FNav) then
+  if not RunQuery(
+    procedure
+    begin
+      LSites := FWS.FindDefines;
+    end) then
     Exit;
-  LSites := FNav.FindDefines;
   DefineSiteRows(LSites, {out} LHits, {out} LPrefixes, {out} LKeys);
   LUnit := 0;
   LProject := 0;
@@ -1806,7 +1916,20 @@ begin
     Exit;
   // ModelIdOf is -1 for a file outside the analysis: DefinesAt then lists
   // the project/platform set alone, which is still the honest answer.
-  LSites := FNav.DefinesAt(FNav.ModelIdOf(LFilePath), LLine, LCol);
+  // Inside it, through the workspace: a light file's own $DEFINEs past its
+  // `implementation` are read first.
+  if FNav.ModelIdOf(LFilePath) < 0 then
+    LSites := FNav.DefinesAt(-1, LLine, LCol)
+  else if not RunQuery(
+    procedure
+    begin
+      LSites := FWS.At<TArray<TPasDefineSite>>(LFilePath, LLine, LCol,
+        function(ANav: TPasNavigator; AMid: Integer): TArray<TPasDefineSite>
+        begin
+          Result := ANav.DefinesAt(AMid, LLine, LCol);
+        end);
+    end) then
+    Exit;
   DefineSiteRows(LSites, {out} LHits, {out} LPrefixes, {out} LKeys);
   // Flat page: a unit row says where its $DEFINE is, since no group does.
   for LIdx := 0 to High(LSites) do
@@ -1860,7 +1983,18 @@ begin
   if not Assigned(FNav) or
      not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
-  LSites := FNav.OptionsAt(FNav.ModelIdOf(LFilePath), LLine, LCol);
+  if FNav.ModelIdOf(LFilePath) < 0 then
+    LSites := FNav.OptionsAt(-1, LLine, LCol)
+  else if not RunQuery(
+    procedure
+    begin
+      LSites := FWS.At<TArray<TPasOptionSite>>(LFilePath, LLine, LCol,
+        function(ANav: TPasNavigator; AMid: Integer): TArray<TPasOptionSite>
+        begin
+          Result := ANav.OptionsAt(AMid, LLine, LCol);
+        end);
+    end) then
+    Exit;
   SetLength(LHits, Length(LSites));
   SetLength(LPrefixes, Length(LSites));
   LUnit := 0;
@@ -1944,11 +2078,15 @@ begin
   if not Assigned(FNav) or
      not ActiveEditorPos(LFilePath, LEditor, LLine, LCol) then
     Exit;
-  LMid := FNav.ModelIdOf(LFilePath);
-  if LMid < 0 then
+  if FNav.ModelIdOf(LFilePath) < 0 then
     Exit;
-  PrepareLint([LMid]);
-  LRows := FindUnusedUses(FNav, [LMid]);
+  if not RunQuery(
+    procedure
+    begin
+      LRows := FWS.FindUnusedUses([LFilePath]);
+    end) then
+    Exit;
+  LMid := FNav.ModelIdOf(LFilePath);
   LTab := SearchTabFor(LMid, -6, stkUnused);
   PopulateFindRefTab(LTab, Format('Unused units in %s (%d)',
     [TPath.GetFileName(LFilePath), Length(LRows)]),
@@ -1963,25 +2101,21 @@ end;
 
 procedure TfrmMain.FindProjectUnusedUnitsActionExecute(Sender: TObject);
 var
-  LMid, LFiles: Integer;
-  LMids: TArray<Integer>;
+  LFiles: Integer;
+  LUnits: TArray<string>;
   LRows: TArray<TPasUnusedUse>;
   LHits: TArray<TPasRefHit>;
   LTab: TFindRefTab;
 begin
   if not Assigned(FNav) then
     Exit;
-  LMids := nil;
-  for LMid := 0 to FSemaProject.ModelCount - 1 do
-    if not FNav.IsUnderLibraryPath(FSemaProject.ModelFile(LMid)) then
-      LMids := LMids + [LMid];
-  Screen.Cursor := crHourGlass;
-  try
-    PrepareLint(LMids);
-    LRows := FindUnusedUses(FNav, LMids);
-  finally
-    Screen.Cursor := crDefault;
-  end;
+  LUnits := ProjectUnitFiles;
+  if not RunQuery(
+    procedure
+    begin
+      LRows := FWS.FindUnusedUses(LUnits);
+    end) then
+    Exit;
   LHits := UnusedUsesHits(LRows, LFiles);
   LTab := SearchTabFor(-1, -6, stkUnusedProject);
   PopulateFindRefTab(LTab, Format('Unused units in the project (%d in %d ' +
@@ -1998,7 +2132,7 @@ end;
 procedure TfrmMain.FindUnreferencedUnitsActionExecute(Sender: TObject);
 var
   LMid: Integer;
-  LMids: TArray<Integer>;
+  LUnits: TArray<string>;
   LRows: TArray<TPasUnreferencedUnit>;
   LHits: TArray<TPasRefHit>;
   LPrefixes: TArray<string>;
@@ -2006,17 +2140,13 @@ var
 begin
   if not Assigned(FNav) then
     Exit;
-  LMids := nil;
-  for LMid := 0 to FSemaProject.ModelCount - 1 do
-    if not FNav.IsUnderLibraryPath(FSemaProject.ModelFile(LMid)) then
-      LMids := LMids + [LMid];
-  Screen.Cursor := crHourGlass;
-  try
-    PrepareLint(LMids);
-    LRows := FindUnreferencedUnits(FNav, LMids);
-  finally
-    Screen.Cursor := crDefault;
-  end;
+  LUnits := ProjectUnitFiles;
+  if not RunQuery(
+    procedure
+    begin
+      LRows := FWS.FindUnreferencedUnits(LUnits);
+    end) then
+    Exit;
   SetLength(LHits, Length(LRows));
   for LMid := 0 to High(LRows) do
   begin
@@ -2082,6 +2212,7 @@ var
   LInactive: TArray<TPasInactiveUse>;
   LIsUnit: Boolean;
   LKind, LDead: string;
+  LKey: TPasSymbolKey;
 begin
   // A symbol first, a UNIT second (the caret is on a `uses` item or on this
   // file's own header name) - the same two targets Find References offers,
@@ -2113,12 +2244,20 @@ begin
       Exit;
     end;
   end
-  else if not FNav.PlanRename(LTMid, LSym, LNewName, {out} LEdits,
-    {out} LCarried, {out} LFamily, {out} LInactive, {out} LError) then
+  else
   begin
-    if LError <> '' then
-      MessageDlg(LError, mtWarning, [mbOK], 0);
-    Exit;
+    // Through the workspace: a rename can reach into library bodies only
+    // through the in-repository copies a library unit uses (RenameFamily's
+    // demand); the ids are read again after it.
+    LKey := SymKey(LTMid, LSym);
+    if not PlanSymbolRename(LKey, LNewName, LEdits, LCarried, LFamily,
+      LInactive, LError) then
+    begin
+      if LError <> '' then
+        MessageDlg(LError, mtWarning, [mbOK], 0);
+      Exit;
+    end;
+    LKey.Resolve(FSemaProject, LTMid, LSym);
   end;
   if not ApplyRenameEdits(LEdits, LNewName) then
     Exit;
@@ -3000,6 +3139,7 @@ begin
   FAsyncTimer.Enabled := False;
   FAsyncTimer.Interval := 150;
   FAsyncTimer.OnTimer := AsyncTimerTick;
+  OnCloseQuery := FormCloseQuery;
   FSettings := TDemoSettings.Create(DefaultSettingsFile);
   SetupControls;
   PopulateStudios;   // after SetupControls (needs Log), before LoadSettings
@@ -3026,8 +3166,7 @@ begin
   FreeAndNil(FSettings);
   CancelAsync;                 // cancel + drain the worker before tearing down
   InvalidateComplPipeline;
-  FreeAndNil(FNav);
-  FreeAndNil(FSemaProject);
+  SetAnalysis(nil);
   FreeAndNil(FDProj);
   Application.OnMessage := nil;   // before the form it dispatches to goes
   FNavHistory.Free;
@@ -4399,8 +4538,6 @@ function TfrmMain.Analyze: Boolean;
 var
   LPlatform: TPasPlatform;
   LSearchPaths, LDefines: TArray<string>;
-  LIdx: Integer;
-  LTab: TSourceTab;
   LSW: TStopwatch;
 begin
   Result := False;
@@ -4420,67 +4557,36 @@ begin
   FAnalyzing := True;
   try
     LSW := TStopwatch.StartNew;
-    FreeAndNil(FNav);
-    FreeAndNil(FSemaProject);
+    SetAnalysis(nil);
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('destroy=%d;', [LSW.ElapsedMilliseconds]);
-    FSemaProject := TPasSemaProject.Create(LPlatform, LSearchPaths, LDefines,
-      FCompilerVersion);
-    FSemaProject.SingleThreaded := cbThreading.ItemIndex = 0;
-    // ALWAYS on in the demo, which is the host whose job is to show what the
-    // analyzer still gets wrong: an unresolved member after a dot is a real gap
-    // and hiding it hides progress. The LIBRARY default stays off (the property
-    // is False unless a host asks), because an editor embedding PasTree wants
-    // the error-tolerant mode. chkShowErrors then filters DISPLAY only, so
-    // toggling it stays instant instead of costing a re-analysis.
-    FSemaProject.ReportUnresolvedMembers := True;
-    FSemaProject.ReportGuessedIfs := True;   // same philosophy: show the guesses
-    FSemaProject.LightPaths := LightTrees;   // chkLightLibs
-    // The .dproj's DCC_* switches and console target, as msbuild hands them
-    // to dcc: $IFOPT and CONSOLE read them.
-    if Assigned(FDProj) then
-    begin
-      FSemaProject.SwitchStart := PasStartOptState(FDProj.Switches);
-      FSemaProject.ConsoleTarget := FDProj.ConsoleTarget;
+    // Ours until SetAnalysis hands it to the workspace below.
+    FSemaProject := NewConfiguredProject(LPlatform, LSearchPaths, LDefines);
+    try
+      // Same engine as the background path (AnalyzeStaged, run here to
+      // completion on THIS thread instead of a worker) - its uses-closure walk
+      // from FMainSource covers a plain .dpr just as well as the old
+      // AnalyzeDirectory fallback did (StartAsyncAnalyze has used it
+      // unconditionally, dproj or not, since the async path shipped). The one
+      // real payoff: AOnProgress fires synchronously on the UI thread, so
+      // lblProgress can show live progress during a blocking Run Parse -
+      // Update forces an immediate repaint since we're not pumping messages.
+      LSW := TStopwatch.StartNew;
+      FSemaProject.AnalyzeStaged([FMainSource], [], nil,
+        procedure(AProgress: TPasStagedProgress)
+        begin
+          lblProgress.Caption := Format('%s %d/%d',
+            [AProgress.Phase, AProgress.FullDone, AProgress.Total]);
+          lblProgress.Update;
+        end);
+    except
+      FreeAndNil(FSemaProject);
+      raise;
     end;
-    FSemaProject.SetNamespaces(EffectiveNamespaces(LPlatform)); // Forms -> Vcl.Forms
-    // Defaults ALWAYS, then the project's on top: the IDE prepends a project's
-    // own aliases to the defaults rather than replacing them, and AddUnitAlias
-    // is last-wins, so this order gives the project precedence on a collision.
-    for var LDef in PasDefaultUnitAliases(LPlatform) do
-      FSemaProject.AddUnitAlias(LDef.Alias, LDef.UnitName);
-    if Assigned(FDProj) then
-      for var LAlias in FDProj.UnitAliases do
-        FSemaProject.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
-    for LIdx := 0 to FOpenFiles.Count - 1 do
-    begin
-      LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
-      FSemaProject.SetBuffer(LTab.FilePath, LTab.Editor.Text);
-    end;
-    for var LRen in FRenameBuffers do
-      if FOpenFiles.IndexOf(LRen.Key) < 0 then
-        FSemaProject.SetBuffer(LRen.Key, LRen.Value);
-
-    // Same engine as the background path (AnalyzeStaged, run here to
-    // completion on THIS thread instead of a worker) - its uses-closure walk
-    // from FMainSource covers a plain .dpr just as well as the old
-    // AnalyzeDirectory fallback did (StartAsyncAnalyze has used it
-    // unconditionally, dproj or not, since the async path shipped). The one
-    // real payoff: AOnProgress fires synchronously on the UI thread, so
-    // lblProgress can show live progress during a blocking Run Parse -
-    // Update forces an immediate repaint since we're not pumping messages.
-    LSW := TStopwatch.StartNew;
-    FSemaProject.AnalyzeStaged([FMainSource], [], nil,
-      procedure(AProgress: TPasStagedProgress)
-      begin
-        lblProgress.Caption := Format('%s %d/%d',
-          [AProgress.Phase, AProgress.FullDone, AProgress.Total]);
-        lblProgress.Update;
-      end);
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('engine=%d;', [LSW.ElapsedMilliseconds]);
     LSW := TStopwatch.StartNew;
-    FNav := NewNavigator;
+    SetAnalysis(FSemaProject);
     RefreshSemanticTokens;
     FAnalyzeOverhead := FAnalyzeOverhead +
       Format('nav=%d;', [LSW.ElapsedMilliseconds]);
@@ -4497,6 +4603,58 @@ begin
     FAnalyzing := False;
   end;
   Result := True;
+end;
+
+{ A project configured as the analysis is - the synchronous one, and the
+  workspace's rebuilds (its factory, QueryOptions' caller) - and NOT
+  analyzed. }
+function TfrmMain.NewConfiguredProject(APlatform: TPasPlatform;
+  const ASearchPaths, ADefines: TArray<string>): TPasSemaProject;
+var
+  LIdx: Integer;
+  LTab: TSourceTab;
+begin
+  Result := TPasSemaProject.Create(APlatform, ASearchPaths, ADefines,
+    FCompilerVersion);
+  try
+    Result.SingleThreaded := cbThreading.ItemIndex = 0;
+    // ALWAYS on in the demo, which is the host whose job is to show what the
+    // analyzer still gets wrong: an unresolved member after a dot is a real gap
+    // and hiding it hides progress. The LIBRARY default stays off (the property
+    // is False unless a host asks), because an editor embedding PasTree wants
+    // the error-tolerant mode. chkShowErrors then filters DISPLAY only, so
+    // toggling it stays instant instead of costing a re-analysis.
+    Result.ReportUnresolvedMembers := True;
+    Result.ReportGuessedIfs := True;   // same philosophy: show the guesses
+    Result.LightPaths := LightTrees;   // chkLightLibs
+    // The .dproj's DCC_* switches and console target, as msbuild hands them
+    // to dcc: $IFOPT and CONSOLE read them.
+    if Assigned(FDProj) then
+    begin
+      Result.SwitchStart := PasStartOptState(FDProj.Switches);
+      Result.ConsoleTarget := FDProj.ConsoleTarget;
+    end;
+    Result.SetNamespaces(EffectiveNamespaces(APlatform)); // Forms -> Vcl.Forms
+    // Defaults ALWAYS, then the project's on top: the IDE prepends a project's
+    // own aliases to the defaults rather than replacing them, and AddUnitAlias
+    // is last-wins, so this order gives the project precedence on a collision.
+    for var LDef in PasDefaultUnitAliases(APlatform) do
+      Result.AddUnitAlias(LDef.Alias, LDef.UnitName);
+    if Assigned(FDProj) then
+      for var LAlias in FDProj.UnitAliases do
+        Result.AddUnitAlias(LAlias.Alias, LAlias.UnitName);
+    for LIdx := 0 to FOpenFiles.Count - 1 do
+    begin
+      LTab := TSourceTab(FOpenFiles.Objects[LIdx]);
+      Result.SetBuffer(LTab.FilePath, LTab.Editor.Text);
+    end;
+    for var LRen in FRenameBuffers do
+      if FOpenFiles.IndexOf(LRen.Key) < 0 then
+        Result.SetBuffer(LRen.Key, LRen.Value);
+  except
+    Result.Free;
+    raise;
+  end;
 end;
 
 // Reports the CURRENT FSemaProject's diagnostics + Done line and populates the
@@ -4734,6 +4892,11 @@ begin
     Log('No project open.');
     Exit;
   end;
+  if FQueryRunning then
+  begin
+    Log('A query is running - Stop it first.');
+    Exit;
+  end;
   CancelAsync;                      // a synchronous parse supersedes the background one
   FReparseTimer.Enabled := False;   // this analysis supersedes a pending one
   ClearMessages;
@@ -4770,6 +4933,13 @@ var
   LIdx: Integer;
   LTab: TSourceTab;
 begin
+  // A workspace query owns the analysis while it runs (see FQueryRunning):
+  // the debounce asks again once it is over.
+  if FQueryRunning then
+  begin
+    FReparseTimer.Enabled := True;
+    Exit;
+  end;
   CancelAsync;
   // ...and any PENDING one: a debounce armed a moment ago (an edit, a tab, the
   // project that was open before this one) would otherwise fire mid-build,
@@ -4785,6 +4955,10 @@ begin
     LPriority := [APriorityFile]
   else
     LPriority := [];
+  // An escalation keeps THIS project full (FStayFull); another one starts
+  // light again.
+  if not SameText(FSemaProjectRoot, FMainSource) then
+    FStayFull := False;
 
   FLastSearchPaths := LSearchPaths;   // see the field
   FLastDefines := LDefines;
@@ -4830,11 +5004,19 @@ begin
   // a "refused" line every time somebody opens something else. A refusal for
   // the same project IS worth reporting - it means the configuration moved
   // under us.
-  if chkIncremental.Checked and Assigned(FSemaProject) and
+  //
+  // The workspace lends it (FWS.Lend): until the session lands, a query
+  // whose answer would have to change the donor refuses (EPasWorkspaceBusy).
+  if chkIncremental.Checked and Assigned(FWS) and
      SameText(FSemaProjectRoot, FMainSource) then
-    if not FAsyncSession.SetParseDonor(FSemaProject) then
+    if FAsyncSession.SetParseDonor(FWS.Lend) then
+      FWSLent := True
+    else
+    begin
+      FWS.EndLend;
       Log('Parse donor refused (configuration changed, or the last run ' +
         'did not finish) - full rebuild.');
+    end;
 
   FAsyncLoud := ALoud;
   FAnalyzeOverhead := '';      // async build reports no wrapper/stage timings
@@ -4860,7 +5042,7 @@ var
   LTab: TSourceTab;
 begin
   Result := False;
-  if not chkIncremental.Checked or not Assigned(FSemaProject) or
+  if FQueryRunning or not chkIncremental.Checked or not Assigned(FSemaProject) or
      (APath = '') then
     Exit;
   // A module run is still in flight (300 ms on a big unit, against a 500 ms
@@ -4885,7 +5067,8 @@ begin
 
   FReparseTimer.Enabled := False;
   ClearLink;
-  FreeAndNil(FNav);            // rebuilt after the swap, over the new models
+  FWS.Release;                 // the session owns the project...
+  SyncWS;                      // ...FNav goes, FSemaProject still points at it
   InvalidateComplPipeline;
   FAsyncModule := True;
   FAsyncModulePath := APath;
@@ -4925,7 +5108,7 @@ var
   LOwnTree: Boolean;
 begin
   Result := nil;
-  if not chkLightLibs.Checked then
+  if not chkLightLibs.Checked or FStayFull then   // FStayFull: decision D9
     Exit;
   LTrees := ExtraSearchPaths;
   if FStudioRoot <> '' then
@@ -4951,6 +5134,7 @@ end;
 
 procedure TfrmMain.chkLightLibsClick(Sender: TObject);
 begin
+  FStayFull := False;   // Light libraries means light again, escalated or not
   // Another closure: a rebuild, loud - its Done line says how many units are
   // light now.
   if Assigned(FSemaProject) and (FMainSource <> '') then
@@ -4967,7 +5151,7 @@ var
   LPath: string;
   LTab: TSourceTab;
 begin
-  if not Assigned(FSemaProject) or Assigned(FAsyncSession) or
+  if FQueryRunning or not Assigned(FSemaProject) or Assigned(FAsyncSession) or
      (FSemaProject.LightCount = 0) then
     Exit;
   LPath := '';
@@ -4991,7 +5175,8 @@ begin
     Exit;
   end;
   ClearLink;
-  FreeAndNil(FNav);            // rebuilt after the swap, over the new models
+  FWS.Release;                 // the session owns the project...
+  SyncWS;                      // ...FNav goes, FSemaProject still points at it
   InvalidateComplPipeline;
   FAsyncModule := True;
   FAsyncPromote := True;
@@ -5015,62 +5200,250 @@ begin
   FAsyncTimer.Enabled := True;
 end;
 
-{ The uses lint reads library bodies and initializations a light unit does
-  not have. LintPromotions names the units it would answer as not known;
-  promoting them (on this thread - the lint itself is synchronous here too)
-  makes the answer exact. A promotion asking for a rebuild leaves its doubts
-  on the rows, and the log says so. }
-procedure TfrmMain.PrepareLint(const AMids: TArray<Integer>);
-var
-  LNav: TPasNavigator;
-  LNeed: TArray<string>;
-  LTried: TDictionary<string, Boolean>;
-  LMore: Boolean;
-  LDone, LRefused: Integer;
+{ ---- the workspace (PasTree.Sema.Workspace) ----
+  FWS owns the analysis (see the field). A query a light unit's body can
+  change - Find References and the rest of Find All, the overrides, the
+  defines, the uses lint, Rename - asks FWS, which first makes the library
+  bodies the answer needs full: a promotion of a few units, a rebuild with
+  the project as parse donor, or an escalation to a full analysis when that
+  is cheaper (decision D8: run it, said in the log before it runs; D9: the
+  project stays full, FStayFull). The answer is the full analysis's; in a
+  full analysis every query is the navigator's own call. }
+
+procedure TfrmMain.SyncWS;
 begin
-  if not Assigned(FSemaProject) or (FSemaProject.LightCount = 0) or
-     Assigned(FAsyncSession) then
-    Exit;
-  LDone := 0;
-  LRefused := 0;
-  LTried := TDictionary<string, Boolean>.Create;
-  try
-    repeat
-      LMore := False;
-      LNav := NewNavigator;
-      try
-        LNeed := LintPromotions(LNav, AMids);
-      finally
-        LNav.Free;
-      end;
-      for var LFile in LNeed do
-        if LTried.TryAdd(LowerCase(LFile), True) then
-        begin
-          if LDone = 0 then
-          begin
-            ClearLink;
-            FreeAndNil(FNav);   // the promotions replace models it holds
-          end;
-          if FSemaProject.PromoteUnit(LFile) then
-          begin
-            Inc(LDone);
-            LMore := True;
-          end
-          else
-            Inc(LRefused);
-        end;
-    until not LMore;
-  finally
-    LTried.Free;
-  end;
-  if not Assigned(FNav) then
+  if Assigned(FWS) then
   begin
-    FNav := NewNavigator;
-    RefreshSemanticTokens;
+    FSemaProject := FWS.Project;
+    FNav := FWS.Nav;   // nil while a module session holds the project
+  end
+  else
+  begin
+    FSemaProject := nil;
+    FNav := nil;
   end;
-  if LDone + LRefused > 0 then
-    Log(Format('Lint: %d light unit(s) promoted first, %d refused - the rows ' +
-      'naming those say what is not known.', [LDone, LRefused]));
+end;
+
+procedure TfrmMain.SetAnalysis(AProject: TPasSemaProject);
+begin
+  if AProject = nil then
+    FreeAndNil(FWS)   // a released workspace leaves the project alone
+  else if FWS = nil then
+  begin
+    FWS := TPasWorkspace.Create(AProject,
+      function: TPasSemaProject
+      var
+        LPlatform: TPasPlatform;
+        LSearchPaths, LDefines: TArray<string>;
+      begin
+        if not BuildConfig(LPlatform, LSearchPaths, LDefines) then
+          raise Exception.Create('No project open: nothing to rebuild.');
+        Result := NewConfiguredProject(LPlatform, LSearchPaths, LDefines);
+      end);
+    FWS.Options := QueryOptions;
+  end
+  else
+    FWS.Adopt(AProject);
+  // The rename gate: the IDE's registry library/browsing paths are somebody
+  // ELSE's sources (RTL, VCL, installed third-party), and the project's own
+  // directories deliberately are not in that set - see
+  // TPasNavigator.RenameBlockReason. Kept on every navigator FWS makes.
+  if Assigned(FWS) then
+    FWS.LibraryPaths := ExtraSearchPaths;
+  SyncWS;
+end;
+
+procedure TfrmMain.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
+begin
+  CanClose := not FQueryRunning;
+  if FQueryRunning then
+    FQueryCancel := True;
+end;
+
+procedure TfrmMain.EndLendDonor;
+begin
+  if FWSLent and Assigned(FWS) then
+    FWS.EndLend;
+  FWSLent := False;
+end;
+
+function TfrmMain.SymKey(AMid, ASym: Integer): TPasSymbolKey;
+begin
+  Result := TPasSymbolKey.Make(FSemaProject, AMid, ASym);
+end;
+
+// The project's own units - every analyzed file outside LibraryPaths: what
+// the project-wide uses lint asks about.
+function TfrmMain.ProjectUnitFiles: TArray<string>;
+begin
+  Result := nil;
+  if not Assigned(FNav) then
+    Exit;
+  for var LMid := 0 to FSemaProject.ModelCount - 1 do
+    if not FNav.IsUnderLibraryPath(FSemaProject.ModelFile(LMid)) then
+      Result := Result + [FSemaProject.ModelFile(LMid)];
+end;
+
+// FWS.PlanRename in a RunQuery. False with AError empty: it did not run.
+function TfrmMain.PlanSymbolRename(const AKey: TPasSymbolKey;
+  const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+  out ACarried: TArray<TPasCarriedRename>;
+  out AFamily: TArray<TPasRenameFamilyMember>;
+  out AInactive: TArray<TPasInactiveUse>; out AError: string): Boolean;
+var
+  LOk: Boolean;
+  LEdits: TArray<TPasRenameEdit>;
+  LCarried: TArray<TPasCarriedRename>;
+  LFamily: TArray<TPasRenameFamilyMember>;
+  LInactive: TArray<TPasInactiveUse>;
+  LError: string;
+begin
+  LOk := False;
+  LError := '';
+  Result := RunQuery(
+    procedure
+    begin
+      LOk := FWS.PlanRename(AKey, ANewName, LEdits, LCarried, LFamily,
+        LInactive, LError);
+    end) and LOk;
+  AEdits := LEdits;
+  ACarried := LCarried;
+  AFamily := LFamily;
+  AInactive := LInactive;
+  AError := LError;
+end;
+
+{ Progress to lblProgress; the Stop button (btnStop) cancels - the query's
+  parallel passes pump the message queue, and between them the progress
+  callback lets the button's own clicks through; the escalation is logged
+  before it runs. Cancelled is read on worker threads too: it reads one
+  Boolean field. }
+function TfrmMain.QueryOptions: TPasQueryOptions;
+begin
+  Result := Default(TPasQueryOptions);
+  Result.Escalation := esAsk;
+  Result.Cancelled :=
+    function: Boolean
+    begin
+      Result := FQueryCancel;
+    end;
+  Result.OnAskEscalate :=
+    function(AReason: string): Boolean
+    begin
+      Log('This answer needs most of the library''s implementations (' +
+        AReason + ') - analyzing the whole library in full; the project ' +
+        'stays full until Light libraries is toggled or another project is ' +
+        'opened. Stop cancels.');
+      ScrollMessagesToEnd;
+      vtMessages.Update;
+      Result := True;
+    end;
+  Result.OnProgress :=
+    procedure(AProgress: TPasQueryProgress)
+    const
+      STAGES: array[TPasQueryStage] of string =
+        ('promoting', 'rebuilding', 'full analysis');
+    var
+      LMsg: TMsg;
+    begin
+      lblProgress.Caption := STAGES[AProgress.Stage] + ': ' + AProgress.Text;
+      lblProgress.Update;
+      while PeekMessage(LMsg, btnStop.Handle, WM_MOUSEFIRST, WM_MOUSELAST,
+        PM_REMOVE) do
+      begin
+        TranslateMessage(LMsg);
+        DispatchMessage(LMsg);
+      end;
+    end;
+end;
+
+{ One workspace query: AQuery calls FWS (never FNav, which is nil meanwhile -
+  the query may replace it) and leaves its answer in the caller's locals.
+  False: it did not run - no analysis, an analysis or another query in
+  flight, or the workspace refused (EPasWorkspaceBusy: a background
+  analysis has the project as its parse donor, or holds it). }
+function TfrmMain.RunQuery(const AQuery: TProc): Boolean;
+begin
+  Result := False;
+  if not Assigned(FWS) or not Assigned(FNav) or FAnalyzing then
+    Exit;
+  if FQueryRunning then
+  begin
+    Log('A query is running - wait for it, or Stop it.');
+    Exit;
+  end;
+  FQueryRunning := True;
+  FQueryCancel := False;
+  FAnalyzing := True;   // the readers FAnalyzing guards back off
+  ClearLink;
+  FNav := nil;
+  btnStop.Enabled := True;
+  btnStop.Update;
+  Screen.Cursor := crHourGlass;
+  try
+    try
+      AQuery();
+      Result := True;
+    except
+      on E: EPasWorkspaceBusy do
+        Log('Not now: ' + E.Message);
+    end;
+  finally
+    Screen.Cursor := crDefault;
+    btnStop.Enabled := Assigned(FAsyncSession) and not FAsyncModule;
+    FAnalyzing := False;
+    FQueryRunning := False;
+    SyncWS;
+  end;
+  if Result then
+    QueryDone;
+end;
+
+{ What the last query did, when it did anything but answer: the library
+  units it made full, a rebuild or an escalation, a cancel, and the units
+  whose bodies the answer still lacks (NotSearched - only after Stop or a
+  refused unit). }
+procedure TfrmMain.QueryDone;
+var
+  LStatus: TPasQueryStatus;
+  LWhat: string;
+begin
+  LStatus := FWS.Status;
+  if LStatus.Changed then
+  begin
+    InvalidateComplPipeline;
+    RefreshSemanticTokens;
+    if not FLastBuildDemoted then
+      DemoteLibraryText;
+  end;
+  if LStatus.Escalated then
+    FStayFull := True;
+  if (LStatus.Rounds > 0) or LStatus.Rebuilt or LStatus.Escalated then
+  begin
+    LWhat := Format('%d unit(s) made full, %d taken in, %d preprocessed in ' +
+      '%d round(s)', [LStatus.Promoted, LStatus.Loaded, LStatus.Preprocessed,
+      LStatus.Rounds]);
+    if LStatus.Escalated then
+      LWhat := LWhat + ', then the library analyzed in full'
+    else if LStatus.Rebuilt then
+      LWhat := LWhat + ', then a rebuild';
+    Log(Format('Library bodies for this answer: %s - %d ms.',
+      [LWhat, LStatus.Ms]));
+  end;
+  if LStatus.Cancelled then
+    Log('Stopped - the answer covers what was analyzed by then.');
+  if LStatus.NotSearched > 0 then
+  begin
+    LWhat := '';
+    if LStatus.Refused <> nil then
+      LWhat := ' (refused: ' + string.Join('; ', LStatus.Refused) + ')';
+    Log(Format('Library implementations not searched: %d unit(s)%s.',
+      [LStatus.NotSearched, LWhat]));
+  end;
+  if LStatus.Cancelled then
+    lblProgress.Caption := 'stopped'
+  else
+    lblProgress.Caption := 'done';
 end;
 
 // The Stop button: user-requested cancellation of the in-flight analysis.
@@ -5078,8 +5451,16 @@ end;
 // TPasSemaProject), so the drain inside CancelAsync is short even on a big
 // project. The previous project/navigator were never touched by the aborted
 // build (double-buffering), so navigation keeps working on the older model.
+// During a workspace query (RunQuery) it stops the query instead: the
+// answer covers what was analyzed by then, and says how much it lacks.
 procedure TfrmMain.btnStopClick(Sender: TObject);
 begin
+  if FQueryRunning then
+  begin
+    FQueryCancel := True;
+    lblProgress.Caption := 'stopping...';
+    Exit;
+  end;
   if not Assigned(FAsyncSession) then
     Exit;
   CancelAsync;
@@ -5090,6 +5471,8 @@ end;
 // Cancels and drains the in-flight background analysis (if any). Called before
 // a new analysis supersedes it, on Run Parse, and on shutdown.
 procedure TfrmMain.CancelAsync;
+var
+  LProject: TPasSemaProject;
 begin
   FAsyncTimer.Enabled := False;
   btnStop.Enabled := False;
@@ -5102,17 +5485,16 @@ begin
     if FAsyncModule then
     begin
       FAsyncSession.WaitFor;
-      FSemaProject := FAsyncSession.TakeProject;
+      LProject := FAsyncSession.TakeProject;
       FAnalyzing := False;
       FAsyncModule := False;
       FAsyncPromote := False;
-      if Assigned(FSemaProject) and not Assigned(FNav) then
-      begin
-        FNav := NewNavigator;
+      SetAnalysis(LProject);   // back to the workspace (nil: none)
+      if Assigned(FNav) then
         RefreshSemanticTokens;
-      end;
     end;
     FreeAndNil(FAsyncSession);   // Destroy waits for the worker to drain
+    EndLendDonor;                // the donor is ours again
   end;
 end;
 
@@ -5121,12 +5503,17 @@ var
   LProgress: TPasStagedProgress;
   LError, LTimings: string;
   LAccepted, LDiscard: Boolean;
+  LProject: TPasSemaProject;
 begin
   if not Assigned(FAsyncSession) then
   begin
     FAsyncTimer.Enabled := False;
     Exit;
   end;
+  // A workspace query owns the analysis while it runs (FQueryRunning): the
+  // swap waits for the next tick after it.
+  if FQueryRunning then
+    Exit;
   if not FAsyncModule then
   begin
     LProgress := FAsyncSession.Progress;
@@ -5144,22 +5531,20 @@ begin
     LError := FAsyncSession.LastError;
     LAccepted := FAsyncSession.ModuleOutcome = moAccepted;
     LDiscard := FAsyncSession.ModuleOutcome = moMustDiscard;
-    FSemaProject := FAsyncSession.TakeProject;   // ours again, either way
+    LProject := FAsyncSession.TakeProject;   // ours again, either way
     LTimings := '';
-    if Assigned(FSemaProject) then
-      LTimings := FSemaProject.StageTimings;
+    if Assigned(LProject) then
+      LTimings := LProject.StageTimings;
     FreeAndNil(FAsyncSession);
     // Half-updated past the commit point: never shown, never a donor - the
     // rebuild below starts cold (see TPasModuleOutcome).
     if LDiscard then
-      FreeAndNil(FSemaProject);
+      FreeAndNil(LProject);
     FAsyncModule := False;
     FAnalyzing := False;
-    if Assigned(FSemaProject) then
-    begin
-      FNav := NewNavigator;
+    SetAnalysis(LProject);   // back to the workspace (nil: none)
+    if Assigned(FNav) then
       RefreshSemanticTokens;
-    end;
     if LError <> '' then
       Log('Module reanalysis error: ' + LError);
     if FAsyncPromote then
@@ -5223,13 +5608,12 @@ begin
   FAsyncStart.Stop;
   LError := FAsyncSession.LastError;
   ClearLink;
-  FreeAndNil(FNav);
-  FreeAndNil(FSemaProject);
-  FSemaProject := FAsyncSession.TakeProject;
+  LProject := FAsyncSession.TakeProject;
   FreeAndNil(FAsyncSession);
+  EndLendDonor;
+  SetAnalysis(LProject);   // the workspace frees the old one (nil: none)
   if Assigned(FSemaProject) then
   begin
-    FNav := NewNavigator;
     RefreshSemanticTokens;
     // MEMORY-AUDIT sec. 6.4-4 stage 1: this project is now IMMUTABLE for us -
     // every re-analysis goes through a fresh session - so the per-unit maps
@@ -5926,12 +6310,6 @@ end;
 // $(avi3rdlib) from the `Environment Variables` key) are expanded; only
 // directories that exist survive. Falls back to the bare RTL source dirs
 // when Studio/registry aren't available.
-function TfrmMain.NewNavigator: TPasNavigator;
-begin
-  Result := TPasNavigator.Create(FSemaProject);
-  Result.LibraryPaths := ExtraSearchPaths;
-end;
-
 function TfrmMain.ExtraSearchPaths: TArray<string>;
 var
   LSeen: TDictionary<string, Boolean>;

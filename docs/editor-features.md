@@ -1387,7 +1387,17 @@ its interfaces:
   full analysis. Find Descendants, Overrides, Implementations, built-in
   references and Rename have theirs too (`docs/library-light-mode.md`).
 - **Unused Units** (12) - a light lint is on the safe side by itself; the
-  demo runs `LintPromotions` and promotes what it names first, after which
-  the rows are the full analysis's.
+  demo asks through its workspace (`TPasWorkspace.FindUnusedUses`), which
+  makes what the lint needs full first, after which the rows are the full
+  analysis's.
+- **In the demo** every entry above - Find References (a symbol, a
+  built-in, a define), Overrides, Implementations, Descendants,
+  Assignments, Creations, Destructions, Find All Defines, Defines and
+  Options at cursor, both Unused Units pages, Units Nobody Uses and Rename -
+  runs through the workspace (0.121.0): its progress in the status line,
+  the Stop button cancels it (the answer then says how many library units
+  it did not search), and an escalation to a full analysis is logged before
+  it runs; the project then stays full until Light libraries is toggled or
+  another project is opened.
 - **Rename** of a library identifier is refused whatever the mode (it is
   under `LibraryPaths`).

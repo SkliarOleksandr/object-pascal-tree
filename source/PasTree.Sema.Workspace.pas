@@ -234,7 +234,15 @@ type
       out AEdits: TArray<TPasRenameEdit>;
       out ACarried: TArray<TPasCarriedRename>;
       out AFamily: TArray<TPasRenameFamilyMember>;
-      out AError: string): Boolean;
+      out AError: string): Boolean; overload;
+    { ... and the old name written in branches the defines leave out
+      (TPasNavigator.PlanRename's AInactive). }
+    function PlanRename(const AKey: TPasSymbolKey; const ANewName: string;
+      out AEdits: TArray<TPasRenameEdit>;
+      out ACarried: TArray<TPasCarriedRename>;
+      out AFamily: TArray<TPasRenameFamilyMember>;
+      out AInactive: TArray<TPasInactiveUse>;
+      out AError: string): Boolean; overload;
     { ---- one file, one position ---- }
     { The routine's implementation node, in Nav's model AMid of its unit. }
     function RoutineImplNode(const AKey: TPasSymbolKey; out AMid: Integer): Integer;
@@ -919,6 +927,18 @@ function TPasWorkspace.PlanRename(const AKey: TPasSymbolKey;
   out ACarried: TArray<TPasCarriedRename>;
   out AFamily: TArray<TPasRenameFamilyMember>; out AError: string): Boolean;
 var
+  LInactive: TArray<TPasInactiveUse>;
+begin
+  Result := PlanRename(AKey, ANewName, AEdits, ACarried, AFamily, LInactive,
+    AError);
+end;
+
+function TPasWorkspace.PlanRename(const AKey: TPasSymbolKey;
+  const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+  out ACarried: TArray<TPasCarriedRename>;
+  out AFamily: TArray<TPasRenameFamilyMember>;
+  out AInactive: TArray<TPasInactiveUse>; out AError: string): Boolean;
+var
   LM, LS: Integer;
 begin
   Prepare(SymDemand(AKey,
@@ -929,10 +949,11 @@ begin
   AEdits := nil;
   ACarried := nil;
   AFamily := nil;
+  AInactive := nil;
   AError := '';
   if Sym(AKey, LM, LS) then
     Result := FNav.PlanRename(LM, LS, ANewName, AEdits, ACarried, AFamily,
-      AError)
+      AInactive, AError)
   else
   begin
     AError := NOT_ANALYZED;

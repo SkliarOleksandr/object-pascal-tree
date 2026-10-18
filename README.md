@@ -354,7 +354,8 @@ usable.
   through a `TPasWorkspace` (`PasTree.Sema.Workspace`), which owns the
   project and its navigator and meets each query's demand inside the query
   - promotion, rebuild, escalation, with progress and cancel - so a host
-  never runs that loop itself. What a host stops
+  never runs that loop itself; the demo asks every Find All query and
+  Rename through it (0.121.0). What a host stops
   seeing, the exempt rules, promotion, the lint, the demand and the
   workspace: `docs/library-light-mode.md`.
 

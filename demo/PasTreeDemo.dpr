@@ -51,6 +51,7 @@ uses
   PasTree.Sema.Dfm in '..\source\PasTree.Sema.Dfm.pas',
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
   PasTree.Sema.Lint in '..\source\PasTree.Sema.Lint.pas',
+  PasTree.Sema.Workspace in '..\source\PasTree.Sema.Workspace.pas',
   PasTree.Outline in '..\source\PasTree.Outline.pas',
   PasTree.Sema.Complete in '..\source\PasTree.Sema.Complete.pas',
   PasTree.Sema.Dump in '..\source\PasTree.Sema.Dump.pas',
