@@ -350,9 +350,13 @@ usable.
   `tools/PasTreeLightSmoke` checks that query by query. Since 0.119.0 every
   public query has its demand - the hierarchy, the conditional symbols (a
   preprocess-only completion that leaves the light unit light), the
-  built-ins, positions and renames included. What a host stops
-  seeing, the exempt rules, promotion, the lint and the demand:
-  `docs/library-light-mode.md`.
+  built-ins, positions and renames included. Since 0.120.0 a host asks
+  through a `TPasWorkspace` (`PasTree.Sema.Workspace`), which owns the
+  project and its navigator and meets each query's demand inside the query
+  - promotion, rebuild, escalation, with progress and cancel - so a host
+  never runs that loop itself. What a host stops
+  seeing, the exempt rules, promotion, the lint, the demand and the
+  workspace: `docs/library-light-mode.md`.
 
 ## Current features
 

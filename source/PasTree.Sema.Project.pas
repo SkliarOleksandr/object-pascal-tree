@@ -2000,6 +2000,10 @@ type
       again for them). }
     function PromotedFiles: TArray<string>;
     procedure ForgetPromotions;
+    { The roots of the last full run - AnalyzeStaged's ARoots, AnalyzeProject's
+      and AnalyzeFile's main file, AnalyzeDirectory's files: what a rebuild of
+      the same closure analyzes (TPasWorkspace's). Empty before a run. }
+    property AnalyzedRoots: TArray<string> read FLightRoots;
     { LIGHT MODE, full answers (docs/library-light-mode.md): the units a
       query must have fully analyzed to answer as a full analysis does -
       for each ask, the units of its scope (spec 03 sec. 3.3.2, "What a unit

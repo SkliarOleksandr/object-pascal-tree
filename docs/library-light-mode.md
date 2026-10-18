@@ -248,7 +248,8 @@ may need those in turn. It stops with `eoNeedsRebuild` (rebuild with the
 project as parse donor - it carries the promoted set - and call again),
 `eoEscalate` (rebuild with `LightPaths` cleared; the session stays full) or
 `eoPartial` (a unit refused; the answer leaves it out and `NotSearched` says
-so).
+so). Since 0.120.0 a host does not run this loop: the workspace (below) runs
+it inside every query.
 
 ### Who can name a declaration
 
@@ -399,6 +400,103 @@ unit's implementation lists an own unit - the patched library copies a
 project keeps in its own tree (S2 loads them; their symbols' demand promotes
 the library units that use them).
 
+## The workspace: completeness inside the query (0.120.0)
+
+The demand, `EnsureFull`, the rebuild and the escalation are one loop, and a
+host that runs it itself before each query can forget it for a new query,
+or run it differently from the oracle. `TPasWorkspace`
+(`PasTree.Sema.Workspace`) owns the project and its navigator and runs that
+loop inside every query of the families table: the query's demand,
+`EnsureFull` until it is empty, a rebuild with the project as parse donor
+on `eoNeedsRebuild`, an escalation on `eoEscalate` - and then the query, on
+a navigator over the models it changed. The answer is the full analysis's.
+In a full analysis every demand is empty and a workspace query is the
+navigator's own call.
+
+- **Identities.** A query may replace models (a promotion) or the whole
+  project (a rebuild, an escalation), so a workspace query takes what
+  survives both: a symbol by `TPasSymbolKey` (`TPasSymbolKey.Make(project,
+  mid, sym)`: the declaring file, the name, the declaration's file, line and
+  column), a file or a position by path. Its answer is in terms of the
+  CURRENT `Project` and `Nav`, valid until the next workspace query changes
+  them; `Generation` moves then and `Status.Changed` says so.
+- **Entries.** The references family (`FindReferences`, `FindAssignments`,
+  `CollectReferencesOfAll`, `FindCreations`, `FindDestructions`), the
+  hierarchy (`FindDescendants`, `FindOverrides`, `FindImplementations`,
+  `FindInterfaceImplementors`, `RenameFamily`), names
+  (`FindBuiltinReferences`, `FindDefines`, `FindDefineReferences`),
+  `PlanRename`, `RoutineImplNode`, `SemanticTokens`, the uses lint
+  (`FindUnusedUses`, `FindUnreferencedUnits`), and two generic ones:
+  `InFile<T>(file, query)` for any question about one file and
+  `At<T>(file, line, col, query)` for any position question (`IdentAt`,
+  `GotoDeclaration`, `GotoImplementation`, `DefinesAt`, `OptionsAt`, the
+  `*At` family) - the query gets the navigator and the file's model id
+  once the demand is met. The "none needed" row of the families table is
+  asked of `Nav` directly.
+- **Options** (`Options: TPasQueryOptions`, set once at a host's dispatch;
+  the zero value is the full analysis's answer): `Partial` - today's fast
+  answer, no promotion, the gap counted; `Escalation` - `esRun` (default:
+  decision D8, run it, with progress), `esAsk` (`OnAskEscalate(reason)`
+  first; a refusal is `esNever`), `esNever` (no rebuild: the demand is met
+  unit by unit however large); `Cancelled` - polled between rounds and by a
+  rebuild's analysis, on its worker threads too (thread-safe and cheap); the
+  query then answers with what is analyzed and counts the rest;
+  `OnProgress(TPasQueryProgress)` - a round (`qsPromote`, its units) or a
+  rebuild (`qsRebuild` / `qsEscalate`, the analysis's
+  `TPasStagedProgress`), with one line of text for a status bar.
+- **Status** (`TPasQueryStatus`, the last query's): `NotSearched` - 0 unless
+  `Partial`, cancelled, or a unit refused (`Refused`); `Rounds`,
+  `Promoted`, `Loaded`, `Preprocessed`, `Rebuilt`, `Escalated`, `Ms` (the
+  demand's cost, the query excluded), `Note`.
+- **Rebuilds** need a `TPasProjectFactory`: a new project configured as the
+  host configures its analysis and not analyzed. The workspace clears its
+  `LightPaths` on an escalation, adopts the current project as parse donor
+  and analyzes the current project's `AnalyzedRoots`. Without a factory a
+  rebuild cannot happen: an escalation is met unit by unit instead, and a
+  unit that only a rebuild can make full stays in `NotSearched`.
+- **After an escalation** the workspace stays full for the session
+  (decision D9): `Escalated` is True, the factory's later projects get no
+  `LightPaths`, and a host configuring its own next analysis leaves them
+  off.
+- **Threading.** A workspace query runs on the caller's thread and may
+  change the project: the caller owns the project exclusively for its
+  duration. `Release` hands the project to a module session
+  (`TPasAsyncSession.CreateForModule` / `CreateForPromotion` take
+  ownership) and every query refuses (`EPasWorkspaceBusy`) until `Adopt`;
+  `Lend` / `EndLend` mark it a running session's parse donor, while which a
+  query whose demand is not empty refuses unless `Partial` (one with an
+  empty demand - every own-code question in practice - still answers).
+  `Adopt` also takes a new analysis of the host's own (an edit, a
+  reconfiguration) and frees the old one.
+
+`LintPromotions` and `PasEnsureDemand` stay for compatibility; nothing in
+PasTree calls them any more (`PasTreeSemaProject -lintpromote` lints through
+a workspace).
+
+### Host migration (S12b)
+
+What each host replaces, and with which workspace call. Common to all: the
+host's analysis result goes into one `TPasWorkspace` (`Create(project,
+factory)`, then `Adopt` for every later full analysis), the factory being
+the host's existing "configure a project" code minus the analysis; its
+`LibraryPaths` go to `TPasWorkspace.LibraryPaths`; every navigator the host
+created itself becomes `WS.Nav`; a symbol the host holds as (model id,
+symbol) becomes `TPasSymbolKey.Make(WS.Project, mid, sym)` at the request;
+`WS.Status.NotSearched > 0` is shown ("library implementations not
+searched: N units") and `WS.Status.Escalated` is announced; the next full
+analysis has no `LightPaths` once `WS.Escalated`.
+
+| host | today | replaced by |
+| --- | --- | --- |
+| demo | Find All > Unused Units / Units Nobody Uses: `LintPromotions` + `PromoteUnit` loop + rebuild on the UI thread | `WS.FindUnusedUses(files)` / `WS.FindUnreferencedUnits(files)` |
+| demo | Find References / Assignments / Creations / Destructions / Descendants / Overrides / Implementations / Find All Defines / Define references / built-in references / Rename | the workspace entry of the same name with the caret's `TPasSymbolKey`; `Options.OnProgress` to the status line, `Options.Cancelled` to the Stop button |
+| demo | opening a light unit promotes it in the background (`CreateForPromotion`) | stays (it keeps the UI responsive); `WS.Release` before the session, `WS.Adopt(TakeProject)` after; a query arriving meanwhile refuses with `EPasWorkspaceBusy` - say "analysis running" |
+| demo | the edit path (`CreateForModule`) and full re-analyses with the project as donor | `WS.Release` / `WS.Adopt` around a module session; `WS.Lend` / `WS.EndLend` around a full session with it as donor, then `WS.Adopt(new)` |
+| pastree-lsp | `PrepareLint` and every "library not analyzed" branch | the dispatcher owns the workspace: lint through `WS.FindUnusedUses`, references / callers / implementation / typeHierarchy through the workspace entries, definition / hover / semanticTokens through `WS.At<T>` / `WS.InFile<T>`; `$/progress` from `Options.OnProgress`, `$/cancelRequest` sets the flag `Options.Cancelled` reads |
+| pastree-mcp | its own promotion loops; the "calls inside library bodies are not analyzed (light mode)" notes | tools through the workspace (`references`, `callers` over `WS.FindReferences`, `related` over the hierarchy entries, `lint` over the lint entries, `source` / `callees` over `WS.InFile<T>`); the notes become `Status.NotSearched` when it is not 0 |
+
+Raise `cMinPasTreeVersion` to 0.120.0 in pastree-lsp and pastree-mcp.
+
 ## The uses lint in light mode
 
 `FindUnusedUses` / `FindUnreferencedUnits` (`PasTree.Sema.Lint`) read library
@@ -439,9 +537,10 @@ doubts.
 Every host already computes its library trees for the navigator
 (`TPasNavigator.LibraryPaths`): the IDE's library and browsing paths plus the
 Studio source trees, minus the project's own trees. That list is the natural
-`LightPaths`. A host switching light mode on by default promotes a unit when
-the user opens it or navigates into its bodies, and runs `LintPromotions`
-before the lint.
+`LightPaths`. A host switching light mode on by default asks its queries
+through a `TPasWorkspace` (above), which makes every answer the full
+analysis's; promoting a unit when the user opens it keeps that file's own
+questions instant.
 
 ## In the demo
 
@@ -464,9 +563,10 @@ anything else = one directory tree; it prints `light: N units` after the
 analysis line. `-promote:<file>` promotes a light unit (`PromoteUnit`; any
 other goes through `AnalyzeModuleOnly`), `-fpafter:<file>` fingerprints the own
 units again after the promotions, `-fpunit:<file>` adds a library unit to every
-fingerprint, and `-lintpromote` (with `-unused`) runs the host's preparation
-step - `LintPromotions` and `PromoteUnit` until nothing is left, a rebuild with
-the project as donor when a promotion asks for one - before the lint.
+fingerprint, and `-lintpromote` (with `-unused`) lints through a
+`TPasWorkspace`, as a host asks: the light units the lint needs are made
+full inside the query (a rebuild with the project as donor when a promotion
+asks for one), and the counts are printed (`lint promotions: ...`).
 
 `tools/PasTreeLightSmoke` is the oracle of "Full answers in light mode": it
 analyzes a `.dproj` twice in one process - full, and light - and asks both
@@ -476,24 +576,25 @@ every n-th identifier position of their text (`-ownunits:<n>`, `-pos:<n>`),
 a library sample (`-sym:Unit.Type.Member`, a default set of RTL and VCL
 names; each on a fresh light project unless `-shared`), and every n-th
 position of the sample's library files (`-libpos:<n>`, the one-library-file
-family). The light side meets each question's demand first, as a host does
-(`PasEnsureDemand`, a rebuild with the donor on `eoNeedsRebuild`; on
-`eoEscalate` the host's rebuild without light paths is a full analysis of
-the same configuration - the full side, which G2 holds byte-identical to
-it - so the question is answered there and the light project is started
-again for the next one). Answers are compared by identity -
-file, line, column, kind, name - never by model id. It prints per family the
-questions, the equal and differing answers and the light answers whose
-`NotSearched` was not 0, then what each question cost the light side
-(rounds, units promoted and taken in, rebuilds, escalations, time). A family
-whose demand is wired must be equal with `NotSearched` 0 (exit 1 otherwise);
-a family not wired yet is listed as an expected difference with its counts.
+family). Both sides ask through a `TPasWorkspace` (since 0.120.0), so the
+oracle tests the code path the hosts run: the light workspace meets each
+question's demand inside the query - a rebuild with the donor on
+`eoNeedsRebuild`, a real full rebuild on `eoEscalate` (after which a fresh
+light workspace takes the next question: the escalated one stays full) -
+and the full one, having nothing light, is the navigator's own call.
+Answers are compared by identity - file, line, column, kind, name - never
+by model id. It prints per family the questions, the equal and differing
+answers and the light answers whose `NotSearched` was not 0, then what each
+question cost the light workspace (rounds, units promoted and taken in,
+rebuilds, escalations, time - an escalation's rebuild included). Every
+family must be equal with `NotSearched` 0 (exit 1 otherwise).
 
 ## What is still open
 
 - Every public query has its demand (0.119.0, the table above); the smoke
   tool reports no expected difference any more.
 - The hosts (demo, language server, MCP server) still promote one unit at a
-  time and run `LintPromotions`; they move to `PasEnsureDemand` before every
-  Find All / references / callers / related query, with progress, cancel and
-  `NotSearched` shown.
+  time and run `LintPromotions`; they move onto the workspace (0.120.0, "Host
+  migration" above), with progress, cancel and `NotSearched` shown.
+- `EnsureFull` is not cancellable inside one round: `Options.Cancelled` is
+  polled between rounds and inside a rebuild.

@@ -97,7 +97,10 @@ function FindUnusedUses(ANav: TPasNavigator;
   const AMids: TArray<Integer>;
   AOptions: TPasLintOptions = []): TArray<TPasUnusedUse>;
 
-{ LIGHT MODE (TPasSemaProject.LightPaths). The lint reads what a light unit
+{ LIGHT MODE (TPasSemaProject.LightPaths). TPasWorkspace.FindUnusedUses /
+  FindUnreferencedUnits (PasTree.Sema.Workspace) make the lint exact
+  without the host's help; LintPromotions stays for hosts not moved yet.
+  The lint reads what a light unit
   never had analyzed - an inline routine's body (InlineDeps), its
   initialization (the link effects, loHideGlobalInit's test), the units its
   implementation `uses` brings in (reach) - and answers those on the safe

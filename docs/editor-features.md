@@ -1374,7 +1374,8 @@ its interfaces:
 - **Find References / callers** of a library symbol: own code and library
   interfaces, plus every library body after the query's demand is met
   (`TPasNavigator.DemandReferences` + `TPasSemaProject.EnsureFull`, or
-  `PasEnsureDemand` - `docs/library-light-mode.md`, "Full answers in light
+  `PasEnsureDemand`; since 0.120.0 a `TPasWorkspace` query does all of it
+  itself - `docs/library-light-mode.md`, "Full answers in light
   mode"); without it library bodies are not searched and `NotSearched` says
   how many units were left out. Find All Assignments, Creations and
   Destructions alike; overrides and implementations in library bodies through

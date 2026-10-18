@@ -32,6 +32,7 @@ uses
   PasTree.Sema.Nav in '..\source\PasTree.Sema.Nav.pas',
   PasTree.Sema.Project in '..\source\PasTree.Sema.Project.pas',
   PasTree.Sema.Lint in '..\source\PasTree.Sema.Lint.pas',
+  PasTree.Sema.Workspace in '..\source\PasTree.Sema.Workspace.pas',
   PasTree.WordIndex in '..\source\PasTree.WordIndex.pas',
   PasTree.TestKit in 'PasTree.TestKit.pas';
 
@@ -6973,6 +6974,12 @@ var
   LRes: TPasEnsureResult;
   LRounds: Integer;
   LUPath: string;
+  LWS: TPasWorkspace;
+  LKey: TPasSymbolKey;
+  LGen, LAsked: Integer;
+  LOpts: TPasQueryOptions;
+  LRaised: Boolean;
+  LProj: TPasSemaProject;
 
   function Lib(const AName: string): string;
   begin
@@ -7041,7 +7048,46 @@ var
     Result := ANav;
   end;
 
+  // The workspace's rebuilds: Run's configuration, not analyzed.
+  function Factory: TPasProjectFactory;
+  begin
+    Result :=
+      function: TPasSemaProject
+      begin
+        Result := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+        Result.LightPaths := [LLib];
+      end;
+  end;
+
+  // A declaration of LibU, any kind, by name.
+  function UKey(AProj: TPasSemaProject; const AName: string): TPasSymbolKey;
+  var
+    LMid: Integer;
+  begin
+    Result := Default(TPasSymbolKey);
+    LMid := AProj.ModelIdOf(LUPath);
+    if LMid < 0 then
+      Exit;
+    for var LS := 0 to AProj.Model(LMid).SymCount - 1 do
+      if SameText(AProj.Model(LMid).Symbols[LS].Name, AName) then
+        Exit(TPasSymbolKey.Make(AProj, LMid, LS));
+  end;
+
+  // Refs' rows of a workspace answer.
+  function WsRefs(const AHits: TArray<TPasRefHit>): string;
+  var
+    LRows: TArray<string>;
+  begin
+    LRows := nil;
+    for var LH in AHits do
+      LRows := LRows + [Format('%s|%d|%d', [LowerCase(ExtractFileName(
+        LH.FilePath)), LH.Line, LH.Col])];
+    TArray.Sort<string>(LRows);
+    Result := string.Join(';', LRows);
+  end;
+
 begin
+  LWS := nil;
   LRoot := TPath.Combine(TPath.GetTempPath, 'pastree_light_demand');
   if TDirectory.Exists(LRoot) then
     TDirectory.Delete(LRoot, True);
@@ -7245,7 +7291,156 @@ begin
       Length(DemandLint(LNav, [LLight.ModelIdOf(TPath.Combine(LOwn,
         'UOwn2.pas'))]).Full) = Length(LintPromotions(LNav,
         [LLight.ModelIdOf(TPath.Combine(LOwn, 'UOwn2.pas'))])));
+
+    // The workspace (PasTree.Sema.Workspace): the same answers, the demand
+    // met inside the query - no host loop.
+    FreeAndNil(LNav);
+    FreeAndNil(LLight);
+    LWS := TPasWorkspace.Create(Run(True), Factory());
+    LKey := UKey(LWS.Project, 'UProc');
+    Ok('workspace: a key survives the analysis it came from',
+      LKey.Valid and (LKey.Line = 8) and SameText(LKey.MainFile, LUPath));
+    Ok('workspace: Find References as the full analysis, no host loop',
+      WsRefs(LWS.FindReferences(LKey)) = Refs(LFullNav, 'UProc'));
+    Ok('workspace: ...NotSearched 0, two rounds, U and V promoted',
+      (LWS.Status.NotSearched = 0) and (LWS.Status.Rounds = 2) and
+      (LWS.Status.Promoted = 2) and (LWS.Status.Loaded = 3) and
+      LWS.Status.Changed and not LWS.Status.Escalated);
+    LGen := LWS.Generation;
+    Ok('workspace: asked again, nothing to do',
+      (WsRefs(LWS.FindReferences(LKey)) = Refs(LFullNav, 'UProc')) and
+      (LWS.Status.Rounds = 0) and not LWS.Status.Changed and
+      (LWS.Generation = LGen));
+    Ok('workspace: FindDescendants of TFoo as the full analysis',
+      (Length(LWS.FindDescendants(UKey(LWS.Project, 'TFoo'))) = 3) and
+      (LWS.Status.NotSearched = 0));
+    Ok('workspace: FindDefineReferences past the stop',
+      (Length(LWS.FindDefineReferences('YDEF')) = 2) and
+      (LWS.Status.NotSearched = 0));
+    Ok('workspace: the uses lint as the full analysis',
+      Length(LWS.FindUnusedUses([TPath.Combine(LOwn, 'UOwn2.pas')])) =
+      Length(FindUnusedUses(LFullNav,
+        [LFull.ModelIdOf(TPath.Combine(LOwn, 'UOwn2.pas'))])));
+    // A position: Go to Implementation lands in a light unit's body.
+    LWS.Adopt(Run(True));
+    Ok('workspace: Adopt takes a new analysis, LibU light again',
+      LWS.Project.IsLight(LWS.Project.ModelIdOf(LUPath)));
+    Ok('workspace: At - Go to Implementation into a light body',
+      LWS.At<Integer>(LUPath, 5, 15,
+        function(ANav: TPasNavigator; AMid: Integer): Integer
+        var
+          LT: TPasNavTarget;
+        begin
+          if ANav.GotoImplementation(AMid, 5, 15, LT) then
+            Result := LT.Line
+          else
+            Result := -1;
+        end) = 14);   // an empty body: its `end`
+    // Partial: today's answer, the gap counted.
+    LWS.Adopt(Run(True));
+    LOpts := Default(TPasQueryOptions);
+    LOpts.Partial := True;
+    LWS.Options := LOpts;
+    Ok('workspace: Partial answers without the bodies and counts them',
+      (WsRefs(LWS.FindReferences(UKey(LWS.Project, 'UProc'))) = '') and
+      (LWS.Status.NotSearched = 4) and (LWS.Status.Rounds = 0));
+    // Cancelled before the first round.
+    LOpts := Default(TPasQueryOptions);
+    LOpts.Cancelled :=
+      function: Boolean
+      begin
+        Result := True;
+      end;
+    LWS.Options := LOpts;
+    Ok('workspace: cancelled - the gap counted, nothing promoted',
+      (WsRefs(LWS.FindReferences(UKey(LWS.Project, 'UProc'))) = '') and
+      LWS.Status.Cancelled and (LWS.Status.NotSearched = 4) and
+      (LWS.Status.Promoted = 0));
+    LWS.Options := Default(TPasQueryOptions);
+    // A session's donor: a query that must change it refuses.
+    LWS.Lend;
+    LRaised := False;
+    try
+      LWS.FindReferences(UKey(LWS.Project, 'UProc'));
+    except
+      on EPasWorkspaceBusy do
+        LRaised := True;
+    end;
+    Ok('workspace: lent as a donor, a demand refuses', LRaised);
+    LRaised := False;
+    try
+      LWS.FindReferences(UKey(LWS.Project, 'UK'));
+    except
+      on EPasWorkspaceBusy do
+        LRaised := True;
+    end;
+    LWS.EndLend;
+    Ok('workspace: ...an empty demand still answers', not LRaised);
+    LProj := LWS.Release;
+    LRaised := False;
+    try
+      LWS.FindDefines;
+    except
+      on EPasWorkspaceBusy do
+        LRaised := True;
+    end;
+    Ok('workspace: released to a session, every query refuses',
+      LRaised and (LWS.Nav = nil));
+    LWS.Adopt(LProj);
+    // Escalation: over the bound, the project is rebuilt full and stays so.
+    LWS.Project.EscalationPercent := 1;
+    Ok('workspace: escalated - the full answer from a full rebuild',
+      (WsRefs(LWS.FindReferences(UKey(LWS.Project, 'UProc'))) =
+       Refs(LFullNav, 'UProc')) and LWS.Status.Escalated and LWS.Escalated and
+      (LWS.Project.LightCount = 0) and (LWS.Status.NotSearched = 0) and
+      (Length(LWS.Project.LightPaths) = 0));
+    // esNever: the same bound, met unit by unit.
+    FreeAndNil(LWS);
+    LWS := TPasWorkspace.Create(Run(True), Factory());
+    LWS.Project.EscalationPercent := 1;
+    LOpts := Default(TPasQueryOptions);
+    LOpts.Escalation := esNever;
+    LWS.Options := LOpts;
+    Ok('workspace: esNever - no rebuild, the answer still complete',
+      (WsRefs(LWS.FindReferences(UKey(LWS.Project, 'UProc'))) =
+       Refs(LFullNav, 'UProc')) and not LWS.Status.Escalated and
+      (LWS.Project.LightCount > 0) and (LWS.Status.NotSearched = 0) and
+      (LWS.Project.EscalationPercent = 1));
+    // esAsk, declined: as esNever.
+    FreeAndNil(LWS);
+    LWS := TPasWorkspace.Create(Run(True), Factory());
+    LWS.Project.EscalationPercent := 1;
+    LAsked := 0;
+    LOpts := Default(TPasQueryOptions);
+    LOpts.Escalation := esAsk;
+    LOpts.OnAskEscalate :=
+      function(ANote: string): Boolean
+      begin
+        Inc(LAsked);
+        Result := False;
+      end;
+    LWS.Options := LOpts;
+    Ok('workspace: esAsk declined - asked once, met unit by unit',
+      (WsRefs(LWS.FindReferences(UKey(LWS.Project, 'UProc'))) =
+       Refs(LFullNav, 'UProc')) and (LAsked = 1) and
+      not LWS.Status.Escalated and (LWS.Status.NotSearched = 0));
+    // No factory: no rebuild possible - still complete, unit by unit.
+    FreeAndNil(LWS);
+    LWS := TPasWorkspace.Create(Run(True), nil);
+    LWS.Project.EscalationPercent := 1;
+    Ok('workspace: no factory - the escalation met unit by unit',
+      (WsRefs(LWS.FindReferences(UKey(LWS.Project, 'UProc'))) =
+       Refs(LFullNav, 'UProc')) and not LWS.Status.Escalated and
+      (LWS.Status.NotSearched = 0));
+    // A full analysis: every demand empty, the navigator's own answer.
+    FreeAndNil(LWS);
+    LWS := TPasWorkspace.Create(Run(False), Factory());
+    Ok('workspace: full mode - no round, the same answer',
+      (WsRefs(LWS.FindReferences(UKey(LWS.Project, 'UProc'))) =
+       Refs(LFullNav, 'UProc')) and (LWS.Status.Rounds = 0) and
+      not LWS.Status.Changed);
   finally
+    LWS.Free;
     LNav.Free;
     LLight.Free;
     LFullNav.Free;

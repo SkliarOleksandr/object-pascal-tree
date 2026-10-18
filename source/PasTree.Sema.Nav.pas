@@ -1416,7 +1416,10 @@ type
     each round. }
   TPasDemandFunc = reference to function(ANav: TPasNavigator): TPasDemand;
 
-  { The host's loop around a query (docs/library-light-mode.md): the demand,
+  { Superseded by TPasWorkspace (PasTree.Sema.Workspace), which runs this
+    loop inside every query, with progress, cancel and the rebuilds; kept
+    for hosts not moved yet.
+    The host's loop around a query (docs/library-light-mode.md): the demand,
     EnsureFull, a navigator over the changed models (ANav is freed and
     replaced, its LibraryPaths kept), again - until the demand is empty
     (True) or EnsureFull cannot go on here (False): AResult.Outcome is then
