@@ -161,6 +161,7 @@ type
     function SymDemand(const AKey: TPasSymbolKey;
       const AOf: TPasSymDemandOf): TPasDemandFunc;
     function FileDemand(const AFile: string): TPasDemandFunc;
+    function UnitRefDemand(const AUnitFile: string): TPasDemandFunc;
     function PositionDemand(const AFile: string;
       ALine, ACol: Integer): TPasDemandFunc;
     class function ExtRefsOf(AProject: TPasSemaProject;
@@ -217,6 +218,11 @@ type
       const AOnlyFile: string = ''): TArray<TPasRefHit>;
     function FindCreations(const AKey: TPasSymbolKey): TArray<TPasRefHit>;
     function FindDestructions(const AKey: TPasSymbolKey): TArray<TPasRefHit>;
+    { A unit, by its file: every `uses` entry naming it and every qualifier
+      in code (TPasNavigator.FindUnitReferences; DemandUnitReferences since
+      0.122.0). AOnlyFile: as FindReferences'. }
+    function FindUnitReferences(const AUnitFile: string;
+      const AOnlyFile: string = ''): TArray<TPasRefHit>;
     { ---- the hierarchy family ---- }
     function FindDescendants(const AKey: TPasSymbolKey): TArray<TPasDescendantHit>;
     function FindOverrides(const AKey: TPasSymbolKey): TArray<TPasOverrideHit>;
@@ -243,6 +249,12 @@ type
       out AFamily: TArray<TPasRenameFamilyMember>;
       out AInactive: TArray<TPasInactiveUse>;
       out AError: string): Boolean; overload;
+    { A unit's rename (TPasNavigator.PlanUnitRename), its references met
+      first (DemandUnitReferences). }
+    function PlanUnitRename(const AUnitFile, ANewName: string;
+      out AEdits: TArray<TPasRenameEdit>; out ARequiredFileName: string;
+      out AInactive: TArray<TPasInactiveUse>;
+      out AError: string): Boolean;
     { ---- one file, one position ---- }
     { The routine's implementation node, in Nav's model AMid of its unit. }
     function RoutineImplNode(const AKey: TPasSymbolKey; out AMid: Integer): Integer;
@@ -953,6 +965,61 @@ begin
   AError := '';
   if Sym(AKey, LM, LS) then
     Result := FNav.PlanRename(LM, LS, ANewName, AEdits, ACarried, AFamily,
+      AInactive, AError)
+  else
+  begin
+    AError := NOT_ANALYZED;
+    Result := False;
+  end;
+  Finish;
+end;
+
+function TPasWorkspace.UnitRefDemand(const AUnitFile: string): TPasDemandFunc;
+var
+  LFile: string;
+begin
+  LFile := AUnitFile;
+  Result :=
+    function(ANav: TPasNavigator): TPasDemand
+    var
+      LM: Integer;
+    begin
+      LM := ANav.ModelIdOf(LFile);
+      if LM < 0 then
+        Result := ANav.DemandFilePath(LFile)
+      else
+        Result := ANav.DemandUnitReferences(LM);
+    end;
+end;
+
+function TPasWorkspace.FindUnitReferences(const AUnitFile,
+  AOnlyFile: string): TArray<TPasRefHit>;
+var
+  LM, LOnly: Integer;
+begin
+  Prepare(UnitRefDemand(AUnitFile));
+  Result := nil;
+  LM := MidOf(AUnitFile);
+  LOnly := MidOf(AOnlyFile);
+  if (LM >= 0) and ((AOnlyFile = '') or (LOnly >= 0)) then
+    Result := FNav.FindUnitReferences(LM, LOnly);
+  Finish;
+end;
+
+function TPasWorkspace.PlanUnitRename(const AUnitFile, ANewName: string;
+  out AEdits: TArray<TPasRenameEdit>; out ARequiredFileName: string;
+  out AInactive: TArray<TPasInactiveUse>; out AError: string): Boolean;
+var
+  LM: Integer;
+begin
+  Prepare(UnitRefDemand(AUnitFile));
+  AEdits := nil;
+  ARequiredFileName := '';
+  AInactive := nil;
+  AError := '';
+  LM := MidOf(AUnitFile);
+  if LM >= 0 then
+    Result := FNav.PlanUnitRename(LM, ANewName, AEdits, ARequiredFileName,
       AInactive, AError)
   else
   begin

@@ -6873,6 +6873,38 @@ begin
     not Has('Hidden') and Has('Seen') and Has('T'));
   Ok('word scan: set union',
     Length(PasWordSetUnion([1, 3, 5], [2, 3, 6])) = 5);
+  // 0.122.0: a `uses` clause spells no word; a heritage's names and an
+  // alias's target are HeritWords, a body's use of a type is not.
+  LScan := PasScanWords('unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+    'uses Vcl.StdCtrls, OnlyUsed;'#13#10 +
+    'type'#13#10 +
+    '  TBase = type Vcl.StdCtrls.TCustomEdit;'#13#10 +
+    '  TFoo = class sealed(TBase, IFoo)'#13#10'  end;'#13#10 +
+    '  TPlain = class'#13#10'  end;'#13#10 +
+    '  TH = class helper(TParentH) for TFoo'#13#10'  end;'#13#10 +
+    '  TI = interface(IBar)'#13#10'  end;'#13#10 +
+    'procedure P;'#13#10'begin'#13#10 +
+    '  if Sender is TUsedOnly then X := TAssigned;'#13#10 +
+    '  if A <= TLess then;'#13#10 +
+    'end;'#13#10'end.'#13#10, False);
+  Ok('word scan: `uses` names are not words, still listed',
+    not Has('OnlyUsed') and
+    (string.Join(',', LScan.ImplUses) = 'Vcl.StdCtrls,OnlyUsed'));
+  Ok('word scan: heritage names and alias targets',
+    PasWordSetHas(LScan.HeritWords, PasWordHash('TBase')) and
+    PasWordSetHas(LScan.HeritWords, PasWordHash('IFoo')) and
+    PasWordSetHas(LScan.HeritWords, PasWordHash('TCustomEdit')) and
+    PasWordSetHas(LScan.HeritWords, PasWordHash('StdCtrls')) and
+    PasWordSetHas(LScan.HeritWords, PasWordHash('TParentH')) and
+    PasWordSetHas(LScan.HeritWords, PasWordHash('IBar')) and
+    PasWordSetHas(LScan.HeritWords, PasWordHash('class')) and
+    Has('TCustomEdit') and Has('TBase'));
+  Ok('word scan: a body''s use of a type is no heritage',
+    not PasWordSetHas(LScan.HeritWords, PasWordHash('TUsedOnly')) and
+    not PasWordSetHas(LScan.HeritWords, PasWordHash('TAssigned')) and
+    not PasWordSetHas(LScan.HeritWords, PasWordHash('TLess')) and
+    not PasWordSetHas(LScan.HeritWords, PasWordHash('TFoo')) and
+    Has('TUsedOnly'));
 end;
 
 // The first routine or type named AName in AFile's model (-1: none).

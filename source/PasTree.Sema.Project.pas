@@ -175,6 +175,20 @@ type
     // Not '': this one file, whatever the scope - loaded or not (a file a
     // host opens that only the full closure has: taken in when it is).
     FilePath: string;
+    // The answer needs a matching unit LOADED, not its body: a unit nobody
+    // loaded goes to TPasDemand.LoadOnly (light), a loaded one is not
+    // wanted at all - what its `uses` clauses say a light model already
+    // has (DemandUnitReferences, 0.122.0).
+    LoadOnly: Boolean;
+    // Words are tested against the words of type heritages (HeritWords,
+    // 0.122.0): the hierarchy demands - a unit whose bodies only USE a
+    // class declares nothing below it.
+    Heritage: Boolean;
+    // Not nil: a unit Words matched is wanted only if it ALSO spells one of
+    // these (its Words, not its heritages) - FindOverrides' rows each
+    // declare the member by name, so a descendant's unit that never writes
+    // the name has no row to add (0.122.0).
+    AlsoWords: TArray<string>;
   end;
 
   { What a query needs analyzed in full before it can answer as a full
@@ -247,6 +261,7 @@ type
   TPasWordEntry = record
     Words: TArray<Cardinal>;
     DirWords: TArray<Cardinal>;   // inside directives (PasTree.WordIndex)
+    HeritWords: TArray<Cardinal>; // in type heritages (PasTree.WordIndex)
     UsedNames: TArray<string>;
     UsedPaths: TArray<string>;
     UsedResolved: Boolean;
@@ -23068,6 +23083,8 @@ var
       begin
         AEntry.Words := PasWordSetUnion(AEntry.Words, LScan.Words);
         AEntry.DirWords := PasWordSetUnion(AEntry.DirWords, LScan.DirWords);
+        AEntry.HeritWords := PasWordSetUnion(AEntry.HeritWords,
+          LScan.HeritWords);
         AEntry.UsedNames := AEntry.UsedNames + LScan.IntfUses + LScan.ImplUses;
         AddIncludes(LI, AEntry, AVisited);
       end;
@@ -23169,6 +23186,7 @@ begin
       begin
         LEntry.Words := LScans[LIdx].Words;
         LEntry.DirWords := LScans[LIdx].DirWords;
+        LEntry.HeritWords := LScans[LIdx].HeritWords;
         LEntry.UsedNames := LScans[LIdx].IntfUses + LScans[LIdx].ImplUses;
         LEntry.Size := LSizes[LIdx];
         var LVisited := TDictionary<string, Boolean>.Create;
@@ -23507,6 +23525,15 @@ begin
       begin
         if not LIn[LNode] or LWanted[LNode] or not IsCandidate(LNode) then
           Continue;
+        // Loaded is enough: a light unit is, and a unit nobody loaded is
+        // loaded on the way - the not-loaded side of LWantedPP below, which
+        // is TPasDemand.LoadOnly for a unit that is not wanted full.
+        if LAsk.LoadOnly then
+        begin
+          if LNode < LCount then
+            Continue;
+        end
+        else
         // Its preprocess-only completion is enough, and done or asked.
         if LAsk.Preprocess and (LWantedPP[LNode] or
            ((LNode < LCount) and HasDefineSide(LNode))) then
@@ -23528,6 +23555,15 @@ begin
                 Break;
               end;
           end
+          else if LAsk.Heritage then
+          begin
+            for var LH in LHashes do
+              if PasWordSetHas(LEntry.HeritWords, LH) then
+              begin
+                LMatch := True;
+                Break;
+              end;
+          end
           else
             for var LH in LHashes do
               if PasWordSetHas(LEntry.Words, LH) then
@@ -23536,8 +23572,21 @@ begin
                 Break;
               end;
         end;
+        // ... and one of AlsoWords anywhere in its code.
+        if LMatch and (LAsk.AlsoWords <> nil) and
+           FWordIdx.TryGetValue(LowerCase(LPaths[LNode]), LEntry) and
+           not LEntry.Unreadable then
+        begin
+          LMatch := False;
+          for var LAlso in LAsk.AlsoWords do
+            if PasWordSetHas(LEntry.Words, PasWordHash(LAlso)) then
+            begin
+              LMatch := True;
+              Break;
+            end;
+        end;
         if LMatch then
-          if LAsk.Preprocess then
+          if LAsk.Preprocess or LAsk.LoadOnly then
             LWantedPP[LNode] := True
           else
             LWanted[LNode] := True;

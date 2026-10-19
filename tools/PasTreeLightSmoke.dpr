@@ -591,6 +591,18 @@ begin
           Result := Result + [HitText(LH.Hit) + '|' + LH.TypeName + '|' +
             LH.ViaTypeName + '|' + IntToStr(Ord(LH.Kind))];
       end);
+  // A class property has the overrides question too: its bare
+  // redeclarations (`property Text;`) below it. Asked since 0.121.2 - its
+  // demand had lost the class, and no question here asked it.
+  if LKind = skProperty then
+    Ask('overrides', LLabel,
+      function(AWs: TPasWorkspace): TArray<string>
+      begin
+        Result := nil;
+        for var LH in AWs.FindOverrides(AId.Key) do
+          Result := Result + [HitText(LH.Hit) + '|' + LH.TypeName + '|' +
+            IntToStr(Ord(LH.Kind))];
+      end);
   if LIsRoutine then
   begin
     Ask('overrides', LLabel,
@@ -757,6 +769,16 @@ begin
   if AStride < 0 then
     AStride := GPosStride;
   LPrefix := '';
+  // A unit's references, its own or a library one: the `uses` entries of
+  // units nobody loaded and the qualifiers in library bodies (0.122.0 -
+  // asked of the navigator, "none needed", before).
+  Ask('unit-references', TPath.GetFileName(LFile),
+    function(AWs: TPasWorkspace): TArray<string>
+    begin
+      Result := HitsText(AWs.FindUnitReferences(LFile));
+      if AWs.Nav.ModelIdOf(LFile) < 0 then
+        Result := One('unresolved');
+    end);
   if ALibrary then
   begin
     LPrefix := 'library-file-';
@@ -791,14 +813,6 @@ begin
   end
   else
   begin
-    Ask('unit-references', TPath.GetFileName(LFile),
-      function(AWs: TPasWorkspace): TArray<string>
-      begin
-        var LMid := AWs.Nav.ModelIdOf(LFile);
-        if LMid < 0 then
-          Exit(One('unresolved'));
-        Result := HitsText(AWs.Nav.FindUnitReferences(LMid));
-      end, False);
     Ask('unit-decl', TPath.GetFileName(LFile),
       function(AWs: TPasWorkspace): TArray<string>
       var

@@ -453,7 +453,10 @@ type
     // query's (>= 0: only that model's rows were asked for).
     function NotSearchedOf(const ADemand: TPasDemand; AOnlyMid: Integer): Integer;
     // DemandDescendants and the rest: the walk from ASeeds and its asks.
-    function HierarchyDemand(const ASeeds: TArray<TPasExtRef>): TPasDemand;
+    // AMember not '': only units also spelling it are made full (the rest
+    // with a type below loaded light) - DemandOverrides.
+    function HierarchyDemand(const ASeeds: TArray<TPasExtRef>;
+      const AMember: string = ''): TPasDemand;
     // The struct a member (a method, a property) is declared in, or NIL_SYM.
     function MemberStruct(AMid, ASym: Integer): Integer;
     function FormBinder: TPasFormBinder;
@@ -1402,6 +1405,14 @@ type
       whatever the mode. PlanUnitRename needs none: the uses entries of a
       light unit are recorded. }
     function DemandRename(ATMid, ASym: Integer): TPasDemand;
+    { FindUnitReferences and PlanUnitRename (0.122.0 - "none needed" before,
+      which was wrong twice over): the `uses` entries of the units NOBODY
+      loaded - each lister of the unit taken in light (a light model
+      records both its clauses) - and the unit qualifiers in code
+      (`Winapi.Windows.SetWindowPos(...)`), which live in bodies: the
+      listers (and the unit itself) whose code outside the `uses` clauses
+      spells the name's last segment, made full. }
+    function DemandUnitReferences(ATargetMid: Integer): TPasDemand;
     function DemandDefineReferences(const AName: string): TPasDemand;
     { How many units the last query of a wired family (the references
       family, FindCreations, FindDestructions, and PasTree.Sema.Lint's
@@ -7268,8 +7279,8 @@ begin
     Result := LM.Scopes[LScope].StructSym;
 end;
 
-function TPasNavigator.HierarchyDemand(
-  const ASeeds: TArray<TPasExtRef>): TPasDemand;
+function TPasNavigator.HierarchyDemand(const ASeeds: TArray<TPasExtRef>;
+  const AMember: string): TPasDemand;
 var
   LIndex: TOvIndex;
   LSeen: TDictionary<Int64, Boolean>;
@@ -7349,6 +7360,11 @@ begin
       // A heritage clause may name it through an alias in another unit.
       if LAsk.Scope = dsUnit then
         LAsk.Scope := dsMember;
+      // Only a heritage declares a type below it (and the implicit roots'
+      // keywords stand in HeritWords too): a body that merely uses the
+      // type needs nothing (0.122.0 - the plain words promoted every unit
+      // writing `X is TCustomEdit`, and TControl's questions escalated).
+      LAsk.Heritage := True;
       if LAliases.TryGetValue(OvKey(LRef.UnitId, LRef.Sym), LNames) then
         LAsk.Words := LAsk.Words + LNames;
       // An implicit root is named by no heritage clause.
@@ -7361,6 +7377,19 @@ begin
           LAsk.Words := LAsk.Words + ['interface']
         else if LName = 'idispatch' then
           LAsk.Words := LAsk.Words + ['dispinterface'];
+      if AMember <> '' then
+      begin
+        // A unit nobody loaded with a type below this one: loaded light, so
+        // its interface's types join the walk - a deeper unit's heritage
+        // names them. Made full only when it also spells the member: every
+        // row (an override, a message handler, a bare property) declares it
+        // by name, and a type declared in an implementation section can be
+        // descended from only in that same unit.
+        var LLoad := LAsk;
+        LLoad.LoadOnly := True;
+        LAsks := LAsks + [LLoad];
+        LAsk.AlsoWords := [AMember];
+      end;
       LAsks := LAsks + [LAsk];
     end;
     Result := FProj.DemandOf(LAsks);
@@ -7389,26 +7418,44 @@ function TPasNavigator.DemandOverrides(ATMid, ASym: Integer): TPasDemand;
 var
   LSeed: TPasExtRef;
   LMid, LStruct: Integer;
+  LIsMethod: Boolean;
 begin
   if FProj.LightCount = 0 then
     Exit(Default(TPasDemand));
   LSeed.UnitId := ATMid;
-  LStruct := MemberStruct(ATMid, ASym);
   // FindOverrides answers for a method of a class or a property alone.
-  if not OvStructOfMethod(ATMid, ASym, LStruct) and
-     not OvStructOfProperty(ATMid, ASym, LStruct) then
+  // Asked ONCE: OvStructOfMethod's out parameter is NIL_SYM when it fails,
+  // so a second call after OvStructOfProperty succeeded wiped a property's
+  // class - the seed became NIL_SYM and the demand empty, and a property's
+  // redeclarations in units nobody loaded went missing with NotSearched 0.
+  LIsMethod := OvStructOfMethod(ATMid, ASym, LStruct);
+  if not LIsMethod and not OvStructOfProperty(ATMid, ASym, LStruct) then
     Exit(Default(TPasDemand));
   // A method: its slot's root class, as FindOverrides climbs to it; a
-  // property: its class (the redeclarations are below it).
-  if OvStructOfMethod(ATMid, ASym, LStruct) then
+  // property: the class of its chain's ROOT (PropertyChain's first link,
+  // the typed declaration) - FindOverrides lists the whole chain wherever
+  // the click was, so a redeclaration below `SpeciesBox.Text` (TCustomEdit's
+  // descendants, under TControl.Text) is in the answer and must be in the
+  // demand (0.122.0: the clicked class seeded it, and they were missing).
+  if LIsMethod then
   begin
     LMid := ATMid;
     OvClimbToRoot(LMid, LStruct, ASym,
       FProj.Model(ATMid).Symbols[ASym].NameLower);
     LSeed.UnitId := LMid;
+  end
+  else
+  begin
+    var LChain := PropertyChain(ATMid, ASym);
+    if (Length(LChain) > 0) and OvStructOfProperty(LChain[0].UnitId,
+         LChain[0].Sym, LMid) then
+    begin
+      LSeed.UnitId := LChain[0].UnitId;
+      LStruct := LMid;
+    end;
   end;
   LSeed.Sym := LStruct;
-  Result := HierarchyDemand([LSeed]);
+  Result := HierarchyDemand([LSeed], FProj.Model(ATMid).Symbols[ASym].Name);
 end;
 
 function TPasNavigator.DemandImplementations(ATMid, ASym: Integer): TPasDemand;
@@ -7572,6 +7619,40 @@ begin
   LChain := PropertyChain(ATMid, ASym);
   Result := PasMergeDemand(DemandReferencesOfAll(LRefs + LChain),
     DemandRenameFamily(ATMid, ASym));
+end;
+
+function TPasNavigator.DemandUnitReferences(ATargetMid: Integer): TPasDemand;
+var
+  LLoad, LBody: TPasDemandAsk;
+  LName: string;
+  LDot: Integer;
+begin
+  CheckGeneration;
+  if (FProj.LightCount = 0) or (ATargetMid < 0) or
+     (ATargetMid >= FProj.ModelCount) then
+    Exit(Default(TPasDemand));
+  // Every lister loaded: its `uses` entries are then in its model, light or
+  // not. No word test - a lister names the unit by definition.
+  LLoad := Default(TPasDemandAsk);
+  LLoad.UnitId := ATargetMid;
+  LLoad.Scope := dsUnit;
+  LLoad.LoadOnly := True;
+  // A qualifier ends with the name's last segment however it is written
+  // (`System.Classes.TList`, `Classes.TList` under a unit scope name). The
+  // word index leaves the `uses` clauses out, so a lister matches only when
+  // its code spells it. A unit nobody loaded is tested on its whole text:
+  // full when it matches, loaded light by LLoad otherwise - and tested
+  // again on its implementation once it is a light model.
+  // PasWordHash folds case.
+  LName := FProj.Model(ATargetMid).UnitNameLower;
+  LDot := LName.LastDelimiter('.');
+  if LDot >= 0 then
+    LName := LName.Substring(LDot + 1);
+  LBody := Default(TPasDemandAsk);
+  LBody.UnitId := ATargetMid;
+  LBody.Scope := dsUnit;
+  LBody.Words := [LName];
+  Result := FProj.DemandOf([LLoad, LBody]);
 end;
 
 function TPasNavigator.DemandBuiltin(const AName: string): TPasDemand;

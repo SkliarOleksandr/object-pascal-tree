@@ -293,6 +293,30 @@ methods (`GetEnumerator`, `MoveNext`, `Current`) match the word `in`, and an
 attribute class also matches its name without `Attribute`. A bare
 `inherited` needs no word of its own: the method it sits in spells the name.
 
+Two refinements (0.122.0). A `uses` clause spells no word: its names are
+kept apart (the demand's graph reads them), because a unit name in a light
+unit's implementation `uses` made every lister of the unit look as if its
+body qualified a name with it. And per unit the index also holds the
+**heritage words** (`HeritWords`): the identifiers inside the parentheses
+after `class`, `object`, `record`, `interface` or `dispinterface` (`sealed`,
+`abstract`, `helper` between them), the keyword itself where no parenthesis
+follows (an implicit root - and `class function`, `of object`: the safe
+side), and the name after a lone `=` with its dotted tail, past `type` (a
+type alias's target, which a heritage may then name). The hierarchy demands
+ask these instead of every word (`TPasDemandAsk.Heritage`): a unit whose
+bodies only USE a class (`X is TCustomEdit`) declares nothing below it.
+The overrides demand narrows further (`TPasDemandAsk.AlsoWords`): every row
+of `FindOverrides` - an override, a message handler, a bare property -
+declares the member by its name, and a type declared in an implementation
+section can be descended from only in that unit, so a unit with a type
+below is made full only when it also spells the member; a unit nobody
+loaded with only the heritage is loaded light (`LoadOnly`), its interface's
+types joining the walk. Measured on the 3,782-unit closure:
+`TControl.Text`'s overrides escalated (every word), then took 218
+promotions (heritage words), now 108; `TControl.SetBounds` escalated, now
+74 promotions; `TWinControl.CreateWnd` 38 - every answer equal to the full
+analysis's, `NotSearched` 0.
+
 A unit nobody loaded is needed only when it is reachable: `EnsureFull` takes
 it in from a light unit's `UNIT_NOT_LOADED` entry (the demand's frontier) -
 full when its body is needed, light (`LoadOnly`) when it only lies on the
@@ -336,11 +360,12 @@ nothing.
 | uses lint | `FindUnusedUses`, `FindUnreferencedUnits`, `LintPromotions` | `DemandLint` = `LintPromotions` (0.115.0) | 0.118.0 |
 | one library file | `SemanticTokens`, `RoutineImplNode`, a library file's outline | `DemandFile`: the unit itself | 0.118.0 |
 | positions | `IdentAt`, `SymbolAt`, `SymbolAtFile`, `ResolveDecl`, `GotoDeclaration`, `GotoImplementation`, `GotoBareInherited`, `MethodAt`, `InterfaceMethodAt`, `InterfaceAt`, `TypeAt`, `AssignableAt`, `ClassAt`, `UnitAt`, `BuiltinNameAt`, `DefineAt`, `DefineSpanAt`, `IfNameAt`, `GotoDefine`, `DefinesAt`, `OptionsAt` | `DemandPosition`: the file when it is light, and the unit of the symbol there when it is light (Go to Implementation lands in its body) | 0.119.0 |
-| hierarchy | `FindDescendants`, `FindOverrides`, `FindImplementations`, `FindInterfaceImplementors`, `RenameFamily` | `DemandDescendants` / `DemandOverrides` / `DemandImplementations` / `DemandInterfaceImplementors` / `DemandRenameFamily`: every type below the question's types over the heritage edges, by name and alias, in `dsMember` of its unit; an implicit root (`TObject`, `IInterface`, `IDispatch`) by `class` / `interface` / `dispinterface` - an escalation | 0.119.0 |
+| hierarchy | `FindDescendants`, `FindOverrides`, `FindImplementations`, `FindInterfaceImplementors`, `RenameFamily` | `DemandDescendants` / `DemandOverrides` / `DemandImplementations` / `DemandInterfaceImplementors` / `DemandRenameFamily`: every type below the question's types over the heritage edges, by name and alias, in `dsMember` of its unit, tested against the heritage words (0.122.0); an implicit root (`TObject`, `IInterface`, `IDispatch`) by `class` / `interface` / `dispinterface` - an escalation. A property's overrides seed the class of its chain's root (0.122.0: a second `OvStructOfMethod` call wiped the class, and the demand was empty; and a click on a redeclaration seeded the redeclaring class while the answer lists the whole chain); overrides ask `AlsoWords` = the member's name | 0.119.0 |
+| unit references | `FindUnitReferences`, `PlanUnitRename` | `DemandUnitReferences`: the unit's listers nobody loaded taken in light (`TPasDemandAsk.LoadOnly`: their `uses` entries), and the listers and the unit itself whose code outside the `uses` clauses spells the name's last segment made full (the qualifiers, `Winapi.Windows.SetWindowPos(...)`) | 0.122.0 |
 | defines | `FindDefines`, `FindDefineReferences` | `DemandDefines` / `DemandDefineReferences`: the light units with a `$DEFINE` (the name) in a directive past their stop - a preprocess-only completion, no promotion; units nobody loaded taken in light first | 0.119.0 |
 | built-in names | `FindBuiltinReferences` | `DemandBuiltin`: every light and not-loaded unit spelling the name | 0.119.0 |
 | renames | `PlanRename` | `DemandRename`: the references of the rename family and a property's chain, and the family's hierarchy (a library symbol is refused anyway) | 0.119.0 |
-| none needed | `FindUnitReferences`, `UnitDeclHit`, `UnitHeaderTarget`, `PlanUnitRename` (a light unit's implementation `uses` entries are recorded); `DeclHit`, `ProjectOutline`, completion, hover, `IsProjectDefined`, `IsUnderLibraryPath`, `RenameBlockReason`, `ModelIdOf`, `IncludeSiteTarget` (interfaces and project facts, analyzed in full); `FindFormSites`, `FormRoleOf`, `DescribeForm` (the form files) | - | - |
+| none needed | `UnitDeclHit`, `UnitHeaderTarget` (the unit's own header); `DeclHit`, `ProjectOutline`, completion, hover, `IsProjectDefined`, `IsUnderLibraryPath`, `RenameBlockReason`, `ModelIdOf`, `IncludeSiteTarget` (interfaces and project facts, analyzed in full); `FindFormSites`, `FormRoleOf`, `DescribeForm` (the form files) | - | - |
 
 A query without a row here is a defect: every new public query of
 `TPasNavigator` or `PasTree.Sema.Lint` gets one - a demand, or "none,
@@ -425,6 +450,7 @@ navigator's own call.
   hierarchy (`FindDescendants`, `FindOverrides`, `FindImplementations`,
   `FindInterfaceImplementors`, `RenameFamily`), names
   (`FindBuiltinReferences`, `FindDefines`, `FindDefineReferences`),
+  a unit's (`FindUnitReferences`, `PlanUnitRename`, by its file; 0.122.0),
   `PlanRename`, `RoutineImplNode`, `SemanticTokens`, the uses lint
   (`FindUnusedUses`, `FindUnreferencedUnits`), and two generic ones:
   `InFile<T>(file, query)` for any question about one file and

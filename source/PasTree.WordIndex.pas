@@ -51,6 +51,16 @@ type
       text as Words - the names a `$DEFINE`, `$IFDEF` or `Defined()`
       spells, which Words leaves out with every other comment. }
     DirWords: TPasWordSet;
+    { The words a type HERITAGE can spell, over the same part of the text as
+      Words (0.122.0): every identifier inside the parentheses after
+      `class`, `object`, `record`, `interface` or `dispinterface` (`sealed`,
+      `abstract`, `helper` between them allowed) - `class(Vcl.Controls.TControl,
+      IFoo)` adds Vcl, Controls, TControl and IFoo - and the keyword itself
+      where no parenthesis follows: an implicit root (`= class`,
+      `= interface`), or `class function`, `of object`, the section keyword -
+      the safe side. A hierarchy demand asks these instead of Words: a unit
+      that only USES a class in its bodies declares nothing below it. }
+    HeritWords: TPasWordSet;
   end;
 
 { The FNV-1a hash of an identifier's folded spelling (PasFoldChar, `&`
@@ -159,6 +169,10 @@ type
     Pos, Len: Integer;                   // 1-based cursor
     Words: TList<Cardinal>;
     DirWords: TList<Cardinal>;
+    HeritWords: TList<Cardinal>;
+    // SkipTrivia passed a lone `=` (not `:=`, `<=`, `>=`) and no other
+    // punctuation since: the next name may be an alias's target.
+    EqSeen: Boolean;
     Collect: Boolean;                    // words are being recorded
     SeenImpl: Boolean;                   // past the first `implementation`
     Scan: TPasWordScan;
@@ -171,6 +185,9 @@ type
     function NextWord(out AStart, ALen: Integer): Boolean;
     function SkipTrivia: Boolean;
     procedure ReadUses(AImpl: Boolean);
+    procedure ReadUsesNames(AImpl: Boolean);
+    procedure SkipBlank;
+    procedure ReadHeritage(AKeyStart, AKeyLen: Integer);
     procedure Run;
   end;
 
@@ -330,11 +347,16 @@ function TWordScanner.SkipTrivia: Boolean;
 var
   LCh: Char;
 begin
+  EqSeen := False;
   while Pos <= Len do
   begin
     LCh := Text[Pos];
     if PasIsIdentStart(LCh) or (LCh = '&') then
       Exit(True);
+    if LCh = '=' then
+      EqSeen := (Pos = 1) or not CharInSet(Text[Pos - 1], [':', '<', '>'])
+    else if not CharInSet(LCh, [' ', #9, #10, #13, '{', '(', '/']) then
+      EqSeen := False;
     case LCh of
       '{':
         SkipBraceComment;
@@ -420,8 +442,25 @@ begin
 end;
 
 { After `uses` / `contains`: dotted names separated by commas up to the
-  semicolon, an `in 'path'` skipped. The names' words are words too. }
+  semicolon, an `in 'path'` skipped. The names are NOT words (since 0.122.0):
+  a `uses` entry names no declaration - the demand reads the clauses from
+  IntfUses / ImplUses and the models' UsesList - and a unit name spelled in a
+  light unit's implementation `uses` made every lister of the unit look as
+  if its body qualified a name with it (DemandUnitReferences). }
 procedure TWordScanner.ReadUses(AImpl: Boolean);
+var
+  LCollect: Boolean;
+begin
+  LCollect := Collect;
+  Collect := False;
+  try
+    ReadUsesNames(AImpl);
+  finally
+    Collect := LCollect;
+  end;
+end;
+
+procedure TWordScanner.ReadUsesNames(AImpl: Boolean);
 var
   LName: string;
   LStart, LLen: Integer;
@@ -487,10 +526,101 @@ begin
   Flush;
 end;
 
+{ Whitespace and comments (directives recorded as everywhere), up to the
+  next token, whatever it is. }
+procedure TWordScanner.SkipBlank;
+begin
+  while Pos <= Len do
+    case Text[Pos] of
+      ' ', #9, #10, #13:
+        Inc(Pos);
+      '{':
+        SkipBraceComment;
+      '(':
+        if Ch(1) = '*' then
+          SkipParenComment
+        else
+          Exit;
+      '/':
+        if Ch(1) = '/' then
+          SkipToLineEnd
+        else
+          Exit;
+    else
+      Exit;
+    end;
+end;
+
+{ After `class` / `object` / `interface` / `dispinterface` (the keyword at
+  AKeyStart, already a word): `sealed` / `abstract` skipped, then the
+  parenthesized heritage's identifiers - or, with no parenthesis, the
+  keyword itself - go to HeritWords. Nested parentheses are counted; a `;`
+  ends a heritage nobody closed. }
+procedure TWordScanner.ReadHeritage(AKeyStart, AKeyLen: Integer);
+var
+  LStart, LLen, LDepth: Integer;
+  LWord: string;
+begin
+  SkipBlank;
+  while (Pos <= Len) and PasIsIdentStart(Text[Pos]) do
+  begin
+    LStart := Pos;
+    while (Pos <= Len) and PasIsIdentChar(Text[Pos]) do
+      Inc(Pos);
+    LWord := LowerCase(Copy(Text, LStart, Pos - LStart));
+    // `class helper(TParentHelper) for TFoo` inherits too.
+    if (LWord <> 'sealed') and (LWord <> 'abstract') and
+       (LWord <> 'helper') then
+    begin
+      // Something else follows (`class function`, `of object`): back to it,
+      // for Run to read as a word.
+      Pos := LStart;
+      Break;
+    end;
+    Words.Add(HashSlice(@Text[LStart], Pos - LStart));
+    SkipBlank;
+  end;
+  if (Pos > Len) or (Text[Pos] <> '(') then
+  begin
+    HeritWords.Add(HashSlice(@Text[AKeyStart], AKeyLen));
+    Exit;
+  end;
+  Inc(Pos);   // (
+  LDepth := 1;
+  while (Pos <= Len) and (LDepth > 0) do
+  begin
+    SkipBlank;
+    if Pos > Len then
+      Break;
+    case Text[Pos] of
+      '(':
+        begin
+          Inc(LDepth);
+          Inc(Pos);
+        end;
+      ')':
+        begin
+          Dec(LDepth);
+          Inc(Pos);
+        end;
+      ';':
+        Exit;
+      '''':
+        SkipString;
+    else
+      if NextWord(LStart, LLen) then
+        HeritWords.Add(HashSlice(@Text[LStart], LLen))
+      else
+        Inc(Pos);
+    end;
+  end;
+end;
+
 procedure TWordScanner.Run;
 var
   LStart, LLen: Integer;
   LWord: string;
+  LEq: Boolean;
 begin
   while Pos <= Len do
   begin
@@ -499,10 +629,42 @@ begin
       Inc(Pos);
       Continue;
     end;
+    LEq := EqSeen;
     if not NextWord(LStart, LLen) then
     begin
       if Pos <= Len then
         Inc(Pos);
+      Continue;
+    end;
+    // The name after a lone `=` may be a type alias's target - `TBase =
+    // TCustomEdit;`, `TBase = type Vcl.StdCtrls.TCustomEdit;` - which a
+    // heritage `class(TBase)` then reaches: dotted, and past `type`, in
+    // HeritWords too. A comparison `A = B` only adds a word.
+    if Collect and LEq then
+    begin
+      HeritWords.Add(HashSlice(@Text[LStart], LLen));
+      if SameText(Copy(Text, LStart, LLen), 'type') then
+      begin
+        SkipBlank;
+        if NextWord(LStart, LLen) then
+          HeritWords.Add(HashSlice(@Text[LStart], LLen));
+      end;
+      while (Pos < Len) and (Text[Pos] = '.') and
+            PasIsIdentStart(Text[Pos + 1]) do
+      begin
+        Inc(Pos);
+        if NextWord(LStart, LLen) then
+          HeritWords.Add(HashSlice(@Text[LStart], LLen));
+      end;
+    end;
+    // A type's heritage (HeritWords): only the keywords that start one.
+    if Collect and ((LLen = 5) or (LLen = 6) or (LLen = 9) or
+       (LLen = 13)) then
+    begin
+      LWord := LowerCase(Copy(Text, LStart, LLen));
+      if (LWord = 'class') or (LWord = 'object') or (LWord = 'record') or
+         (LWord = 'interface') or (LWord = 'dispinterface') then
+        ReadHeritage(LStart, LLen);
       Continue;
     end;
     // Only the three keywords that steer the scan are compared.
@@ -545,7 +707,7 @@ end;
 function PasScanWords(const AText: string; AWholeText: Boolean): TPasWordScan;
 var
   LS: TWordScanner;
-  LArr, LDir: TArray<Cardinal>;
+  LArr, LDir, LHerit: TArray<Cardinal>;
 begin
   LS := Default(TWordScanner);
   LS.Text := AText;
@@ -554,6 +716,7 @@ begin
   LS.Collect := AWholeText;
   LS.Words := TList<Cardinal>.Create;
   LS.DirWords := TList<Cardinal>.Create;
+  LS.HeritWords := TList<Cardinal>.Create;
   try
     LS.Run;
     // No `implementation` keyword: the whole text is the answer.
@@ -565,16 +728,20 @@ begin
       LS.Collect := True;
       LS.Words.Clear;
       LS.DirWords.Clear;
+      LS.HeritWords.Clear;
       LS.Run;
       LS.Scan.FromImplementation := False;
     end;
     LArr := SortedSet(LS.Words.ToArray);
     LDir := SortedSet(LS.DirWords.ToArray);
+    LHerit := SortedSet(LS.HeritWords.ToArray);
   finally
+    LS.HeritWords.Free;
     LS.DirWords.Free;
     LS.Words.Free;
   end;
   Result := LS.Scan;
+  Result.HeritWords := LHerit;
   Result.Words := LArr;
   Result.DirWords := LDir;
   if AWholeText then
