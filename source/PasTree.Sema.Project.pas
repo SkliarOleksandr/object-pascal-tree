@@ -11323,7 +11323,6 @@ var
   end;
 
 begin
-  Result := False;
   // A closed instantiation's own helper first (TPasHelperReg.TargetInst).
   if (ACur.Inst <> NIL_INST) and (AFromMid >= 0) and
      (AFromMid <= High(FHelperIdx)) and (FHelperIdx[AFromMid] <> nil) and
@@ -11904,7 +11903,6 @@ var
   LCur, LNext: TSemaXType;
   LM: TPasSemaModel;
   LScope, LDef, LChild, LDepth, LRMid, LRSym, LHop: Integer;
-  LRootName: string;
   LExt: TPasExtRef;
   LEmitMid, LEmitCtx: Integer;
   LDistinct: Boolean;
@@ -23255,7 +23253,6 @@ var
   LHashes: TArray<Cardinal>;
   LEntry: TPasWordEntry;
   LPath, LKey, LWord: string;
-  LEdge: TEdge;
   LScope: TPasDemandScope;
   LAnyFrontier, LMatch: Boolean;
   LDemandedNL: Integer;

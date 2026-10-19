@@ -3526,7 +3526,7 @@ end;
 
 function TPasSemaTyper.TypeNode(N: Integer): Integer;
 var
-  LChild, LThen, LNode: Integer;
+  LChild, LNode: Integer;
 begin
   if N = NIL_NODE then
     Exit(NIL_SYM);
