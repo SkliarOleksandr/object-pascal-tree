@@ -301,6 +301,9 @@ type
     function ProjModel(AMid: Integer; const AWhere: string): TPasSemaModel;
     function BridgeName(const AKey: string; out AMid, ASym: Integer): Boolean;
     function BridgeUnitMid(const AName: string): Integer;
+    function UnitRefFullName(AModel: TPasSemaModel; AMid, ASym: Integer):
+      string;
+    procedure CollectNamespaceChildren(const ANamespace: string);
     function OwnModelTypeX(AOvSym: Integer;
       ADepth: Integer = 0): TSemaXType;
     function OwnModelParamX(AOvSym: Integer): TSemaXType;
@@ -2661,8 +2664,106 @@ begin
     else
       Exit;
     end;
-  AddItem(LM.Symbols[ASym].Name, LM.Symbols[ASym].NameLower,
-    LM.Symbols[ASym].Kind, ABucket, AMid, ASym, ACtx);
+  // A used unit is listed under its FULL name (`System.SysUtils` for a
+  // `uses SysUtils` the unit scope names completed) - the row is how a
+  // qualified name gets written, and the short one is what was typed
+  // already. Keyed by the written name, so the dedup is unchanged.
+  if LM.Symbols[ASym].Kind = skUnitRef then
+    AddItem(UnitRefFullName(LM, AMid, ASym), LM.Symbols[ASym].NameLower,
+      skUnitRef, ABucket, AMid, ASym, ACtx)
+  else
+    AddItem(LM.Symbols[ASym].Name, LM.Symbols[ASym].NameLower,
+      LM.Symbols[ASym].Kind, ABucket, AMid, ASym, ACtx);
+end;
+
+{ The name a unit-ref symbol's unit is FILED under - the resolved model's
+  file name, which carries the namespace the unit scope names (-NS) or a
+  namespace-prefix lookup added to the written name. Only a namespace
+  completion counts: an ALIAS (-A, `WinTypes` for Winapi.Windows) is not a
+  qualifier dcc accepts in place of the written name, so anything but
+  `<namespace>.<written>` keeps the written name, as does an unresolved
+  unit. }
+function TPasCompletion.UnitRefFullName(AModel: TPasSemaModel;
+  AMid, ASym: Integer): string;
+var
+  LIdx, LUid: Integer;
+  LFull: string;
+begin
+  Result := AModel.Symbols[ASym].Name;
+  if FProj = nil then
+    Exit;
+  for LIdx := 0 to High(AModel.UsesList) do
+    if AModel.UsesList[LIdx].Sym = ASym then
+    begin
+      Result := AModel.UsesList[LIdx].NameFull;
+      if AMid < 0 then
+        LUid := BridgeUnitMid(Result)
+      else
+        LUid := AModel.UsesList[LIdx].UnitId;
+      if (LUid >= 0) and (LUid < FProj.ModelCount) then
+      begin
+        LFull := ChangeFileExt(ExtractFileName(FProj.ModelFile(LUid)), '');
+        if (Length(LFull) > Length(Result)) and
+           SameText(Copy(LFull, Length(LFull) - Length(Result), MaxInt),
+             '.' + Result) then
+          Result := LFull;
+      end;
+      Exit;
+    end;
+end;
+
+{ `System.|`, `Winapi.|`: the next SEGMENTS of the longer dotted unit names
+  under ANamespace - `SysUtils`, `Classes`, `Win` (of System.Win.ComObj) -
+  that MemberOf would resolve the qualifier to. Only units this file USES
+  above the caret, and the file's own name: qualifying a unit requires
+  having used it (BridgeUnitMid), so a namespace child nobody imported
+  would be E2003 the moment it was written. First hit wins against the
+  unit's own exports, as in MemberOf. }
+procedure TPasCompletion.CollectNamespaceChildren(const ANamespace: string);
+
+  procedure AddFrom(const AFull: string);
+  var
+    LRest: string;
+    LDot, LUid: Integer;
+  begin
+    if (Length(AFull) <= Length(ANamespace) + 1) or
+       not SameText(Copy(AFull, 1, Length(ANamespace) + 1),
+         ANamespace + '.') then
+      Exit;
+    LRest := Copy(AFull, Length(ANamespace) + 2, MaxInt);
+    LDot := Pos('.', LRest);
+    if LDot > 0 then
+    begin
+      SetLength(LRest, LDot - 1);
+      LUid := -1;
+    end
+    else
+      LUid := BridgeUnitMid(AFull);
+    if LRest <> '' then
+      AddItem(LRest, PasNameKey(LRest), skUnitRef, cbUnitName, LUid,
+        NIL_SYM, NIL_INST);
+  end;
+
+var
+  LIdx, LTok: Integer;
+begin
+  if (FProj = nil) or (ANamespace = '') then
+    Exit;
+  for LIdx := 0 to High(FModel.UsesList) do
+  begin
+    if FModel.UsesList[LIdx].NameNode <> NIL_NODE then
+    begin
+      LTok := FModel.Tree.Nodes[FModel.UsesList[LIdx].NameNode].FirstToken;
+      if (FCaretVis >= 0) and (LTok > FCaretVis) then
+        Continue;
+    end;
+    if FModel.UsesList[LIdx].Sym <> NIL_SYM then
+      AddFrom(UnitRefFullName(FModel, -1, FModel.UsesList[LIdx].Sym))
+    else
+      AddFrom(FModel.UsesList[LIdx].NameFull);
+  end;
+  if FProjMid >= 0 then
+    AddFrom(ChangeFileExt(ExtractFileName(FProj.ModelFile(FProjMid)), ''));
 end;
 
 procedure TPasCompletion.AddKeywords(const AWords: array of string);
@@ -3073,14 +3174,24 @@ begin
                 not FModel.DeclaredAfter(LSym, FCaretVis)) then
               AddSym(-1, LSym, NIL_INST, ABucket);
           end;
-      Exit;
+    end
+    else
+    begin
+      CollectUnitInterface(ABase.UnitMid, ABucket);
+      // dcc lets `System.` qualify EVERY compiler-provided name
+      // (System.Delete, System.PAnsiChar), so the System unit's list carries
+      // the seeds too - and only System's: seeds are per-model copies, not
+      // anyone's exports.
+      if (FProj <> nil) and (ABase.UnitMid = FProj.EnsureSystemUnit) then
+        AddSeeds;
     end;
-    CollectUnitInterface(ABase.UnitMid, ABucket);
-    // dcc lets `System.` qualify EVERY compiler-provided name (System.Delete,
-    // System.PAnsiChar), so the System unit's list carries the seeds too -
-    // and only System's: seeds are per-model copies, not anyone's exports.
-    if (FProj <> nil) and (ABase.UnitMid = FProj.EnsureSystemUnit) then
-      AddSeeds;
+    // A unit qualifier may also be the head of a longer unit name -
+    // `System.` continues to System.SysUtils as well as naming System. The
+    // unit's own exports went first (AddItem: first hit wins), as MemberOf
+    // tries them first.
+    if (FContext = ccMember) and (FProj <> nil) then
+      CollectNamespaceChildren(ChangeFileExt(ExtractFileName(
+        FProj.ModelFile(ABase.UnitMid)), ''));
   end
   else
   begin
@@ -4965,7 +5076,11 @@ begin
           end;
           EnsureAncestry(LInfo.Scope);
           CollectMembers(LRef);
-        end;
+        end
+        // `Winapi.|`: a qualifier that is no unit YET, only the head of
+        // longer unit names - its list is their next segments.
+        else if LRef.PendingUnit <> '' then
+          CollectNamespaceChildren(LRef.PendingUnit);
       end;
     ccUses:
       CollectUnitNames;

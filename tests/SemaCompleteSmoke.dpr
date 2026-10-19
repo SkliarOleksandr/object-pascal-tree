@@ -2082,6 +2082,66 @@ begin
   GProjMid := -1;
   TDirectory.Delete(GDir, True);
 
+  // ======== dotted unit names as qualifiers ================================
+  // A used unit is listed under its filed name (`uses Alpha` under the scope
+  // name Ns is Ns.Alpha - the row writes the qualified name), and a unit
+  // qualifier's list continues into the longer unit names under it (`Ns.`
+  // is unit Ns AND the head of Ns.Alpha / Ns.Deep.Beta) - only the used ones.
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_dotted');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'System.pas'), CF_SYSTEM);
+  TFile.WriteAllText(TPath.Combine(GDir, 'Ns.pas'),
+    'unit Ns;'#10'interface'#10'type TNsOwn = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(GDir, 'Ns.Alpha.pas'),
+    'unit Ns.Alpha;'#10'interface'#10'type TAlpha = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(GDir, 'Ns.Deep.Beta.pas'),
+    'unit Ns.Deep.Beta;'#10'interface'#10'type TBeta = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(GDir, 'Zz.Leaf.pas'),
+    'unit Zz.Leaf;'#10'interface'#10'type TLeaf = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(GDir, 'Ns.Gamma.pas'),
+    'unit Ns.Gamma;'#10'interface'#10'type TGamma = class end;'#10 +
+    'implementation'#10'end.'#10);
+  var LDotMain :=
+    'unit mainu;'#10'interface'#10'uses Ns, Alpha, Ns.Deep.Beta, Zz.Leaf;'#10 +
+    'implementation'#10'procedure P;'#10'var X: //V;'#10'begin'#10 +
+    'end;'#10'end.'#10;
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), LDotMain);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProj.SetNamespaces(['Ns']);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  ProjCase(StringReplace(LDotMain, '//V', 'Alph|', []));
+  GCounter.Ok('dotted: a scope-name-completed unit lists its full name',
+    GHit and Has('Ns.Alpha') and not Has('Alpha'));
+  ProjCase(StringReplace(LDotMain, '//V', 'Ns.|', []));
+  GCounter.Ok('dotted: a unit qualifier lists its own exports',
+    GHit and Has('TNsOwn'));
+  GCounter.Ok('dotted: ... and the used units under it, one segment each',
+    Has('Alpha') and Has('Deep') and (BucketOf('Alpha') = cbUnitName) and
+    not Has('Ns.Alpha'));
+  GCounter.Ok('dotted: ... but no unit the file does not use',
+    not Has('Gamma'));
+  ProjCase(StringReplace(LDotMain, '//V', 'Ns.Deep.|', []));
+  GCounter.Ok('dotted: a pending qualifier lists the next segments',
+    GHit and Has('Beta'));
+  ProjCase(StringReplace(LDotMain, '//V', 'Zz.|', []));
+  GCounter.Ok('dotted: a first segment that is no unit lists the next ones',
+    GHit and Has('Leaf'));
+  ProjCase(StringReplace(StringReplace(LDotMain, '//V', 'Integer', []),
+    'implementation', 'type TQ = Zz.|;'#10'implementation', []));
+  GCounter.Ok('dotted: ... in a type declaration too', GHit and Has('Leaf'));
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
   if GCounter.Finish('SemaCompleteSmoke') then
     ExitCode := 1;
   GComp.Free;
