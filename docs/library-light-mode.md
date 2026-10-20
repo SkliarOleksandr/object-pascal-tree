@@ -357,7 +357,7 @@ nothing.
 | references | `FindReferences`, `FindAssignments`, `CollectReferencesOfAll` | `DemandReferences` / `DemandReferencesOfAll`: each symbol (each link of a property's redeclaration chain) by its scope, its name spelled | 0.118.0 |
 | creations | `FindCreations` | `DemandCreations`: `dsMember` of the class's unit, one of the class's constructor names spelled | 0.118.0 |
 | destructions | `FindDestructions` | `DemandDestructions`: `dsMember` of the class's unit, `Free`/`Destroy`/`FreeAndNil`/`Release` spelled | 0.118.0 |
-| uses lint | `FindUnusedUses`, `FindUnreferencedUnits`, `LintPromotions` | `DemandLint` = `LintPromotions` (0.115.0) | 0.118.0 |
+| uses lint | `FindUnusedUses`, `FindUnreferencedUnits`, `LintPromotions` | `DemandLint` = `LintPromotions` (0.115.0), and as `LoadOnly` the not-loaded imports through which a library body may still reach a unit a removal seems to leave out (0.123.0) | 0.118.0 |
 | one library file | `SemanticTokens`, `RoutineImplNode`, a library file's outline | `DemandFile`: the unit itself | 0.118.0 |
 | positions | `IdentAt`, `SymbolAt`, `SymbolAtFile`, `ResolveDecl`, `GotoDeclaration`, `GotoImplementation`, `GotoBareInherited`, `MethodAt`, `InterfaceMethodAt`, `InterfaceAt`, `TypeAt`, `AssignableAt`, `ClassAt`, `UnitAt`, `BuiltinNameAt`, `DefineAt`, `DefineSpanAt`, `IfNameAt`, `GotoDefine`, `DefinesAt`, `OptionsAt` | `DemandPosition`: the file when it is light, and the unit of the symbol there when it is light (Go to Implementation lands in its body) | 0.119.0 |
 | hierarchy | `FindDescendants`, `FindOverrides`, `FindImplementations`, `FindInterfaceImplementors`, `RenameFamily` | `DemandDescendants` / `DemandOverrides` / `DemandImplementations` / `DemandInterfaceImplementors` / `DemandRenameFamily`: every type below the question's types over the heritage edges, by name and alias, in `dsMember` of its unit, tested against the heritage words (0.122.0); an implicit root (`TObject`, `IInterface`, `IDispatch`) by `class` / `interface` / `dispinterface` - an escalation. A property's overrides seed the class of its chain's root (0.122.0: a second `OvStructOfMethod` call wiped the class, and the demand was empty; and a click on a redeclaration seeded the redeclaring class while the answer lists the whole chain); overrides ask `AlsoWords` = the member's name | 0.119.0 |
@@ -547,6 +547,23 @@ same lint over AMids had to treat as unknown. The host promotes them
 units light, and they may be needed in turn - until the answer is empty,
 recreates its navigator and lints. A promotion that asks for a rebuild
 (`promote-needs-rebuild`) gets one, with the project as parse donor.
+
+The reach's missing edges (0.123.0): a unit a removal seems to leave out may
+still be reached in the full closure through a library implementation - a
+light unit the program keeps, whose implementation `uses` a unit nobody
+loaded, which leads back to it. Promoting the unit that seems lost (what
+`LintPromotions` did) cannot see that path, and the row kept a "leaves X out"
+the full lint does not have. Before reporting a loss, the lint now walks on
+past the loaded models (`TPasSemaProject.NotLoadedImports` /
+`NotLoadedUses`: the light units' not-loaded imports, then the word index's
+`uses` names of the units nobody loaded - every name, conditional or not, a
+superset). A seemingly lost unit that walk reaches is not reported and not
+promoted: `DemandLint` asks for the first not-loaded unit of that path as
+`LoadOnly` (taken in light), and the next round reads the graph that far -
+until the path is loaded or the loss is real. Until then, and when a take-in
+is refused, the row carries "whether removing it leaves X out is not known -
+a library implementation not loaded may reach them". The walk runs only for
+a row that would report a loss, and never in full mode.
 
 Measured on the 3,782-unit closure, its 1,566 listed units: full mode
 12,098 unused entries and 137 unreferenced units; light with the promotions -

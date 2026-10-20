@@ -6843,6 +6843,13 @@ begin
     'implementation'#13#10'end.'#13#10, False);
   Ok('word scan: conditional `uses` alternatives with no comma between',
     string.Join(',', LScan.IntfUses) = 'A,B1,B2,C,D');
+  // 0.123.0: a `uses` clause mutes only its names - a directive inside a
+  // recorded clause still spells its DirWords.
+  LScan := PasScanWords('unit U;'#13#10'interface'#13#10'implementation'#13#10 +
+    'uses A, {$IFDEF InUsesDef}B{$ENDIF}, D;'#13#10'end.'#13#10, False);
+  Ok('word scan: a directive inside `uses` spells its DirWords',
+    PasWordSetHas(LScan.DirWords, PasWordHash('InUsesDef')) and
+    not Has('B') and (string.Join(',', LScan.ImplUses) = 'A,B,D'));
   LScan := PasScanWords(
     'unit U;'#13#10'interface'#13#10'uses A.B, C in ''c.pas'';'#13#10 +
     'const IntfOnly = 1;'#13#10 +
@@ -6920,6 +6927,107 @@ begin
     if SameText(AProj.Model(LMid).Symbols[LS].Name, AName) and
        (AProj.Model(LMid).Symbols[LS].Kind in [skRoutine, skType]) then
       Exit(LS);
+end;
+
+{ The uses lint in light mode (0.123.0): removing UMain's LibIni seems to
+  leave LibIni's initialization out of App, but a full closure still reaches
+  it - UKeep -> LibHub, whose implementation uses LibMid, which uses LibIni.
+  LibMid is not loaded in light mode (only a library body names it): the
+  demand takes it in light, and the row is the full analysis's - no "leaves
+  LibIni out" doubt, LibIni not promoted for nothing. }
+procedure TestLightLintReach;
+const
+  APP =
+    'program App;'#13#10'uses UMain, UKeep;'#13#10'begin'#13#10 +
+    '  Keep;'#13#10'end.'#13#10;
+  UMAIN =
+    'unit UMain;'#13#10'interface'#13#10'implementation'#13#10 +
+    'uses LibIni;'#13#10'end.'#13#10;
+  UKEEP =
+    'unit UKeep;'#13#10'interface'#13#10'procedure Keep;'#13#10 +
+    'implementation'#13#10'uses LibHub;'#13#10 +
+    'procedure Keep;'#13#10'begin'#13#10'  HubProc;'#13#10'end;'#13#10 +
+    'end.'#13#10;
+  LIBHUB =
+    'unit LibHub;'#13#10'interface'#13#10'procedure HubProc;'#13#10 +
+    'implementation'#13#10'uses LibMid;'#13#10 +
+    'procedure HubProc;'#13#10'begin'#13#10'  MidProc;'#13#10'end;'#13#10 +
+    'end.'#13#10;
+  LIBMID =
+    'unit LibMid;'#13#10'interface'#13#10'uses LibIni;'#13#10 +
+    'procedure MidProc;'#13#10'implementation'#13#10 +
+    'procedure MidProc;'#13#10'begin'#13#10'  IniCount := 1;'#13#10'end;'#13#10 +
+    'end.'#13#10;
+  LIBINI =
+    'unit LibIni;'#13#10'interface'#13#10'var'#13#10'  IniCount: Integer;'#13#10 +
+    'implementation'#13#10'initialization'#13#10'  IniCount := 0;'#13#10 +
+    'end.'#13#10;
+var
+  LRoot, LOwn, LLib, LAppPath, LMain: string;
+  LFull, LLight: TPasSemaProject;
+  LFullNav: TPasNavigator;
+  LWS: TPasWorkspace;
+  LFullRows, LLightRows: TArray<TPasUnusedUse>;
+
+  function Run(ALight: Boolean): TPasSemaProject;
+  begin
+    Result := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+    if ALight then
+      Result.LightPaths := [LLib];
+    Result.EscalationPercent := 0;
+    Result.AnalyzeStaged([LAppPath], []);
+  end;
+
+  function RowsText(const ARows: TArray<TPasUnusedUse>): string;
+  begin
+    Result := '';
+    for var LR in ARows do
+      Result := Result + LR.UnitName + ':' + string.Join('|', LR.Doubts) + ';';
+  end;
+
+begin
+  LRoot := TPath.Combine(TPath.GetTempPath, 'pastree_light_lint_reach');
+  if TDirectory.Exists(LRoot) then
+    TDirectory.Delete(LRoot, True);
+  LOwn := TPath.Combine(LRoot, 'own');
+  LLib := TPath.Combine(LRoot, 'lib');
+  TDirectory.CreateDirectory(LOwn);
+  TDirectory.CreateDirectory(LLib);
+  LAppPath := TPath.Combine(LOwn, 'App.dpr');
+  LMain := TPath.Combine(LOwn, 'UMain.pas');
+  TFile.WriteAllText(LAppPath, APP);
+  TFile.WriteAllText(LMain, UMAIN);
+  TFile.WriteAllText(TPath.Combine(LOwn, 'UKeep.pas'), UKEEP);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibHub.pas'), LIBHUB);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibMid.pas'), LIBMID);
+  TFile.WriteAllText(TPath.Combine(LLib, 'LibIni.pas'), LIBINI);
+  LWS := nil;
+  LFullNav := nil;
+  LFull := Run(False);
+  try
+    LFullNav := TPasNavigator.Create(LFull);
+    LFullRows := FindUnusedUses(LFullNav, [LFull.ModelIdOf(LMain)]);
+    Ok('light lint reach: full - LibIni unused, nothing left out',
+      RowsText(LFullRows) = 'LibIni:;');
+    LLight := Run(True);
+    Ok('light lint reach: LibMid not loaded in light mode',
+      (LLight.ModelIdOf(TPath.Combine(LLib, 'LibMid.pas')) < 0) and
+      LLight.IsLight(LLight.ModelIdOf(TPath.Combine(LLib, 'LibIni.pas'))));
+    LWS := TPasWorkspace.Create(LLight, nil);
+    LLightRows := LWS.FindUnusedUses([LMain]);
+    Ok('light lint reach: the workspace answers as the full analysis',
+      RowsText(LLightRows) = RowsText(LFullRows));
+    Ok('light lint reach: ...LibMid taken in, LibIni not promoted',
+      (LWS.Status.NotSearched = 0) and (LWS.Status.Promoted = 0) and
+      (LWS.Project.ModelIdOf(TPath.Combine(LLib, 'LibMid.pas')) >= 0) and
+      LWS.Project.IsLight(LWS.Project.ModelIdOf(TPath.Combine(LLib,
+        'LibIni.pas'))));
+  finally
+    LWS.Free;
+    LFullNav.Free;
+    LFull.Free;
+    TDirectory.Delete(LRoot, True);
+  end;
 end;
 
 { Full answers in light mode (TPasSemaProject.DemandOf / EnsureFull, the
@@ -15726,6 +15834,7 @@ begin
   TestLightStop;
   TestWordScan;
   TestLightDemand;
+  TestLightLintReach;
   TestHelperCarrier;
 
   if GCounter.Finish('SemaProjectSmoke') then

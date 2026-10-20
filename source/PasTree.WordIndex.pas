@@ -174,6 +174,10 @@ type
     // punctuation since: the next name may be an alias's target.
     EqSeen: Boolean;
     Collect: Boolean;                    // words are being recorded
+    // Inside a `uses` clause whose words would be recorded: Collect is off
+    // for its names, but a directive between them still spells DirWords
+    // (`uses A {$IFDEF MSWINDOWS}, B{$ENDIF};`).
+    UsesCollect: Boolean;
     SeenImpl: Boolean;                   // past the first `implementation`
     Scan: TPasWordScan;
     function Ch(AOffset: Integer = 0): Char; inline;
@@ -212,7 +216,7 @@ var
   LName, LArg: string;
   LIdx: Integer;
 begin
-  if Collect then
+  if Collect or UsesCollect then
   begin
     LIdx := AStart;
     while LIdx < AEnd do
@@ -453,10 +457,12 @@ var
 begin
   LCollect := Collect;
   Collect := False;
+  UsesCollect := LCollect;
   try
     ReadUsesNames(AImpl);
   finally
     Collect := LCollect;
+    UsesCollect := False;
   end;
 end;
 

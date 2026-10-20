@@ -123,9 +123,12 @@ function LintPromotions(ANav: TPasNavigator; const AMids: TArray<Integer>;
   family, docs/library-light-mode.md): the same light units, for
   TPasSemaProject.EnsureFull / PasEnsureDemand - which promote them in one
   batch, take in what their implementations import and ask again until
-  nothing is left. Empty, at no cost, when no unit is light. Both reports
-  set ANav.NotSearched: the light units their answer had to treat as
-  unknown (0 after the demand is met). }
+  nothing is left - and, as LoadOnly, the not-loaded imports of light units
+  through which a full closure may still reach a unit a removal seems to
+  leave out (a library body reaching it, 0.123.0): taken in light, the
+  next round reads that far. Empty, at no cost, when no unit is light. Both
+  reports set ANav.NotSearched: the light units their answer had to treat
+  as unknown, and those imports (0 after the demand is met). }
 function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   AOptions: TPasLintOptions = []): TPasDemand;
 
@@ -198,6 +201,15 @@ type
     // to treat as unknown - what LintPromotions returns.
     FInlineLight: TDictionary<Int64, TArray<Integer>>;
     FLightNeeded: TDictionary<Integer, Boolean>;
+    // Light mode, the reach past the loaded models (KeptPastLoaded): the
+    // units nobody loaded, as nodes ModelCount + index, by lower path; each
+    // node's `uses` targets, built on first walk; and the not-loaded imports
+    // of loaded units a removal's answer needs taken in - LintPromotions'
+    // LoadOnly.
+    FNLNodes: TDictionary<string, Integer>;
+    FNLPaths: TList<string>;
+    FNLOut: TDictionary<Integer, TArray<Integer>>;
+    FLoadNeeded: TDictionary<string, Boolean>;
     // DesignerUnits' form files by lower-cased path: every component class
     // of every form climbs its ancestry, and each level asked the disk for
     // two files and re-parsed the one it found - 12 of the lint's 13 s on a
@@ -210,8 +222,11 @@ type
     function DropsGlobalInit(AFrom, ATo: Integer): Boolean;
     function ReachOf(ARoot, ASkipFrom, ASkipTo: Integer): TArray<Boolean>;
     function FullReach(ARoot: Integer): TArray<Boolean>;
-    function EffectsFrom(AStart: Integer; const ALost: TArray<Boolean>;
-      out AUnknown: TArray<string>): TArray<string>;
+    function EffectsFrom(AStart: Integer; const ALost, AKept: TArray<Boolean>;
+      out AUnknown: TArray<Integer>; out APending: TArray<string>): TArray<string>;
+    function NLNode(const APath: string): Integer;
+    function PastLoadedOut(ANode: Integer): TArray<Integer>;
+    function KeptPastLoaded(const ALess, ALost: TArray<Boolean>): TArray<Boolean>;
     function NamesOf(AMid: Integer): TDictionary<string, Integer>;
     function LinkEffect(AMid: Integer): string;
     function NeedsItsUnit(const AExt: TPasExtRef): Boolean;
@@ -484,6 +499,10 @@ begin
   FGlobalInit := TDictionary<Integer, Boolean>.Create;
   FInlineLight := TDictionary<Int64, TArray<Integer>>.Create;
   FLightNeeded := TDictionary<Integer, Boolean>.Create;
+  FNLNodes := TDictionary<string, Integer>.Create;
+  FNLPaths := TList<string>.Create;
+  FNLOut := TDictionary<Integer, TArray<Integer>>.Create;
+  FLoadNeeded := TDictionary<string, Boolean>.Create;
   FForms := TDictionary<string, TLintFormInfo>.Create;
   for var LMid := 0 to FProj.ModelCount - 1 do
   begin
@@ -498,6 +517,10 @@ end;
 destructor TUsesLint.Destroy;
 begin
   FForms.Free;
+  FLoadNeeded.Free;
+  FNLOut.Free;
+  FNLPaths.Free;
+  FNLNodes.Free;
   FLightNeeded.Free;
   FInlineLight.Free;
   FGlobalInit.Free;
@@ -699,9 +722,12 @@ end;
 // The units with an effect AStart reaches through the units in ALost,
 // 'Name (initialization)'. A light unit among them is not judged - its
 // initialization and what its implementation `uses` brings in are not known:
-// its name goes to AUnknown instead.
-function TUsesLint.EffectsFrom(AStart: Integer; const ALost: TArray<Boolean>;
-  out AUnknown: TArray<string>): TArray<string>;
+// it goes to AUnknown instead (the caller records it in FLightNeeded). A unit
+// in AKept (nil: none) may stay reached through units nobody loaded: not
+// judged either - a unit with an effect, or a light one, goes to APending.
+function TUsesLint.EffectsFrom(AStart: Integer; const ALost,
+  AKept: TArray<Boolean>; out AUnknown: TArray<Integer>;
+  out APending: TArray<string>): TArray<string>;
 var
   LSeen: TArray<Boolean>;
   LQueue: TList<Integer>;
@@ -709,6 +735,7 @@ var
 begin
   Result := nil;
   AUnknown := nil;
+  APending := nil;
   SetLength(LSeen, FProj.ModelCount);
   LQueue := TList<Integer>.Create;
   try
@@ -718,11 +745,13 @@ begin
     while LAt < LQueue.Count do
     begin
       LU := LQueue[LAt];
-      if IsLight(LU) then
+      if (AKept <> nil) and AKept[LU] then
       begin
-        FLightNeeded.AddOrSetValue(LU, True);
-        AUnknown := AUnknown + [UnitNameOf(LU)];
+        if IsLight(LU) or (LinkEffect(LU) <> '') then
+          APending := APending + [UnitNameOf(LU)];
       end
+      else if IsLight(LU) then
+        AUnknown := AUnknown + [LU]
       else if LinkEffect(LU) <> '' then
         Result := Result + [Format('%s (%s)', [UnitNameOf(LU),
           LinkEffect(LU)])];
@@ -739,19 +768,155 @@ begin
   end;
 end;
 
+// The node of a unit nobody loaded (ModelCount + index), made on first use.
+function TUsesLint.NLNode(const APath: string): Integer;
+var
+  LKey: string;
+begin
+  LKey := LowerCase(APath);
+  if not FNLNodes.TryGetValue(LKey, Result) then
+  begin
+    Result := FProj.ModelCount + FNLPaths.Count;
+    FNLPaths.Add(APath);
+    FNLNodes.Add(LKey, Result);
+  end;
+end;
+
+// The targets of ANode's `uses` past the loaded graph (FEdges): a loaded
+// model's not-loaded imports, a not-loaded unit's every listed unit - a
+// loaded one as its model id, the rest as NLNode.
+function TUsesLint.PastLoadedOut(ANode: Integer): TArray<Integer>;
+var
+  LPaths: TArray<string>;
+  LMid: Integer;
+begin
+  if FNLOut.TryGetValue(ANode, Result) then
+    Exit;
+  if ANode < FProj.ModelCount then
+    LPaths := FProj.NotLoadedImports(ANode)
+  else
+    LPaths := FProj.NotLoadedUses(FNLPaths[ANode - FProj.ModelCount]);
+  Result := nil;
+  for var LPath in LPaths do
+  begin
+    LMid := FProj.ModelIdOf(LPath);
+    if LMid >= 0 then
+      Result := Result + [LMid]
+    else
+      Result := Result + [NLNode(LPath)];
+  end;
+  FNLOut.Add(ANode, Result);
+end;
+
+// Light mode: the units of ALost a full closure may still reach after the
+// removal - through the units nobody loaded, past a light unit's
+// implementation `uses` (a library body reaching a unit the removed entry
+// also led to). The word index lists every name, conditional or not, so
+// this over-approximates: such a unit is not called lost but PENDING, and
+// the frontier of the path - the not-loaded import of a unit ALess keeps -
+// goes to FLoadNeeded, taken in light by the demand. The next round walks
+// the loaded graph that far, and the answer ends as the full analysis's.
+// nil when nothing lost is reached that way (no light unit: no walk).
+function TUsesLint.KeptPastLoaded(const ALess,
+  ALost: TArray<Boolean>): TArray<Boolean>;
+var
+  LN, LAt, LU, LT: Integer;
+  LSeen: TDictionary<Integer, Boolean>;
+  LQueue: TList<Integer>;
+  LTag: TDictionary<Integer, string>;   // node -> the frontier import's path
+  LFrontier: string;
+  LLeft, LWaveEnd: Integer;
+  LWave: TArray<string>;
+
+  procedure Visit(ANode: Integer; const AFrontier: string);
+  begin
+    if LSeen.ContainsKey(ANode) or
+       ((ANode < LN) and ALess[ANode]) then
+      Exit;
+    LSeen.Add(ANode, True);
+    LTag.Add(ANode, AFrontier);
+    LQueue.Add(ANode);
+  end;
+
+begin
+  Result := nil;
+  if FProj.LightCount = 0 then
+    Exit;
+  LN := FProj.ModelCount;
+  LSeen := TDictionary<Integer, Boolean>.Create;
+  LTag := TDictionary<Integer, string>.Create;
+  LQueue := TList<Integer>.Create;
+  try
+    // Only a light model has not-loaded imports worth a walk; the loaded
+    // edges out of ALess stay inside it (the removed one aside).
+    for LU := 0 to LN - 1 do
+      if ALess[LU] and IsLight(LU) then
+        for LT in PastLoadedOut(LU) do
+          if LT >= LN then
+            Visit(LT, FNLPaths[LT - LN]);
+    // Done once every lost unit a row would name is reached.
+    LLeft := 0;
+    for LU := 0 to LN - 1 do
+      if ALost[LU] and (IsLight(LU) or (LinkEffect(LU) <> '')) then
+        Inc(LLeft);
+    LAt := 0;
+    LWaveEnd := 0;
+    while (LAt < LQueue.Count) and (LLeft > 0) do
+    begin
+      // A wave's units nobody loaded are scanned together, in parallel.
+      if LAt = LWaveEnd then
+      begin
+        LWave := nil;
+        for var LI := LAt to LQueue.Count - 1 do
+          if (LQueue[LI] >= LN) and not FNLOut.ContainsKey(LQueue[LI]) then
+            LWave := LWave + [FNLPaths[LQueue[LI] - LN]];
+        FProj.ScanNotLoaded(LWave);
+        LWaveEnd := LQueue.Count;
+      end;
+      LU := LQueue[LAt];
+      LFrontier := LTag[LU];
+      if LU < LN then
+      begin
+        if ALost[LU] then
+        begin
+          if Result = nil then
+            SetLength(Result, LN);
+          Result[LU] := True;
+          FLoadNeeded.AddOrSetValue(LFrontier, True);
+          if IsLight(LU) or (LinkEffect(LU) <> '') then
+            Dec(LLeft);
+        end;
+        for var LE := FStart[LU] to FStart[LU + 1] - 1 do
+          Visit(FEdges[LE], LFrontier);
+      end;
+      for LT in PastLoadedOut(LU) do
+        Visit(LT, LFrontier);
+      Inc(LAt);
+    end;
+  finally
+    LQueue.Free;
+    LTag.Free;
+    LSeen.Free;
+  end;
+end;
+
 // 'removing it leaves X (initialization) out of P', '' when it leaves
 // nothing with an effect out. With no program in the analysis (a directory
 // of units) only the listed unit's own effect is known. AUnknown: the same
 // for the light units the removal leaves out, whose effects are not known
-// ('' for none) - a doubt on the safe side.
+// ('' for none) - a doubt on the safe side; and, in light mode, the units a
+// library implementation not loaded may still reach (KeptPastLoaded) - not
+// reported as left out, their path taken in by the demand.
 function TUsesLint.DropsText(AFrom, ATo: Integer; out AUnknown: string): string;
 var
-  LFull, LLess, LLost: TArray<Boolean>;
-  LUnits, LPrograms, LEffects, LLightUnits, LLightPrograms,
-    LUnknown: TArray<string>;
+  LFull, LLess, LLost, LKept: TArray<Boolean>;
+  LUnits, LPrograms, LEffects, LLightUnits, LLightPrograms, LPending,
+    LPendingUnits: TArray<string>;
+  LUnknown: TArray<Integer>;
 begin
   Result := '';
   AUnknown := '';
+  LPendingUnits := nil;
   if FRoots = nil then
   begin
     if IsLight(ATo) then
@@ -781,15 +946,29 @@ begin
     SetLength(LLost, Length(LFull));
     for var LMid := 0 to High(LFull) do
       LLost[LMid] := LFull[LMid] and not LLess[LMid];
-    LEffects := EffectsFrom(ATo, LLost, LUnknown);
+    LEffects := EffectsFrom(ATo, LLost, nil, LUnknown, LPending);
+    // Light mode: what a library body may still reach is not lost yet -
+    // walked only when something would be reported.
+    if (LEffects <> nil) or (LUnknown <> nil) then
+    begin
+      LKept := KeptPastLoaded(LLess, LLost);
+      if LKept <> nil then
+        LEffects := EffectsFrom(ATo, LLost, LKept, LUnknown, LPending);
+    end;
+    for var LU in LPending do
+      if not MatchText(LU, LPendingUnits) then
+        LPendingUnits := LPendingUnits + [LU];
     for var LU in LEffects do
       if not MatchText(LU, LUnits) then
         LUnits := LUnits + [LU];
     if (LEffects <> nil) and not MatchText(UnitNameOf(LRoot), LPrograms) then
       LPrograms := LPrograms + [UnitNameOf(LRoot)];
     for var LU in LUnknown do
-      if not MatchText(LU, LLightUnits) then
-        LLightUnits := LLightUnits + [LU];
+    begin
+      FLightNeeded.AddOrSetValue(LU, True);
+      if not MatchText(UnitNameOf(LU), LLightUnits) then
+        LLightUnits := LLightUnits + [UnitNameOf(LU)];
+    end;
     if (LUnknown <> nil) and
        not MatchText(UnitNameOf(LRoot), LLightPrograms) then
       LLightPrograms := LLightPrograms + [UnitNameOf(LRoot)];
@@ -802,6 +981,14 @@ begin
       'interface-only - what their initialization and implementation bring ' +
       'in is not known', [NamedList(LLightUnits, MAX_NAMED),
       NamedList(LLightPrograms, MAX_NAMED)]);
+  if LPendingUnits <> nil then
+  begin
+    if AUnknown <> '' then
+      AUnknown := AUnknown + '; ';
+    AUnknown := AUnknown + Format('whether removing it leaves %s out is ' +
+      'not known - a library implementation not loaded may reach them',
+      [NamedList(LPendingUnits, MAX_NAMED)]);
+  end;
 end;
 
 // Whether AMid's initialization reaches outside the unit - see
@@ -1869,19 +2056,24 @@ begin
   LLint := TUsesLint.Create(ANav);
   try
     Result := UnreferencedRows(LLint, AMids, AOptions);
-    ANav.NotSearched := LLint.FLightNeeded.Count;
+    ANav.NotSearched := LLint.FLightNeeded.Count + LLint.FLoadNeeded.Count;
   finally
     LLint.Free;
   end;
 end;
 
-function LintPromotions(ANav: TPasNavigator; const AMids: TArray<Integer>;
-  AOptions: TPasLintOptions): TArray<string>;
+// LintPromotions, and the not-loaded imports to take in light (ALoad,
+// KeptPastLoaded's frontier), sorted.
+function LintNeeds(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions; out ALoad: TArray<string>): TArray<string>;
 var
   LRowsLint, LUnrefLint: TUsesLint;
   LNeeded: TDictionary<Integer, Boolean>;
+  LLoad: TDictionary<string, string>;
 begin
   Result := nil;
+  ALoad := nil;
+  LLoad := TDictionary<string, string>.Create;
   LNeeded := TDictionary<Integer, Boolean>.Create;
   LRowsLint := TUsesLint.Create(ANav);
   LUnrefLint := TUsesLint.Create(ANav);
@@ -1900,20 +2092,40 @@ begin
       LNeeded.AddOrSetValue(LMid, True);
     for var LMid in LNeeded.Keys do
       Result := Result + [ANav.Project.ModelFile(LMid)];
+    for var LPath in LRowsLint.FLoadNeeded.Keys do
+      LLoad.AddOrSetValue(LowerCase(LPath), LPath);
+    for var LPath in LUnrefLint.FLoadNeeded.Keys do
+      LLoad.AddOrSetValue(LowerCase(LPath), LPath);
+    ALoad := LLoad.Values.ToArray;
   finally
     LUnrefLint.Free;
     LRowsLint.Free;
     LNeeded.Free;
+    LLoad.Free;
   end;
   TArray.Sort<string>(Result, TIStringComparer.Ordinal);
+  TArray.Sort<string>(ALoad, TIStringComparer.Ordinal);
+end;
+
+function LintPromotions(ANav: TPasNavigator; const AMids: TArray<Integer>;
+  AOptions: TPasLintOptions): TArray<string>;
+var
+  LLoad: TArray<string>;
+begin
+  Result := LintNeeds(ANav, AMids, AOptions, LLoad);
 end;
 
 function DemandLint(ANav: TPasNavigator; const AMids: TArray<Integer>;
   AOptions: TPasLintOptions): TPasDemand;
+var
+  LLoad: TArray<string>;
 begin
   if ANav.Project.LightCount = 0 then
     Exit(Default(TPasDemand));
-  Result := ANav.Project.DemandOfFiles(LintPromotions(ANav, AMids, AOptions));
+  Result := ANav.Project.DemandOfFiles(LintNeeds(ANav, AMids, AOptions,
+    LLoad));
+  Result.LoadOnly := LLoad;
+  Inc(Result.NotSearched, Length(LLoad));
 end;
 
 function FindUnusedUses(ANav: TPasNavigator;
@@ -1929,7 +2141,7 @@ begin
       if (LMid >= 0) and (LMid < ANav.Project.ModelCount) then
         LLint.CheckUnit(LMid);
     Result := LLint.FRows.ToArray;
-    ANav.NotSearched := LLint.FLightNeeded.Count;
+    ANav.NotSearched := LLint.FLightNeeded.Count + LLint.FLoadNeeded.Count;
   finally
     LLint.Free;
   end;

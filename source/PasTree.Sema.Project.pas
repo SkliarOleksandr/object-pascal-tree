@@ -2041,6 +2041,19 @@ type
       Cheap: no graph, no word index; its volumes are what an earlier
       DemandOf measured (none before one: EnsureFull does not escalate). }
     function DemandOfFiles(const AFiles: TArray<string>): TPasDemand;
+    { The `uses` graph past the loaded models, as DemandOf reads it - for a
+      query that walks the full closure's graph itself (the uses lint's
+      reach, 0.123.0). NotLoadedImports: the files of AMid's
+      UNIT_NOT_LOADED entries (resolved, existing; a light unit's
+      implementation imports). NotLoadedUses: the files a unit nobody loaded
+      lists, from the word index (every name, conditional or not: a
+      superset). Paths are full; a path ModelIdOf knows is a loaded unit.
+      ScanNotLoaded: the word index of those units at once, in parallel -
+      a walk calls it per wave before NotLoadedUses (which scans one file
+      alone otherwise). }
+    function NotLoadedImports(AMid: Integer): TArray<string>;
+    function NotLoadedUses(const APath: string): TArray<string>;
+    procedure ScanNotLoaded(const APaths: TArray<string>);
     { Makes ADemand's units fully analyzed: the not-loaded ones taken in
       (TakeInUnits - full for ADemand.Full, light for LoadOnly), the light
       ones promoted in one batch (parse and Phase 1 in parallel, one commit,
@@ -23660,6 +23673,52 @@ begin
     LNL.Free;
     LPaths.Free;
   end;
+end;
+
+function TPasSemaProject.NotLoadedImports(AMid: Integer): TArray<string>;
+var
+  LM: TPasSemaModel;
+  LPath: string;
+begin
+  Result := nil;
+  if (AMid < 0) or (AMid >= FModels.Count) then
+    Exit;
+  LM := FModels[AMid];
+  if LM = nil then
+    Exit;
+  for var LU := 0 to High(LM.UsesList) do
+    if LM.UsesList[LU].UnitId = UNIT_NOT_LOADED then
+    begin
+      LPath := NotLoadedPathOf(AMid, LU);
+      if LPath <> '' then
+        Result := Result + [LPath];
+    end;
+end;
+
+procedure TPasSemaProject.ScanNotLoaded(const APaths: TArray<string>);
+var
+  LFull: TArray<string>;
+begin
+  SetLength(LFull, Length(APaths));
+  for var LIdx := 0 to High(APaths) do
+    LFull[LIdx] := TPath.GetFullPath(APaths[LIdx]);
+  if LFull <> nil then
+    EnsureWords(LFull, True);
+end;
+
+function TPasSemaProject.NotLoadedUses(const APath: string): TArray<string>;
+var
+  LFull, LKey: string;
+  LEntry: TPasWordEntry;
+begin
+  LFull := TPath.GetFullPath(APath);
+  LKey := LowerCase(LFull);
+  EnsureWords([LFull], True);
+  ResolveWordUses(LKey, LFull);
+  if FWordIdx.TryGetValue(LKey, LEntry) then
+    Result := LEntry.UsedPaths
+  else
+    Result := nil;
 end;
 
 function TPasSemaProject.DemandOfFiles(const AFiles: TArray<string>): TPasDemand;
