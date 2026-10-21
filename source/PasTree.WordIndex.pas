@@ -61,6 +61,16 @@ type
       the safe side. A hierarchy demand asks these instead of Words: a unit
       that only USES a class in its bodies declares nothing below it. }
     HeritWords: TPasWordSet;
+    { The words a DECLARATION can spell, over the same part of the text as
+      Words (0.124.0): every identifier followed by `=`, `:` (not `:=`),
+      `,`, `)` or `<` - a type, a constant, a variable, a field, an enum
+      value, a generic type's name, and on the way every argument and
+      comparison - or by a compiler directive (the safe side: the branch
+      may hide what follows), and the names after `procedure`, `function`,
+      `constructor`, `destructor`, `property` and `operator`, each segment
+      of a dotted one. A declaration search (DemandFind) asks these: a unit
+      that only calls `Min` declares no Min. }
+    DeclWords: TPasWordSet;
   end;
 
 { The FNV-1a hash of an identifier's folded spelling (PasFoldChar, `&`
@@ -71,6 +81,19 @@ function PasWordHash(const AName: string): Cardinal;
   only those from the first `implementation` on. }
 function PasScanWords(const AText: string; AWholeText: Boolean): TPasWordScan;
 
+{ The distinct identifiers AText spells in code - all of it, the `uses`
+  names left out as in Words - each folded (PasFoldChar, `&` dropped): the
+  spellings behind the hashes, which a wildcard needs (TPasSemaProject's
+  vocabulary, 0.124.0). Distinct by spelling, not by hash: two spellings
+  sharing a hash are both kept. }
+function PasScanSpellings(const AText: string): TArray<string>;
+
+{ APattern over AText, both folded: `*` any run of characters, `?` one. }
+function PasWildMatch(const APattern, AText: string): Boolean;
+
+{ Whether AText holds a wildcard (`*` or `?`). }
+function PasIsWildPattern(const AText: string): Boolean;
+
 { Is the identifier hashed AHash in ASet? }
 function PasWordSetHas(const ASet: TPasWordSet; AHash: Cardinal): Boolean;
 
@@ -80,6 +103,7 @@ function PasWordSetUnion(const ASet, AMore: TPasWordSet): TPasWordSet;
 implementation
 
 uses
+  System.Math,
   System.Generics.Collections,
   System.Generics.Defaults,
   PasTree.Types;
@@ -105,6 +129,47 @@ begin
   if LStart > Length(AName) then
     Exit(HashSlice(nil, 0));
   Result := HashSlice(@AName[LStart], Length(AName) - LStart + 1);
+end;
+
+function PasWildMatch(const APattern, AText: string): Boolean;
+var
+  LP, LT, LStar, LMark: Integer;
+begin
+  LP := 1;
+  LT := 1;
+  LStar := 0;
+  LMark := 0;
+  while LT <= Length(AText) do
+  begin
+    if (LP <= Length(APattern)) and ((APattern[LP] = '?') or
+       (APattern[LP] = AText[LT])) then
+    begin
+      Inc(LP);
+      Inc(LT);
+    end
+    else if (LP <= Length(APattern)) and (APattern[LP] = '*') then
+    begin
+      LStar := LP;
+      LMark := LT;
+      Inc(LP);
+    end
+    else if LStar > 0 then
+    begin
+      LP := LStar + 1;
+      Inc(LMark);
+      LT := LMark;
+    end
+    else
+      Exit(False);
+  end;
+  while (LP <= Length(APattern)) and (APattern[LP] = '*') do
+    Inc(LP);
+  Result := LP > Length(APattern);
+end;
+
+function PasIsWildPattern(const AText: string): Boolean;
+begin
+  Result := (System.Pos('*', AText) > 0) or (System.Pos('?', AText) > 0);
 end;
 
 function PasWordSetHas(const ASet: TPasWordSet; AHash: Cardinal): Boolean;
@@ -163,6 +228,24 @@ begin
 end;
 
 type
+  { The words DeclWords' tracking of routine bodies reacts to. }
+  TDeclKw = (dkNone, dkRoutine, dkProperty, dkBegin, dkInit, dkBlock, dkEnd,
+    dkNoBody, dkImplementation, dkClass, dkTypeKw, dkPacked, dkOf, dkTo);
+
+  { Where DeclWords' tracking stands: the routine bodies and the type
+    bodies open, the routine headers whose body has not begun (their local
+    declarations follow), the parameter lists' brackets. }
+  TDeclDepths = record
+    Body, Typ, Pend, Param: Integer;
+  end;
+
+  { A conditional's branches: the state at its `$IF`, and the branches
+    seen so far combined on the safe side (TWordScanner.Conditional). }
+  TDeclCond = record
+    Start, Combined: TDeclDepths;
+    HasCombined: Boolean;
+  end;
+
   { The scanner's state over one text. }
   TWordScanner = record
     Text: string;
@@ -170,6 +253,28 @@ type
     Words: TList<Cardinal>;
     DirWords: TList<Cardinal>;
     HeritWords: TList<Cardinal>;
+    DeclWords: TList<Cardinal>;
+    // The word before was a routine or property keyword, or a dotted
+    // routine name's segment after one: this word is declared.
+    AfterDeclKw: Boolean;
+    // A routine's or a property's name (or a procedural type's keyword)
+    // was just read: a `(` / `[` next opens its parameters (Depths.Param
+    // counts the brackets), whose names DeclWords leaves out.
+    ParamArm: Boolean;
+    // DeclWords leaves out what a routine declares locally - in its body
+    // and between its header and its body: Depths tracks the blocks past
+    // the first `implementation` (an interface has no bodies), Conds the
+    // conditional branches, PrevKw / PrevCol1 / LastPunct the word and
+    // the punctuation before the current word (a header or a procedural
+    // type? a type with a body?), TypeHead that the word read opens a
+    // type's body unless what follows its heritage says otherwise.
+    Depths: TDeclDepths;
+    Conds: TArray<TDeclCond>;
+    CondCount: Integer;
+    PrevKw: TDeclKw;
+    PrevCol1: Boolean;
+    LastPunct: Char;
+    TypeHead: Boolean;
     // SkipTrivia passed a lone `=` (not `:=`, `<=`, `>=`) and no other
     // punctuation since: the next name may be an alias's target.
     EqSeen: Boolean;
@@ -180,6 +285,16 @@ type
     UsesCollect: Boolean;
     SeenImpl: Boolean;                   // past the first `implementation`
     Scan: TPasWordScan;
+    // PasScanSpellings: the folded spellings, and per hash the first one's
+    // index in Spell (another spelling with that hash is added too).
+    Spell: TList<string>;
+    SpellAt: TDictionary<Cardinal, Integer>;
+    procedure AddSpelling(AStart, ALen: Integer; AHash: Cardinal);
+    function KwOf(AStart, ALen: Integer): TDeclKw;
+    function AtLineStart(AStart: Integer): Boolean;
+    function NextIs(const AChars: TSysCharSet; const AWord: string): Boolean;
+    procedure Declared(AStart, ALen: Integer; ADeclKw: Boolean);
+    procedure Conditional(const AName: string);
     function Ch(AOffset: Integer = 0): Char; inline;
     procedure SkipToLineEnd;
     procedure SkipBraceComment;
@@ -192,6 +307,7 @@ type
     procedure ReadUsesNames(AImpl: Boolean);
     procedure SkipBlank;
     procedure ReadHeritage(AKeyStart, AKeyLen: Integer);
+    function DeclFollows(out ADot: Boolean): Boolean;
     procedure Run;
   end;
 
@@ -235,6 +351,7 @@ begin
   while (LIdx < AEnd) and CharInSet(Text[LIdx], ['A'..'Z', 'a'..'z', '_']) do
     Inc(LIdx);
   LName := UpperCase(Copy(Text, AStart, LIdx - AStart));
+  Conditional(LName);
   if (LName <> 'I') and (LName <> 'INCLUDE') then
     Exit;
   LArg := Trim(Copy(Text, LIdx, AEnd - LIdx));
@@ -250,7 +367,18 @@ begin
   end;
   // A compiler-supplied text (`$I %DATE%`) names no file.
   if (LArg <> '') and (LArg[1] <> '%') then
+  begin
     Scan.Includes := Scan.Includes + [LArg];
+    // The included file may hold the rest of a routine - its body, its
+    // `end`: DeclWords reads what follows as module level again (the safe
+    // side - a local recorded, never a declaration missed).
+    if SeenImpl then
+    begin
+      Depths.Body := 0;
+      Depths.Pend := 0;
+      Depths.Param := 0;
+    end;
+  end;
 end;
 
 procedure TWordScanner.SkipBraceComment;
@@ -357,6 +485,25 @@ begin
     LCh := Text[Pos];
     if PasIsIdentStart(LCh) or (LCh = '&') then
       Exit(True);
+    // A parameter list's brackets, and the punctuation before the next
+    // word (DeclWords).
+    if ((LCh = '(') and (Ch(1) <> '*')) or (LCh = '[') then
+    begin
+      if ParamArm or (Depths.Param > 0) then
+        Inc(Depths.Param);
+      ParamArm := False;
+    end
+    else if (LCh = ')') or (LCh = ']') then
+    begin
+      if Depths.Param > 0 then
+        Dec(Depths.Param);
+    end
+    else if not CharInSet(LCh, [' ', #9, #10, #13, '{', '/']) then
+      ParamArm := False;
+    if not CharInSet(LCh, [' ', #9, #10, #13, '{']) and
+       not ((LCh = '(') and (Ch(1) = '*')) and
+       not ((LCh = '/') and (Ch(1) = '/')) then
+      LastPunct := LCh;
     if LCh = '=' then
       EqSeen := (Pos = 1) or not CharInSet(Text[Pos - 1], [':', '<', '>'])
     else if not CharInSet(LCh, [' ', #9, #10, #13, '{', '(', '/']) then
@@ -441,8 +588,39 @@ begin
     Inc(Pos);
   ALen := Pos - AStart;
   if Collect then
+  begin
     Words.Add(HashSlice(@Text[AStart], ALen));
+    if Spell <> nil then
+      AddSpelling(AStart, ALen, Words.Last);
+  end;
   Result := True;
+end;
+
+procedure TWordScanner.AddSpelling(AStart, ALen: Integer; AHash: Cardinal);
+var
+  LAt, LIdx: Integer;
+  LSame: Boolean;
+  LText: string;
+begin
+  if SpellAt.TryGetValue(AHash, LAt) then
+  begin
+    LText := Spell[LAt];
+    LSame := Length(LText) = ALen;
+    LIdx := 0;
+    while LSame and (LIdx < ALen) do
+    begin
+      LSame := LText[LIdx + 1] = PasFoldChar(Text[AStart + LIdx]);
+      Inc(LIdx);
+    end;
+    if LSame then
+      Exit;
+  end
+  else
+    SpellAt.Add(AHash, Spell.Count);
+  SetLength(LText, ALen);
+  for LIdx := 0 to ALen - 1 do
+    LText[LIdx + 1] := PasFoldChar(Text[AStart + LIdx]);
+  Spell.Add(LText);
 end;
 
 { After `uses` / `contains`: dotted names separated by commas up to the
@@ -622,26 +800,371 @@ begin
   end;
 end;
 
+{ Whether the identifier just read (Pos past it) reads as declared - the
+  next token, past blanks and comments, is `=`, `:` but not `:=`, `,`, `)`
+  or `<`, or a directive comes first; ADot: the next token is `.`. Reads
+  ahead only: Pos, the word sets and the directives' records stay as they
+  are (Run's SkipTrivia records them when it gets there). }
+function TWordScanner.DeclFollows(out ADot: Boolean): Boolean;
+var
+  LAt: Integer;
+begin
+  ADot := False;
+  LAt := Pos;
+  while LAt <= Len do
+    case Text[LAt] of
+      ' ', #9, #10, #13:
+        Inc(LAt);
+      '{':
+        begin
+          if (LAt < Len) and (Text[LAt + 1] = '$') then
+            Exit(True);
+          while (LAt <= Len) and (Text[LAt] <> '}') do
+            Inc(LAt);
+          Inc(LAt);
+        end;
+      '(':
+        if (LAt < Len) and (Text[LAt + 1] = '*') then
+        begin
+          if (LAt + 1 < Len) and (Text[LAt + 2] = '$') then
+            Exit(True);
+          Inc(LAt, 2);
+          while (LAt < Len) and not ((Text[LAt] = '*') and
+                (Text[LAt + 1] = ')')) do
+            Inc(LAt);
+          Inc(LAt, 2);
+        end
+        else
+          Exit(False);
+      '/':
+        if (LAt < Len) and (Text[LAt + 1] = '/') then
+        begin
+          while (LAt <= Len) and (Text[LAt] <> #10) and (Text[LAt] <> #13) do
+            Inc(LAt);
+        end
+        else
+          Exit(False);
+      '=', ',', ')', '<':
+        Exit(True);
+      ':':
+        Exit((LAt = Len) or (Text[LAt + 1] <> '='));
+      '.':
+        begin
+          ADot := (LAt = Len) or (Text[LAt + 1] <> '.');
+          Exit(False);
+        end;
+    else
+      Exit(False);
+    end;
+  Result := False;
+end;
+
+// The word at AStart (ALen characters) is AKw - lower-case ASCII, compared
+// without building a string.
+function WordIs(const AText: string; AStart, ALen: Integer;
+  const AKw: string): Boolean;
+var
+  LCh: Char;
+begin
+  if ALen <> Length(AKw) then
+    Exit(False);
+  for var LIdx := 0 to ALen - 1 do
+  begin
+    LCh := AText[AStart + LIdx];
+    if (LCh >= 'A') and (LCh <= 'Z') then
+      LCh := Char(Ord(LCh) + 32);
+    if LCh <> AKw[LIdx + 1] then
+      Exit(False);
+  end;
+  Result := True;
+end;
+
+function TWordScanner.KwOf(AStart, ALen: Integer): TDeclKw;
+
+  function Is_(const AKw: string): Boolean;
+  begin
+    Result := WordIs(Text, AStart, ALen, AKw);
+  end;
+
+begin
+  Result := dkNone;
+  case ALen of
+    2:
+      if Is_('of') then
+        Result := dkOf
+      else if Is_('to') then
+        Result := dkTo;
+    3:
+      if Is_('end') then
+        Result := dkEnd
+      else if Is_('asm') then
+        Result := dkBegin
+      else if Is_('try') then
+        Result := dkBlock;
+    4:
+      if Is_('case') then
+        Result := dkBlock;
+    5:
+      if Is_('begin') then
+        Result := dkBegin
+      else if Is_('class') then
+        Result := dkClass;
+    6:
+      if Is_('record') or Is_('object') then
+        Result := dkTypeKw
+      else if Is_('packed') then
+        Result := dkPacked;
+    7:
+      if Is_('forward') then
+        Result := dkNoBody;
+    8:
+      if Is_('function') or Is_('operator') then
+        Result := dkRoutine
+      else if Is_('property') then
+        Result := dkProperty
+      else if Is_('external') then
+        Result := dkNoBody;
+    9:
+      if Is_('procedure') then
+        Result := dkRoutine
+      else if Is_('interface') then
+        Result := dkTypeKw;
+    10:
+      if Is_('destructor') then
+        Result := dkRoutine;
+    11:
+      if Is_('constructor') then
+        Result := dkRoutine;
+    12:
+      if Is_('finalization') then
+        Result := dkInit;
+    13:
+      if Is_('dispinterface') then
+        Result := dkTypeKw;
+    14:
+      if Is_('implementation') then
+        Result := dkImplementation
+      else if Is_('initialization') then
+        Result := dkInit;
+  end;
+end;
+
+function TWordScanner.AtLineStart(AStart: Integer): Boolean;
+begin
+  Result := (AStart = 1) or CharInSet(Text[AStart - 1], [#10, #13]);
+end;
+
+{ Whether the next token, past blanks and comments, is one of AChars or the
+  word AWord (lower case). Reads ahead only. }
+function TWordScanner.NextIs(const AChars: TSysCharSet;
+  const AWord: string): Boolean;
+var
+  LAt, LFrom: Integer;
+begin
+  LAt := Pos;
+  while LAt <= Len do
+    case Text[LAt] of
+      ' ', #9, #10, #13:
+        Inc(LAt);
+      '{':
+        begin
+          while (LAt <= Len) and (Text[LAt] <> '}') do
+            Inc(LAt);
+          Inc(LAt);
+        end;
+      '/':
+        if (LAt < Len) and (Text[LAt + 1] = '/') then
+          while (LAt <= Len) and not CharInSet(Text[LAt], [#10, #13]) do
+            Inc(LAt)
+        else
+          Exit(False);
+    else
+      if CharInSet(Text[LAt], AChars) then
+        Exit(True);
+      if not PasIsIdentStart(Text[LAt]) then
+        Exit(False);
+      LFrom := LAt;
+      while (LAt <= Len) and PasIsIdentChar(Text[LAt]) do
+        Inc(LAt);
+      Exit(WordIs(Text, LFrom, LAt - LFrom, AWord));
+    end;
+  Result := False;
+end;
+
+{ DeclWords for the word just read (Collect on), and the tracking of what
+  a routine declares locally - past the first `implementation`: a header
+  (a routine keyword at module level that is no procedural type) has its
+  local declarations up to its `begin` / `asm` (Pend), a body its blocks up
+  to their `end` (Body); `forward` and `external` end a header with no
+  body; a routine keyword at a line's start (or after `class` there) is at
+  module level whatever the count says (a block left open across a
+  conditional branch); a body's `begin` leaves any type body. Every guess
+  errs toward recording a word: a local declaration recorded only makes a
+  unit match a name it does not declare (one more unit made full). }
+procedure TWordScanner.Declared(AStart, ALen: Integer; ADeclKw: Boolean);
+var
+  LDot, LTracked: Boolean;
+  LKw: TDeclKw;
+begin
+  LTracked := SeenImpl;
+  // `procedure(A: T)`: the keyword's list, not a name after it.
+  ADeclKw := ADeclKw and (Depths.Param = 0);
+  if ADeclKw or (DeclFollows(LDot) and (Depths.Param = 0) and
+     not (LTracked and ((Depths.Body > 0) or (Depths.Pend > 0)))) then
+    DeclWords.Add(Words.Last);
+  if ADeclKw then
+  begin
+    DeclFollows(LDot);
+    if LDot then
+      AfterDeclKw := True
+    else
+      ParamArm := True;
+  end;
+  LKw := KwOf(AStart, ALen);
+  case LKw of
+    dkRoutine, dkProperty:
+      begin
+        AfterDeclKw := True;
+        ParamArm := True;
+        Depths.Param := 0;
+        if (LKw = dkRoutine) and LTracked then
+        begin
+          // At a line's start: module level, a header of its own - or a
+          // nested routine, whose outer header's locals are then recorded.
+          if AtLineStart(AStart) or ((PrevKw = dkClass) and PrevCol1) then
+          begin
+            Depths.Body := 0;
+            Depths.Pend := 0;
+          end;
+          if (Depths.Body = 0) and (Depths.Typ = 0) and
+             not CharInSet(LastPunct, ['=', ':', '(', ',']) and
+             not (PrevKw in [dkOf, dkTo]) then
+            Inc(Depths.Pend);
+        end;
+      end;
+    dkBegin:
+      begin
+        Depths.Param := 0;
+        if LTracked then
+          if Depths.Body > 0 then
+            Inc(Depths.Body)
+          else
+          begin
+            Depths.Body := 1;
+            Depths.Typ := 0;
+            if Depths.Pend > 0 then
+              Dec(Depths.Pend);
+          end;
+      end;
+    dkInit:
+      if LTracked and (Depths.Body = 0) then
+      begin
+        Depths.Body := 1;
+        Depths.Typ := 0;
+        Depths.Pend := 0;
+      end;
+    dkBlock:
+      if LTracked and (Depths.Body > 0) then
+        Inc(Depths.Body);
+    dkEnd:
+      begin
+        Depths.Param := 0;
+        if Depths.Body > 0 then
+          Dec(Depths.Body)
+        else if Depths.Typ > 0 then
+          Dec(Depths.Typ);
+      end;
+    dkNoBody:
+      if (Depths.Body = 0) and (Depths.Pend > 0) then
+        Dec(Depths.Pend);
+    dkImplementation:
+      Depths := Default(TDeclDepths);
+    dkClass, dkTypeKw:
+      // A type's body opens after its heritage, unless what follows says
+      // otherwise (Run): after `=` or `:` (`packed`, `array of`), never an
+      // `of object`.
+      TypeHead := (CharInSet(LastPunct, ['=', ':']) or
+        (PrevKw = dkPacked) or ((PrevKw = dkOf) and
+        not WordIs(Text, AStart, ALen, 'object'))) and
+        ((Depths.Body = 0) or WordIs(Text, AStart, ALen, 'record'));
+  end;
+  PrevKw := LKw;
+  PrevCol1 := AtLineStart(AStart);
+  LastPunct := #0;
+end;
+
+{ A conditional directive (its name upper-cased): DeclWords' tracking takes
+  each branch from the state at the `$IF`, and leaves the `$ENDIF` with
+  the branches combined toward recording - the fewest bodies, headers and
+  parameter lists open, the most type bodies (inside one a routine keyword
+  is a method, not a header). }
+procedure TWordScanner.Conditional(const AName: string);
+
+  function Combine(const A, B: TDeclDepths): TDeclDepths;
+  begin
+    Result.Body := Min(A.Body, B.Body);
+    Result.Pend := Min(A.Pend, B.Pend);
+    Result.Param := Min(A.Param, B.Param);
+    Result.Typ := Max(A.Typ, B.Typ);
+  end;
+
+begin
+  if (AName = 'IF') or (AName = 'IFDEF') or (AName = 'IFNDEF') or
+     (AName = 'IFOPT') then
+  begin
+    if CondCount = Length(Conds) then
+      SetLength(Conds, CondCount * 2 + 4);
+    Conds[CondCount].Start := Depths;
+    Conds[CondCount].HasCombined := False;
+    Inc(CondCount);
+  end
+  else if CondCount = 0 then
+    Exit
+  else if (AName = 'ELSE') or (AName = 'ELSEIF') then
+  begin
+    if Conds[CondCount - 1].HasCombined then
+      Conds[CondCount - 1].Combined := Combine(Conds[CondCount - 1].Combined,
+        Depths)
+    else
+      Conds[CondCount - 1].Combined := Depths;
+    Conds[CondCount - 1].HasCombined := True;
+    Depths := Conds[CondCount - 1].Start;
+  end
+  else if (AName = 'ENDIF') or (AName = 'IFEND') then
+  begin
+    if Conds[CondCount - 1].HasCombined then
+      Depths := Combine(Conds[CondCount - 1].Combined, Depths);
+    Dec(CondCount);
+  end;
+end;
+
 procedure TWordScanner.Run;
 var
   LStart, LLen: Integer;
   LWord: string;
-  LEq: Boolean;
+  LEq, LDeclKw: Boolean;
 begin
   while Pos <= Len do
   begin
     if not SkipTrivia then
     begin
+      LastPunct := Text[Pos];
       Inc(Pos);
       Continue;
     end;
     LEq := EqSeen;
+    LDeclKw := AfterDeclKw;
+    AfterDeclKw := False;
     if not NextWord(LStart, LLen) then
     begin
       if Pos <= Len then
         Inc(Pos);
       Continue;
     end;
+    ParamArm := False;
+    TypeHead := False;
+    if Collect then
+      Declared(LStart, LLen, LDeclKw);
     // The name after a lone `=` may be a type alias's target - `TBase =
     // TCustomEdit;`, `TBase = type Vcl.StdCtrls.TCustomEdit;` - which a
     // heritage `class(TBase)` then reaches: dotted, and past `type`, in
@@ -670,7 +1193,17 @@ begin
       LWord := LowerCase(Copy(Text, LStart, LLen));
       if (LWord = 'class') or (LWord = 'object') or (LWord = 'record') or
          (LWord = 'interface') or (LWord = 'dispinterface') then
+      begin
         ReadHeritage(LStart, LLen);
+        // A type with a body (DeclWords' tracking): not a forward
+        // declaration, a short `class(TBase);`, a `class of`, a generic
+        // constraint.
+        if TypeHead and not NextIs([';', '>', ',', ')'], 'of') then
+          if Depths.Body > 0 then
+            Inc(Depths.Body)
+          else
+            Inc(Depths.Typ);
+      end;
       Continue;
     end;
     // Only the three keywords that steer the scan are compared.
@@ -713,7 +1246,7 @@ end;
 function PasScanWords(const AText: string; AWholeText: Boolean): TPasWordScan;
 var
   LS: TWordScanner;
-  LArr, LDir, LHerit: TArray<Cardinal>;
+  LArr, LDir, LHerit, LDecl: TArray<Cardinal>;
 begin
   LS := Default(TWordScanner);
   LS.Text := AText;
@@ -723,6 +1256,7 @@ begin
   LS.Words := TList<Cardinal>.Create;
   LS.DirWords := TList<Cardinal>.Create;
   LS.HeritWords := TList<Cardinal>.Create;
+  LS.DeclWords := TList<Cardinal>.Create;
   try
     LS.Run;
     // No `implementation` keyword: the whole text is the answer.
@@ -732,26 +1266,64 @@ begin
       LS.Pos := 1;
       LS.SeenImpl := False;
       LS.Collect := True;
+      LS.AfterDeclKw := False;
+      LS.ParamArm := False;
+      LS.Depths := Default(TDeclDepths);
+      LS.CondCount := 0;
+      LS.PrevKw := dkNone;
+      LS.LastPunct := #0;
       LS.Words.Clear;
       LS.DirWords.Clear;
       LS.HeritWords.Clear;
+      LS.DeclWords.Clear;
       LS.Run;
       LS.Scan.FromImplementation := False;
     end;
     LArr := SortedSet(LS.Words.ToArray);
     LDir := SortedSet(LS.DirWords.ToArray);
     LHerit := SortedSet(LS.HeritWords.ToArray);
+    LDecl := SortedSet(LS.DeclWords.ToArray);
   finally
+    LS.DeclWords.Free;
     LS.HeritWords.Free;
     LS.DirWords.Free;
     LS.Words.Free;
   end;
   Result := LS.Scan;
   Result.HeritWords := LHerit;
+  Result.DeclWords := LDecl;
   Result.Words := LArr;
   Result.DirWords := LDir;
   if AWholeText then
     Result.FromImplementation := False;
+end;
+
+function PasScanSpellings(const AText: string): TArray<string>;
+var
+  LS: TWordScanner;
+begin
+  LS := Default(TWordScanner);
+  LS.Text := AText;
+  LS.Pos := 1;
+  LS.Len := Length(AText);
+  LS.Collect := True;
+  LS.Words := TList<Cardinal>.Create;
+  LS.DirWords := TList<Cardinal>.Create;
+  LS.HeritWords := TList<Cardinal>.Create;
+  LS.DeclWords := TList<Cardinal>.Create;
+  LS.Spell := TList<string>.Create;
+  LS.SpellAt := TDictionary<Cardinal, Integer>.Create;
+  try
+    LS.Run;
+    Result := LS.Spell.ToArray;
+  finally
+    LS.SpellAt.Free;
+    LS.Spell.Free;
+    LS.DeclWords.Free;
+    LS.HeritWords.Free;
+    LS.DirWords.Free;
+    LS.Words.Free;
+  end;
 end;
 
 end.

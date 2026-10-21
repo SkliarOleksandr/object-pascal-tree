@@ -7037,6 +7037,251 @@ end;
   in, full), and in one reachable only through such a unit (the unit between
   loaded light first) - with NotSearched 0; the word filter keeps the units
   that only mention the name in a comment or a string out. }
+// Light mode, the find family (0.124.0): FindDeclarations through the
+// workspace answers as the full analysis does - a declaration in a light
+// unit's implementation (that unit made full, no other), one in the
+// interface of a unit only a library implementation uses (loaded light,
+// nothing made full), in its implementation, a member inherited through a
+// type declared in an implementation, a wildcard, a unit by name - and a
+// wildcard spelled everywhere escalates.
+procedure TestLightFind;
+const
+  APP =
+    'program App;'#13#10'uses UOwn;'#13#10'begin'#13#10'  Go;'#13#10 +
+    'end.'#13#10;
+  UOWN =
+    'unit UOwn;'#13#10'interface'#13#10'procedure Go;'#13#10 +
+    'implementation'#13#10'uses LibA, LibC, LibD;'#13#10 +
+    'procedure Go;'#13#10'begin'#13#10'  APub;'#13#10'  DPub;'#13#10 +
+    'end;'#13#10'end.'#13#10;
+  LIBA =
+    'unit LibA;'#13#10'interface'#13#10'type'#13#10 +
+    '  TBase = class'#13#10'    procedure Hello; virtual;'#13#10 +
+    '  end;'#13#10'procedure APub;'#13#10 +
+    'implementation'#13#10'uses LibB;'#13#10'type'#13#10 +
+    '  TImplOnly = class(TBase)'#13#10'    procedure Extra;'#13#10 +
+    '  end;'#13#10 +
+    '  TImplDerived = class(TBase)'#13#10'  end;'#13#10 +
+    'procedure TBase.Hello;'#13#10'begin'#13#10'end;'#13#10 +
+    'procedure TImplOnly.Extra;'#13#10'begin'#13#10'end;'#13#10 +
+    'procedure APub;'#13#10'begin'#13#10'  BPub;'#13#10'end;'#13#10 +
+    'end.'#13#10;
+  LIBB =
+    'unit LibB;'#13#10'interface'#13#10'const'#13#10'  BK = 5;'#13#10 +
+    'procedure BPub;'#13#10 +
+    'implementation'#13#10'type'#13#10 +
+    '  TBHidden = class'#13#10'    procedure Clear;'#13#10'  end;'#13#10 +
+    'procedure TBHidden.Clear;'#13#10'begin'#13#10'end;'#13#10 +
+    'procedure BPub;'#13#10'begin'#13#10'end;'#13#10'end.'#13#10;
+  LIBC =
+    'unit LibC;'#13#10'interface'#13#10'uses LibA;'#13#10'type'#13#10 +
+    '  TDerived = class(TBase)'#13#10'  end;'#13#10 +
+    'implementation'#13#10'end.'#13#10;
+  LIBD =
+    'unit LibD;'#13#10'interface'#13#10'procedure DPub;'#13#10 +
+    'implementation'#13#10'procedure DPub;'#13#10'var'#13#10 +
+    '  LCount: Integer;'#13#10'begin'#13#10'  LCount := 0;'#13#10 +
+    '  Inc(LCount);'#13#10'end;'#13#10'end.'#13#10;
+var
+  LRoot, LOwn, LLib, LAppPath: string;
+  LFull: TPasSemaProject;
+  LFullNav: TPasNavigator;
+  LWS: TPasWorkspace;
+  LPct: Integer;
+
+  function Lib(const AName: string): string;
+  begin
+    Result := TPath.Combine(LLib, AName);
+  end;
+
+  function Run(ALight: Boolean): TPasSemaProject;
+  begin
+    Result := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+    if ALight then
+      Result.LightPaths := [LLib];
+    Result.EscalationPercent := LPct;
+    Result.AnalyzeStaged([LAppPath], []);
+  end;
+
+  function Factory: TPasProjectFactory;
+  begin
+    Result :=
+      function: TPasSemaProject
+      begin
+        Result := TPasSemaProject.Create(pfWin32, [LOwn, LLib], []);
+        Result.LightPaths := [LLib];
+      end;
+  end;
+
+  function Rows(const AHits: TArray<TPasDeclHit>): string;
+  var
+    LRows: TArray<string>;
+  begin
+    LRows := nil;
+    for var LH in AHits do
+      LRows := LRows + [Format('%s|%d|%d|%s|%s|%s', [LowerCase(ExtractFileName(
+        LH.Hit.FilePath)), LH.Hit.Line, LH.Hit.Col, LH.Name, LH.Inherits,
+        BoolToStr(LH.IsUnit, True)])];
+    Result := string.Join(';', LRows);
+  end;
+
+  // A fresh light workspace, AQuery asked through it: equal to the full
+  // answer, and the rows themselves.
+  function Light(const AQuery: string; AUnits: Boolean = True): string;
+  begin
+    FreeAndNil(LWS);
+    LWS := TPasWorkspace.Create(Run(True), Factory());
+    Result := Rows(LWS.FindDeclarations(AQuery, AUnits));
+  end;
+
+  function FullRows(const AQuery: string; AUnits: Boolean = True): string;
+  begin
+    Result := Rows(LFullNav.FindDeclarations(AQuery, AUnits));
+  end;
+
+  function Same(const AQuery: string): Boolean;
+  begin
+    Result := (Light(AQuery) = FullRows(AQuery)) and
+      (LWS.Status.NotSearched = 0);
+  end;
+
+begin
+  LWS := nil;
+  LPct := 90;
+  LRoot := TPath.Combine(TPath.GetTempPath, 'pastree_light_find');
+  if TDirectory.Exists(LRoot) then
+    TDirectory.Delete(LRoot, True);
+  LOwn := TPath.Combine(LRoot, 'own');
+  LLib := TPath.Combine(LRoot, 'lib');
+  TDirectory.CreateDirectory(LOwn);
+  TDirectory.CreateDirectory(LLib);
+  LAppPath := TPath.Combine(LOwn, 'App.dpr');
+  TFile.WriteAllText(LAppPath, APP);
+  TFile.WriteAllText(TPath.Combine(LOwn, 'UOwn.pas'), UOWN);
+  TFile.WriteAllText(Lib('LibA.pas'), LIBA);
+  TFile.WriteAllText(Lib('LibB.pas'), LIBB);
+  TFile.WriteAllText(Lib('LibC.pas'), LIBC);
+  TFile.WriteAllText(Lib('LibD.pas'), LIBD);
+  LFull := Run(False);
+  LFullNav := TPasNavigator.Create(LFull);
+  try
+    Ok('find: full mode lists an implementation-section class',
+      FullRows('TImplOnly') = 'liba.pas|11|3|TImplOnly||False');
+    Ok('find: full mode finds a member inherited through it',
+      FullRows('TImplDerived.Hello') = 'liba.pas|5|15|TBase.Hello|TImplDerived|False');
+    // Exact: the unit spelling it made full, no other; no escalation.
+    Ok('find: exact name in a light implementation - as full',
+      Same('TImplOnly'));
+    Ok('find: ... LibA alone made full, nothing escalated',
+      (LWS.Status.Promoted = 1) and not LWS.Status.Escalated and
+      not LWS.Project.IsLight(LWS.Project.ModelIdOf(Lib('LibA.pas'))) and
+      LWS.Project.IsLight(LWS.Project.ModelIdOf(Lib('LibD.pas'))));
+    // A unit nobody loaded: its interface's constant - loaded light only.
+    FreeAndNil(LWS);
+    LWS := TPasWorkspace.Create(Run(True), Factory());
+    Ok('find: the light closure has not loaded LibB',
+      LWS.Project.ModelIdOf(Lib('LibB.pas')) < 0);
+    var LNlUnits, LNlIncludes: TArray<string>;
+    LWS.Project.NotLoadedFiles(LNlUnits, LNlIncludes);
+    Ok('find: the files a full analysis reads beyond the loaded models',
+      (Length(LNlUnits) = 1) and SameText(ExtractFileName(LNlUnits[0]),
+      'LibB.pas') and (LNlIncludes = nil));
+    LWS.EnsureClosure;
+    Ok('find: the closure taken in - the full analysis''s units, none full',
+      (LWS.Project.ModelCount = LFull.ModelCount) and
+      LWS.Project.IsLight(LWS.Project.ModelIdOf(Lib('LibB.pas'))) and
+      (LWS.Status.Promoted = 0) and (LWS.Status.Loaded = 1));
+    FreeAndNil(LWS);
+    LWS := TPasWorkspace.Create(Run(True), Factory());
+    Ok('find: an interface constant of a unit nobody loaded - as full',
+      Same('BK'));
+    Ok('find: ... taken in light, nothing made full',
+      (LWS.Status.Promoted = 0) and (LWS.Status.Loaded = 1) and
+      LWS.Project.IsLight(LWS.Project.ModelIdOf(Lib('LibB.pas'))));
+    // Its implementation: taken in, then made full.
+    Ok('find: a member declared in its implementation - as full',
+      Same('TBHidden.Clear') and (FullRows('TBHidden.Clear') <> ''));
+    Ok('find: a qualifier that is the unit''s name - as full',
+      Same('LibB.TBHidden') and (FullRows('LibB.TBHidden') <> ''));
+    Ok('find: an inherited member through an implementation type - as full',
+      Same('TImplDerived.Hello'));
+    Ok('find: a wildcard - as full', Same('*Only*') and
+      (FullRows('*Only*') = 'liba.pas|11|3|TImplOnly||False'));
+    Ok('find: a wildcard qualifier - as full', Same('*Hidden.*'));
+    Ok('find: a unit by name, nobody loaded it - as full',
+      Same('LibB') and (Pos('libb.pas|1|6|LibB||True', FullRows('LibB')) > 0));
+    Ok('find: a name nothing declares - nothing made full',
+      (Light('NoSuchName') = '') and (LWS.Status.Promoted = 0) and
+      (LWS.Status.Loaded = 0));
+    // Declared in most units (LibC's implementation declares nothing):
+    // past a bound of half the library, escalated - still as full.
+    LPct := 50;
+    Ok('find: a wildcard declared all over escalates, as full',
+      Same('*') and LWS.Status.Escalated);
+    var LScan := PasScanWords('unit U; interface implementation type'#13#10 +
+      '  TA = class end;'#13#10'  TE = procedure(Sender: TA);'#13#10 +
+      'var'#13#10'  Y{$IFDEF Q}Z{$ENDIF}: Integer;'#13#10 +
+      'procedure TB.Go(Src: Integer; const P: array of Byte);'#13#10 +
+      'begin'#13#10 +
+      '  Min(1, 2); X := 3;'#13#10'end;'#13#10'end.',
+      False);
+    Ok('find: the declared words - a name before = or after procedure',
+      PasWordSetHas(LScan.DeclWords, PasWordHash('ta')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('TB')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('go')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('Y')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('TE')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('Src')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('P')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('Sender')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('Min')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('X')));
+    // What a routine declares locally is not declared for a search; what
+    // the module and its types declare after it is.
+    LScan := PasScanWords('unit U; interface implementation'#13#10 +
+      'procedure Outer(AArg: Integer);'#13#10'var'#13#10 +
+      '  LOuter: Integer;'#13#10 +
+      '  procedure Inner;'#13#10'  var'#13#10'    LInner: Integer;'#13#10 +
+      '  begin'#13#10'    if LInner = 0 then begin LInner := 1; end;'#13#10 +
+      '  end;'#13#10'begin'#13#10'  try case LOuter of 1: ; end; finally end;'#13#10 +
+      '  var LInline: Integer := 0;'#13#10'end;'#13#10 +
+      'procedure Fwd; forward;'#13#10 +
+      'type'#13#10'  TLater = class'#13#10'    procedure M(AParam: Integer);'#13#10 +
+      '    FField: Integer;'#13#10'  end;'#13#10 +
+      '  TRec = record'#13#10'    case Integer of'#13#10'      0: (RA: Integer);'#13#10 +
+      '  end;'#13#10'  TMeta = class of TLater;'#13#10 +
+      'const'#13#10'  CLater = 1;'#13#10 +
+      '{$IFDEF X}procedure A; begin{$ELSE}procedure A; begin{$ENDIF}'#13#10 +
+      '  if True then begin end;'#13#10'end;'#13#10'var'#13#10'  VLast: Integer;'#13#10 +
+      'procedure Fwd;'#13#10'begin'#13#10'end;'#13#10 +
+      'procedure InInc;'#13#10'{$I InIncBody.inc}'#13#10 +
+      'const'#13#10'  CAfterInc = 2;'#13#10'end.', False);
+    Ok('find: locals left out of the declared words, the module''s kept',
+      PasWordSetHas(LScan.DeclWords, PasWordHash('Outer')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('TLater')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('M')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('FField')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('TRec')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('RA')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('TMeta')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('CLater')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('VLast')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('CAfterInc')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('AArg')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('LOuter')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('LInner')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('LInline')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('AParam')));
+    Ok('find: the word scan of the spellings',
+      (Length(PasScanSpellings('A a {B} &C ''d'' Ab')) = 3) and
+      PasWildMatch('*b?', 'abc') and not PasWildMatch('b*', 'abc'));
+  finally
+    LWS.Free;
+    LFullNav.Free;
+    LFull.Free;
+  end;
+end;
+
 procedure TestLightDemand;
 const
   LIBU =
@@ -15835,6 +16080,7 @@ begin
   TestWordScan;
   TestLightDemand;
   TestLightLintReach;
+  TestLightFind;
   TestHelperCarrier;
 
   if GCounter.Finish('SemaProjectSmoke') then

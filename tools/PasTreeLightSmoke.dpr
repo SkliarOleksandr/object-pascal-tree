@@ -39,6 +39,10 @@ program PasTreeLightSmoke;
                          a fresh light project per library symbol, so each
                          question's cost is its own)
     -escalate:<pct>      TPasSemaProject.EscalationPercent (default 40)
+    -find:<query>        a declaration search (FindDeclarations; repeatable);
+                         the default library sample is used when none
+    -findown:<n>         every n-th own symbol's name searched too (25; 0 =
+                         none), on one shared light workspace
     -family:<name>       only this family (repeatable)
     -v                   every difference, not the first few per family
 
@@ -109,6 +113,8 @@ var
   GFull: TPasSemaProject;    // GFullWS.Project: a full one never changes
   GLibs: TArray<string>;     // the navigators' LibraryPaths
   GOwnStride, GOwnUnitStride, GPosStride, GLibPosStride, GEscalate: Integer;
+  GFindArgs: TArray<string>; // -find:<query>; the default sample when none
+  GFindOwnStride: Integer;   // every n-th own symbol's name searched (0: none)
   GNoLib, GShared, GVerbose: Boolean;
   GStats: TDictionary<string, TFamilyStat>;
   GFamilyOrder: TList<string>;
@@ -945,6 +951,60 @@ begin
       end);
 end;
 
+{ ---- declarations by name (the find family, 0.124.0) ----------------------- }
+
+function DeclHitsText(const AHits: TArray<TPasDeclHit>): TArray<string>;
+begin
+  SetLength(Result, Length(AHits));
+  for var LI := 0 to High(AHits) do
+    Result[LI] := HitText(AHits[LI].Hit) + '|' + AHits[LI].Name + '|' +
+      AHits[LI].Inherits + IfThen(AHits[LI].IsUnit, '|unit', '');
+end;
+
+{ One search, each on a fresh light workspace unless -shared (its cost is
+  its own, and an earlier search's promotions do not make it equal). }
+procedure AskFind(const AQuery: string; AFresh: Boolean);
+begin
+  if not Wanted('find') then
+    Exit;
+  if AFresh and not GShared then
+    NewLightWorkspace;
+  GCur := Default(TCostRow);
+  GCur.Text := 'find ' + AQuery;
+  var LSW := TStopwatch.StartNew;
+  Ask('find', AQuery,
+    function(AWs: TPasWorkspace): TArray<string>
+    begin
+      Result := DeclHitsText(AWs.FindDeclarations(AQuery));
+    end);
+  GCosts.Add(GCur);
+  Writeln(ErrOutput, Format('  find %s: %d ms (ensure %d ms, %d promoted, ' +
+    '%d loaded, %d escalation(s))', [AQuery, LSW.ElapsedMilliseconds, GCur.Ms,
+    GCur.Promoted, GCur.Loaded, GCur.Escalations]));
+end;
+
+{ The library sample of names (-find:<query> replaces it), then every n-th
+  own symbol's name (-findown:<n>) on one shared light workspace. }
+procedure AskFinds(const AOwnNames: TArray<string>);
+var
+  LQueries: TArray<string>;
+begin
+  LQueries := GFindArgs;
+  if LQueries = nil then
+    LQueries := ['TAnonymousThread', 'TRegGroups', 'TPropFixup', 'Min',
+      'System.Classes.TList', 'TStringList.Add', 'TStringList.BeginUpdate',
+      'Classes.TThread.Synchronize', 'TComponent.Create', 'System.VarUtils',
+      'Winapi.ShLwApi', 'NoSuchNameAnywhere', '*Fixup*', '*Anonymous*',
+      '*.SaveToStream', '*Form.Close*', '*GetCurrent*', '*Utils', '*Add*',
+      '*Create*'];
+  for var LQ in LQueries do
+    AskFind(LQ, True);
+  if not GShared then
+    NewLightWorkspace;
+  for var LQ in AOwnNames do
+    AskFind(LQ, False);
+end;
+
 { ---- the report ----------------------------------------------------------- }
 
 function Report: Boolean;
@@ -1010,6 +1070,7 @@ var
   LMid, LUnitIdx: Integer;
   LSW: TStopwatch;
   LBefore: Int64;
+  LFindOwn: TArray<string>;
 begin
   GDProj := TPasDProj.Create;
   try
@@ -1069,6 +1130,9 @@ begin
             Inc(LUnitIdx);
             if LUnitIdx mod GOwnStride = 0 then
               LOwnIds.Add(LId);
+            if (GFindOwnStride > 0) and (LUnitIdx mod GFindOwnStride = 0) and
+               not MatchText(LId.Key.Name, LFindOwn) then
+              LFindOwn := LFindOwn + [LId.Key.Name];
           end;
       end;
       Writeln(ErrOutput, Format('own symbols asked: %d', [LOwnIds.Count]));
@@ -1159,6 +1223,11 @@ begin
         LDone.Free;
       end;
     end;
+    // 6. Declarations by name: the library sample, each on a fresh light
+    //    workspace, then the own names.
+    LSW := TStopwatch.StartNew;
+    AskFinds(LFindOwn);
+    Writeln(ErrOutput, Format('find: %d ms', [LSW.ElapsedMilliseconds]));
     if not Report then
       ExitCode := 1;
   finally
@@ -1179,7 +1248,7 @@ begin
       Writeln(ErrOutput, 'Usage: PasTreeLightSmoke <project.dproj> [-p:<platform>] ' +
         '[-studio:<dir>] [-L<dir>] [-Lfile:<file>] [-light:<spec>] [-own:<n>] ' +
         '[-ownunits:<n>] [-pos:<n>] [-sym:<Unit.Name>] [-nolib] [-shared] ' +
-        '[-escalate:<pct>] [-family:<name>] [-v]');
+        '[-escalate:<pct>] [-find:<query>] [-findown:<n>] [-family:<name>] [-v]');
       ExitCode := 2;
       Exit;
     end;
@@ -1189,6 +1258,7 @@ begin
     GPosStride := 40;
     GLibPosStride := 100;
     GEscalate := 40;
+    GFindOwnStride := 25;
     for var LI := 2 to ParamCount do
     begin
       GArg := ParamStr(LI);
@@ -1214,6 +1284,10 @@ begin
         GLibPosStride := StrToIntDef(Copy(GArg, 9, MaxInt), 100)
       else if GArg.StartsWith('-sym:', True) then
         GSymArgs := GSymArgs + [Copy(GArg, 6, MaxInt)]
+      else if GArg.StartsWith('-findown:', True) then
+        GFindOwnStride := StrToIntDef(Copy(GArg, 10, MaxInt), 25)
+      else if GArg.StartsWith('-find:', True) then
+        GFindArgs := GFindArgs + [Copy(GArg, 7, MaxInt)]
       else if SameText(GArg, '-nolib') then
         GNoLib := True
       else if SameText(GArg, '-shared') then

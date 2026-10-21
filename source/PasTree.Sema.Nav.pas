@@ -78,6 +78,22 @@ type
     IndexNode: Integer;
   end;
 
+  { One row of FindDeclarations: a declaration (or a unit) whose name a
+    search matched. }
+  TPasDeclHit = record
+    Hit: TPasRefHit;       // the name where it is declared
+    Name: string;          // its owner chain and name (`TOuter.TInner.M`); a unit's name
+    IsUnit: Boolean;
+    Kind: TSemaSymbolKind; // not IsUnit
+    // The declaration in the navigator's project (a unit: Mid alone, Sym
+    // -1) - valid until its models change.
+    Mid, Sym: Integer;
+    // A member found through a type the query named, which inherits it:
+    // that qualifier as written (`TFoo` for `TFoo.Bar`, Bar declared in an
+    // ancestor). '' for a row the name itself matched.
+    Inherits: string;
+  end;
+
   // One mention of a conditional symbol (FindDefineReferences): the row plus
   // what the directive was and whether the compiler ever reached it.
   TPasDefineHit = record
@@ -1384,6 +1400,50 @@ type
       spelling the name - a compiler-provided name has no unit to start a
       visibility set from. }
     function DemandBuiltin(const AName: string): TPasDemand;
+    { FindDeclarations, and a host's own search over the models' symbols
+      (pastree-mcp's `find`): the units whose declarations a search for
+      AQuery can list (0.124.0). Not a visibility question - every unit's
+      declarations are searched - but a spelling one: a declaration in a
+      light unit's implementation stands there by name, and so do its owner
+      types (a type declared in an implementation section has its members
+      inside it). So a light unit is made full when its implementation
+      DECLARES the name's last segment (the word index's DeclWords: a name
+      before `=`, `:`, `,`, `)`, `<`, a directive, or after a routine or
+      property keyword - a unit that only calls a routine is not asked)
+      and every qualifier its own unit name does not hold (the owner
+      types); a unit nobody loaded passing the same test over its whole
+      text is loaded light, and tested on its implementation in the next
+      round. A wildcard in a segment is matched against the spellings of
+      the indexed texts (the vocabulary, built on the first wildcard): a
+      wide pattern is declared all over the library, and EnsureFull
+      escalates. A member inherited through the qualifier's type
+      (FindDeclarations' Inherits) is not asked here: that lookup runs
+      only when nothing matched, and the qualifier is then a search of its
+      own (TPasWorkspace.FindDeclarations does both). AUnits: the units
+      nobody loaded whose unit name matches AQuery, loaded light. }
+    function DemandFind(const AQuery: string; AUnits: Boolean = True): TPasDemand;
+    { Every unit nobody loaded that the full closure has, loaded light - a
+      host's count of the units indexed, or of the files outside them,
+      that must be the full analysis's (0.124.0). Exact once met: each
+      round takes in what the loaded models' `uses` name, conditionals
+      decided, until nothing is left (the word index's graph alone counts
+      conditional entries too). No body is made full. }
+    function DemandClosure: TPasDemand;
+    { Every declaration whose name matches AQuery - `Bar`, `TFoo.Bar`,
+      `Unit.TFoo.Bar`, a `*` / `?` wildcard in any segment (`*Foo*`,
+      `*.Save`, `*Form.Save`); case-insensitive, generic parameters
+      ignored (`TList<T>` is TList). The declarations a reader looks up by
+      name: module-level ones and the members of types (and enum values),
+      in interfaces and implementation sections alike; never locals or
+      parameters. The qualifiers must be the END of the declaration's unit
+      name and owner chain (`Unit.TOuter.TInner`); when none is, they may
+      be any subsequence of it (`TOuter.M` for TOuter.TInner.M). A
+      qualified name with no wildcard nothing declares is looked up as a
+      member its qualifier's type inherits (TPasDeclHit.Inherits). AUnits:
+      the units whose name matches AQuery too. Rows by file, line, column.
+      Its demand: DemandFind. }
+    function FindDeclarations(const AQuery: string;
+      AUnits: Boolean = True): TArray<TPasDeclHit>;
     { FindDefines and FindDefineReferences: the light units whose text past
       the light stream's stop holds a $DEFINE (or the name, in any
       directive) - each preprocessed whole, as a full analysis would, its
@@ -1464,7 +1524,8 @@ uses
   System.SysUtils,
   System.Classes,
   System.IOUtils,
-  System.Generics.Defaults;
+  System.Generics.Defaults,
+  PasTree.WordIndex;
 
 // One (model, symbol) as one number - the reverse-heritage index's key and
 // every walk's seen set. A Format('%d:%d') string per probe cost more than
@@ -7667,6 +7728,309 @@ begin
   LAsk.Scope := dsAll;
   LAsk.Words := [AName];
   Result := FProj.DemandOf([LAsk]);
+end;
+
+// A search's segments: generic parameters dropped, folded.
+function FindParts(const AQuery: string): TArray<string>;
+var
+  LAt: Integer;
+begin
+  Result := AQuery.Split(['.']);
+  for var LIdx := 0 to High(Result) do
+  begin
+    LAt := Pos('<', Result[LIdx]);
+    if LAt > 0 then
+      Result[LIdx] := Copy(Result[LIdx], 1, LAt - 1);
+    Result[LIdx] := PasFoldName(Trim(Result[LIdx]));
+  end;
+end;
+
+function TPasNavigator.DemandFind(const AQuery: string;
+  AUnits: Boolean): TPasDemand;
+var
+  LParts: TArray<string>;
+  LAsks: TArray<TPasDemandAsk>;
+  LAsk: TPasDemandAsk;
+  LWord: TPasDemandWord;
+begin
+  CheckGeneration;
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LParts := FindParts(AQuery);
+  if (LParts = nil) or (LParts[High(LParts)] = '') then
+    Exit(Default(TPasDemand));
+  // The name, then its qualifiers in order.
+  LAsk := Default(TPasDemandAsk);
+  LAsk.UnitId := -1;
+  LAsk.Scope := dsAll;
+  LWord.Pattern := LParts[High(LParts)];
+  LWord.UnitSegment := False;
+  LAsk.Declares := [LWord];
+  for var LIdx := 0 to High(LParts) - 1 do
+  begin
+    LWord.Pattern := LParts[LIdx];
+    LWord.UnitSegment := True;
+    LAsk.Declares := LAsk.Declares + [LWord];
+  end;
+  LAsks := [LAsk];
+  if AUnits then
+  begin
+    LAsk := Default(TPasDemandAsk);
+    LAsk.UnitId := -1;
+    LAsk.Scope := dsAll;
+    LAsk.UnitPattern := PasFoldName(Trim(AQuery));
+    LAsks := LAsks + [LAsk];
+  end;
+  Result := FProj.DemandOf(LAsks);
+end;
+
+function TPasNavigator.DemandClosure: TPasDemand;
+var
+  LAsk: TPasDemandAsk;
+begin
+  CheckGeneration;
+  if FProj.LightCount = 0 then
+    Exit(Default(TPasDemand));
+  LAsk := Default(TPasDemandAsk);
+  LAsk.UnitId := -1;
+  LAsk.Scope := dsAll;
+  LAsk.UnitPattern := '*';
+  Result := FProj.DemandOf([LAsk]);
+end;
+
+function TPasNavigator.FindDeclarations(const AQuery: string;
+  AUnits: Boolean): TArray<TPasDeclHit>;
+var
+  LParts, LQuals, LChain: TArray<string>;
+  LName, LKey, LUnitName: string;
+  LWild, LAnyWild, LOk, LAny: Boolean;
+  LM: TPasSemaModel;
+  LSeen: TDictionary<string, Boolean>;
+  LList: TList<TPasDeclHit>;
+  LRow: TPasDeclHit;
+  LHit: TPasRefHit;
+  LAt: Integer;
+
+  // The owner chain of a struct-member scope of AM, outer first.
+  function OwnerOf(AM: TPasSemaModel; AScope: Integer): string;
+  var
+    LSt: Integer;
+  begin
+    Result := '';
+    while (AScope <> NIL_SCOPE) and (AScope < AM.Scopes.Count) and
+          (AM.Scopes[AScope].Kind = sckStruct) do
+    begin
+      LSt := AM.Scopes[AScope].StructSym;
+      if LSt = NIL_SYM then
+        Break;
+      if Result = '' then
+        Result := AM.Symbols[LSt].Name
+      else
+        Result := AM.Symbols[LSt].Name + '.' + Result;
+      AScope := AM.Symbols[LSt].Scope;
+    end;
+  end;
+
+  // A symbol's owner chain - an enum value's under its type (a named
+  // enum), or under what holds an anonymous one.
+  function SymOwner(AM: TPasSemaModel; ASym: Integer): string;
+  var
+    LType, LScope: Integer;
+  begin
+    if AM.Symbols[ASym].Kind <> skEnumValue then
+      Exit(OwnerOf(AM, AM.Symbols[ASym].Scope));
+    LType := AM.Symbols[ASym].TypeSym;
+    if (LType <> NIL_SYM) and (LType < AM.SymCount) then
+    begin
+      Result := OwnerOf(AM, AM.Symbols[LType].Scope);
+      if Result <> '' then
+        Result := Result + '.' + AM.Symbols[LType].Name
+      else
+        Result := AM.Symbols[LType].Name;
+      Exit;
+    end;
+    LScope := AM.Symbols[ASym].Scope;
+    if (LScope <> NIL_SCOPE) and (LScope < AM.Scopes.Count) then
+      LScope := AM.Scopes[LScope].Parent;
+    Result := OwnerOf(AM, LScope);
+  end;
+
+  // Module-level, or a member of a type (an enum's value): what a reader
+  // looks up by name.
+  function IsDecl(ASym: Integer): Boolean;
+  var
+    LScope: Integer;
+  begin
+    Result := False;
+    if not (LM.Symbols[ASym].Kind in [skType, skVar, skConst, skField,
+       skRoutine, skProperty, skEnumValue]) or
+       (LM.Symbols[ASym].DeclNode = NIL_NODE) or
+       (sfBuiltin in LM.Symbols[ASym].Flags) then
+      Exit;
+    LScope := LM.Symbols[ASym].Scope;
+    while (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
+          (LM.Scopes[LScope].Kind in [sckStruct, sckGenericParams, sckEnum]) do
+      LScope := LM.Scopes[LScope].Parent;
+    Result := (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
+      (LM.Scopes[LScope].Kind in [sckUnit, sckImplementation]);
+  end;
+
+  function SegMatches(const AQual, ASeg: string): Boolean;
+  var
+    LSeg: string;
+  begin
+    LSeg := ASeg;
+    if Pos('<', LSeg) > 0 then
+      LSeg := Copy(LSeg, 1, Pos('<', LSeg) - 1);
+    Result := PasWildMatch(AQual, PasFoldName(LSeg));
+  end;
+
+  procedure AddRow(AMid, ASym: Integer; const AInherits: string);
+  var
+    LAM: TPasSemaModel;
+  begin
+    if not DeclHit(AMid, ASym, LHit) then
+      Exit;
+    LKey := LowerCase(LHit.FilePath) + ':' + IntToStr(LHit.Line) + ':' +
+      IntToStr(LHit.Col);
+    if not LSeen.TryAdd(LKey, True) then
+      Exit;
+    LAM := FProj.Model(AMid);
+    LRow := Default(TPasDeclHit);
+    LRow.Hit := LHit;
+    LRow.Name := SymOwner(LAM, ASym);
+    if LRow.Name <> '' then
+      LRow.Name := LRow.Name + '.' + LAM.Symbols[ASym].Name
+    else
+      LRow.Name := LAM.Symbols[ASym].Name;
+    LRow.Kind := LAM.Symbols[ASym].Kind;
+    LRow.Mid := AMid;
+    LRow.Sym := ASym;
+    LRow.Inherits := AInherits;
+    LList.Add(LRow);
+  end;
+
+begin
+  CheckGeneration;
+  Result := nil;
+  LParts := FindParts(AQuery);
+  if (LParts = nil) or (LParts[High(LParts)] = '') then
+    Exit;
+  LName := LParts[High(LParts)];
+  LWild := PasIsWildPattern(LName);
+  LQuals := Copy(LParts, 0, High(LParts));
+  LAnyWild := LWild;
+  for var LQ in LQuals do
+    LAnyWild := LAnyWild or PasIsWildPattern(LQ);
+  LSeen := TDictionary<string, Boolean>.Create;
+  LList := TList<TPasDeclHit>.Create;
+  try
+    LAny := False;
+    for var LRelaxed := False to True do
+    begin
+      // Relaxed: the qualifiers as a subsequence of the chain - only when
+      // none is its end.
+      if LRelaxed and (LAny or (LQuals = nil)) then
+        Break;
+      for var LMid := 0 to FProj.ModelCount - 1 do
+      begin
+        LM := FProj.Model(LMid);
+        if LM = nil then
+          Continue;
+        LUnitName := TPath.GetFileNameWithoutExtension(FProj.ModelFile(LMid));
+        for var LSym := 0 to LM.SymCount - 1 do
+        begin
+          if LWild then
+          begin
+            if not PasWildMatch(LName, LM.Symbols[LSym].NameLower) then
+              Continue;
+          end
+          else if LM.Symbols[LSym].NameLower <> LName then
+            Continue;
+          if not IsDecl(LSym) then
+            Continue;
+          if LQuals <> nil then
+          begin
+            LChain := LUnitName.Split(['.']);
+            for var LSeg in SymOwner(LM, LSym).Split(['.']) do
+              if LSeg <> '' then
+                LChain := LChain + [LSeg];
+            if LRelaxed then
+            begin
+              LAt := 0;
+              for var LSeg in LChain do
+                if (LAt <= High(LQuals)) and SegMatches(LQuals[LAt], LSeg) then
+                  Inc(LAt);
+              LOk := LAt > High(LQuals);
+            end
+            else
+            begin
+              LOk := Length(LQuals) <= Length(LChain);
+              if LOk then
+                for var LIdx := 0 to High(LQuals) do
+                  if not SegMatches(LQuals[LIdx],
+                     LChain[Length(LChain) - Length(LQuals) + LIdx]) then
+                  begin
+                    LOk := False;
+                    Break;
+                  end;
+            end;
+            if not LOk then
+              Continue;
+          end;
+          LAny := True;
+          AddRow(LMid, LSym, '');
+        end;
+      end;
+    end;
+    // A member the qualifier's type inherits.
+    if not LAny and (LQuals <> nil) and not LAnyWild then
+    begin
+      var LQual := string.Join('.', Copy(AQuery.Split(['.']), 0,
+        High(AQuery.Split(['.']))));
+      for var LType in FindDeclarations(LQual, False) do
+      begin
+        var LMMid, LMSym, LCtx: Integer;
+        if LType.IsUnit or (LType.Kind <> skType) then
+          Continue;
+        var LX := FProj.CanonTypeX(XPlain(LType.Mid, LType.Sym));
+        if not XValid(LX) then
+          LX := XPlain(LType.Mid, LType.Sym);
+        if FProj.FindMemberX(-1, LX, LName, LMMid, LMSym, LCtx) and
+           (LMMid >= 0) and (LMSym <> NIL_SYM) then
+          AddRow(LMMid, LMSym, LQual);
+      end;
+    end;
+    // Units by name.
+    if AUnits then
+      for var LMid := 0 to FProj.ModelCount - 1 do
+        if PasWildMatch(PasFoldName(Trim(AQuery)), PasFoldName(
+           TPath.GetFileNameWithoutExtension(FProj.ModelFile(LMid)))) and
+           UnitDeclHit(LMid, LHit) then
+        begin
+          LKey := LowerCase(LHit.FilePath) + ':' + IntToStr(LHit.Line) + ':' +
+            IntToStr(LHit.Col);
+          if not LSeen.TryAdd(LKey, True) then
+            Continue;
+          LRow := Default(TPasDeclHit);
+          LRow.Hit := LHit;
+          LRow.Name := TPath.GetFileNameWithoutExtension(FProj.ModelFile(LMid));
+          LRow.IsUnit := True;
+          LRow.Mid := LMid;
+          LRow.Sym := -1;
+          LList.Add(LRow);
+        end;
+    LList.Sort(TComparer<TPasDeclHit>.Construct(
+      function(const L, R: TPasDeclHit): Integer
+      begin
+        Result := PasCompareHitPos(L.Hit.FilePath, L.Hit.Line, L.Hit.Col,
+          R.Hit.FilePath, R.Hit.Line, R.Hit.Col);
+      end));
+    Result := LList.ToArray;
+  finally
+    LList.Free;
+    LSeen.Free;
+  end;
 end;
 
 function PasEnsureDemand(var ANav: TPasNavigator; const ADemand: TPasDemandFunc;

@@ -159,6 +159,13 @@ type
              every unit uses them. }
   TPasDemandScope = (dsSelf, dsUnit, dsMember, dsAll);
 
+  { One condition of a declaration search's unit test
+    (TPasDemandAsk.Declares). }
+  TPasDemandWord = record
+    Pattern: string;       // folded; `*` / `?` wildcards allowed
+    UnitSegment: Boolean;  // a qualifier: may be a segment of the unit's name
+  end;
+
   { One question of a demand: the light units whose bodies may name a
     declaration of UnitId, within Scope, spelling one of Words (any; folded,
     `&` dropped) in their implementation - nil Words: no spelling test, for a
@@ -189,6 +196,22 @@ type
     // declare the member by name, so a descendant's unit that never writes
     // the name has no row to add (0.122.0).
     AlsoWords: TArray<string>;
+    // Not nil: a declaration search (TPasNavigator.DemandFind, 0.124.0) -
+    // in place of Words, the name (the conditions without UnitSegment) and
+    // its qualifiers (those with it, in the query's order). A unit is
+    // matched when it DECLARES a word matching the name (DeclWords; `*` and
+    // `?` matched against the vocabulary's spellings; folded) and every
+    // qualifier but the longest prefix of them its own unit name's
+    // segments hold in order - the unit qualifiers; the rest are owner
+    // types, declared in it too. A light unit matched is made full (what
+    // its implementation declares); a unit nobody loaded is loaded light
+    // (its interface's declarations) - the next round tests its
+    // implementation alone.
+    Declares: TArray<TPasDemandWord>;
+    // Not '': a unit nobody loaded whose unit name (its file name) matches
+    // this pattern is loaded light - a search for units by name; a loaded
+    // unit is never wanted by it.
+    UnitPattern: string;
   end;
 
   { What a query needs analyzed in full before it can answer as a full
@@ -262,9 +285,13 @@ type
     Words: TArray<Cardinal>;
     DirWords: TArray<Cardinal>;   // inside directives (PasTree.WordIndex)
     HeritWords: TArray<Cardinal>; // in type heritages (PasTree.WordIndex)
+    DeclWords: TArray<Cardinal>;  // where a declaration's name stands (0.124.0)
     UsedNames: TArray<string>;
     UsedPaths: TArray<string>;
     UsedResolved: Boolean;
+    // The include files merged into Words, every level (lower-cased full
+    // paths): what the vocabulary scans beside the file (0.124.0).
+    Includes: TArray<string>;
     Size: Int64;
     Whole: Boolean;
     Unreadable: Boolean;
@@ -598,6 +625,12 @@ type
     // source volume EnsureFull made full so far, and its escalation bound.
     // Host thread only, like every other call on a finished project.
     FWordIdx: TDictionary<string, TPasWordEntry>;
+    // The vocabulary behind the word index's hashes - folded spelling ->
+    // hash, over every file FVocabFiles names (its whole text and its
+    // includes'): built on the first wildcard demand (DemandOf's Declares),
+    // extended as the index grows (0.124.0).
+    FVocab: TDictionary<string, Cardinal>;
+    FVocabFiles: TDictionary<string, Boolean>;
     FNotLoadedPath: TDictionary<string, string>;
     // The preprocess-only completion's rows, by lower-cased path.
     FDefineSide: TDictionary<string, TArray<TPasSideDefine>>;
@@ -619,6 +652,15 @@ type
       whole text when AWhole) - in parallel, the include files they name
       after them, sequentially resolved. }
     procedure EnsureWords(const APaths: TArray<string>; AWhole: Boolean);
+    { The vocabulary (FVocab) over every file the word index holds and the
+      include files merged into its entries - those not in it yet, scanned
+      whole in parallel (PasScanSpellings). }
+    procedure EnsureVocabulary;
+    { The hashes of the vocabulary's spellings APattern (folded, wildcards)
+      matches - sorted, distinct; a spelling with a character past ASCII
+      always (the safe side: its folding is the model's, not the
+      pattern's). }
+    function VocabHashes(const APattern: string): TArray<Cardinal>;
     function NotLoadedPathOf(AMid, AUse: Integer): string;
     procedure ResolveWordUses(const AKey, APath: string);
     { The batch promotion of EnsureFull: every unit of AIds (light models)
@@ -2054,6 +2096,14 @@ type
     function NotLoadedImports(AMid: Integer): TArray<string>;
     function NotLoadedUses(const APath: string): TArray<string>;
     procedure ScanNotLoaded(const APaths: TArray<string>);
+    { What a full analysis would read beyond the loaded models (0.124.0):
+      AUnits, every unit nobody loaded that the full closure's graph
+      reaches, as DemandOf walks it; AIncludes, the include files the light
+      units' implementations and those units name (lower-cased). Full
+      paths; both nil when no unit is light. What a host counts as indexed
+      beside the loaded models and their own include files. A superset: the
+      word scan reads every `uses` entry and include, conditional or not. }
+    procedure NotLoadedFiles(out AUnits, AIncludes: TArray<string>);
     { Makes ADemand's units fully analyzed: the not-loaded ones taken in
       (TakeInUnits - full for ADemand.Full, light for LoadOnly), the light
       ones promoted in one batch (parse and Phase 1 in parallel, one commit,
@@ -2491,6 +2541,8 @@ destructor TPasSemaProject.Destroy;
 begin
   ReleaseUsesMemo;
   FWordIdx.Free;
+  FVocab.Free;
+  FVocabFiles.Free;
   FNotLoadedPath.Free;
   FDefineSide.Free;
   FByUnitName.Free;
@@ -23098,6 +23150,8 @@ var
         AEntry.DirWords := PasWordSetUnion(AEntry.DirWords, LScan.DirWords);
         AEntry.HeritWords := PasWordSetUnion(AEntry.HeritWords,
           LScan.HeritWords);
+        AEntry.DeclWords := PasWordSetUnion(AEntry.DeclWords,
+          LScan.DeclWords);
         AEntry.UsedNames := AEntry.UsedNames + LScan.IntfUses + LScan.ImplUses;
         AddIncludes(LI, AEntry, AVisited);
       end;
@@ -23114,7 +23168,13 @@ begin
     for LResolved in APaths do
     begin
       LKey := LowerCase(LResolved);
-      if FWordIdx.TryGetValue(LKey, LEntry) and (LEntry.Whole or not AWhole) then
+      // A unit scanned whole while nobody loaded it and loaded light since
+      // is scanned again, its implementation alone: its interface is the
+      // model's, and the words it spells there made it full for every
+      // demand spelling them (0.124.0).
+      if FWordIdx.TryGetValue(LKey, LEntry) and (LEntry.Whole or not AWhole) and
+         not (LEntry.Whole and not AWhole and FByPath.TryGetValue(LKey, LIdx) and
+              (LIdx >= 0) and IsLight(LIdx)) then
         Continue;
       if LTodoSet.TryAdd(LKey, True) then
         LTodo := LTodo + [LResolved];
@@ -23200,11 +23260,13 @@ begin
         LEntry.Words := LScans[LIdx].Words;
         LEntry.DirWords := LScans[LIdx].DirWords;
         LEntry.HeritWords := LScans[LIdx].HeritWords;
+        LEntry.DeclWords := LScans[LIdx].DeclWords;
         LEntry.UsedNames := LScans[LIdx].IntfUses + LScans[LIdx].ImplUses;
         LEntry.Size := LSizes[LIdx];
         var LVisited := TDictionary<string, Boolean>.Create;
         try
           AddIncludes(LowerCase(LTodo[LIdx]), LEntry, LVisited);
+          LEntry.Includes := LVisited.Keys.ToArray;
         finally
           LVisited.Free;
         end;
@@ -23287,6 +23349,7 @@ var
   LScope: TPasDemandScope;
   LAnyFrontier, LMatch: Boolean;
   LDemandedNL: Integer;
+  LCond: TArray<TArray<Cardinal>>;
 
   function SizeOf_(ANode: Integer): Int64;
   var
@@ -23349,6 +23412,62 @@ var
   function IsCandidate(ANode: Integer): Boolean;
   begin
     Result := (ANode >= LCount) or IsLight(ANode);
+  end;
+
+  // Sorted sets ASet and AHashes share a hash.
+  function Intersects(const ASet, AHashes: TArray<Cardinal>): Boolean;
+  var
+    LA, LB: Integer;
+  begin
+    if Length(AHashes) * 12 < Length(ASet) then
+    begin
+      for var LH in AHashes do
+        if PasWordSetHas(ASet, LH) then
+          Exit(True);
+      Exit(False);
+    end;
+    LA := 0;
+    LB := 0;
+    while (LA <= High(ASet)) and (LB <= High(AHashes)) do
+      if ASet[LA] = AHashes[LB] then
+        Exit(True)
+      else if ASet[LA] < AHashes[LB] then
+        Inc(LA)
+      else
+        Inc(LB);
+    Result := False;
+  end;
+
+  // A declaration search's unit test (TPasDemandAsk.Declares; ACond: each
+  // condition's hashes): the name declared (DeclWords), and of the
+  // qualifiers - the UnitSegment conditions, in order - the longest prefix
+  // the unit name's segments hold as a subsequence, the rest declared (the
+  // owner types). Unreadable: the safe side.
+  function DeclaresMatch(ANode: Integer; const AAsk: TPasDemandAsk;
+    const ACond: TArray<TArray<Cardinal>>): Boolean;
+  var
+    LE: TPasWordEntry;
+    LSegs: TArray<string>;
+    LQ: Integer;
+  begin
+    if not FWordIdx.TryGetValue(LowerCase(LPaths[ANode]), LE) or
+       LE.Unreadable then
+      Exit(True);
+    LSegs := PasFoldName(TPath.GetFileNameWithoutExtension(LPaths[ANode])).
+      Split(['.']);
+    // The qualifiers' prefix in the unit name.
+    LQ := 0;
+    while (LQ <= High(AAsk.Declares)) and not AAsk.Declares[LQ].UnitSegment do
+      Inc(LQ);
+    for var LSeg in LSegs do
+      if (LQ <= High(AAsk.Declares)) and AAsk.Declares[LQ].UnitSegment and
+         PasWildMatch(AAsk.Declares[LQ].Pattern, LSeg) then
+        Inc(LQ);
+    for var LC := 0 to High(AAsk.Declares) do
+      if (not AAsk.Declares[LC].UnitSegment or (LC >= LQ)) and
+         not Intersects(LE.DeclWords, ACond[LC]) then
+        Exit(False);
+    Result := True;
   end;
 
 begin
@@ -23459,9 +23578,24 @@ begin
     FLightTotal := Result.TotalVolume;
     SetLength(LWanted, LN);
     SetLength(LWantedPP, LN);
+    // A wildcard of a declaration search needs the spellings behind the
+    // hashes: every file the index holds now, the units just walked too.
+    for var LAsk in AAsks do
+      for var LDecl in LAsk.Declares do
+        if PasIsWildPattern(LDecl.Pattern) then
+          EnsureVocabulary;
     for var LAsk in AAsks do
     begin
       LScope := LAsk.Scope;
+      // Each Declares condition's hashes: the word's, or the vocabulary's
+      // spellings matching the pattern.
+      LCond := nil;
+      SetLength(LCond, Length(LAsk.Declares));
+      for LIdx := 0 to High(LAsk.Declares) do
+        if PasIsWildPattern(LAsk.Declares[LIdx].Pattern) then
+          LCond[LIdx] := VocabHashes(LAsk.Declares[LIdx].Pattern)
+        else
+          LCond[LIdx] := [PasWordHash(LAsk.Declares[LIdx].Pattern)];
       if LAsk.FilePath <> '' then
       begin
         SetLength(LIn, 0);
@@ -23538,6 +23672,24 @@ begin
       begin
         if not LIn[LNode] or LWanted[LNode] or not IsCandidate(LNode) then
           Continue;
+        // A declaration search: a light unit matched made full, a unit
+        // nobody loaded loaded light (its implementation tested once it is
+        // a light model); a search by unit name loads the units nobody
+        // loaded whose name matches, and wants nothing else.
+        if (LAsk.Declares <> nil) or (LAsk.UnitPattern <> '') then
+        begin
+          if LAsk.UnitPattern <> '' then
+            LMatch := (LNode >= LCount) and PasWildMatch(LAsk.UnitPattern,
+              PasFoldName(TPath.GetFileNameWithoutExtension(LPaths[LNode])))
+          else
+            LMatch := DeclaresMatch(LNode, LAsk, LCond);
+          if LMatch then
+            if LNode < LCount then
+              LWanted[LNode] := True
+            else
+              LWantedPP[LNode] := True;
+          Continue;
+        end;
         // Loaded is enough: a light unit is, and a unit nobody loaded is
         // loaded on the way - the not-loaded side of LWantedPP below, which
         // is TPasDemand.LoadOnly for a unit that is not wanted full.
@@ -23719,6 +23871,140 @@ begin
     Result := LEntry.UsedPaths
   else
     Result := nil;
+end;
+
+procedure TPasSemaProject.NotLoadedFiles(out AUnits,
+  AIncludes: TArray<string>);
+var
+  LSeen, LIncSeen: TDictionary<string, Boolean>;
+  LWave, LNext, LLight: TArray<string>;
+  LEntry: TPasWordEntry;
+
+  procedure Add(const APath: string; var AInto: TArray<string>);
+  var
+    LMid: Integer;
+  begin
+    if FByPath.TryGetValue(LowerCase(APath), LMid) then
+      Exit;
+    if LSeen.TryAdd(LowerCase(APath), True) then
+      AInto := AInto + [APath];
+  end;
+
+  procedure AddIncludes(const APath: string);
+  begin
+    if FWordIdx.TryGetValue(LowerCase(APath), LEntry) then
+      for var LInc in LEntry.Includes do
+        if LIncSeen.TryAdd(LInc, True) then
+          AIncludes := AIncludes + [LInc];
+  end;
+
+begin
+  AUnits := nil;
+  AIncludes := nil;
+  if LightCount = 0 then
+    Exit;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LIncSeen := TDictionary<string, Boolean>.Create;
+  try
+    LWave := nil;
+    LLight := nil;
+    for var LMid := 0 to FModels.Count - 1 do
+    begin
+      if IsLight(LMid) then
+        LLight := LLight + [FFiles[LMid]];
+      for var LPath in NotLoadedImports(LMid) do
+        Add(LPath, LWave);
+    end;
+    EnsureWords(LLight, False);
+    for var LPath in LLight do
+      AddIncludes(LPath);
+    while LWave <> nil do
+    begin
+      AUnits := AUnits + LWave;
+      ScanNotLoaded(LWave);
+      LNext := nil;
+      for var LFrom in LWave do
+      begin
+        AddIncludes(LFrom);
+        for var LPath in NotLoadedUses(LFrom) do
+          Add(LPath, LNext);
+      end;
+      LWave := LNext;
+    end;
+  finally
+    LIncSeen.Free;
+    LSeen.Free;
+  end;
+end;
+
+procedure TPasSemaProject.EnsureVocabulary;
+var
+  LTodo: TArray<string>;
+  LSpell: TArray<TArray<string>>;
+begin
+  if FWordIdx = nil then
+    Exit;
+  if FVocab = nil then
+  begin
+    FVocab := TDictionary<string, Cardinal>.Create;
+    FVocabFiles := TDictionary<string, Boolean>.Create;
+  end;
+  LTodo := nil;
+  for var LPair in FWordIdx do
+  begin
+    if LPair.Value.Unreadable then
+      Continue;
+    if FVocabFiles.TryAdd(LPair.Key, True) then
+      LTodo := LTodo + [LPair.Key];
+    for var LInc in LPair.Value.Includes do
+      if FVocabFiles.TryAdd(LInc, True) then
+        LTodo := LTodo + [LInc];
+  end;
+  if LTodo = nil then
+    Exit;
+  SetLength(LSpell, Length(LTodo));
+  ParallelFor(High(LTodo),
+    procedure(AIdx: Integer)
+    begin
+      try
+        LSpell[AIdx] := PasScanSpellings(FSM.LoadText(LTodo[AIdx]));
+      except
+        LSpell[AIdx] := nil;
+      end;
+    end);
+  for var LIdx := 0 to High(LTodo) do
+    for var LWord in LSpell[LIdx] do
+      if not FVocab.ContainsKey(LWord) then
+        FVocab.Add(LWord, PasWordHash(LWord));
+end;
+
+function TPasSemaProject.VocabHashes(const APattern: string): TArray<Cardinal>;
+var
+  LList: TList<Cardinal>;
+  LWide: Boolean;
+begin
+  Result := nil;
+  if FVocab = nil then
+    Exit;
+  LList := TList<Cardinal>.Create;
+  try
+    for var LPair in FVocab do
+    begin
+      LWide := False;
+      for var LCh in LPair.Key do
+        if LCh > #127 then
+        begin
+          LWide := True;
+          Break;
+        end;
+      if LWide or PasWildMatch(APattern, LPair.Key) then
+        LList.Add(LPair.Value);
+    end;
+    Result := LList.ToArray;
+  finally
+    LList.Free;
+  end;
+  TArray.Sort<Cardinal>(Result);
 end;
 
 function TPasSemaProject.DemandOfFiles(const AFiles: TArray<string>): TPasDemand;

@@ -158,6 +158,8 @@ type
       FStatus filled. }
     procedure Prepare(const ADemand: TPasDemandFunc);
     procedure Finish;
+    { FStatus with an earlier Prepare's of the same query added. }
+    procedure MergeStatus(const APrev: TPasQueryStatus);
     function SymDemand(const AKey: TPasSymbolKey;
       const AOf: TPasSymDemandOf): TPasDemandFunc;
     function FileDemand(const AFile: string): TPasDemandFunc;
@@ -235,6 +237,24 @@ type
       const AOnlyFile: string = ''): TArray<TPasRefHit>;
     function FindDefines: TArray<TPasDefineSite>;
     function FindDefineReferences(const AName: string): TArray<TPasDefineHit>;
+    { ---- declarations by name (0.124.0) ---- }
+    { TPasNavigator.FindDeclarations, its demand (DemandFind) met first:
+      the declarations the full analysis holds. When nothing matches a
+      qualified name, its qualifier's demand too (the inherited-member
+      lookup), level by level. }
+    function FindDeclarations(const AQuery: string;
+      AUnits: Boolean = True): TArray<TPasDeclHit>;
+    { DemandFind met and nothing asked: for a host whose own search walks
+      Project's models by name (a `find` with rules of its own) - after it,
+      every declaration such a search can match (TPasNavigator.DemandFind's
+      contract) is in a fully analyzed model, or in a light one's
+      interface, as in the full analysis. A host looking a qualifier up as
+      a type of its own (an inherited member) calls it for the qualifier. }
+    procedure EnsureFind(const AQuery: string; AUnits: Boolean = True);
+    { DemandClosure met: every unit the full analysis loads is loaded
+      (the library ones light) - Project's models are the full closure's
+      units, for a host counting them. }
+    procedure EnsureClosure;
     { ---- renames ---- }
     function PlanRename(const AKey: TPasSymbolKey; const ANewName: string;
       out AEdits: TArray<TPasRenameEdit>;
@@ -281,7 +301,8 @@ implementation
 
 uses
   System.Math,
-  System.StrUtils;
+  System.StrUtils,
+  PasTree.WordIndex;
 
 const
   // A demand that keeps moving: each round loads units the closure had not
@@ -905,6 +926,86 @@ begin
   if (AOnlyFile = '') or (LOnly >= 0) then
     Result := FNav.FindBuiltinReferences(AName, LOnly);
   Finish;
+end;
+
+function TPasWorkspace.FindDeclarations(const AQuery: string;
+  AUnits: Boolean): TArray<TPasDeclHit>;
+
+  function AnySymbol(const AHits: TArray<TPasDeclHit>): Boolean;
+  begin
+    for var LH in AHits do
+      if not LH.IsUnit then
+        Exit(True);
+    Result := False;
+  end;
+
+  // Nothing matched a qualified name: FindDeclarations looks it up as a
+  // member its qualifier's type inherits - the qualifier is a search of
+  // its own, and so is its qualifier when nothing matches it either.
+  procedure EnsureQualifiers(const AName: string);
+  var
+    LQual: string;
+    LPrev: TPasQueryStatus;
+  begin
+    if (LastDelimiter('.', AName) = 0) or PasIsWildPattern(AName) then
+      Exit;
+    LQual := Copy(AName, 1, LastDelimiter('.', AName) - 1);
+    LPrev := FStatus;
+    EnsureFind(LQual, False);
+    MergeStatus(LPrev);
+    if not AnySymbol(FNav.FindDeclarations(LQual, False)) then
+      EnsureQualifiers(LQual);
+  end;
+
+begin
+  EnsureFind(AQuery, AUnits);
+  Result := FNav.FindDeclarations(AQuery, AUnits);
+  if not AnySymbol(Result) and (LastDelimiter('.', AQuery) > 0) and
+     not PasIsWildPattern(AQuery) then
+  begin
+    EnsureQualifiers(AQuery);
+    Result := FNav.FindDeclarations(AQuery, AUnits);
+  end;
+end;
+
+procedure TPasWorkspace.MergeStatus(const APrev: TPasQueryStatus);
+begin
+  FStatus.NotSearched := Max(FStatus.NotSearched, APrev.NotSearched);
+  FStatus.Cancelled := FStatus.Cancelled or APrev.Cancelled;
+  FStatus.Escalated := FStatus.Escalated or APrev.Escalated;
+  FStatus.Rebuilt := FStatus.Rebuilt or APrev.Rebuilt;
+  FStatus.Changed := FStatus.Changed or APrev.Changed;
+  Inc(FStatus.Rounds, APrev.Rounds);
+  Inc(FStatus.Promoted, APrev.Promoted);
+  Inc(FStatus.Loaded, APrev.Loaded);
+  Inc(FStatus.Preprocessed, APrev.Preprocessed);
+  FStatus.Refused := APrev.Refused + FStatus.Refused;
+  Inc(FStatus.Ms, APrev.Ms);
+  if APrev.Note <> '' then
+    FStatus.Note := APrev.Note + IfThen(FStatus.Note <> '', '; ' +
+      FStatus.Note, '');
+end;
+
+procedure TPasWorkspace.EnsureFind(const AQuery: string; AUnits: Boolean);
+var
+  LQuery: string;
+begin
+  LQuery := AQuery;
+  Prepare(
+    function(ANav: TPasNavigator): TPasDemand
+    begin
+      Result := ANav.DemandFind(LQuery, AUnits);
+    end);
+  // No navigator query sets NotSearched: Prepare's own count is the answer's.
+end;
+
+procedure TPasWorkspace.EnsureClosure;
+begin
+  Prepare(
+    function(ANav: TPasNavigator): TPasDemand
+    begin
+      Result := ANav.DemandClosure;
+    end);
 end;
 
 function TPasWorkspace.FindDefines: TArray<TPasDefineSite>;

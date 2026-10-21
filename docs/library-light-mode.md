@@ -324,6 +324,80 @@ way to one - and the next round's demand reaches past it. With no frontier
 left, a needed unit is not in the full closure either, and counts for
 nothing.
 
+A unit scanned whole while nobody loaded it and loaded light since is
+scanned again, its implementation alone (0.124.0): its interface is the
+model's, and the words written there made it full for every demand that
+spelled them.
+
+### Declarations by name (0.124.0)
+
+A search by name - `TPasNavigator.FindDeclarations`, or a host's own walk
+over the models' symbols such as pastree-mcp's `find` - lists declarations,
+not uses, and asks no visibility question: every unit's declarations are
+searched. In light mode it misses what light implementations declare (a
+class written only in `System.Classes`' implementation) and the units only
+those implementations use. `DemandFind` asks which units can declare a
+match, through two more readings of the word scan:
+
+- **Declared words** (`DeclWords`): the names standing where a declaration
+  names something - before `=`, `:` (not `:=`), `,`, `)` or `<`, before a
+  directive (the safe side), and after `procedure`, `function`,
+  `constructor`, `destructor`, `property` and `operator`, each segment of a
+  dotted name. Not the names a routine declares for itself: past the first
+  `implementation` the scan follows the routine bodies (`begin` / `asm` /
+  `try` / `case` / an inline `record` to their `end`), the local sections
+  between a header and its body (`forward` and `external` end a header with
+  none), the parameter lists after a routine's or a property's name, and the
+  type bodies (inside which a routine keyword is a method). Each branch of a
+  conditional starts from the state at its `$IF`, and the `$ENDIF` keeps the
+  branches combined toward recording - the fewest bodies and headers open,
+  the most type bodies; a routine keyword at a line's start, and a body's
+  `begin`, reset what a branch left open. Every guess errs toward recording
+  a word: a local recorded only makes one more unit full. A unit that only
+  calls `Min` declares no Min.
+- **The vocabulary**: the index holds hashes, so a wildcard (`*Fixup*`,
+  `*.SaveToStream`) is matched against the spellings of the scanned texts,
+  read on the first wildcard demand for every file the index holds and the
+  include files merged into it (`PasScanSpellings`), extended as the index
+  grows; the matching spellings' hashes are the words asked.
+
+A light unit is made full when its implementation declares the name's last
+segment and every qualifier that its own unit name does not hold (the
+qualifiers are the end of a declaration's unit name and owner chain, or any
+subsequence of it: a prefix of them may be the unit name, the rest are owner
+types, which an implementation-section declaration has declared in the same
+unit). A unit nobody loaded passing the same test on its whole text is loaded
+light - its interface's declarations - and tested on its implementation the
+next round; so is one whose unit name matches the query. `FindDeclarations`
+looks a qualified name nothing declares up as a member its qualifier's type
+inherits; the workspace asks that qualifier's own demand only then, level by
+level, and a host with its own search (`TPasWorkspace.EnsureFind`) does the
+same when its lookup reaches the qualifier. A wide wildcard is declared all
+over the library, and `EnsureFull` escalates.
+
+An answer that counts what is indexed ("no declaration matches X among the
+N units indexed") or names the files outside it needs the full closure's
+units, not its declarations: `DemandClosure` (`TPasWorkspace.EnsureClosure`)
+takes in every unit nobody loaded, light, round by round from the loaded
+models' `uses` - conditionals decided, so the count is exact, where
+`TPasSemaProject.NotLoadedFiles` (the same graph from the word index, no
+loading) is a superset: it reads every `uses` entry and include,
+conditional or not. `NotLoadedFiles` also names the include files the light
+implementations read, which no model lists.
+
+Measured with the oracle (each library search on a fresh light workspace,
+its word index built first; the own names on one), every answer equal to
+the full analysis's with `NotSearched` 0. The 3,782-unit closure: 372
+searches (20 library names and wildcards, 352 own names). A name one
+implementation declares (`TAnonymousThread`, `TRegGroups`, `TPropFixup`,
+`System.Classes.TList`) made one unit full; `Min` 15 promoted and 23 taken
+in, `TComponent.Create` 2 and 10, `Winapi.ShLwApi` (a unit nobody loaded) 1
+taken in; `*Fixup*` 18 and 34, `*.SaveToStream` 93 and 137, `*GetCurrent*`
+159 and 215; five escalations - `*Add*`, `*Create*` and the member names
+declared all over the library's implementations `Create`, `Destroy`,
+`Connect`. The demo's closure: 1,666 searches, ten escalations of the same
+kinds.
+
 ### EnsureFull
 
 - **The batch**: the light units are parsed and Phase-1'd in parallel (the
@@ -364,6 +438,8 @@ nothing.
 | unit references | `FindUnitReferences`, `PlanUnitRename` | `DemandUnitReferences`: the unit's listers nobody loaded taken in light (`TPasDemandAsk.LoadOnly`: their `uses` entries), and the listers and the unit itself whose code outside the `uses` clauses spells the name's last segment made full (the qualifiers, `Winapi.Windows.SetWindowPos(...)`) | 0.122.0 |
 | defines | `FindDefines`, `FindDefineReferences` | `DemandDefines` / `DemandDefineReferences`: the light units with a `$DEFINE` (the name) in a directive past their stop - a preprocess-only completion, no promotion; units nobody loaded taken in light first | 0.119.0 |
 | built-in names | `FindBuiltinReferences` | `DemandBuiltin`: every light and not-loaded unit spelling the name | 0.119.0 |
+| declarations by name | `FindDeclarations`; a host's own search over the models' symbols (pastree-mcp's `find`) | `DemandFind`: every light unit whose implementation DECLARES the name's last segment (`DeclWords`) and each qualifier its unit name does not hold, made full; every unit nobody loaded passing the same test on its whole text, or whose unit name matches, loaded light (and tested on its implementation the next round); a wildcard through the vocabulary. A member inherited through the qualifier is asked only when nothing matched: the qualifier is then a search of its own (`TPasWorkspace.FindDeclarations`) | 0.124.0 |
+| the closure's units | a host's count of the units indexed, or of the files outside them | `DemandClosure`: every unit nobody loaded, taken in light | 0.124.0 |
 | renames | `PlanRename` | `DemandRename`: the references of the rename family and a property's chain, and the family's hierarchy (a library symbol is refused anyway) | 0.119.0 |
 | none needed | `UnitDeclHit`, `UnitHeaderTarget` (the unit's own header); `DeclHit`, `ProjectOutline`, completion, hover, `IsProjectDefined`, `IsUnderLibraryPath`, `RenameBlockReason`, `ModelIdOf`, `IncludeSiteTarget` (interfaces and project facts, analyzed in full); `FindFormSites`, `FormRoleOf`, `DescribeForm` (the form files) | - | - |
 
@@ -450,7 +526,9 @@ navigator's own call.
   hierarchy (`FindDescendants`, `FindOverrides`, `FindImplementations`,
   `FindInterfaceImplementors`, `RenameFamily`), names
   (`FindBuiltinReferences`, `FindDefines`, `FindDefineReferences`),
-  a unit's (`FindUnitReferences`, `PlanUnitRename`, by its file; 0.122.0),
+  declarations by name (`FindDeclarations`, and `EnsureFind` for a host's
+  own search; `EnsureClosure` for its count of the units; 0.124.0), a
+  unit's (`FindUnitReferences`, `PlanUnitRename`, by its file; 0.122.0),
   `PlanRename`, `RoutineImplNode`, `SemanticTokens`, the uses lint
   (`FindUnusedUses`, `FindUnreferencedUnits`), and two generic ones:
   `InFile<T>(file, query)` for any question about one file and
