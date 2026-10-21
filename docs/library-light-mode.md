@@ -730,13 +730,18 @@ question cost the light workspace (rounds, units promoted and taken in,
 rebuilds, escalations, time - an escalation's rebuild included). Every
 family must be equal with `NotSearched` 0 (exit 1 otherwise).
 
-## What is still open
+## Status
 
-- Every public query has its demand (0.119.0, the table above); the smoke
-  tool reports no expected difference any more.
-- The demo asks through the workspace (0.121.0, "In the demo"); the
-  language server and the MCP server move onto it in their own
-  repositories ("Host migration" above), with progress, cancel and
-  `NotSearched` shown.
+Complete. Every public query of the navigator, the lint and the workspace
+has its demand (0.119.0, declarations by name 0.124.0); the demo (0.121.0),
+the language server and the MCP server ask through the workspace, with
+progress, cancel and `NotSearched` shown. The light smoke oracle reports
+every family equal to a full analysis, `NotSearched` 0, on the demo and the
+3,782-unit closure.
+
+Known limits, by design:
+
 - `EnsureFull` is not cancellable inside one round: `Options.Cancelled` is
   polled between rounds and inside a rebuild.
+- Library diagnostics: a light unit reports its interface only; a library
+  file asked about alone is made full first.
