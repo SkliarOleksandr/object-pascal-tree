@@ -254,7 +254,13 @@ type
     // Per item: the `override`s listed under its name whose ancestor slot
     // the walk has not met yet (AddItem's overload count).
     FPendingOverrides: TArray<Integer>;
-    FUnitMids: TDictionary<string, Integer>;  // lazy: unit basename -> mid
+    // SplitOverloads: per item, the next item of the same name (-1 ends the
+    // chain), and its parameter list lower-cased, read when first compared.
+    FSplitOverloads: Boolean;
+    FNextSame: TArray<Integer>;
+    FParamsOf: TArray<string>;
+    FParamsKnown: TArray<Boolean>;
+    FUnitMids:TDictionary<string, Integer>;  // lazy: unit basename -> mid
     FContext: TPasComplContext;
     FCaretVis: Integer;            // block-scope positional visibility
     FClassSide: Boolean;           // member completion on a TYPE reference
@@ -376,6 +382,9 @@ type
     // collection
     procedure AddItem(const AName, AKey: string; AKind: TSemaSymbolKind;
       ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
+    procedure AppendItem(const AName: string; AKind: TSemaSymbolKind;
+      ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
+    function RowParams(ARow: Integer): string;
     procedure AddSym(AMid, ASym, ACtx: Integer; ABucket: TPasComplBucket);
     procedure AddKeywords(const AWords: array of string);
     procedure EnsureAncestry(ACaretScope: Integer);
@@ -432,6 +441,15 @@ type
       separates an LSP Constructor kind from a Function, and what a display
       column shows instead of the generic "routine". }
     function ItemHeadWord(const AItem: TPasComplItem): string;
+    { One item per overload instead of one per name: a same-name routine
+      whose parameter list differs from every one listed under the name gets
+      a row of its own, as the RAD Studio Code Completion list shows them;
+      one whose list is the same - an `override` or a redeclaration met on
+      the walk up the ancestors - is the same signature and stays out.
+      Overloads is then always 0. Default False: one row per name, the
+      others counted in Overloads. Set before CompleteAt. }
+    property SplitOverloads: Boolean read FSplitOverloads
+      write FSplitOverloads;
     { The declaration's parameter list as display text - '(const AName:
       string; ACount: Integer)' - whitespace runs collapsed to one space
       (a multi-line list must read as one line; any length cap is the
@@ -2565,7 +2583,8 @@ end;
 procedure TPasCompletion.AddItem(const AName, AKey: string;
   AKind: TSemaSymbolKind; ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
 var
-  LIdx: Integer;
+  LIdx, LRow: Integer;
+  LParams: string;
 begin
   if AName = '' then
     Exit;
@@ -2582,6 +2601,31 @@ begin
     if (AKind = skRoutine) and (FItems[LIdx].Kind = skRoutine) and
        (FItems[LIdx].Bucket <> cbKeyword) then
     begin
+      if FSplitOverloads then
+      begin
+        // A row per signature: the same parameter list as a row already
+        // under this name is that row's override or redeclaration. By the
+        // list, not by the override count above - an override met before
+        // ANOTHER overload of its ancestor would cancel the wrong one.
+        // Read only on a collision, which is a same-name routine.
+        LParams := '';
+        if ASym <> NIL_SYM then
+          LParams := LowerCase(SymSignature(AMid, ASym).ParamsText);
+        LRow := LIdx;
+        while True do
+        begin
+          if RowParams(LRow) = LParams then
+            Exit;
+          if FNextSame[LRow] < 0 then
+            Break;
+          LRow := FNextSame[LRow];
+        end;
+        AppendItem(AName, AKind, ABucket, AMid, ASym, ACtx);
+        FNextSame[LRow] := FCount - 1;
+        FParamsOf[FCount - 1] := LParams;
+        FParamsKnown[FCount - 1] := True;
+        Exit;
+      end;
       if FPendingOverrides[LIdx] > 0 then
         Dec(FPendingOverrides[LIdx])
       else
@@ -2591,6 +2635,13 @@ begin
     end;
     Exit;
   end;
+  AppendItem(AName, AKind, ABucket, AMid, ASym, ACtx);
+  FSeen.Add(AKey, FCount - 1);
+end;
+
+procedure TPasCompletion.AppendItem(const AName: string;
+  AKind: TSemaSymbolKind; ABucket: TPasComplBucket; AMid, ASym, ACtx: Integer);
+begin
   if FCount = Length(FItems) then
   begin
     if FCount = 0 then
@@ -2598,9 +2649,20 @@ begin
     else
       SetLength(FItems, FCount * 2);
     SetLength(FPendingOverrides, Length(FItems));
+    if FSplitOverloads then
+    begin
+      SetLength(FNextSame, Length(FItems));
+      SetLength(FParamsOf, Length(FItems));
+      SetLength(FParamsKnown, Length(FItems));
+    end;
   end;
   FPendingOverrides[FCount] := Ord((AKind = skRoutine) and
     IsOverrideSym(AMid, ASym));
+  if FSplitOverloads then
+  begin
+    FNextSame[FCount] := -1;
+    FParamsKnown[FCount] := False;
+  end;
   FItems[FCount].Name := AName;
   FItems[FCount].Kind := AKind;
   FItems[FCount].Bucket := ABucket;
@@ -2608,8 +2670,21 @@ begin
   FItems[FCount].Sym := ASym;
   FItems[FCount].Ctx := ACtx;
   FItems[FCount].Overloads := 0;
-  FSeen.Add(AKey, FCount);
   Inc(FCount);
+end;
+
+// SplitOverloads: row ARow's parameter list, lower-cased, read once.
+function TPasCompletion.RowParams(ARow: Integer): string;
+begin
+  if not FParamsKnown[ARow] then
+  begin
+    FParamsOf[ARow] := '';
+    if FItems[ARow].Sym <> NIL_SYM then
+      FParamsOf[ARow] := LowerCase(
+        SymSignature(FItems[ARow].Mid, FItems[ARow].Sym).ParamsText);
+    FParamsKnown[ARow] := True;
+  end;
+  Result := FParamsOf[ARow];
 end;
 
 procedure TPasCompletion.AddSym(AMid, ASym, ACtx: Integer;
@@ -5011,6 +5086,9 @@ begin
   end;
   FItems := nil;
   FPendingOverrides := nil;
+  FNextSame := nil;
+  FParamsOf := nil;
+  FParamsKnown := nil;
   FCount := 0;
   // Not Clear: it discards the table's capacity AND virtual-notifies every
   // old entry - recreating is cheaper at list scale. Pre-sized where the list
@@ -5139,6 +5217,9 @@ begin
   AItems := FItems;
   FItems := nil;
   FPendingOverrides := nil;
+  FNextSame := nil;
+  FParamsOf := nil;
+  FParamsKnown := nil;
   FCount := 0;
 end;
 
