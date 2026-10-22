@@ -293,6 +293,19 @@ type
     // result's, a property's type (6.2 ParamType = TypeRef): no subrange
     // bounds, so no constants and no enum values.
     FTypeNameOnly: Boolean;
+    // ccType after a declaration's colon - a variable's, a field's, a typed
+    // constant's type as well as FTypeNameOnly's: types alone, the constants
+    // and enum values a subrange's bounds could name left out (pastree-lsp,
+    // 2026-10-22: the list there is for picking a type; a subrange typed
+    // inline after a colon is written by hand).
+    FColonType: Boolean;
+    // ccType in a heritage list: nkClassType after `class(`, nkInterfaceType
+    // after `interface(`, nkError anywhere else. A class's list takes a class
+    // and interfaces, an interface's interfaces alone.
+    FHeritage: TPasNodeKind;
+    // The nkTypeDecl that heritage list belongs to - the type being declared,
+    // which cannot be its own ancestor; NIL_NODE outside one.
+    FHeritageDecl: Integer;
     // The last-good model's sckImplementation scope (lazy; -2 = not yet
     // looked up, NIL_SCOPE = the model has none) - OwnModelTypeX resolves
     // from it so implementation-section types bridge too.
@@ -317,6 +330,8 @@ type
     function IsOverrideSym(AMid, ASym: Integer): Boolean;
     function MethodHasSelf(AMethodScope: Integer): Boolean;
     function TypeNameOnlyAt(const AInfo: TPasCaretInfo): Boolean;
+    function ColonTypeAt(const AInfo: TPasCaretInfo): Boolean;
+    function HeritageAt(const AInfo: TPasCaretInfo): TPasNodeKind;
     function IsStructMemberStart(const AInfo: TPasCaretInfo): Boolean;
     function StatementSiteKind(const AInfo: TPasCaretInfo): TPasNodeKind;
     function TypeOfOverlaySym(ASym, ADepth: Integer): TPasComplTypeRef;
@@ -414,6 +429,16 @@ type
     constructor Create(AModel: TPasSemaModel;
       AProject: TPasSemaProject = nil; AProjectMid: Integer = -1);
     destructor Destroy; override;
+    { The text a host parses the completion overlay from, for a caret at
+      1-based (line, col) of AText: AText itself, except that a caret between
+      a dot and a `)` gets a space there. `.)` is the legacy `]` (spec B.5.2)
+      and lexes as one token, so `Assigned(Decl.|)` - the closing paren the
+      editor typed with the opening one - had no dot at all and listed the
+      scope instead of Decl's members (pastree-lsp, 2026-10-22). Nobody
+      invokes completion inside a `.)` written as a bracket; positions left of
+      the caret, the caret's own included, are unchanged. }
+    class function CaretSource(const AText: string;
+      ALine, ACol: Integer): string; static;
     { Classifies the caret at 1-based (line, col) of the model's main file.
       False = ckNone (AInfo.Kind still says so); True fills every field. A
       column past the end of its line clamps to the line end - hosts report
@@ -528,6 +553,33 @@ begin
   FUnitMids.Free;
   FSeen.Free;
   inherited;
+end;
+
+class function TPasCompletion.CaretSource(const AText: string;
+  ALine, ACol: Integer): string;
+var
+  LPos, LLine, LEnd: Integer;
+begin
+  Result := AText;
+  if (ALine < 1) or (ACol < 2) then
+    Exit;
+  LPos := 1;
+  for LLine := 2 to ALine do
+  begin
+    LPos := Pos(#10, AText, LPos);
+    if LPos = 0 then
+      Exit;
+    Inc(LPos);
+  end;
+  // LPos: the line's first character; the caret stands before LPos + ACol - 1.
+  // A caret past the line's end (virtual space) has no `)` after it.
+  LEnd := Pos(#10, AText, LPos);
+  if LEnd = 0 then
+    LEnd := Length(AText) + 1;
+  LPos := LPos + ACol - 1;
+  if (LPos < LEnd) and (AText[LPos] = ')') and
+     (AText[LPos - 1] = '.') then
+    Result := Copy(AText, 1, LPos - 1) + ' ' + Copy(AText, LPos, MaxInt);
 end;
 
 // The raw token of Files[0] covering AOffset (Start <= AOffset < EndPos), or
@@ -2717,6 +2769,34 @@ begin
   // `function F: 1..2` are E2029, `(A: K)` E2005 (local/probe-cc P5a-P5e).
   if FTypeNameOnly and (LM.Symbols[ASym].Kind in [skConst, skEnumValue]) then
     Exit;
+  // A declaration's `Name: |` lists types alone (pastree-lsp, 2026-10-22) -
+  // a subrange there is legal but written by hand.
+  if FColonType and (LM.Symbols[ASym].Kind in [skConst, skEnumValue]) then
+    Exit;
+  // A heritage list names a class and interfaces (`class(`) or interfaces
+  // (`interface(`), a type of any other category does not compile there
+  // (pastree-lsp, 2026-10-22). A type whose category is not known - an alias
+  // the typer could not follow - stays listed rather than be wrongly hidden;
+  // a unit name stays as the qualifier of one. A generic parameter cannot be
+  // an ancestor.
+  if FHeritage <> nkError then
+    case LM.Symbols[ASym].Kind of
+      skUnitRef:
+        ;
+      skType, skBuiltinType:
+        if not (LM.Symbols[ASym].TypeCat in [tcUnknown, tcInterface]) and
+           ((FHeritage = nkInterfaceType) or
+            (LM.Symbols[ASym].TypeCat <> tcClass)) then
+          Exit;
+    else
+      Exit;
+    end;
+  // ... and never the type whose list it is.
+  if (FHeritageDecl <> NIL_NODE) and (AMid < 0) and
+     (LM.Symbols[ASym].DeclNode <> NIL_NODE) and
+     ((LM.Symbols[ASym].DeclNode = FHeritageDecl) or
+      IsDescendantNode(LM.Symbols[ASym].DeclNode, FHeritageDecl)) then
+    Exit;
   // `inherited X` names a method or a property of an ancestor; a field, a
   // class var, a nested type or a const there is E2096 Method identifier
   // expected (12.1.2; local/probe-cc P7).
@@ -4144,6 +4224,44 @@ begin
     nkInlineConst]) in [nkParam, nkPropertyDecl, nkRoutine, nkProcType];
 end;
 
+{ A ccType position right after a colon - every declaration's `Name: |`
+  (ClassifyAt has already told those from a case label's and an aggregate
+  field's colon). }
+function TPasCompletion.ColonTypeAt(const AInfo: TPasCaretInfo): Boolean;
+var
+  LPrev: Integer;
+begin
+  if AInfo.Kind = ckIdent then
+    LPrev := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LPrev := AInfo.RawToken;
+  Result := (LPrev >= 0) and
+    (FModel.Tree.Source.Files[0].Tokens[LPrev].Kind = tkColon);
+end;
+
+{ The heritage list a ccType caret stands in: `= class(|`, `class(TA, |`
+  give nkClassType, `= interface(|` nkInterfaceType, anything else nkError.
+  The walk stops at a type-argument or generic-parameter list first - the
+  comma in `class(TDictionary<string, |` separates type arguments, which
+  take any type. }
+function TPasCompletion.HeritageAt(const AInfo: TPasCaretInfo): TPasNodeKind;
+var
+  LPrev: Integer;
+begin
+  Result := nkError;
+  if AInfo.Kind = ckIdent then
+    LPrev := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LPrev := AInfo.RawToken;
+  if (LPrev < 0) or not (FModel.Tree.Source.Files[0].Tokens[LPrev].Kind in
+     [tkLParen, tkComma]) then
+    Exit;
+  Result := UpChainKind(AInfo.Node, [nkClassType, nkInterfaceType,
+    nkGenericParams, nkTypeArgs, nkCall, nkParen, nkSetCtor]);
+  if not (Result in [nkClassType, nkInterfaceType]) then
+    Result := nkError;
+end;
+
 { The construct a statement-class caret (ccStatement) stands in: the
   innermost statement list, routine declaration part or structured type on
   the chain - a caret right after a construct's closing `;` / `end` is past
@@ -4227,7 +4345,9 @@ begin
     ccExpression:
       AddKeywords(EXPR_WORDS);
     ccType:
-      if FTypeNameOnly then
+      // A heritage list names declared types only - no type constructor.
+      if FHeritage <> nkError then
+      else if FTypeNameOnly then
         AddKeywords(PARAM_TYPE_WORDS)
       else
         AddKeywords(TYPE_WORDS);
@@ -5106,6 +5226,15 @@ begin
   FBaseOwnUnit := False;
   FInMethodBody := MethodBodyScope(LInfo.Scope) <> NIL_SCOPE;
   FTypeNameOnly := (FContext = ccType) and TypeNameOnlyAt(LInfo);
+  FColonType := (FContext = ccType) and ColonTypeAt(LInfo);
+  if FContext = ccType then
+    FHeritage := HeritageAt(LInfo)
+  else
+    FHeritage := nkError;
+  if FHeritage <> nkError then
+    FHeritageDecl := UpChainNode(LInfo.Node, nkTypeDecl)
+  else
+    FHeritageDecl := NIL_NODE;
   case FContext of
     ccNone:
       Exit(False);

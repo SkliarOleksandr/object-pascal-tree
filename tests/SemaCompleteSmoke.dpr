@@ -77,6 +77,7 @@ begin
   GComp.Free;
   GComp := nil;
   GModel.Free;
+  LClean := TPasCompletion.CaretSource(LClean, LLine, LCol);
   LPre := GPP.ProcessText('test.pas', LClean);
   GTree := TPasParser.ParseFile(LPre, LDiags);
   GModel := TPasSemaResolver.Analyze(GTree);
@@ -137,6 +138,7 @@ begin
   GComp.Free;
   GComp := nil;
   GModel.Free;
+  LClean := TPasCompletion.CaretSource(LClean, LLine, LCol);
   LPre := GPP.ProcessText('mainu.pas', LClean);
   GTree := TPasParser.ParseFile(LPre, LDiags);
   GModel := TPasSemaResolver.Analyze(GTree);
@@ -758,6 +760,66 @@ begin
     end);
 end;
 
+// A dot inside a wrapping construct - a call's argument list, a condition, an
+// index, a set constructor: the list is the members of what stands before the
+// dot, never the scope's names (pastree-lsp, 2026-10-22: `Assigned(Decl.|)`
+// listed every global).
+procedure DotCase(const ALine: string);
+begin
+  ProjCase(PROJ_HEAD + '  ' + ALine + #10 + PROJ_TAIL);
+  GCounter.Ok(Format('dot in context: %s lists the members only', [ALine]),
+    GHit and (GCtx = ccMember) and Has('Pub') and not Has('ImplVar') and
+    not Has('ExtProc'),
+    procedure
+    begin
+      Write('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':');
+      for var LFi := 0 to Min(High(GItems), 9) do
+        Write(' ', GItems[LFi].Name);
+      Writeln;
+    end);
+end;
+
+// A type slot in a `type` section (ADecl, `const`'s COwn, an enum, a record, a
+// set and an interface declared above it): the list holds every name of the
+// comma-separated AWant and none of ANot.
+procedure TypeSlotCase(const ADecl, AWant, ANot: string);
+var
+  LOk: Boolean;
+begin
+  ProjCase(
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses exta;'#10 +
+    'const'#10 +
+    '  COwn = 1;'#10 +
+    'type'#10 +
+    '  TEnum = (eA, eB);'#10 +
+    '  TSet = set of TEnum;'#10 +
+    '  TRec = record end;'#10 +
+    '  IOwn = interface end;'#10 +
+    ADecl + #10 +
+    'implementation'#10 +
+    'end.'#10);
+  LOk := GHit and (GCtx = ccType);
+  for var LName in AWant.Split([',']) do
+    LOk := LOk and Has(LName);
+  for var LName in ANot.Split([',']) do
+    LOk := LOk and ((LName = '') or not Has(LName));
+  GCounter.Ok(Format('type slot: %s lists %s, not %s', [Trim(ADecl), AWant,
+    ANot]), LOk,
+    procedure
+    begin
+      Write('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':');
+      for var LName in AWant.Split([',']) do
+        if not Has(LName) then
+          Write(' missing ', LName);
+      for var LName in ANot.Split([',']) do
+        if (LName <> '') and Has(LName) then
+          Write(' has ', LName);
+      Writeln;
+    end);
+end;
+
 // One B47 overlay case: the members a dot after ABase lists must hold
 // AWant and not ANot ('' = no check).
 procedure B47Case(const ABase, AWant, ANot: string);
@@ -960,6 +1022,30 @@ begin
   GCounter.Ok('next-line theft: list still holds the members',
     GHit and (GCtx = ccMember) and Has('Pub'));
 
+  DotCase('if Assigned(B.|) then;');
+  DotCase('if Assigned(B.|');
+  DotCase('if Assigned(B.Pu|) then;');
+  DotCase('M.Over(1, B.|);');
+  DotCase('M.Over(B.|, 1);');
+  DotCase('ImplVar := Ord(B.|);');
+  DotCase('ImplVar := B.| + 1;');
+  DotCase('ImplVar := 1 + B.|;');
+  DotCase('if B.| then;');
+  DotCase('if not B.| then;');
+  DotCase('while B.| do;');
+  DotCase('if (B.|) then;');
+  DotCase('if (ImplVar = 1) and (B.|) then;');
+  DotCase('Arr[B.|] := nil;');
+  DotCase('ImplVar := [B.|];');
+  DotCase('with B.| do;');
+  DotCase('case B.| of 1: ; end;');
+  DotCase('for ImplVar := B.| to 1 do;');
+  DotCase('raise B.|;');
+  DotCase('var V := B.|;');
+  DotCase('ImplVar := Ord(Assigned(B.|));');
+  DotCase('M.Over(TBase(B).|);');
+  DotCase('Writeln(B.|);');
+
   // Instance of the OWN class: own members + bridged inherited ones.
   ProjCase(PROJ_HEAD + '  M.|'#10 + PROJ_TAIL);
   GCounter.Ok('M.| lists the own method', Has('Own'));
@@ -1065,6 +1151,24 @@ begin
   GCounter.Ok('type position lists types', Has('TBase') and Has('TMy'));
   GCounter.Ok('type position filters non-types', not Has('ExtProc'));
   GCounter.Ok('type position keyword', Has('array'));
+
+  // A declaration's colon lists types alone, a heritage list the types it
+  // can name (pastree-lsp, 2026-10-22).
+  TypeSlotCase('var V: |;', 'TRec,TBase,IOwn,array', 'COwn,eA,ExtProc');
+  TypeSlotCase('const C2: | = 1;', 'TRec,TBase', 'COwn,eA');
+  TypeSlotCase('  TR2 = record F: |; end;', 'TRec,TBase', 'COwn,eA');
+  TypeSlotCase('  TC2 = class procedure P(A: |); end;', 'TRec', 'COwn,eA');
+  TypeSlotCase('  TC2 = class function F: |; end;', 'TRec', 'COwn,eA');
+  TypeSlotCase('  TC2 = class property P: | read X; end;', 'TRec', 'COwn,eA');
+  TypeSlotCase('  TSub = |;', 'COwn,eA,TRec', '');
+  TypeSlotCase('  TNew = class(|);',
+    'TBase,IOwn,TExtGen',
+    'TRec,TEnum,Integer,string,COwn,eA,ExtProc,array,TSet,TNew');
+  TypeSlotCase('  TNew = class(TBase, |);', 'IOwn',
+    'TRec,TEnum,Integer,COwn');
+  TypeSlotCase('  TNew = class(TB|);', 'TBase', 'TRec');
+  TypeSlotCase('  INew = interface(|);', 'IOwn',
+    'TBase,TObject,TRec,TEnum,Integer,array,INew');
 
   // --- uses clause ----------------------------------------------------------
   ProjCase(

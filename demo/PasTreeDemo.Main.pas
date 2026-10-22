@@ -4444,7 +4444,8 @@ begin
   // caret sits after the dot. No completion beats a dialog loop.
   try
   LTab := TSourceTab(pgc.ActivePage);
-  LPre := FComplPP.ProcessText(LTab.FilePath, LTab.Editor.Text);
+  LPre := FComplPP.ProcessText(LTab.FilePath, TPasCompletion.CaretSource(
+    LTab.Editor.Text, LTab.Editor.CaretY, LTab.Editor.CaretX));
   LTree := TPasParser.ParseFile(LPre, LDiags);
   LModel := TPasSemaResolver.Analyze(LTree, False, FPlatform);
   LEngine := nil;
