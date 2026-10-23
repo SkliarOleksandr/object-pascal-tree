@@ -581,6 +581,61 @@ begin
   Result.Run := ARun;
 end;
 
+{ OwnTokenCell finds its word by length and first letter (audit C1-49): every
+  cell word, in three spellings, is its own cell; a name next to one - longer,
+  shorter, &-escaped, non-ASCII - is an identifier. }
+function BuildCellWordCases(APP: TPasPreprocessor): TPasCustomCases;
+begin
+  Result := [
+    ChainCase('I5', 'OwnTokenCell: every cell word in any case, nothing else',
+      function: TPasCheckResult
+      var
+        LText, LWord, LBad: string;
+        LWords: TArray<string>;
+        LPre: TPasPreprocessed;
+        LIdx, LW, LWant, LGot, LIdentCell, LChecked: Integer;
+      begin
+        LWords := nil;
+        for LWord in DIRECTIVE_WORDS do
+          LWords := LWords + [LWord];
+        LWords := LWords + ['align'];   // CELL_EXTRA_WORDS, after them
+        // Token 0 is a plain name: the identifier cell to expect.
+        LText := 'x ';
+        for LWord in LWords do
+          LText := LText + LWord + ' ' + UpperCase(LWord) + ' ' +
+            UpperCase(Copy(LWord, 1, 1)) + Copy(LWord, 2, MaxInt) + ' ' +
+            LWord + 'x ' + Copy(LWord, 1, Length(LWord) - 1) + 'q &' +
+            LWord + ' ';
+        LText := LText + '_read r'#$00E9'ad readonlyreadonly';
+        LPre := APP.ProcessText('cells.pas', LText);
+        LIdentCell := OwnTokenCell(LPre, 0);
+        LBad := '';
+        LChecked := 0;
+        for LIdx := 0 to High(LPre.Visible) - 1 do
+        begin
+          // A word the lexer makes a keyword is classified by its kind.
+          if LPre.VisibleToken(LIdx).Kind <> tkIdentifier then
+            Continue;
+          Inc(LChecked);
+          LWant := LIdentCell;
+          for LW := 0 to High(LWords) do
+            if SameText(LPre.VisibleText(LIdx), LWords[LW]) then
+            begin
+              LWant := OwnTokenCellCount - Length(LWords) + LW;
+              Break;
+            end;
+          LGot := OwnTokenCell(LPre, LIdx);
+          if LGot <> LWant then
+            LBad := LBad + ' ' + LPre.VisibleText(LIdx) + '=' +
+              OwnTokenCellName(LGot);
+        end;
+        Result.Passed := (LBad = '') and (LChecked > 300);
+        Result.Message := Format('  %d checked, wrong cells:%s',
+          [LChecked, LBad]) + sLineBreak;
+      end)
+  ];
+end;
+
 { The checker over trees no parser bug is known to produce, but which it exists
   to catch (audit B1-32, B1-33): it reports them and returns. }
 function BuildCorruptTreeCases(APP: TPasPreprocessor): TPasCustomCases;
@@ -808,7 +863,7 @@ begin
       BuildCustomCases(GPP, GSM) + BuildRoundtripCases +
       BuildPreprocessorCases(GPP) + BuildOwnTokenCases(GPP) +
       BuildNameFlagCases(GPP) + BuildDepthCases(GPP) + BuildChainCases(GPP) +
-      BuildCorruptTreeCases(GPP),
+      BuildCorruptTreeCases(GPP) + BuildCellWordCases(GPP),
       GPassed,
       GFailed, TreeVerdict);
     if GFailed > 0 then

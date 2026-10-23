@@ -770,24 +770,68 @@ begin
   end;
 end;
 
+const
+  CELL_WORD_MAX_LEN = 15;
+
+var
+  // The cell words (DIRECTIVE_WORDS, then CELL_EXTRA_WORDS) by length and
+  // lower-cased first letter, each bucket in word order: OwnTokenCell runs
+  // for every owned identifier, and a plain name compared against all 60
+  // words through an out-of-line call (audit C1-49). Built once, read-only.
+  GCellWords: array[1..CELL_WORD_MAX_LEN, 'a'..'z'] of TArray<SmallInt>;
+
+procedure BuildCellWords;
+var
+  LIdx: Integer;
+  LWord: string;
+begin
+  for LIdx := 0 to Length(DIRECTIVE_WORDS) + High(CELL_EXTRA_WORDS) do
+  begin
+    if LIdx <= High(DIRECTIVE_WORDS) then
+      LWord := DIRECTIVE_WORDS[LIdx]
+    else
+      LWord := CELL_EXTRA_WORDS[LIdx - Length(DIRECTIVE_WORDS)];
+    // Every word is lower-case ASCII and short; one that is not would never
+    // be found, so it stops the program at once instead.
+    Assert((Length(LWord) >= 1) and (Length(LWord) <= CELL_WORD_MAX_LEN) and
+      CharInSet(LWord[1], ['a'..'z']));
+    GCellWords[Length(LWord), LWord[1]] :=
+      GCellWords[Length(LWord), LWord[1]] + [SmallInt(LIdx)];
+  end;
+end;
+
 function OwnTokenCell(const ASource: TPasPreprocessed;
   AVisIndex: Integer): Integer;
 var
   LKind: TPasTokenKind;
   LText: PChar;
-  LLen, LIdx: Integer;
+  LLen: Integer;
+  LCh: Char;
+  LWord: SmallInt;
+  LMatch: Boolean;
 begin
   LKind := ASource.VisibleToken(AVisIndex).Kind;
   if LKind <> tkIdentifier then
     Exit(Ord(LKind));
   ASource.VisibleSlice(AVisIndex, LText, LLen);
   // An &-escaped identifier keeps its '&' and never matches: it is a name.
-  for LIdx := 0 to High(DIRECTIVE_WORDS) do
-    if SliceEqualsWord(LText, LLen, DIRECTIVE_WORDS[LIdx]) then
-      Exit(CELL_WORD_BASE + LIdx);
-  for LIdx := 0 to High(CELL_EXTRA_WORDS) do
-    if SliceEqualsWord(LText, LLen, CELL_EXTRA_WORDS[LIdx]) then
-      Exit(CELL_WORD_BASE + Length(DIRECTIVE_WORDS) + LIdx);
+  if (LLen < 1) or (LLen > CELL_WORD_MAX_LEN) then
+    Exit(CELL_IDENT);
+  LCh := LText^;
+  if (LCh >= 'A') and (LCh <= 'Z') then
+    Inc(LCh, 32);
+  if (LCh < 'a') or (LCh > 'z') then
+    Exit(CELL_IDENT);
+  for LWord in GCellWords[LLen, LCh] do
+  begin
+    if LWord <= High(DIRECTIVE_WORDS) then
+      LMatch := SliceEqualsWord(LText, LLen, DIRECTIVE_WORDS[LWord])
+    else
+      LMatch := SliceEqualsWord(LText, LLen,
+        CELL_EXTRA_WORDS[LWord - Length(DIRECTIVE_WORDS)]);
+    if LMatch then
+      Exit(CELL_WORD_BASE + LWord);
+  end;
   Result := CELL_IDENT;
 end;
 
@@ -1178,6 +1222,42 @@ var
       Result := ATree.Nodes[ANode].FirstToken;
   end;
 
+  // A violation, its message rendered here, only when one is found: a check
+  // that built it inline paid the hidden string temporaries of every KName,
+  // At and Format at the call site on each call, valid code included - about
+  // 18% of CheckTree (audit C1-48). In ATemplate, {n} is the kind name of the
+  // next argument (a node), {a} its site (a visible token), {d} the integer
+  // itself and {c} its own-token cell name.
+  procedure Report(ACls: TPasCheckClass; ANode, AVisIndex: Integer;
+    const ATemplate: string; const AArgs: array of Integer);
+  var
+    LMsg: string;
+    LIdx, LArg: Integer;
+  begin
+    LMsg := '';
+    LArg := 0;
+    LIdx := 1;
+    while LIdx <= Length(ATemplate) do
+      if (ATemplate[LIdx] = '{') and (LIdx + 2 <= Length(ATemplate)) and
+         (ATemplate[LIdx + 2] = '}') and (LArg <= High(AArgs)) then
+      begin
+        case ATemplate[LIdx + 1] of
+          'n': LMsg := LMsg + KName(AArgs[LArg]);
+          'a': LMsg := LMsg + At(AArgs[LArg]);
+          'd': LMsg := LMsg + IntToStr(AArgs[LArg]);
+          'c': LMsg := LMsg + OwnTokenCellName(AArgs[LArg]);
+        end;
+        Inc(LArg);
+        Inc(LIdx, 3);
+      end
+      else
+      begin
+        LMsg := LMsg + ATemplate[LIdx];
+        Inc(LIdx);
+      end;
+    AReport.Add(ACls, ANode, AVisIndex, LMsg);
+  end;
+
   function LinkOk(ALink: Integer): Boolean;
   begin
     Result := (ALink >= 0) and (ALink < LCount);
@@ -1379,40 +1459,36 @@ var
           if LEmpty[ANode] then
           begin
             if LAnchor <> LLo[ANode] then
-              AReport.Add(ccContain, LKid, LAnchor, Format(
-                'empty %s (child %d) anchored at %s, away from its empty ' +
-                'parent %s at %s', [KName(LKid), LIdx, At(LAnchor),
-                KName(ANode), At(LLo[ANode])]));
+              Report(ccContain, LKid, LAnchor,
+                'empty {n} (child {d}) anchored at {a}, away from its empty ' +
+                'parent {n} at {a}', [LKid, LIdx, LAnchor, ANode, LLo[ANode]]);
           end
           else if (LAnchor < LLo[ANode]) or (LAnchor > LHi[ANode] + 1) then
-            AReport.Add(ccContain, LKid, LAnchor, Format(
-              'empty %s (child %d) anchored at %s, outside its parent %s ' +
-              '%s..%s', [KName(LKid), LIdx, At(LAnchor), KName(ANode),
-              At(LLo[ANode]), At(LHi[ANode])]))
+            Report(ccContain, LKid, LAnchor,
+              'empty {n} (child {d}) anchored at {a}, outside its parent {n} ' +
+              '{a}..{a}', [LKid, LIdx, LAnchor, ANode, LLo[ANode], LHi[ANode]])
           else if (LAnchor <= LPrevEnd) or (LAnchor < LPrevAnchor) then
-            AReport.Add(ccOrder, LKid, LAnchor, Format(
-              'empty %s (child %d of %s) anchored at %s, before the end of ' +
-              'the sibling before it', [KName(LKid), LIdx, KName(ANode),
-              At(LAnchor)]));
+            Report(ccOrder, LKid, LAnchor,
+              'empty {n} (child {d} of {n}) anchored at {a}, before the end ' +
+              'of the sibling before it', [LKid, LIdx, ANode, LAnchor]);
           LPrevAnchor := Max(LPrevAnchor, LAnchor);
         end
         else if not LEmpty[ANode] then
         begin
           if LHi[LKid] > LHi[ANode] then
-            AReport.Add(ccContain, LKid, LLo[LKid], Format(
-              '%s (child %d) %s..%s ends after its parent %s %s..%s',
-              [KName(LKid), LIdx, At(LLo[LKid]), At(LHi[LKid]), KName(ANode),
-              At(LLo[ANode]), At(LHi[ANode])]));
+            Report(ccContain, LKid, LLo[LKid],
+              '{n} (child {d}) {a}..{a} ends after its parent {n} {a}..{a}',
+              [LKid, LIdx, LLo[LKid], LHi[LKid], ANode, LLo[ANode],
+              LHi[ANode]]);
           if LLo[LKid] <= LPrevEnd then
-            AReport.Add(ccOrder, LKid, LLo[LKid], Format(
-              '%s (child %d of %s) starts at %s, inside the sibling before ' +
-              'it (ends %s)', [KName(LKid), LIdx, KName(ANode),
-              At(LLo[LKid]), At(LPrevEnd)]))
+            Report(ccOrder, LKid, LLo[LKid],
+              '{n} (child {d} of {n}) starts at {a}, inside the sibling ' +
+              'before it (ends {a})', [LKid, LIdx, ANode, LLo[LKid], LPrevEnd])
           else if LLo[LKid] < LPrevAnchor then
-            AReport.Add(ccOrder, LKid, LLo[LKid], Format(
-              '%s (child %d of %s) starts at %s, before an empty sibling''s ' +
-              'anchor %s', [KName(LKid), LIdx, KName(ANode), At(LLo[LKid]),
-              At(LPrevAnchor)]));
+            Report(ccOrder, LKid, LLo[LKid],
+              '{n} (child {d} of {n}) starts at {a}, before an empty ' +
+              'sibling''s anchor {a}', [LKid, LIdx, ANode, LLo[LKid],
+              LPrevAnchor]);
           LPrevEnd := Max(LPrevEnd, LHi[LKid]);
           LPrevAnchor := Max(LPrevAnchor, LHi[LKid] + 1);
         end;
@@ -1538,7 +1614,6 @@ var
   const
     MAX_HITS = 16;
     SAYS: array[TPasOwnMult] of string = ('', 'once', 'at most once');
-    HEAD_TEXT: array[Boolean] of string = ('', ' at its head');
   var
     LHitRule, LHitCount: array[0..MAX_HITS - 1] of Integer;
     LHits, LKid, LCursor, LTok, LIdx, LRule, LCount: Integer;
@@ -1555,10 +1630,12 @@ var
       if LRuleOf < 0 then
       begin
         Inc(AReport.OwnUnlisted);
-        AReport.Add(ccOwn, ANode, ATok, Format(
-          '%s owns `%s`%s, which no rule of the own-token table covers',
-          [KName(ANode), OwnTokenCellName(LCell),
-           HEAD_TEXT[ATok = ATree.Nodes[ANode].FirstToken]]));
+        if ATok = ATree.Nodes[ANode].FirstToken then
+          Report(ccOwn, ANode, ATok, '{n} owns `{c}` at its head, which no ' +
+            'rule of the own-token table covers', [ANode, LCell])
+        else
+          Report(ccOwn, ANode, ATok, '{n} owns `{c}`, which no rule of the ' +
+            'own-token table covers', [ANode, LCell]);
         Exit;
       end;
       Inc(AReport.OwnCounts[LRuleOf]);
@@ -1581,6 +1658,15 @@ var
         LHitCount[LHits] := 1;
         Inc(LHits);
       end;
+    end;
+
+    // Cold, as Report: its strings are this frame's, not JudgeOwn's.
+    procedure ReportMult(ARule, ACount: Integer);
+    begin
+      AReport.Add(ccOwn, ANode, Site(ANode), Format(
+        '%s owns %d token(s) of `%s`; the own-token table says %s',
+        [KName(ANode), ACount, GOwnRules[ARule].CellsText,
+         SAYS[GOwnRules[ARule].Mult]]));
     end;
 
   begin
@@ -1613,10 +1699,7 @@ var
           LCount := LHitCount[LIdx];
       if ((GOwnRules[LRule].Mult = omOnce) and (LCount <> 1)) or
          ((GOwnRules[LRule].Mult = omOpt) and (LCount > 1)) then
-        AReport.Add(ccOwn, ANode, Site(ANode), Format(
-          '%s owns %d token(s) of `%s`; the own-token table says %s',
-          [KName(ANode), LCount, GOwnRules[LRule].CellsText,
-           SAYS[GOwnRules[LRule].Mult]]));
+        ReportMult(LRule, LCount);
     end;
   end;
 
@@ -1663,15 +1746,14 @@ var
       LParent := NIL_NODE;
     LAux := ATree.Nodes[ANode].Aux;
     if not AuxInDomain(Kind(ANode), LAux) then
-      AReport.Add(ccAux, ANode, Site(ANode), Format(
-        '%s has Aux %d, outside its kind''s domain', [KName(ANode), LAux]));
+      Report(ccAux, ANode, Site(ANode),
+        '{n} has Aux {d}, outside its kind''s domain', [ANode, LAux]);
     if nfError in ATree.Nodes[ANode].Flags then
-      AReport.Add(ccFlags, ANode, Site(ANode), Format(
-        '%s carries nfError, which the parser never sets', [KName(ANode)]));
+      Report(ccFlags, ANode, Site(ANode),
+        '{n} carries nfError, which the parser never sets', [ANode]);
     if (nfNegated in ATree.Nodes[ANode].Flags) and
        not (Kind(ANode) in [nkBinaryOp, nkVisibility]) then
-      AReport.Add(ccFlags, ANode, Site(ANode), Format(
-        '%s carries nfNegated', [KName(ANode)]));
+      Report(ccFlags, ANode, Site(ANode), '{n} carries nfNegated', [ANode]);
     if LBadTok[ANode] then
       Exit;
     // nfPacked (F3): on a type dcc lets `packed` pack, with the word right
@@ -1679,23 +1761,20 @@ var
     if nfPacked in ATree.Nodes[ANode].Flags then
       if not (Kind(ANode) in [nkRecordType, nkArrayType, nkSetType,
          nkFileType, nkClassType, nkObjectType, nkClassOf]) then
-        AReport.Add(ccFlags, ANode, Site(ANode), Format(
-          '%s carries nfPacked', [KName(ANode)]))
+        Report(ccFlags, ANode, Site(ANode), '{n} carries nfPacked', [ANode])
       else if (LLo[ANode] = 0) or (TokKind(LLo[ANode] - 1) <> tkPacked) then
-        AReport.Add(ccFlags, ANode, Site(ANode), Format(
-          '%s is marked packed, and no `packed` stands before it',
-          [KName(ANode)]))
+        Report(ccFlags, ANode, Site(ANode),
+          '{n} is marked packed, and no `packed` stands before it', [ANode])
       else if (LState[ANode] = ST_TREE) and
               (LOwner[LLo[ANode] - 1] <> ATree.Nodes[ANode].Parent) then
-        AReport.Add(ccFlags, ANode, Site(ANode), Format(
-          'the `packed` before %s is not its parent''s token',
-          [KName(ANode)]));
+        Report(ccFlags, ANode, Site(ANode),
+          'the `packed` before {n} is not its parent''s token', [ANode]);
     // nfAbstract / nfSealed (F4): on a class or an object type, each set
     // exactly when its word stands in the run right after the head word.
     if ([nfAbstract, nfSealed] * ATree.Nodes[ANode].Flags <> []) and
        not (Kind(ANode) in [nkClassType, nkObjectType]) then
-      AReport.Add(ccFlags, ANode, Site(ANode), Format(
-        '%s carries nfAbstract or nfSealed', [KName(ANode)]))
+      Report(ccFlags, ANode, Site(ANode), '{n} carries nfAbstract or nfSealed',
+        [ANode])
     else if Kind(ANode) in [nkClassType, nkObjectType] then
     begin
       LAbstract := False;
@@ -1711,9 +1790,9 @@ var
       end;
       if (LAbstract <> (nfAbstract in ATree.Nodes[ANode].Flags)) or
          (LSealed <> (nfSealed in ATree.Nodes[ANode].Flags)) then
-        AReport.Add(ccFlags, ANode, Site(ANode), Format(
-          '%s: nfAbstract / nfSealed disagree with the words after its head',
-          [KName(ANode)]));
+        Report(ccFlags, ANode, Site(ANode),
+          '{n}: nfAbstract / nfSealed disagree with the words after its head',
+          [ANode]);
     end;
     // nfVar / nfConst / nfOut (F18): a parameter's mode word stands at its
     // left edge, or right after a leading attribute group that starts there
@@ -1721,8 +1800,8 @@ var
     // `out` carries no flag - the word is its first name child.
     LMode := [nfVar, nfConst, nfOut] * ATree.Nodes[ANode].Flags;
     if (LMode <> []) and (Kind(ANode) <> nkParam) then
-      AReport.Add(ccFlags, ANode, Site(ANode), Format(
-        '%s carries a parameter mode', [KName(ANode)]))
+      Report(ccFlags, ANode, Site(ANode), '{n} carries a parameter mode',
+        [ANode])
     else if Kind(ANode) = nkParam then
     begin
       LVis := LLo[ANode];
@@ -1756,8 +1835,7 @@ var
       if (Kind(ANode) <> nkVarSec) or (LParent = NIL_NODE) or
          not (Kind(LParent) in [nkClassType, nkRecordType,
          nkObjectType, nkHelperType]) then
-        AReport.Add(ccFlags, ANode, Site(ANode), Format(
-          '%s carries nfThreadvar', [KName(ANode)]))
+        Report(ccFlags, ANode, Site(ANode), '{n} carries nfThreadvar', [ANode])
       else if (LLo[ANode] = 0) or (TokKind(LLo[ANode] - 1) <> tkThreadvar) then
         AReport.Add(ccFlags, ANode, Site(ANode),
           'a var section is marked threadvar, and no `threadvar` stands ' +
@@ -1782,9 +1860,9 @@ var
     if not LExtParent then
     begin
       if LMode <> [] then
-        AReport.Add(ccFlags, ANode, Site(ANode), Format(
-          '%s carries an external clause flag outside an external directive',
-          [KName(ANode)]));
+        Report(ccFlags, ANode, Site(ANode),
+          '{n} carries an external clause flag outside an external directive',
+          [ANode]);
     end
     else if not LEmpty[ANode] then
     begin
@@ -1829,8 +1907,7 @@ var
           'nfAttrTarget disagrees with a word and `:` before the attribute');
     end
     else if nfAttrTarget in ATree.Nodes[ANode].Flags then
-      AReport.Add(ccFlags, ANode, Site(ANode), Format(
-        '%s carries nfAttrTarget', [KName(ANode)]));
+      Report(ccFlags, ANode, Site(ANode), '{n} carries nfAttrTarget', [ANode]);
     // nfDelayed (an external directive) and nfResident (an exports item):
     // exactly when the word stands in the node's clause outside every
     // value's span.
@@ -1838,8 +1915,8 @@ var
        WordAt(LLo[ANode], ['external'])) or (Kind(ANode) = nkExportsItem)) then
     begin
       if [nfDelayed, nfResident] * ATree.Nodes[ANode].Flags <> [] then
-        AReport.Add(ccFlags, ANode, Site(ANode), Format(
-          '%s carries nfDelayed or nfResident', [KName(ANode)]));
+        Report(ccFlags, ANode, Site(ANode),
+          '{n} carries nfDelayed or nfResident', [ANode]);
     end
     else
     begin
@@ -1893,22 +1970,22 @@ var
         begin
           LOpKind := TokKind(LAux);
           if LAux <> ATree.Nodes[ANode].FirstToken then
-            AReport.Add(ccAux, ANode, Site(ANode), Format(
-              'BinaryOp Aux %d is not its FirstToken %d',
-              [LAux, ATree.Nodes[ANode].FirstToken]))
+            Report(ccAux, ANode, Site(ANode),
+              'BinaryOp Aux {d} is not its FirstToken {d}',
+              [LAux, ATree.Nodes[ANode].FirstToken])
           else if not (LOpKind in BINARY_OP_TOKENS) then
-            AReport.Add(ccAux, ANode, Site(ANode), Format(
-              'BinaryOp Aux names a %s token, no binary operator',
-              [OwnTokenCellName(Ord(LOpKind))]))
+            Report(ccAux, ANode, Site(ANode),
+              'BinaryOp Aux names a {c} token, no binary operator',
+              [Ord(LOpKind)])
           else if LKids <> 2 then
-            AReport.Add(ccAux, ANode, Site(ANode), Format(
-              'BinaryOp has %d children', [LKids]))
+            Report(ccAux, ANode, Site(ANode), 'BinaryOp has {d} children',
+              [LKids])
           else if not (LEmpty[LFirstKid] or LEmpty[LSecondKid]) and
              ((LAux <= LHi[LFirstKid]) or (LAux >= LLo[LSecondKid])) then
-            AReport.Add(ccAux, ANode, Site(ANode), Format(
-              'BinaryOp operator at %s is not between its operands (%s..%s, ' +
-              '%s..%s)', [At(LAux), At(LLo[LFirstKid]), At(LHi[LFirstKid]),
-              At(LLo[LSecondKid]), At(LHi[LSecondKid])]))
+            Report(ccAux, ANode, Site(ANode),
+              'BinaryOp operator at {a} is not between its operands ' +
+              '({a}..{a}, {a}..{a})', [LAux, LLo[LFirstKid], LHi[LFirstKid],
+              LLo[LSecondKid], LHi[LSecondKid]])
           else
           begin
             if nfNegated in ATree.Nodes[ANode].Flags then
@@ -1923,20 +2000,20 @@ var
       nkUnaryOp:
         begin
           if LAux <> ATree.Nodes[ANode].FirstToken then
-            AReport.Add(ccAux, ANode, Site(ANode), Format(
-              'UnaryOp Aux %d is not its FirstToken %d',
-              [LAux, ATree.Nodes[ANode].FirstToken]))
+            Report(ccAux, ANode, Site(ANode),
+              'UnaryOp Aux {d} is not its FirstToken {d}',
+              [LAux, ATree.Nodes[ANode].FirstToken])
           else if not (TokKind(LAux) in UNARY_OP_TOKENS) then
-            AReport.Add(ccAux, ANode, Site(ANode), Format(
-              'UnaryOp Aux names a %s token, no unary operator',
-              [OwnTokenCellName(Ord(TokKind(LAux)))]))
+            Report(ccAux, ANode, Site(ANode),
+              'UnaryOp Aux names a {c} token, no unary operator',
+              [Ord(TokKind(LAux))])
           else if LKids <> 1 then
-            AReport.Add(ccAux, ANode, Site(ANode), Format(
-              'UnaryOp has %d children', [LKids]))
+            Report(ccAux, ANode, Site(ANode), 'UnaryOp has {d} children',
+              [LKids])
           else if not LEmpty[LFirstKid] and (LAux >= LLo[LFirstKid]) then
-            AReport.Add(ccAux, ANode, Site(ANode), Format(
-              'UnaryOp operator at %s is not before its operand at %s',
-              [At(LAux), At(LLo[LFirstKid])]));
+            Report(ccAux, ANode, Site(ANode),
+              'UnaryOp operator at {a} is not before its operand at {a}',
+              [LAux, LLo[LFirstKid]]);
         end;
       nkVisibility:
         if (nfNegated in ATree.Nodes[ANode].Flags) and
@@ -2419,6 +2496,7 @@ begin
 end;
 
 initialization
+  BuildCellWords;
   BuildOwnTable;
 
 end.
