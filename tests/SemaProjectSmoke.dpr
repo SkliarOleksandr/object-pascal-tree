@@ -14034,6 +14034,47 @@ begin
       not TPasSourceManager.IsValidUtf8(TBytes.Create($41, $80), 0));
     Ok('utf8scan: the start offset skips the preamble',
       TPasSourceManager.IsValidUtf8(TBytes.Create($EF, $BB, $BF, $41), 3));
+    // Audit C2-22: the scan takes eight ASCII bytes at a time, and a
+    // validated text is decoded without the strict decoder's second pass.
+    // The verdict and the text must not depend on where a byte falls against
+    // those eight-byte steps.
+    var LLong := TEncoding.ASCII.GetBytes('0123456789abcdefABCDEFGH');
+    for var LAt := 0 to High(LLong) do
+    begin
+      var LBad := Copy(LLong);
+      LBad[LAt] := $80;
+      if TPasSourceManager.IsValidUtf8(LBad, 0) then
+        Ok('utf8scan: a stray continuation byte at ' + IntToStr(LAt) +
+          ' of 24 fails', False);
+      var LSplit := Copy(LLong, 0, LAt) + TBytes.Create($E2, $82, $AC) +
+        Copy(LLong, LAt, MaxInt);
+      var LHow: string;
+      if not TPasSourceManager.IsValidUtf8(LSplit, 0) or
+        (TPasSourceManager.DecodeBytes(LSplit, LHow) <>
+          TEncoding.UTF8.GetString(LSplit)) or (LHow <> '') then
+        Ok('utf8scan: a euro sign at ' + IntToStr(LAt) +
+          ' of 24 passes and decodes as the strict decoder', False);
+      var LCut := Copy(LLong, 0, LAt) + TBytes.Create($E2, $82);
+      if TPasSourceManager.IsValidUtf8(LCut, 0) then
+        Ok('utf8scan: a sequence cut at ' + IntToStr(LAt) + ' fails', False);
+    end;
+    Ok('utf8scan: every position of a 24-byte text against the 8-byte steps',
+      True);
+    var LHow2: string;
+    Ok('decode: a long ASCII text decodes as itself',
+      TPasSourceManager.DecodeBytes(LLong, LHow2) =
+        '0123456789abcdefABCDEFGH');
+    Ok('decode: a BOM and ASCII after it',
+      TPasSourceManager.DecodeBytes(TBytes.Create($EF, $BB, $BF) + LLong,
+        LHow2) = '0123456789abcdefABCDEFGH');
+    Ok('decode: an empty file and a bare BOM are empty',
+      (TPasSourceManager.DecodeBytes(nil, LHow2) = '') and
+      (TPasSourceManager.DecodeBytes(TBytes.Create($EF, $BB, $BF),
+        LHow2) = ''));
+    Ok('decode: a BOM file with a bad byte is still read leniently',
+      (TPasSourceManager.DecodeBytes(TBytes.Create($EF, $BB, $BF) + LLong +
+        TBytes.Create($C0) + LLong, LHow2) = '0123456789abcdefABCDEFGH' +
+        #$FFFD + '0123456789abcdefABCDEFGH') and (LHow2 <> ''));
 
   finally
     if TDirectory.Exists(LDir) then

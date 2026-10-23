@@ -1461,8 +1461,17 @@ end;
   parser produced a single node, the model came out EMPTY - and every unit
   that imported it lost every name it declared. One byte in a comment cost
   ~1700 false "undeclared identifier" reports on the Alcinoe package. }
+var
+  // The non-validating UTF-8 decoder: the lenient fallback for a file with a
+  // UTF-8 BOM, and the decode of bytes IsValidUtf8 has already passed (the
+  // strict TEncoding.UTF8 would validate them a second time, audit C2-22).
+  // Stateless, so shared by every worker; created in initialization.
+  GUtf8NoCheck: TEncoding;
+
 class function TPasSourceManager.IsValidUtf8(const ABytes: TBytes;
   AStart: Integer): Boolean;
+const
+  cHighBits: UInt64 = $8080808080808080;
 var
   LIdx, LEnd, LNeed: Integer;
   LB, LMin2: Byte;
@@ -1471,6 +1480,13 @@ begin
   LEnd := Length(ABytes);
   while LIdx < LEnd do
   begin
+    // Eight ASCII bytes at a time - nearly all of a source file (audit C2-22).
+    if (LEnd - LIdx >= 8) and
+      ((PUInt64(@ABytes[LIdx])^ and cHighBits) = 0) then
+    begin
+      Inc(LIdx, 8);
+      Continue;
+    end;
     LB := ABytes[LIdx];
     if LB < $80 then
     begin
@@ -1507,9 +1523,9 @@ end;
 class function TPasSourceManager.DecodeBytes(const ABytes: TBytes;
   out AHow: string): string;
 var
-  LEnc, LLenient: TEncoding;
+  LEnc: TEncoding;
   LStart: Integer;
-  LDeclared: Boolean;
+  LDeclared, LValid: Boolean;
 begin
   AHow := '';
   LEnc := nil;
@@ -1522,18 +1538,18 @@ begin
   // the debugger on every one of them (a project with hundreds of Windows-1251
   // sources became unusable under the IDE that way, 2026-09-03) and an
   // exception's worth of time on a load path that is the closure's fixed cost.
-  if (LEnc.CodePage = CP_UTF8) and not IsValidUtf8(ABytes, LStart) then
+  if LEnc.CodePage = CP_UTF8 then
   begin
-    if LDeclared then
+    // Validated, it is decoded with no second validation by the strict
+    // decoder; a declared UTF-8 that fails is decoded leniently, with no
+    // error flags: substitute rather than raise.
+    LValid := IsValidUtf8(ABytes, LStart);
+    if LValid or LDeclared then
     begin
-      // Same encoding, no error flags: substitute rather than raise.
-      LLenient := TUTF8Encoding.Create(CP_UTF8, 0, 0);
-      try
-        Result := LLenient.GetString(ABytes, LStart, Length(ABytes) - LStart);
-      finally
-        LLenient.Free;
-      end;
-      AHow := 'UTF-8|leniently, substituting U+FFFD';
+      Result := GUtf8NoCheck.GetString(ABytes, LStart,
+        Length(ABytes) - LStart);
+      if not LValid then
+        AHow := 'UTF-8|leniently, substituting U+FFFD';
     end
     else
       Result := TEncoding.ANSI.GetString(ABytes, LStart,
@@ -1857,5 +1873,11 @@ begin
      (TPath.GetExtension(Result) = '') then
     Result := Result + '.pas';
 end;
+
+initialization
+  GUtf8NoCheck := TUTF8Encoding.Create(CP_UTF8, 0, 0);
+
+finalization
+  FreeAndNil(GUtf8NoCheck);
 
 end.
