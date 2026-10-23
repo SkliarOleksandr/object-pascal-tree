@@ -21,9 +21,15 @@ unit PasTree.Outline;
   TWO entries, paired by nothing more than their names; the semantic pairing
   is TPasNavigator.GotoImplementation's job.
 
+  A routine body's nested routines and the types it declares (with their
+  members) ARE listed, right after the routine's own row, owned by it
+  (`TFoo.Bar` for a routine nested in the method TFoo.Bar) - the same rows
+  TPasSemaModel.NamedDeclRoot gives the project outline (2026-10-23: Go To
+  did not find a nested routine).
+
   What is deliberately NOT listed: enumeration values (a 200-member enum
-  would drown the list they sit in), routine-local declarations and nested
-  routines (they belong to the body, and the body is one entry), parameters.
+  would drown the list they sit in), a body's variables and constants (they
+  belong to the body, and the body is one entry), parameters.
 
   Positions are file/line/col of the declared NAME, in whichever file the
   name sits - a declaration that arrived through an $I include reports that
@@ -924,19 +930,22 @@ begin
     LName, LTypes);
 end;
 
-// A routine header, declared in a struct (AOwner = the struct) or at module
+// A routine header, declared in a struct (AOwner = the struct), at module
 // level - where a dotted name (`TFoo<T>.Bar`, `TOuter.TInner.Baz`) names the
-// owner itself. The body, when there is one, makes this an implementation
-// row; its local declarations are not walked.
+// owner itself - or in another routine's body (AOwner = that routine). The
+// body, when there is one, makes this an implementation row; of its local
+// declarations the nested routines and the types are walked, owned by this
+// routine, its variables and constants are not.
 procedure TOutlineWalker.Routine(ANode: Integer; const AOwner: string);
 var
-  LChild, LFirstName, LParams, LResult: Integer;
+  LChild, LFirstName, LParams, LResult, LBody: Integer;
   LSegments: TArray<string>;
-  LHead, LOwner, LName, LDetail: string;
+  LHead, LOwner, LName, LDetail, LInner: string;
   LIsImpl: Boolean;
   LIdx: Integer;
   LTypes: TArray<TPasTextSpan>;
 begin
+  LBody := NIL_NODE;
   LHead := LowerCase(FTree.NodeText(ANode));
   if FTree.Nodes[ANode].Aux = 1 then
     LHead := 'class ' + LHead;
@@ -971,7 +980,10 @@ begin
       nkDirective, nkAttrGroup:
         ;
       nkRoutineBody:
-        LIsImpl := True;
+        begin
+          LIsImpl := True;
+          LBody := LChild;
+        end;
     else
       // The result type in any other shape (a qualified name, `array of`,
       // a string type...): the one child that is none of the above.
@@ -998,6 +1010,25 @@ begin
       TypedSpanText(LResult, True, Length(LDetail) + 2, LTypes);
   Emit(okRoutine, LHead, LOwner, LName, LDetail, LIsImpl, ANode, LFirstName,
     LTypes);
+  if LBody = NIL_NODE then
+    Exit;
+  // The body's own declarations, owned by this routine as its header spells
+  // it - the chain TPasSemaModel.ScopeOwner gives the project outline.
+  if LOwner <> '' then
+    LInner := LOwner + '.' + LName
+  else
+    LInner := LName;
+  LChild := FirstChild(LBody);
+  while LChild <> NIL_NODE do
+  begin
+    case Kind(LChild) of
+      nkRoutine:
+        Routine(LChild, LInner);
+      nkTypeSec:
+        WalkDecl(LChild, LInner);
+    end;
+    LChild := NextSib(LChild);
+  end;
 end;
 
 procedure TOutlineWalker.PropertyDecl(ANode: Integer; const AOwner: string);

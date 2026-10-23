@@ -992,9 +992,12 @@ type
       rehydrates that one unit when the row is chosen. Head words come from
       the symbol kind (`type`, `var`/`class var`, `field`, `const`,
       `property`/`class property`) and, for a routine, from RoutineHead
-      (`constructor`, `class function`...). Owner is the enclosing struct
-      chain (`TOuter.TInner`), Section osInterface or osImplementation from
-      the scope the declaration sits in.
+      (`constructor`, `class function`...). Owner is
+      TPasSemaModel.ScopeOwner: the enclosing struct chain (`TOuter.TInner`),
+      for a nested routine or a local type the routine holding it as its
+      header spells it (`TFoo.Bar`, a level deeper `TFoo.Bar.Local`).
+      Section is osInterface or osImplementation from the scope the
+      declaration chain ends in.
 
       Each model opens with its header row (okModule, `unit`/`program`/...
       by the root node kind, named after the FILE - the header's own
@@ -1003,9 +1006,12 @@ type
       `(not found)` in Detail for one that did not load; landing =
       IncludeSiteTarget). Both are Sym = -1.
 
-      Not listed: parameters, locals, nested routines, enumeration values,
-      generic parameters, labels, unit references, builtins - the same
-      exclusions as the module outline - and no section or uses rows: those
+      The rows are what TPasSemaModel.NamedDeclRoot accepts: module-level
+      declarations, type members, nested routines and types declared in a
+      routine body with their members. Not listed: parameters, a body's
+      variables and constants, enumeration values, generic parameters,
+      labels, unit references, builtins - the same exclusions as the module
+      outline - and no section or uses rows: those
       are one module's shape, not a project's. A routine is ONE row, its
       declaration (an implementation-only routine's header is that
       declaration); GotoImplementation takes it from there. }
@@ -1433,10 +1439,12 @@ type
       `Unit.TFoo.Bar`, a `*` / `?` wildcard in any segment (`*Foo*`,
       `*.Save`, `*Form.Save`); case-insensitive, generic parameters
       ignored (`TList<T>` is TList). The declarations a reader looks up by
-      name: module-level ones and the members of types (and enum values),
-      in interfaces and implementation sections alike; never locals or
-      parameters. The qualifiers must be the END of the declaration's unit
-      name and owner chain (`Unit.TOuter.TInner`); when none is, they may
+      name (TPasSemaModel.NamedDeclRoot): module-level ones, the members of
+      types (and enum values), nested routines and types declared in a
+      routine body, in interfaces and implementation sections alike; never
+      a body's variables and constants or parameters. The qualifiers must
+      be the END of the declaration's unit name and owner chain
+      (`Unit.TOuter.TInner`, `Unit.TFoo.Bar.Nested`); when none is, they may
       be any subsequence of it (`TOuter.M` for TOuter.TInner.M). A
       qualified name with no wildcard nothing declares is looked up as a
       member its qualifier's type inherits (TPasDeclHit.Inherits). AUnits:
@@ -3715,39 +3723,6 @@ var
   LE: TPasOutlineEntry;
   LUnitName: string;
 
-  // The enclosing struct chain of a member scope, outer first
-  // (`TOuter.TInner`): each sckStruct scope carries its own type symbol
-  // (StructSym, stamped at collect time), whose Scope is the next level up.
-  function OwnerOf(AScope: Integer): string;
-  var
-    LSt: Integer;
-  begin
-    Result := '';
-    while (AScope <> NIL_SCOPE) and (LM.Scopes[AScope].Kind = sckStruct) do
-    begin
-      LSt := LM.Scopes[AScope].StructSym;
-      if LSt = NIL_SYM then
-        Break;
-      if Result = '' then
-        Result := LM.Symbols[LSt].Name
-      else
-        Result := LM.Symbols[LSt].Name + '.' + Result;
-      AScope := LM.Symbols[LSt].Scope;
-    end;
-  end;
-
-  // The module-level scope a member scope chain ends in: sckUnit /
-  // sckImplementation for the rows this list keeps; anything else (a routine's
-  // locals, a nested routine's struct, an enum) is NOT a project-level
-  // declaration and the row is dropped.
-  function RootScopeOf(AScope: Integer): Integer;
-  begin
-    Result := AScope;
-    while (Result <> NIL_SCOPE) and
-          (LM.Scopes[Result].Kind in [sckStruct, sckGenericParams]) do
-      Result := LM.Scopes[Result].Parent;
-  end;
-
   // What the retained descriptors say about a declaration - never its text,
   // which a demoted unit no longer has (see the header): the resolved type's
   // name for a var, field, property, typed constant or function result
@@ -3836,19 +3811,12 @@ begin
       // the last declared symbol (see TPasSemaModel.GrowSyms).
       for LSym := 0 to LM.SymCount - 1 do
       begin
-        if not (LM.Symbols[LSym].Kind in [skType, skVar, skConst, skField,
-                skRoutine, skProperty]) then
-          Continue;
-        if (LM.Symbols[LSym].DeclNode = NIL_NODE) or
-           (sfBuiltin in LM.Symbols[LSym].Flags) then
+        // Module-level declarations, type members, nested routines and local
+        // types - the one rule of every name list (NamedDeclRoot).
+        LRoot := LM.NamedDeclRoot(LSym, False);
+        if LRoot = NIL_SCOPE then
           Continue;
         LScope := LM.Symbols[LSym].Scope;
-        if (LScope < 0) or (LScope >= LM.Scopes.Count) then
-          Continue;
-        LRoot := RootScopeOf(LScope);
-        if (LRoot = NIL_SCOPE) or
-           not (LM.Scopes[LRoot].Kind in [sckUnit, sckImplementation]) then
-          Continue;
         LE := Default(TPasOutlineEntry);
         case LM.Symbols[LSym].Kind of
           skType: begin LE.Kind := okType; LE.Head := 'type'; end;
@@ -3860,7 +3828,7 @@ begin
           LE.Kind := okRoutine;
           LE.Head := HEADS[LM.RoutineHead(LSym)];
         end;
-        LE.Owner := OwnerOf(LScope);
+        LE.Owner := LM.ScopeOwner(LScope);
         LE.Name := LM.Symbols[LSym].Name;
         LE.Detail := DetailOf(LSym);
         // A `: T` detail is a resolved type's text, every identifier in it
@@ -7811,24 +7779,10 @@ var
   LHit: TPasRefHit;
   LAt: Integer;
 
-  // The owner chain of a struct-member scope of AM, outer first.
+  // The owner chain of a declaration made in AScope of AM, outer first.
   function OwnerOf(AM: TPasSemaModel; AScope: Integer): string;
-  var
-    LSt: Integer;
   begin
-    Result := '';
-    while (AScope <> NIL_SCOPE) and (AScope < AM.Scopes.Count) and
-          (AM.Scopes[AScope].Kind = sckStruct) do
-    begin
-      LSt := AM.Scopes[AScope].StructSym;
-      if LSt = NIL_SYM then
-        Break;
-      if Result = '' then
-        Result := AM.Symbols[LSt].Name
-      else
-        Result := AM.Symbols[LSt].Name + '.' + Result;
-      AScope := AM.Symbols[LSt].Scope;
-    end;
+    Result := AM.ScopeOwner(AScope);
   end;
 
   // A symbol's owner chain - an enum value's under its type (a named
@@ -7855,24 +7809,11 @@ var
     Result := OwnerOf(AM, LScope);
   end;
 
-  // Module-level, or a member of a type (an enum's value): what a reader
-  // looks up by name.
+  // Module-level, a member of a type (an enum's value too), a nested routine
+  // or a local type: what a reader looks up by name (NamedDeclRoot).
   function IsDecl(ASym: Integer): Boolean;
-  var
-    LScope: Integer;
   begin
-    Result := False;
-    if not (LM.Symbols[ASym].Kind in [skType, skVar, skConst, skField,
-       skRoutine, skProperty, skEnumValue]) or
-       (LM.Symbols[ASym].DeclNode = NIL_NODE) or
-       (sfBuiltin in LM.Symbols[ASym].Flags) then
-      Exit;
-    LScope := LM.Symbols[ASym].Scope;
-    while (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
-          (LM.Scopes[LScope].Kind in [sckStruct, sckGenericParams, sckEnum]) do
-      LScope := LM.Scopes[LScope].Parent;
-    Result := (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
-      (LM.Scopes[LScope].Kind in [sckUnit, sckImplementation]);
+    Result := LM.NamedDeclRoot(ASym, True) <> NIL_SCOPE;
   end;
 
   function SegMatches(const AQual, ASeg: string): Boolean;

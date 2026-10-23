@@ -482,6 +482,7 @@ type
     procedure GrowSyms;
     function FindByArityDeepK(AScope: Integer; const AKey: TSemaKey;
       AWantGeneric: Boolean; ADepth: Integer = 0): Integer;
+    procedure SnapshotRoutineScopeNames;
   public
     Tree: TPasTree;                 // referenced, not owned
     Symbols: TArray<TSemaSymbol>;
@@ -631,6 +632,11 @@ type
       (audit C1-35). A new model starts without one. }
     HydrateFailStamp: string;
     DemotedHeads: TArray<Byte>;           // per symbol: Ord(TPasRoutineHead)
+    { RoutineScopeName's snapshot: the routine scopes that own a named
+      declaration (NamedDeclRoot), ascending, and their names. Only those -
+      most routine scopes own none. }
+    DemotedRoutineScopes: TArray<Integer>;
+    DemotedRoutineNames: TArray<string>;
     { The parser's own rows as AddParseDiags received them (VisIndex-based),
       kept through DemoteText: a parse-donor hit reuses the tree, not the
       parse, and re-adds them from here - otherwise an unedited unit with a
@@ -850,6 +856,32 @@ type
       a struct's member scope and on a method implementation's routine
       scope. NIL_SYM outside any struct. EnclosingStructSym's scope half. }
     function EnclosingStructSymOfScope(AScope: Integer): Integer;
+    { The scope a declaration that a reader looks up BY NAME ends in - the
+      unit scope or the implementation scope - or NIL_SCOPE when ASym is not
+      one. The one rule of every name list: the Go To outline
+      (TPasNavigator.ProjectOutline), FindDeclarations, and the hosts' symbol
+      searches. One is a module-level declaration, a member of a type (an
+      enum's value only when AEnumValues), and a routine NESTED in a routine
+      body or a type declared there with its members, at any depth. Not one:
+      a routine's local variable or constant, a parameter, `Result`, what an
+      anonymous method or a block declares, a builtin, a symbol with no
+      declaration node. Scopes and node kinds only, so a demoted model
+      answers too. (2026-10-23: Go To found no nested routine - the lists
+      stopped at the first routine scope.) }
+    function NamedDeclRoot(ASym: Integer; AEnumValues: Boolean): Integer;
+    { The owner chain of a declaration made in AScope, outer first:
+      `TOuter.TInner` for a struct member, `TFoo.Bar` for a declaration in
+      the body of the method TFoo.Bar (the header's own name segments,
+      qualifiers included), `TFoo.Bar.Local` one routine deeper, '' at module
+      level. What NamedDeclRoot accepts always has one. }
+    function ScopeOwner(AScope: Integer): string;
+    { The name a NAMED routine's scope (one opened by an nkRoutine - not an
+      anonymous method's, a procedural type's or a property signature's)
+      spells in its header, qualifiers joined: `TFoo.Bar`, `Outer`. Read
+      from the header's name segments, or on a demoted model from the
+      snapshot DemoteText took of every scope ScopeOwner can reach. '' for
+      any other scope. }
+    function RoutineScopeName(AScope: Integer): string;
     { Stage 2 of the release: snapshots RoutineHead for every routine symbol
       and the stream identity counts, then frees the whole text layer
       (Visible + per-file Source/Tokens/LineStarts). See the Demoted field. }
@@ -2436,6 +2468,156 @@ begin
   end;
 end;
 
+// A routine scope a name can be declared in for a reader: one an nkRoutine
+// opened. Anonymous methods, procedural types and property signatures open
+// sckRoutine scopes too, and have no name to own anything by.
+function IsNamedRoutineScope(AModel: TPasSemaModel; AScope: Integer): Boolean;
+var
+  LNode: Integer;
+begin
+  Result := False;
+  if (AScope < 0) or (AScope >= AModel.Scopes.Count) or
+     (AModel.Scopes[AScope].Kind <> sckRoutine) then
+    Exit;
+  LNode := AModel.Scopes[AScope].OwnerNode;
+  Result := (LNode >= 0) and (LNode <= High(AModel.Tree.Nodes)) and
+    (AModel.Tree.Nodes[LNode].Kind = nkRoutine);
+end;
+
+function TPasSemaModel.NamedDeclRoot(ASym: Integer;
+  AEnumValues: Boolean): Integer;
+var
+  LScope: Integer;
+  LMember: Boolean;
+begin
+  Result := NIL_SCOPE;
+  if (ASym < 0) or (ASym >= SymCount) then
+    Exit;
+  if not ((Symbols[ASym].Kind in [skType, skVar, skConst, skField, skRoutine,
+            skProperty]) or
+          (AEnumValues and (Symbols[ASym].Kind = skEnumValue))) or
+     (Symbols[ASym].DeclNode = NIL_NODE) or
+     (sfBuiltin in Symbols[ASym].Flags) then
+    Exit;
+  // LMember: a type's scope lies between the symbol and the routine scope,
+  // so the symbol is a member of a type declared in the body, not a local.
+  LMember := False;
+  LScope := Symbols[ASym].Scope;
+  while (LScope >= 0) and (LScope < Scopes.Count) do
+  begin
+    case Scopes[LScope].Kind of
+      sckUnit, sckImplementation:
+        Exit(LScope);
+      sckStruct, sckEnum:
+        LMember := True;
+      sckGenericParams:
+        ;
+      sckRoutine:
+        begin
+          if not IsNamedRoutineScope(Self, LScope) then
+            Exit;
+          // Of a body's own declarations only a nested routine and a local
+          // type are names a reader goes to; its variables and constants
+          // are the body's.
+          if not LMember and not (Symbols[ASym].Kind in [skRoutine, skType]) then
+            Exit;
+          // Further out, every routine scope is an enclosing routine.
+          LMember := True;
+        end;
+    else
+      Exit;   // a block's, a with's, System's
+    end;
+    LScope := Scopes[LScope].Parent;
+  end;
+end;
+
+function TPasSemaModel.RoutineScopeName(AScope: Integer): string;
+var
+  LLo, LHi, LMid, LChild: Integer;
+begin
+  Result := '';
+  if not IsNamedRoutineScope(Self, AScope) then
+    Exit;
+  if Demoted then
+  begin
+    LLo := 0;
+    LHi := High(DemotedRoutineScopes);
+    while LLo <= LHi do
+    begin
+      LMid := (LLo + LHi) div 2;
+      if DemotedRoutineScopes[LMid] = AScope then
+        Exit(DemotedRoutineNames[LMid]);
+      if DemotedRoutineScopes[LMid] < AScope then
+        LLo := LMid + 1
+      else
+        LHi := LMid - 1;
+    end;
+    Exit;
+  end;
+  // The header's name segments (nfName), as CollectRoutine walks them: an
+  // identifier each, a segment's generic parameters after it.
+  LChild := Tree.Nodes[Scopes[AScope].OwnerNode].FirstChild;
+  while (LChild <> NIL_NODE) and (Tree.Nodes[LChild].Kind = nkAttrGroup) do
+    LChild := Tree.Nodes[LChild].NextSibling;
+  while LChild <> NIL_NODE do
+  begin
+    if Tree.Nodes[LChild].Kind <> nkGenericParams then
+    begin
+      if not (nfName in Tree.Nodes[LChild].Flags) or
+         (Tree.Nodes[LChild].Kind <> nkIdent) then
+        Break;
+      if Result = '' then
+        Result := Tree.NodeText(LChild)
+      else
+        Result := Result + '.' + Tree.NodeText(LChild);
+    end;
+    LChild := Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function TPasSemaModel.ScopeOwner(AScope: Integer): string;
+var
+  LSt: Integer;
+  LPart: string;
+begin
+  Result := '';
+  while (AScope >= 0) and (AScope < Scopes.Count) do
+  begin
+    case Scopes[AScope].Kind of
+      sckStruct:
+        begin
+          // Each struct scope carries its own type symbol, whose Scope is
+          // the next level up.
+          LSt := Scopes[AScope].StructSym;
+          if LSt = NIL_SYM then
+            Break;
+          LPart := Symbols[LSt].Name;
+          AScope := Symbols[LSt].Scope;
+        end;
+      sckGenericParams:
+        begin
+          AScope := Scopes[AScope].Parent;
+          Continue;
+        end;
+      sckRoutine:
+        begin
+          // A method's header spells its class: nothing further out to add
+          // for it, and an enclosing routine's scope is the parent.
+          LPart := RoutineScopeName(AScope);
+          if LPart = '' then
+            Break;
+          AScope := Scopes[AScope].Parent;
+        end;
+    else
+      Break;
+    end;
+    if Result = '' then
+      Result := LPart
+    else
+      Result := LPart + '.' + Result;
+  end;
+end;
+
 function TPasSemaModel.IsClassCtorDtor(ASym: Integer): Boolean;
 var
   LName, LRoutine: Integer;
@@ -2627,6 +2809,66 @@ begin
 end;
 {$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
+// Every named routine scope on the way out from a declaration NamedDeclRoot
+// accepts - the scopes ScopeOwner reads a name from - with that name, while
+// the text is still here.
+procedure TPasSemaModel.SnapshotRoutineScopeNames;
+var
+  LSym, LScope, LCount: Integer;
+  LMarks: TArray<Boolean>;
+begin
+  DemotedRoutineScopes := nil;
+  DemotedRoutineNames := nil;
+  LMarks := nil;
+  LCount := 0;
+  for LSym := 0 to SymCount - 1 do
+  begin
+    // The common case first: a declaration directly in a unit or
+    // implementation scope has no routine on its way out.
+    LScope := Symbols[LSym].Scope;
+    if (LScope < 0) or (LScope >= Scopes.Count) or
+       (Scopes[LScope].Kind in [sckUnit, sckImplementation, sckSystem]) then
+      Continue;
+    if NamedDeclRoot(LSym, True) = NIL_SCOPE then
+      Continue;
+    while (LScope >= 0) and (LScope < Scopes.Count) and
+          not (Scopes[LScope].Kind in [sckUnit, sckImplementation]) do
+    begin
+      if IsNamedRoutineScope(Self, LScope) then
+      begin
+        if LMarks = nil then
+          SetLength(LMarks, Scopes.Count);
+        if not LMarks[LScope] then
+        begin
+          LMarks[LScope] := True;
+          Inc(LCount);
+        end;
+      end;
+      if Scopes[LScope].Kind = sckStruct then
+      begin
+        // As ScopeOwner climbs: through the type's own symbol.
+        if Scopes[LScope].StructSym = NIL_SYM then
+          Break;
+        LScope := Symbols[Scopes[LScope].StructSym].Scope;
+      end
+      else
+        LScope := Scopes[LScope].Parent;
+    end;
+  end;
+  if LCount = 0 then
+    Exit;
+  SetLength(DemotedRoutineScopes, LCount);
+  SetLength(DemotedRoutineNames, LCount);
+  LCount := 0;
+  for LScope := 0 to High(LMarks) do
+    if LMarks[LScope] then
+    begin
+      DemotedRoutineScopes[LCount] := LScope;
+      DemotedRoutineNames[LCount] := RoutineScopeName(LScope);
+      Inc(LCount);
+    end;
+end;
+
 procedure TPasSemaModel.DemoteText;
 var
   LIdx: Integer;
@@ -2641,6 +2883,7 @@ begin
     SetLength(DemotedHeads, SymCount);
     for LIdx := 0 to SymCount - 1 do
       DemotedHeads[LIdx] := Byte(RoutineHead(LIdx));
+    SnapshotRoutineScopeNames;
     DemotedVisCount := Length(Tree.Source.Visible);
     SetLength(DemotedFileSizes, Length(Tree.Source.Files));
     SetLength(DemotedTokenCounts, Length(Tree.Source.Files));
@@ -2730,6 +2973,8 @@ begin
     DemotedTokenCounts := nil;
     DemotedFileHashes := nil;
     DemotedHeads := nil;
+    DemotedRoutineScopes := nil;
+    DemotedRoutineNames := nil;
     DemotedVisCount := 0;
     Result := True;
   finally

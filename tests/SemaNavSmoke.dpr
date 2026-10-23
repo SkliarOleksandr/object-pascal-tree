@@ -1744,6 +1744,39 @@ const
   INC_OUT =
     'procedure FromInc;'#10;                                     // inc 1
 
+  // Nested routines and local types: rows of both outlines and of
+  // FindDeclarations, owned by the routine whose body declares them; the
+  // body's variables, constants and an anonymous method's declarations are
+  // not (TPasSemaModel.NamedDeclRoot, 2026-10-23).
+  UNIT_NEST =
+    'unit NavNest;'#10 +                                         // 1
+    'interface'#10 +                                             // 2
+    'type'#10 +                                                  // 3
+    '  TCid = class'#10 +                                        // 4
+    '    procedure Click;'#10 +                                  // 5
+    '  end;'#10 +                                                // 6
+    'implementation'#10 +                                        // 7
+    'procedure TCid.Click;'#10 +                                 // 8
+    '  function IsOutside(A: Integer): Boolean;'#10 +            // 9
+    '    procedure Deeper; begin end;'#10 +                      // 10
+    '  begin Deeper; Result := A > 0; end;'#10 +                 // 11
+    'type'#10 +                                                  // 12
+    '  TLocalRec = record'#10 +                                  // 13
+    '    LField: Integer;'#10 +                                  // 14
+    '  end;'#10 +                                                // 15
+    'const'#10 +                                                 // 16
+    '  LConst = 1;'#10 +                                         // 17
+    'var'#10 +                                                   // 18
+    '  LVar: TLocalRec;'#10 +                                    // 19
+    'begin'#10 +                                                 // 20
+    '  LVar.LField := LConst;'#10 +                              // 21
+    '  IsOutside(LVar.LField);'#10 +                             // 22
+    'end;'#10 +                                                  // 23
+    'procedure Plain;'#10 +                                      // 24
+    '  procedure Helper; begin end;'#10 +                        // 25
+    'begin Helper; end;'#10 +                                    // 26
+    'end.'#10;                                                   // 27
+
   // DefinesAt and an `$I` below the cursor with no main-file directive
   // between them (audit A2-22): FROMINC counts from line 7 on, not before.
   // NavDefN.inc nests a further include, placed at NavDefL's line 7 too.
@@ -3970,6 +4003,38 @@ begin
        AOut[AIdx].Line, AOut[AIdx].Col, BoolToStr(AOut[AIdx].IsImpl, True)]));
 end;
 
+// The index of the project outline row AOwner.AName, -1 when there is none,
+// -2 when there are several.
+function OutRow(const AOut: TArray<TPasOutlineEntry>;
+  const AOwner, AName: string): Integer;
+var
+  LIdx: Integer;
+begin
+  Result := -1;
+  for LIdx := 0 to High(AOut) do
+    if (AOut[LIdx].Owner = AOwner) and (AOut[LIdx].Name = AName) then
+      if Result = -1 then
+        Result := LIdx
+      else
+        Exit(-2);
+end;
+
+// FindDeclarations' rows for AQuery: exactly one, named AName, at ALine:ACol
+// of NavNest.pas.
+function OneDeclAt(const AQuery, AName: string; ALine, ACol: Integer): Boolean;
+var
+  LRows: TArray<TPasDeclHit>;
+begin
+  LRows := GNav.FindDeclarations(AQuery, False);
+  Result := (Length(LRows) = 1) and (LRows[0].Name = AName) and
+    SameText(TPath.GetFileName(LRows[0].Hit.FilePath), 'NavNest.pas') and
+    (LRows[0].Hit.Line = ALine) and (LRows[0].Hit.Col = ACol);
+  if not Result then
+    for var LRow in LRows do
+      Writeln(Format('    got: %s %s:%d:%d', [LRow.Name,
+        TPath.GetFileName(LRow.Hit.FilePath), LRow.Hit.Line, LRow.Hit.Col]));
+end;
+
 procedure CheckDecl(const ACase: string; ALine, ACol, AWantLine: Integer);
 var
   LTarget: TPasNavTarget;
@@ -4050,6 +4115,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDpB.pas'), UNIT_DPB);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavDpC.pas'), UNIT_DPC);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavOut.inc'), INC_OUT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavNest.pas'), UNIT_NEST);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -6135,6 +6201,92 @@ begin
           LPOFrom = 1);
         Ok('project outline: an out-of-range model is skipped',
           Length(GNav.ProjectOutline([-1, 100000])) = 0);
+      end;
+
+      // Nested routines and local types (NamedDeclRoot, 2026-10-23): the
+      // module outline lists them after their routine, owned by it; the
+      // project outline and FindDeclarations by the same owner chain; a
+      // body's variables and constants stay out of all three.
+      var LMidNest := GNav.ModelIdOf(TPath.Combine(LDir, 'NavNest.pas'));
+      Ok('nested: NavNest model found', LMidNest >= 0);
+      if LMidNest >= 0 then
+      begin
+        // The project was demoted further up: the module outline reads text.
+        Ok('nested: NavNest hydrated', GProj.EnsureHydrated(LMidNest));
+        var LNOut := PasModuleOutline(GProj.Model(LMidNest).Tree);
+        Ok('nested outline: 12 rows', Length(LNOut) = 12);
+        CheckOut(LNOut, 5, okRoutine, 'procedure', 'TCid', 'Click', '', 8, 11,
+          True);
+        CheckOut(LNOut, 6, okRoutine, 'function', 'TCid.Click', 'IsOutside',
+          '(A: Integer): Boolean', 9, 12, True);
+        CheckOut(LNOut, 7, okRoutine, 'procedure', 'TCid.Click.IsOutside',
+          'Deeper', '', 10, 15, True);
+        CheckOut(LNOut, 8, okType, 'type', 'TCid.Click', 'TLocalRec',
+          '= record', 13, 3, False);
+        CheckOut(LNOut, 9, okVar, 'field', 'TCid.Click.TLocalRec', 'LField',
+          ': Integer', 14, 5, False);
+        CheckOut(LNOut, 10, okRoutine, 'procedure', '', 'Plain', '', 24, 11,
+          True);
+        CheckOut(LNOut, 11, okRoutine, 'procedure', 'Plain', 'Helper', '', 25,
+          13, True);
+        Ok('nested outline: rows in the implementation section',
+          (Length(LNOut) = 12) and (LNOut[6].Section = osImplementation) and
+          (LNOut[9].Section = osImplementation));
+
+        // The project outline, before and after the unit's text is demoted:
+        // a routine scope's name then comes from DemoteText's snapshot.
+        for var LDemoted := False to True do
+        begin
+          var LTag := 'nested project outline';
+          if LDemoted then
+          begin
+            GProj.DemoteText([]);
+            Ok('nested: NavNest demoted', GProj.Model(LMidNest).Demoted);
+            LTag := LTag + ' (demoted)';
+          end;
+          var LNPO := GNav.ProjectOutline([LMidNest]);
+          var LRIs := OutRow(LNPO, 'TCid.Click', 'IsOutside');
+          Ok(LTag + ': TCid.Click.IsOutside, a function, implementation',
+            (LRIs >= 0) and (LNPO[LRIs].Kind = okRoutine) and
+            (LNPO[LRIs].Head = 'function') and
+            (LNPO[LRIs].Section = osImplementation) and
+            (LNPO[LRIs].Detail = ': Boolean'));
+          Ok(LTag + ': TCid.Click.IsOutside.Deeper',
+            OutRow(LNPO, 'TCid.Click.IsOutside', 'Deeper') >= 0);
+          Ok(LTag + ': TCid.Click.TLocalRec and its field',
+            (OutRow(LNPO, 'TCid.Click', 'TLocalRec') >= 0) and
+            (OutRow(LNPO, 'TCid.Click.TLocalRec', 'LField') >= 0));
+          Ok(LTag + ': Plain.Helper', OutRow(LNPO, 'Plain', 'Helper') >= 0);
+          Ok(LTag + ': no local var, const or parameter',
+            (OutRow(LNPO, 'TCid.Click', 'LVar') = -1) and
+            (OutRow(LNPO, 'TCid.Click', 'LConst') = -1) and
+            (OutRow(LNPO, 'TCid.Click.IsOutside', 'A') = -1) and
+            (OutRow(LNPO, 'TCid.Click.IsOutside', 'Result') = -1));
+          // TCid, Click, IsOutside, Deeper, TLocalRec, LField, Plain, Helper.
+          Ok(LTag + ': 9 rows', Length(LNPO) = 9);
+          if LRIs >= 0 then
+          begin
+            var LNHit: TPasRefHit;
+            Ok(LTag + ': DeclHit lands on IsOutside',
+              GNav.DeclHit(LNPO[LRIs].UnitId, LNPO[LRIs].Sym, {out} LNHit) and
+              (LNHit.Line = 9) and (LNHit.Col = 12));
+          end;
+        end;
+
+        Ok('nested find: IsOutside', OneDeclAt('IsOutside',
+          'TCid.Click.IsOutside', 9, 12));
+        Ok('nested find: Click.IsOutside', OneDeclAt('Click.IsOutside',
+          'TCid.Click.IsOutside', 9, 12));
+        Ok('nested find: NavNest.TCid.Click.IsOutside.Deeper',
+          OneDeclAt('NavNest.TCid.Click.IsOutside.Deeper',
+          'TCid.Click.IsOutside.Deeper', 10, 15));
+        Ok('nested find: Plain.Helper', OneDeclAt('Plain.Helper',
+          'Plain.Helper', 25, 13));
+        Ok('nested find: a local type''s field', OneDeclAt('TLocalRec.LField',
+          'TCid.Click.TLocalRec.LField', 14, 5));
+        Ok('nested find: no local var or const',
+          (Length(GNav.FindDeclarations('LVar', False)) = 0) and
+          (Length(GNav.FindDeclarations('LConst', False)) = 0));
       end;
     finally
       GNav.Free;
