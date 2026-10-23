@@ -1475,6 +1475,17 @@ begin
   TPasArrayTrim.Exact<string>(LStrs, 0);
   GCounter.Ok('scopelist: TPasArrayTrim.Exact moves managed elements',
     LOk and (LStrs = nil));
+  // ...and an unmanaged one, whose old slots are no longer zeroed (C2-01).
+  var LInts: TArray<Integer>;
+  SetLength(LInts, 100);
+  for LIdx := 0 to 99 do
+    LInts[LIdx] := LIdx * 7;
+  TPasArrayTrim.Exact<Integer>(LInts, 61);
+  LOk := Length(LInts) = 61;
+  for LIdx := 0 to 60 do
+    if LInts[LIdx] <> LIdx * 7 then
+      LOk := False;
+  GCounter.Ok('scopelist: TPasArrayTrim.Exact moves unmanaged elements', LOk);
 end;
 
 procedure TestNameKeys;

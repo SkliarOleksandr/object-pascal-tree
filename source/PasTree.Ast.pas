@@ -1263,9 +1263,11 @@ end;
 
 procedure TPasTreeBuilder.Init(ACapacityHint: Integer);
 begin
-  // The parser passes ~half its visible-token count (nodes run 0.5-1x visible
-  // tokens): one up-front allocation instead of ~10 doublings each copying the
-  // arena so far. Build still trims to the exact count.
+  // The parser passes 3/4 of its visible-token count - nodes run about 0.7x
+  // the visible tokens (0.70 over the RTL, audit C1-01; at half, nearly every
+  // file doubled the arena once): one up-front allocation instead of
+  // doublings each copying the arena so far. Build still trims to the exact
+  // count.
   if ACapacityHint < 64 then
     ACapacityHint := 64;
   FNodes := nil;

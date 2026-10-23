@@ -731,7 +731,12 @@ begin
   if ACount > 0 then
   begin
     Move(A[0], LExact[0], ACount * SizeOf(T));
-    FillChar(A[0], ACount * SizeOf(T), 0);
+    // Only a managed T needs the old slots zeroed (releasing A must finalize
+    // nothing that moved); tokens, nodes and integers would pay one more
+    // write pass over the arena for nothing (audit C2-01). IsManagedType is
+    // a compile-time intrinsic: the unmanaged instantiations have no call.
+    if IsManagedType(T) then
+      FillChar(A[0], ACount * SizeOf(T), 0);
   end;
   A := LExact;
 end;
