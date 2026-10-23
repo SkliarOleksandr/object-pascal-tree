@@ -52,6 +52,20 @@ type
       Candidates: TArray<string>;
       MatchIdx: Integer;
     end;
+    // One include candidate asked on disk (see FIncludePaths): whether the
+    // file was there, its directory's last-write time read before the probe,
+    // when it was probed, and the include epoch of the probe.
+    TIncludePath = record
+      Exists: Boolean;
+      Stamp: TDateTime;
+      ProbedAt: TDateTime;
+      Epoch: Integer;
+    end;
+    // A directory's last-write time and the include epoch it was read in.
+    TIncludeDirStamp = record
+      Stamp: TDateTime;
+      Epoch: Integer;
+    end;
   private
     FSearchPaths: TArray<string>;
     FNamespaces: TArray<string>;                  // -NS prefixes, in order
@@ -79,6 +93,7 @@ type
     // or renamed in it - exactly the events that change a listing.
     FPathListings: TArray<TArray<string>>;
     FPathStamps: TArray<TDateTime>;
+    FPathListedAt: TArray<TDateTime>;   // when each was listed
     FDirStamps: TDictionary<string, TDateTime>;
     // The run each listing was last checked in (BeginRun counts the runs,
     // FRunEpoch): FDirChecked per directory index, FListingsEpoch for the
@@ -187,8 +202,8 @@ type
     FMemoFromIndex: TDictionary<string, string>;
     // (unit path and including path, each up to its last separator, + the
     // include argument, #0 between, all as spelled) -> resolved path, '' for
-    // not found. ResolveInclude probes the file system (TFile.Exists per
-    // candidate) and runs for every include of every includer. Same lifetime
+    // not found. ResolveInclude asks a candidate of FIncludePaths (the disk
+    // behind it) and runs for every include of every includer. Same lifetime
     // as FIncludeStreams - one analysis, AnalyzeModuleOnly's included (both
     // are dropped by BeginRun) - and guarded by the same FIncludeLock (it
     // runs on the parse workers), so a later analysis on this manager sees
@@ -198,13 +213,58 @@ type
     FIncludeMemo: TDictionary<string, string>;
     // File probes made for includes (ResolveIncludeIn), for the tests.
     FIncludeProbes: Integer;
+    // The include candidates asked on disk (folded full path -> the answer)
+    // and the last-write times of their directories (folded path). The memo
+    // above lives one run, and a light-mode query takes units in over
+    // several runs, each resolving its includes anew: a miss probed the
+    // unit's directory, the project's and every search path again - 2.9 s of
+    // a 9 s `find` on the client group, where jcl.inc and jvcl.inc name
+    // dozens of includes of other compilers. These outlive the runs. A
+    // directory's time is read once per FIncludeEpoch (moved wherever the
+    // memo is dropped) - it moves when a file is created, deleted or renamed
+    // in it - and an answer holds while it equals the time read before the
+    // probe. A whole listing per directory was tried first: on the client
+    // the 490 candidates of 23 names in 148 directories cost 18,806 names
+    // listed, 90 ms where the probes take about 10. The probes and the time
+    // reads run outside FIncludeLock (parse workers); only the dictionaries
+    // are under it.
+    FIncludePaths: TDictionary<string, TIncludePath>;
+    FIncludeDirStamps: TDictionary<string, TIncludeDirStamp>;
+    FIncludeEpoch: Integer;
+    FIncludeDiskChecks: Integer;   // TFile.Exists calls made, for the tests
+    // Step 3 of the include search (SearchPathInclude): every file name of
+    // the search paths (folded) -> the first path holding it, from the
+    // listings EnsureSearchIndex takes anyway - they kept .pas and .dcu
+    // alone, and a light-mode `find` on the client asked the disk 16,763
+    // times, about 80 names no path holds (jvcl.inc's jvcld20win32.inc ..
+    // jvcld37win32.inc, in branches no build compiles) times every search
+    // path. A copy of the listings, their stamps and listing times: the
+    // workers build its names on first use and check it once per run
+    // (FRunEpoch; EnsureIncludeIndexFresh) and
+    // list a moved path again, apart from the driver's RefreshListings. Under
+    // FIncludeLock. FIncCheckedRun: the run it was last checked in; FIncBusy:
+    // a worker is building or checking it; FIncGen: driver merges, so a
+    // worker's late result never replaces a fresher listing.
+    FIncNames: TDictionary<string, Integer>;
+    FIncListings: TArray<TArray<string>>;
+    FIncStamps, FIncListedAt: TArray<TDateTime>;
+    FIncCheckedRun, FIncGen: Integer;
+    FIncBusy: Boolean;
+    FIncIndexRefreshes: Integer;   // relisted by a worker, for the tests
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
+    function TryIncludeFile(const ADir, AName: string;
+      out AResolved: string): Boolean;
+    function IncludeFileExists(const APath: string): Boolean;
+    procedure DropIncludeMemo;
     function DirIndex(const ADir: string): TDictionary<string, string>;
     procedure EnsureSearchIndex;
     function BuildUnitMemo(const AKey: string): TUnitMemo;
     function FromDirIndex(const AFromFile: string): TDictionary<string, string>;
     procedure ForgetUnitResolution;
     procedure MergeSearchIndex;
+    function EnsureIncludeIndexFresh: Boolean;
+    function IncludeFromIndex(const AName: string;
+      out AResolved: string): Boolean;
     function RefreshListings: Boolean;
     function PinnedFile(const AKey: string; out AResolved: string): Boolean;
     procedure PinInPath(const AUnitName, APath: string);
@@ -349,6 +409,12 @@ type
     { The file probes ResolveInclude has made on this manager - a directory
       asked whether it holds the file. For the tests. }
     property IncludeProbes: Integer read FIncludeProbes;
+    { The candidates ResolveInclude has asked the disk about on this manager
+      - again when its directory moved since the last answer. For the tests. }
+    property IncludeDiskChecks: Integer read FIncludeDiskChecks;
+    { The times a worker found a search path moved and listed it again for
+      the include index. For the tests. }
+    property IncludeIndexRefreshes: Integer read FIncIndexRefreshes;
     { Indexes every *.pas/*.dpr under ARoot by basename, for unit-name
       resolution when there are no real search paths (project-dir fallback). }
     procedure BuildUnitIndex(const ARoot: string);
@@ -414,6 +480,11 @@ uses
   PasTree.Dcu,
   PasTree.Dcu.Source;
 
+const
+  // An include probe made this soon after its directory's last change is
+  // made again in the next epoch (TPasSourceManager.IncludeFileExists).
+  RACY_PROBE = 2 / SecsPerDay;
+
 // True when AName ends in AExt ('.pas', ASCII, any case) - what
 // SameText(TPath.GetExtension(AName), AExt) answers for an extension without
 // a dot of its own, minus the string GetExtension allocates per file listed.
@@ -445,11 +516,15 @@ begin
   FRecoveredLock := TObject.Create;
   FIncludeLock := TObject.Create;
   FDcuLock := TObject.Create;
+  FIncCheckedRun := -1;
 end;
 
 destructor TPasSourceManager.Destroy;
 begin
   FIncludeMemo.Free;
+  FIncNames.Free;
+  FIncludePaths.Free;
+  FIncludeDirStamps.Free;
   FUnitMemo.Free;
   FDcuFailures.Free;
   FDcuTexts.Free;
@@ -509,18 +584,15 @@ begin
   end;
 end;
 
-// The .pas and .dcu files of one search path, for EnsureSearchIndex.
+// Every file of one search path, for EnsureSearchIndex: its .pas and .dcu
+// files for the unit indexes, all of them for the include index (an include
+// has any extension - SearchPathInclude).
 function ListSearchPath(const ADir: string): TArray<string>;
 begin
   Result := nil;
   try
     if TDirectory.Exists(ADir) then
-      Result := TDirectory.GetFiles(ADir, TSearchOption.soTopDirectoryOnly,
-        function(const APath: string; const ASearchRec: TSearchRec): Boolean
-        begin
-          Result := HasExt(ASearchRec.Name, '.pas') or
-            HasExt(ASearchRec.Name, '.dcu');
-        end);
+      Result := TDirectory.GetFiles(ADir);
   except
     Result := nil;   // unreadable: nothing found there, as DirIndex says
   end;
@@ -697,7 +769,7 @@ begin
   // An include is looked up in the project directory as well.
   TMonitor.Enter(FIncludeLock);
   try
-    FreeAndNil(FIncludeMemo);
+    DropIncludeMemo;
   finally
     TMonitor.Exit(FIncludeLock);
   end;
@@ -751,7 +823,7 @@ begin
   // misses may be hits now (audit B4-39).
   TMonitor.Enter(FIncludeLock);
   try
-    FreeAndNil(FIncludeMemo);
+    DropIncludeMemo;
   finally
     TMonitor.Exit(FIncludeLock);
   end;
@@ -823,6 +895,110 @@ begin
   end;
 end;
 
+// TryFile for an include: the candidate looked up in its directory's listing
+// (IncludeFileExists) instead of on disk.
+function TPasSourceManager.TryIncludeFile(const ADir, AName: string;
+  out AResolved: string): Boolean;
+var
+  LCandidate: string;
+begin
+  Result := False;
+  if not PathTextUsable(ADir) or not PathTextUsable(AName) then
+    Exit;
+  LCandidate := TPath.Combine(ADir, AName);
+  if IncludeFileExists(LCandidate) then
+  begin
+    AResolved := TPath.GetFullPath(LCandidate);
+    Result := True;
+  end;
+end;
+
+// SourceExists for an include candidate, by FIncludePaths: a buffer, or the
+// disk's answer for the path - kept across runs while its directory's
+// last-write time, read once per include epoch, equals the one read before
+// the probe. A probe made within RACY_PROBE of that time may have missed a
+// file created in the same clock tick, the time unmoved (git's racy index):
+// it holds for its own epoch and is made again in the next. The probe and
+// the time read run outside FIncludeLock, the parse workers resolving
+// includes concurrently; two workers asking the same path at once both
+// probe, and either answer is the disk's.
+function TPasSourceManager.IncludeFileExists(const APath: string): Boolean;
+var
+  LFull, LDir, LKey, LDirKey: string;
+  LEpoch: Integer;
+  LDirStamp: TIncludeDirStamp;
+  LEntry: TIncludePath;
+  LHaveStamp, LHaveEntry: Boolean;
+begin
+  Result := False;
+  try
+    LFull := TPath.GetFullPath(APath);
+  except
+    Exit;   // a path GetFullPath rejects names no file and no buffer
+  end;
+  LKey := PasFoldName(LFull);
+  if (FBuffers <> nil) and FBuffers.ContainsKey(LKey) then
+    Exit(True);
+  LDir := ExtractFileDir(LFull);
+  LDirKey := PasFoldName(LDir);
+  TMonitor.Enter(FIncludeLock);
+  try
+    LEpoch := FIncludeEpoch;
+    LHaveStamp := (FIncludeDirStamps <> nil) and
+      FIncludeDirStamps.TryGetValue(LDirKey, LDirStamp) and
+      (LDirStamp.Epoch = LEpoch);
+    LHaveEntry := (FIncludePaths <> nil) and
+      FIncludePaths.TryGetValue(LKey, LEntry);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+  if LHaveEntry and (LEntry.Epoch = LEpoch) then
+    Exit(LEntry.Exists);
+  if not LHaveStamp then
+  begin
+    // Read BEFORE the probe: a file created after it moves the time past
+    // this one, and the next epoch probes again.
+    LDirStamp.Stamp := DirStamp(LDir);
+    LDirStamp.Epoch := LEpoch;
+  end;
+  if LHaveEntry and (LEntry.Stamp = LDirStamp.Stamp) and
+     (LEntry.ProbedAt - LEntry.Stamp >= RACY_PROBE) then
+  begin
+    Result := LEntry.Exists;
+    LEntry.Epoch := LEpoch;
+  end
+  else
+  begin
+    TInterlocked.Increment(FIncludeDiskChecks);
+    LEntry.Stamp := LDirStamp.Stamp;
+    LEntry.ProbedAt := Now;
+    LEntry.Exists := TFile.Exists(LFull);
+    LEntry.Epoch := LEpoch;
+    Result := LEntry.Exists;
+  end;
+  TMonitor.Enter(FIncludeLock);
+  try
+    if FIncludePaths = nil then
+    begin
+      FIncludePaths := TDictionary<string, TIncludePath>.Create;
+      FIncludeDirStamps := TDictionary<string, TIncludeDirStamp>.Create;
+    end;
+    if not LHaveStamp then
+      FIncludeDirStamps.AddOrSetValue(LDirKey, LDirStamp);
+    FIncludePaths.AddOrSetValue(LKey, LEntry);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+end;
+
+// The include answers of one run dropped, and the disk answers behind them
+// due for a check (FIncludePaths). Under FIncludeLock.
+procedure TPasSourceManager.DropIncludeMemo;
+begin
+  FreeAndNil(FIncludeMemo);
+  Inc(FIncludeEpoch);
+end;
+
 procedure TPasSourceManager.BuildUnitIndex(const ARoot: string);
 var
   LFile, LKey, LExt: string;
@@ -859,7 +1035,7 @@ end;
 procedure TPasSourceManager.EnsureSearchIndex;
 var
   LListings: TArray<TArray<string>>;
-  LStamps: TArray<TDateTime>;
+  LStamps, LListedAt: TArray<TDateTime>;
 begin
   if FSearchIndex <> nil then
     Exit;
@@ -869,14 +1045,17 @@ begin
   // path serves both indexes.
   SetLength(LListings, Length(FSearchPaths));
   SetLength(LStamps, Length(FSearchPaths));
+  SetLength(LListedAt, Length(FSearchPaths));
   TParallel.&For(0, High(FSearchPaths),
     procedure(AIndex: Integer)
     begin
       LStamps[AIndex] := DirStamp(FSearchPaths[AIndex]);
+      LListedAt[AIndex] := Now;
       LListings[AIndex] := ListSearchPath(FSearchPaths[AIndex]);
     end);
   FPathListings := LListings;
   FPathStamps := LStamps;
+  FPathListedAt := LListedAt;
   FListingsEpoch := FRunEpoch;   // just listed
   MergeSearchIndex;
 end;
@@ -897,8 +1076,118 @@ begin
       if HasExt(LFile, '.dcu') then
         FDcuIndex.TryAdd(
           PasFoldName(TPath.GetFileNameWithoutExtension(LFile)), LFile)
-      else
+      else if HasExt(LFile, '.pas') then
         FSearchIndex.TryAdd(PasFoldName(TPath.GetFileName(LFile)), LFile);
+  // The include index takes its own copy: the parse workers read it, and
+  // refresh it on their own when a run finds a path moved
+  // (EnsureIncludeIndexFresh) - never this driver-side state. Its names are
+  // built lazily, by the first include that reaches step 3 (a cold client
+  // analysis asks step 3 three times; the 20,000 names cost 24 ms on the
+  // driver when built here).
+  TMonitor.Enter(FIncludeLock);
+  try
+    FIncListings := Copy(FPathListings);
+    FIncStamps := Copy(FPathStamps);
+    FIncListedAt := Copy(FPathListedAt);
+    SetLength(FIncListedAt, Length(FIncStamps));
+    FIncCheckedRun := FRunEpoch;
+    FreeAndNil(FIncNames);
+    Inc(FIncGen);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+end;
+
+// Every file name of AListings, folded, to the first path holding it.
+function BuildIncludeNames(const AListings: TArray<TArray<string>>):
+  TDictionary<string, Integer>;
+var
+  LIdx: Integer;
+  LFile: string;
+begin
+  Result := TDictionary<string, Integer>.Create;
+  for LIdx := 0 to High(AListings) do
+    for LFile in AListings[LIdx] do
+      Result.TryAdd(PasFoldName(TPath.GetFileName(LFile)), LIdx);
+end;
+
+// The include index made ready for this run: its names built if they are
+// not, and - once per run (FRunEpoch: only a new run can find the disk
+// moved; a buffer is answered apart, IncludeFromIndex) unless the driver
+// listed the paths in it already - checked against the search paths'
+// last-write times, a moved path or one listed within RACY_PROBE of its time
+// listed again. One worker does it, outside the lock; True when the index
+// may answer, False while another worker is at it (the caller probes
+// meanwhile) or before EnsureSearchIndex listed the paths.
+function TPasSourceManager.EnsureIncludeIndexFresh: Boolean;
+var
+  LRun, LGen, LIdx: Integer;
+  LCheck, LAny: Boolean;
+  LListings: TArray<TArray<string>>;
+  LStamps, LListedAt: TArray<TDateTime>;
+  LNames: TDictionary<string, Integer>;
+  LStamp: TDateTime;
+begin
+  TMonitor.Enter(FIncludeLock);
+  try
+    if FIncListings = nil then
+      Exit(False);
+    LRun := FRunEpoch;
+    if (FIncCheckedRun = LRun) and (FIncNames <> nil) then
+      Exit(True);
+    if FIncBusy then
+      Exit(False);
+    FIncBusy := True;
+    LGen := FIncGen;
+    LCheck := FIncCheckedRun <> LRun;
+    LListings := Copy(FIncListings);
+    LStamps := Copy(FIncStamps);
+    LListedAt := Copy(FIncListedAt);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+  LNames := nil;
+  LAny := False;
+  try
+    if LCheck then
+      for LIdx := 0 to High(LStamps) do
+      begin
+        LStamp := DirStamp(FSearchPaths[LIdx]);
+        if (LStamp = LStamps[LIdx]) and
+           (LListedAt[LIdx] - LStamps[LIdx] >= RACY_PROBE) then
+          Continue;
+        LAny := True;
+        LStamps[LIdx] := LStamp;
+        LListedAt[LIdx] := Now;
+        LListings[LIdx] := ListSearchPath(FSearchPaths[LIdx]);
+      end;
+    LNames := BuildIncludeNames(LListings);
+  finally
+    TMonitor.Enter(FIncludeLock);
+    try
+      // A driver-side merge since then is fresher than this: keep it, and
+      // let the next include build its names.
+      if (LNames <> nil) and (FIncGen = LGen) then
+      begin
+        if LAny then
+        begin
+          FIncListings := LListings;
+          FIncStamps := LStamps;
+          FIncListedAt := LListedAt;
+          Inc(FIncIndexRefreshes);
+        end;
+        FIncNames.Free;
+        FIncNames := LNames;
+        LNames := nil;
+        FIncCheckedRun := LRun;
+      end;
+      FIncBusy := False;
+      Result := (FIncCheckedRun = FRunEpoch) and (FIncNames <> nil);
+    finally
+      TMonitor.Exit(FIncludeLock);
+    end;
+    LNames.Free;
+  end;
 end;
 
 // The search paths' and the project directory's stamps against the ones the
@@ -928,6 +1217,8 @@ begin
       if LStamp = FPathStamps[LIdx] then
         Continue;
       FPathStamps[LIdx] := LStamp;
+      if LIdx <= High(FPathListedAt) then
+        FPathListedAt[LIdx] := Now;
       FPathListings[LIdx] := ListSearchPath(FSearchPaths[LIdx]);
       Result := True;
     end;
@@ -945,7 +1236,7 @@ begin
   TMonitor.Enter(FIncludeLock);
   try
     FreeAndNil(FIncludeStreams);
-    FreeAndNil(FIncludeMemo);
+    DropIncludeMemo;
   finally
     TMonitor.Exit(FIncludeLock);
   end;
@@ -1400,7 +1691,7 @@ begin
   FreeAndNil(FIncludeIndex);
   TMonitor.Enter(FIncludeLock);
   try
-    FreeAndNil(FIncludeMemo);   // its misses may be hits now
+    DropIncludeMemo;   // its misses may be hits now
   finally
     TMonitor.Exit(FIncludeLock);
   end;
@@ -1752,7 +2043,7 @@ begin
   TMonitor.Enter(FIncludeLock);
   try
     FreeAndNil(FIncludeStreams);
-    FreeAndNil(FIncludeMemo);
+    DropIncludeMemo;
   finally
     TMonitor.Exit(FIncludeLock);
   end;
@@ -1817,7 +2108,7 @@ var
   function TryDir(const ADir: string): Boolean;
   begin
     TInterlocked.Increment(FIncludeProbes);
-    Result := TryFile(ADir, LName, AResolved);
+    Result := TryIncludeFile(ADir, LName, AResolved);
   end;
 
   function Sweep: Boolean;
@@ -1894,12 +2185,13 @@ begin
     TMonitor.Exit(FIncludeLock);
   end;
   AResolved := '';
-  for LDir in FSearchPaths do
-  begin
-    TInterlocked.Increment(FIncludeProbes);
-    if TryFile(LDir, AName, AResolved) then
-      Break;
-  end;
+  if not IncludeFromIndex(AName, AResolved) then
+    for LDir in FSearchPaths do
+    begin
+      TInterlocked.Increment(FIncludeProbes);
+      if TryIncludeFile(LDir, AName, AResolved) then
+        Break;
+    end;
   TMonitor.Enter(FIncludeLock);
   try
     if FIncludeMemo = nil then
@@ -1909,6 +2201,50 @@ begin
     TMonitor.Exit(FIncludeLock);
   end;
   Result := AResolved <> '';
+end;
+
+// Step 3 from the include index: True when it answered (AResolved the file
+// on the first search path holding it, '' when none does); False when it
+// cannot - not built (no PrepareIndexes on this manager), a name with a
+// directory in it, or a check of it in progress - and the paths are probed.
+// A host's buffer counts as a file, as it does for a probe.
+function TPasSourceManager.IncludeFromIndex(const AName: string;
+  out AResolved: string): Boolean;
+var
+  LName, LKey, LBufDir: string;
+  LIdx, LPath: Integer;
+begin
+  AResolved := '';
+  if (AName = '') or (LastDelimiter('\/:', AName) > 0) or
+     not PathTextUsable(AName) then
+    Exit(False);
+  if not EnsureIncludeIndexFresh then
+    Exit(False);
+  LName := PasFoldName(AName);
+  TMonitor.Enter(FIncludeLock);
+  try
+    if (FIncNames = nil) or not FIncNames.TryGetValue(LName, LIdx) then
+      LIdx := Length(FSearchPaths);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+  if FBuffers <> nil then
+    for LKey in FBuffers.Keys do
+      if ExtractFileName(LKey) = LName then
+      begin
+        LBufDir := ExtractFileDir(LKey);
+        for LPath := 0 to LIdx - 1 do
+          if PathTextUsable(FSearchPaths[LPath]) and
+             (PasFoldName(ExcludeTrailingPathDelimiter(
+             TPath.GetFullPath(FSearchPaths[LPath]))) = LBufDir) then
+          begin
+            LIdx := LPath;
+            Break;
+          end;
+      end;
+  if LIdx < Length(FSearchPaths) then
+    AResolved := TPath.GetFullPath(TPath.Combine(FSearchPaths[LIdx], AName));
+  Result := True;
 end;
 
 function PasIncludeFileName(const AArg: string): string;

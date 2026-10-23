@@ -16097,6 +16097,211 @@ begin
     finally
       LSM3.Free;
     end;
+
+    // The disk's answer for an include candidate outlives the memo: a
+    // light-mode query takes units in over several runs, and a run that
+    // probed the disk for every include anew was 2.9 s of a cold `find` on
+    // the client group. An answer holds while its directory's last-write
+    // time, read once per epoch (the memo dropped), is the one read before
+    // the probe; one made within 2 s of that time is made again.
+    var LOld := TPath.Combine(LDir, 'listed');
+    TDirectory.CreateDirectory(LOld);
+    TFile.WriteAllText(TPath.Combine(LOld, 'old.inc'), '');
+    TDirectory.SetLastWriteTime(LOld, Now - 1 / HoursPerDay);
+    var LUserL := TPath.Combine(LOld, 'User.pas');
+    var LSM4 := TPasSourceManager.Create([]);
+    try
+      Ok('include cache: an include beside the unit is found',
+        LSM4.ResolveInclude(LUserL, LUserL, 'old.inc', LRes) and
+        SameText(LRes, TPath.Combine(LOld, 'old.inc')));
+      var LChecks := LSM4.IncludeDiskChecks;
+      Ok('include cache: ...by one question to the disk', LChecks = 1);
+      Ok('include cache: a name not there is a miss',
+        not LSM4.ResolveInclude(LUserL, LUserL, 'gone.inc', LRes));
+      LSM4.ReleaseAnalysisCaches;
+      LChecks := LSM4.IncludeDiskChecks;
+      Ok('include cache: found again after the caches are released',
+        LSM4.ResolveInclude(LUserL, LUserL, 'old.inc', LRes));
+      Ok('include cache: ...without asking the disk again',
+        LSM4.IncludeDiskChecks = LChecks);
+      TFile.WriteAllText(TPath.Combine(LOld, 'gone.inc'), '');
+      TDirectory.SetLastWriteTime(LOld, Now - 1 / HoursPerDay / 2);
+      LSM4.BeginRun(False);
+      Ok('include cache: a file created since is found in the next run',
+        LSM4.ResolveInclude(LUserL, LUserL, 'gone.inc', LRes));
+      Ok('include cache: ...its moved directory asked again',
+        LSM4.IncludeDiskChecks = LChecks + 1);
+      TFile.Delete(TPath.Combine(LOld, 'old.inc'));
+      TDirectory.SetLastWriteTime(LOld, Now - 1 / HoursPerDay / 4);
+      LSM4.ReleaseAnalysisCaches;
+      Ok('include cache: a file deleted since is a miss',
+        not LSM4.ResolveInclude(LUserL, LUserL, 'old.inc', LRes));
+      LSM4.ReleaseAnalysisCaches;
+      TDirectory.SetLastWriteTime(LOld, Now);
+      LChecks := LSM4.IncludeDiskChecks;
+      LSM4.ResolveInclude(LUserL, LUserL, 'gone.inc', LRes);
+      var LRacy := LSM4.IncludeDiskChecks - LChecks;
+      LSM4.ReleaseAnalysisCaches;
+      LChecks := LSM4.IncludeDiskChecks;
+      Ok('include cache: an answer read within seconds of its directory''s '
+        + 'change is asked again, the directory unmoved',
+        LSM4.ResolveInclude(LUserL, LUserL, 'gone.inc', LRes) and
+        (LRacy = 1) and (LSM4.IncludeDiskChecks = LChecks + 1));
+    finally
+      LSM4.Free;
+    end;
+
+    // The disk is asked outside the include lock and the answers published
+    // under it: parse workers resolving at once, first into an empty cache,
+    // then - the directories changed, a new run - into stale answers that
+    // several ask again at the same time. Every answer must be right and nothing may
+    // be freed under a reader (a checked build raises on either).
+    const cDirs = 20;
+    const cThreads = 8;
+    var LBase := TPath.Combine(LDir, 'conc');
+    var LDirs: TArray<string>;
+    SetLength(LDirs, cDirs);
+    for var LDn := 0 to cDirs - 1 do
+    begin
+      LDirs[LDn] := TPath.Combine(LBase, 'd' + IntToStr(LDn));
+      TDirectory.CreateDirectory(LDirs[LDn]);
+      TFile.WriteAllText(TPath.Combine(LDirs[LDn], 'own' + IntToStr(LDn) +
+        '.inc'), '');
+    end;
+    TFile.WriteAllText(TPath.Combine(LDirs[cDirs - 1], 'shared.inc'), '');
+    for var LDn := 0 to cDirs - 1 do
+      TDirectory.SetLastWriteTime(LDirs[LDn], Now - 1 / HoursPerDay);
+    var LSM5 := TPasSourceManager.Create(LDirs);
+    try
+      var LWrong := 0;
+      var LRaised := 0;
+      var LRound: TProc<Boolean> := procedure(ALate: Boolean)
+        var
+          LThreads: TArray<TThread>;
+        begin
+          SetLength(LThreads, cThreads);
+          for var LT := 0 to cThreads - 1 do
+          begin
+            var LFirst := LT;
+            LThreads[LT] := TThread.CreateAnonymousThread(
+              procedure
+              var
+                LGot, LUnit: string;
+              begin
+                try
+                  for var LStep := 0 to cDirs - 1 do
+                  begin
+                    var LDn := (LFirst * 7 + LStep) mod cDirs;
+                    LUnit := TPath.Combine(LDirs[LDn], 'U.pas');
+                    if not LSM5.ResolveInclude(LUnit, LUnit, 'own' +
+                       IntToStr(LDn) + '.inc', LGot) or not SameText(LGot,
+                       TPath.Combine(LDirs[LDn], 'own' + IntToStr(LDn) + '.inc'))
+                    then
+                      TInterlocked.Increment(LWrong);
+                    if not LSM5.ResolveInclude(LUnit, LUnit, 'shared.inc',
+                       LGot) or not SameText(LGot,
+                       TPath.Combine(LDirs[cDirs - 1], 'shared.inc')) then
+                      TInterlocked.Increment(LWrong);
+                    if ALate <> (LSM5.ResolveInclude(LUnit, LUnit,
+                       'late' + IntToStr(LDn) + '.inc', LGot)) then
+                      TInterlocked.Increment(LWrong);
+                  end;
+                except
+                  TInterlocked.Increment(LRaised);
+                end;
+              end);
+            LThreads[LT].FreeOnTerminate := False;
+          end;
+          for var LT := 0 to cThreads - 1 do
+            LThreads[LT].Start;
+          for var LT := 0 to cThreads - 1 do
+          begin
+            LThreads[LT].WaitFor;
+            LThreads[LT].Free;
+          end;
+        end;
+      LRound(False);
+      Ok('include cache, concurrent: every answer right on a cold cache',
+        (LWrong = 0) and (LRaised = 0));
+      Ok('include cache, concurrent: each candidate asked at least once',
+        LSM5.IncludeDiskChecks >= cDirs);
+      var LFirstChecks := LSM5.IncludeDiskChecks;
+      for var LDn := 0 to cDirs - 1 do
+      begin
+        TFile.WriteAllText(TPath.Combine(LDirs[LDn], 'late' + IntToStr(LDn) +
+          '.inc'), '');
+        TDirectory.SetLastWriteTime(LDirs[LDn], Now - 1 / HoursPerDay / 2);
+      end;
+      LSM5.BeginRun(False);
+      LRound(True);
+      Ok('include cache, concurrent: stale answers asked again at '
+        + 'once, every answer right', (LWrong = 0) and (LRaised = 0) and
+        (LSM5.IncludeDiskChecks >= LFirstChecks + cDirs));
+    finally
+      LSM5.Free;
+    end;
+
+    // Step 3 from the search paths' listings (the include index): no probe
+    // per path, the first path holding the name wins, a path that moved is
+    // listed again in the next run, a buffer counts, a name with a
+    // directory in it is still probed.
+    var LP1 := TPath.Combine(LDir, 'ip1');
+    var LP2 := TPath.Combine(LDir, 'ip2');
+    var LIU := TPath.Combine(LDir, 'iu');
+    TDirectory.CreateDirectory(LP1);
+    TDirectory.CreateDirectory(TPath.Combine(LP2, 'sub'));
+    TDirectory.CreateDirectory(LIU);
+    TFile.WriteAllText(TPath.Combine(LP2, 'idx.inc'), '');
+    TFile.WriteAllText(TPath.Combine(LP2, 'sub\deep.inc'), '');
+    TDirectory.SetLastWriteTime(LP1, Now - 1 / HoursPerDay);
+    TDirectory.SetLastWriteTime(LP2, Now - 1 / HoursPerDay);
+    var LUserI := TPath.Combine(LIU, 'User.pas');
+    var LSM6 := TPasSourceManager.Create([LP1, LP2]);
+    try
+      LSM6.PrepareIndexes;
+      var LProbes := LSM6.IncludeProbes;
+      Ok('include index: a name on the second path is found',
+        LSM6.ResolveInclude(LUserI, LUserI, 'idx.inc', LRes) and
+        SameText(LRes, TPath.Combine(LP2, 'idx.inc')));
+      Ok('include index: ...probing only the unit''s and the project''s ' +
+        'directories, no path', LSM6.IncludeProbes - LProbes = 2);
+      Ok('include index: in another case, spelled as written',
+        LSM6.ResolveInclude(LUserI, LUserI, 'IDX.INC', LRes) and
+        (LRes = TPath.Combine(LP2, 'IDX.INC')));
+      Ok('include index: a name no path holds is a miss',
+        not LSM6.ResolveInclude(LUserI, LUserI, 'nowhere.inc', LRes));
+      Ok('include index: a name with a directory is probed',
+        LSM6.ResolveInclude(LUserI, LUserI, 'sub\deep.inc', LRes) and
+        SameText(LRes, TPath.Combine(LP2, 'sub\deep.inc')));
+      TFile.WriteAllText(TPath.Combine(LP1, 'idx.inc'), '');
+      TFile.WriteAllText(TPath.Combine(LP1, 'nowhere.inc'), '');
+      TDirectory.SetLastWriteTime(LP1, Now - 1 / HoursPerDay / 2);
+      var LRefreshes := LSM6.IncludeIndexRefreshes;
+      LSM6.ReleaseAnalysisCaches;
+      Ok('include index: within the run, the index still answers as listed',
+        LSM6.ResolveInclude(LUserI, LUserI, 'idx.inc', LRes) and
+        SameText(LRes, TPath.Combine(LP2, 'idx.inc')) and
+        (LSM6.IncludeIndexRefreshes = LRefreshes));
+      LSM6.BeginRun(False);
+      Ok('include index: a file created on an earlier path wins next run',
+        LSM6.ResolveInclude(LUserI, LUserI, 'idx.inc', LRes) and
+        SameText(LRes, TPath.Combine(LP1, 'idx.inc')));
+      Ok('include index: ...and a miss becomes a hit',
+        LSM6.ResolveInclude(LUserI, LUserI, 'nowhere.inc', LRes) and
+        SameText(LRes, TPath.Combine(LP1, 'nowhere.inc')));
+      Ok('include index: ...the moved path listed again, once',
+        LSM6.IncludeIndexRefreshes = LRefreshes + 1);
+      LSM6.BeginRun(False);
+      LSM6.ResolveInclude(LUserI, LUserI, 'idx.inc', LRes);
+      Ok('include index: an unmoved path is not listed again',
+        LSM6.IncludeIndexRefreshes = LRefreshes + 1);
+      LSM6.SetBuffer(TPath.Combine(LP1, 'buf.inc'), '', 1);
+      Ok('include index: a buffer on a path counts as its file',
+        LSM6.ResolveInclude(LUserI, LUserI, 'buf.inc', LRes) and
+        SameText(LRes, TPath.Combine(LP1, 'buf.inc')));
+    finally
+      LSM6.Free;
+    end;
   finally
     LSM.Free;
     if TDirectory.Exists(LDir) then
