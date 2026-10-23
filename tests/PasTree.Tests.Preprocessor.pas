@@ -475,6 +475,23 @@ begin
     SwitchCase('1.3.1', '{$D1} sets it, and the group goes on',
       '{$D-}{$R-}{$D1,R+}', 'R', True, APP),
     SwitchCase('1.3.1', '...D itself', '{$D-}{$D2}', 'D', True, APP),
+    // Audit C1-05: the long names are classified from the directive's slice,
+    // in any case, and every other long word is dropped unread.
+    SwitchCase('1.3.1', '{$rangeChecks on} in mixed case sets R',
+      '{$R-}{$rangeChecks on}', 'R', True, APP),
+    SwitchCase('1.3.1', '{$OverflowChecks ON} sets Q',
+      '{$Q-}{$OverflowChecks ON}', 'Q', True, APP),
+    SwitchCase('1.3.1', '{$BOOLEVAL ON} sets B', '{$BOOLEVAL ON}', 'B',
+      True, APP),
+    SwitchCase('1.3.1', '{$VARSTRINGCHECKS OFF} clears V',
+      '{$VARSTRINGCHECKS OFF}', 'V', False, APP),
+    SwitchCase('1.3.1', 'a longer word with a tracked prefix is passthrough',
+      '{$R-}{$RANGECHECKSX ON}', 'R', False, APP),
+    SwitchCase('1.3.1', 'a tracked name cut short is passthrough',
+      '{$R-}{$RANGECHECK ON}', 'R', False, APP),
+    SwitchCase('1.3.1', 'passthrough words between switches change nothing',
+      '{$R+}{$EXTERNALSYM R}{$REGION ''x''}{$HPPEMIT ''y''}{$ENDREGION}' +
+      '{$WARN SYMBOL_PLATFORM OFF}', 'R', True, APP),
 
     // ---- 1.3.4: $PUSHOPT/$POPOPT round-trips BOTH halves of TPasOptState
     // -- the single-letter switches and SCOPEDENUMS, tracked separately

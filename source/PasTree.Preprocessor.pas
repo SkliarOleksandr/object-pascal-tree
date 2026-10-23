@@ -472,6 +472,18 @@ type
   end;
 
   TPasPreprocessor = class
+  private type
+    // The long switch names HandleDirective acts on, classified from the
+    // directive's slice (ClassifyLongSwitch); lsNone is every other long
+    // word - EXTERNALSYM, REGION, HPPEMIT, WARN ... - passthrough trivia,
+    // dropped before anything is materialized.
+    TLongSwitch = (lsNone, lsRangeChecks, lsOverflowChecks, lsIOChecks,
+      lsOptimization, lsBoolEval, lsWriteableConst, lsTypedAddress,
+      lsExtendedSyntax, lsLongStrings, lsStackFrames, lsSafeDivide,
+      lsOpenStrings, lsAssertions, lsDebugInfo, lsLocalSymbols,
+      lsReferenceInfo, lsTypeInfo, lsDefinitionInfo, lsStackChecks, lsYD,
+      lsAppType, lsImportedData, lsVarStringChecks, lsScopedEnums, lsRtti,
+      lsMinEnumSize, lsAlign, lsVarPropSetter);
   private
     FSourceManager: TPasSourceManager;
     FBaseDefines: TPasDefines;   // caller-owned project defines
@@ -549,7 +561,7 @@ type
       ATop: Integer);
     procedure ResetSwitches;
     procedure ApplySwitches(const ABody: string);
-    procedure ApplyLongSwitch(const AName, AArg: string);
+    procedure ApplyLongSwitch(AKind: TLongSwitch; const AArg: string);
     function CurrentOptState: TPasOptState;
     procedure AddOptionRef(AFileId: Integer; const AToken: TPasToken;
       AKind: TPasOptionRefKind);
@@ -791,6 +803,28 @@ begin
       if SliceEqualsWord(AText, ALen, 'PUSHOPT') then Exit(pdPushopt)
       else if SliceEqualsWord(AText, ALen, 'POPOPT') then Exit(pdPopopt);
   end;
+end;
+
+const
+  cLongSwitchNames: array[TPasPreprocessor.TLongSwitch] of string = ('',
+    'RANGECHECKS', 'OVERFLOWCHECKS', 'IOCHECKS', 'OPTIMIZATION', 'BOOLEVAL',
+    'WRITEABLECONST', 'TYPEDADDRESS', 'EXTENDEDSYNTAX', 'LONGSTRINGS',
+    'STACKFRAMES', 'SAFEDIVIDE', 'OPENSTRINGS', 'ASSERTIONS', 'DEBUGINFO',
+    'LOCALSYMBOLS', 'REFERENCEINFO', 'TYPEINFO', 'DEFINITIONINFO',
+    'STACKCHECKS', 'YD', 'APPTYPE', 'IMPORTEDDATA', 'VARSTRINGCHECKS',
+    'SCOPEDENUMS', 'RTTI', 'MINENUMSIZE', 'ALIGN', 'VARPROPSETTER');
+
+// The long switch the word AText/ALen names (any case), lsNone for any other
+// - a length test first, so a passthrough word builds no string and compares
+// characters only against the few names of its length.
+function ClassifyLongSwitch(AText: PChar; ALen: Integer)
+  : TPasPreprocessor.TLongSwitch;
+begin
+  for Result := Succ(lsNone) to High(Result) do
+    if (Length(cLongSwitchNames[Result]) = ALen) and
+      SliceEqualsWord(AText, ALen, cLongSwitchNames[Result]) then
+      Exit;
+  Result := lsNone;
 end;
 
 { TPasPreprocessed ----------------------------------------------------------- }
@@ -1683,9 +1717,10 @@ procedure TPasPreprocessor.HandleDirective(AFileId: Integer;
   const AToken: TPasToken);
 var
   LText: PChar;
-  LLen, LNameLen, LIdx: Integer;
+  LLen, LNameLen: Integer;
   LKind: TPPDirKind;
-  LBody, LName, LArg: string;
+  LLong: TLongSwitch;
+  LBody, LArg: string;
   LParent, LTaken: Boolean;
   LTop: Integer;
   LSwitch: Char;
@@ -2000,15 +2035,14 @@ begin
   end
   else
   begin
-    // Long-form switches we track; everything else is passthrough trivia.
-    // ApplyLongSwitch dispatches on the UPPERCASED name, as SplitDirective
-    // used to hand it.
-    SetString(LName, LText, LNameLen);
-    for LIdx := 1 to LNameLen do
-      if (LName[LIdx] >= 'a') and (LName[LIdx] <= 'z') then
-        LName[LIdx] := Char(Ord(LName[LIdx]) - 32);
+    // Long-form switches we track; everything else is passthrough trivia,
+    // classified from the slice and dropped with no string built (audit
+    // C1-05: about 100,000 EXTERNALSYM / REGION / HPPEMIT in RTL+VCL).
+    LLong := ClassifyLongSwitch(LText, LNameLen);
+    if LLong = lsNone then
+      Exit;
     FTouched := [];
-    ApplyLongSwitch(LName, Arg);
+    ApplyLongSwitch(LLong, Arg);
     if FTouched <> [] then
       AddOptionRef(AFileId, AToken, orSet);
   end;
@@ -2180,7 +2214,8 @@ begin
   SetAlign(LOpt.Align);
 end;
 
-procedure TPasPreprocessor.ApplyLongSwitch(const AName, AArg: string);
+procedure TPasPreprocessor.ApplyLongSwitch(AKind: TLongSwitch;
+  const AArg: string);
 
   procedure SetSwitch(ALetter: Char);
   begin
@@ -2194,38 +2229,38 @@ procedure TPasPreprocessor.ApplyLongSwitch(const AName, AArg: string);
   end;
 
 begin
-  if AName = 'RANGECHECKS' then SetSwitch('R')
-  else if AName = 'OVERFLOWCHECKS' then SetSwitch('Q')
-  else if AName = 'IOCHECKS' then SetSwitch('I')
-  else if AName = 'OPTIMIZATION' then SetSwitch('O')
-  else if AName = 'BOOLEVAL' then SetSwitch('B')
-  else if AName = 'WRITEABLECONST' then SetSwitch('J')
-  else if AName = 'TYPEDADDRESS' then SetSwitch('T')
-  else if AName = 'EXTENDEDSYNTAX' then SetSwitch('X')
-  else if AName = 'LONGSTRINGS' then SetSwitch('H')
-  else if AName = 'STACKFRAMES' then SetSwitch('W')
-  else if AName = 'SAFEDIVIDE' then SetSwitch('U')
-  else if AName = 'OPENSTRINGS' then SetSwitch('P')
-  else if AName = 'ASSERTIONS' then SetSwitch('C')
-  else if AName = 'DEBUGINFO' then SetSwitch('D')
-  else if AName = 'LOCALSYMBOLS' then SetSwitch('L')
-  else if AName = 'REFERENCEINFO' then SetSwitch('Y')
+  if AKind = lsRangeChecks then SetSwitch('R')
+  else if AKind = lsOverflowChecks then SetSwitch('Q')
+  else if AKind = lsIOChecks then SetSwitch('I')
+  else if AKind = lsOptimization then SetSwitch('O')
+  else if AKind = lsBoolEval then SetSwitch('B')
+  else if AKind = lsWriteableConst then SetSwitch('J')
+  else if AKind = lsTypedAddress then SetSwitch('T')
+  else if AKind = lsExtendedSyntax then SetSwitch('X')
+  else if AKind = lsLongStrings then SetSwitch('H')
+  else if AKind = lsStackFrames then SetSwitch('W')
+  else if AKind = lsSafeDivide then SetSwitch('U')
+  else if AKind = lsOpenStrings then SetSwitch('P')
+  else if AKind = lsAssertions then SetSwitch('C')
+  else if AKind = lsDebugInfo then SetSwitch('D')
+  else if AKind = lsLocalSymbols then SetSwitch('L')
+  else if AKind = lsReferenceInfo then SetSwitch('Y')
   // The long forms with no entry here before - dcc64 37.0 moves the letter
   // $IFOPT reads for each (local/probe-b62 T): TYPEINFO is $M (19.1.1),
   // DEFINITIONINFO is $YD, Y+ to $IFOPT, and its OFF is Y-; STACKCHECKS is
   // $S. A `{$IFOPT M+}` after `{$TYPEINFO ON}` took the other branch (audit
   // E2-17).
-  else if AName = 'TYPEINFO' then SetSwitch('M')
-  else if AName = 'DEFINITIONINFO' then SetSwitch('Y')
-  else if AName = 'STACKCHECKS' then SetSwitch('S')
+  else if AKind = lsTypeInfo then SetSwitch('M')
+  else if AKind = lsDefinitionInfo then SetSwitch('Y')
+  else if AKind = lsStackChecks then SetSwitch('S')
   // `{$YD}` is a two-letter word, so it is classified here, not as a
   // switch group; it is Y+ and ends the group (ApplySwitchText's rule).
-  else if AName = 'YD' then
+  else if AKind = lsYD then
   begin
     FSwitches['Y'] := True;
     Include(FTouched, optY);
   end
-  else if AName = 'APPTYPE' then
+  else if AKind = lsAppType then
   begin
     if SameText(AArg, 'CONSOLE') or SameText(AArg, 'GUI') then
     begin
@@ -2235,9 +2270,9 @@ begin
       FAppTypeEvents.Add(LApp);
     end;
   end
-  else if AName = 'IMPORTEDDATA' then SetSwitch('G')
-  else if AName = 'VARSTRINGCHECKS' then SetSwitch('V')
-  else if AName = 'SCOPEDENUMS' then
+  else if AKind = lsImportedData then SetSwitch('G')
+  else if AKind = lsVarStringChecks then SetSwitch('V')
+  else if AKind = lsScopedEnums then
   begin
     // Long-form only (no single-letter twin). Positional: the resolver reads
     // the state at each enum's declaration site - see TPasScopedEnumsEvent.
@@ -2249,12 +2284,12 @@ begin
       Exit;
     Include(FTouched, optScopedEnums);
   end
-  else if AName = 'RTTI' then
+  else if AKind = lsRtti then
   begin
     ApplyRtti(AArg);
     Include(FTouched, optRtti);
   end
-  else if AName = 'MINENUMSIZE' then
+  else if AKind = lsMinEnumSize then
   begin
     // The long form of {$Z1/2/4} (13.0 docs list both). Positional - see
     // TPasMinEnumEvent.
@@ -2264,7 +2299,7 @@ begin
       Include(FTouched, optZ);
     end;
   end
-  else if AName = 'ALIGN' then
+  else if AKind = lsAlign then
   begin
     // The long form of {$A1/2/4/8/16}, plus ON/OFF for {$A+}/{$A-}.
     // Positional - see TPasAlignEvent. dcc rejects any other value (E1030 on
@@ -2281,7 +2316,7 @@ begin
       Exit;
     Include(FTouched, optA);
   end
-  else if AName = 'VARPROPSETTER' then
+  else if AKind = lsVarPropSetter then
   begin
     // 13.1.6. Long-form-only ON/OFF like SCOPEDENUMS, but NOT positional:
     // nothing reads it per-declaration yet, because PasTree emits no E2282.
@@ -2293,7 +2328,6 @@ begin
       Exit;
     Include(FTouched, optVarPropSetter);
   end;
-  // Unknown names: passthrough (WARN, HINTS, REGION, HPPEMIT, ...)
 end;
 
 // {$RTTI mode METHODS(set) FIELDS(set) PROPERTIES(set)} (19.2.1). Real
