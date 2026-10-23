@@ -1600,17 +1600,22 @@ var
   LSkipStart: Integer;
   LLexer: TPasLexer;
   LPull, LWantAsm: Boolean;
+  // Active, read once per directive: the conditional stack moves only inside
+  // HandleDirective (an include's nested ProcessFile returns through it), so
+  // this is exact without a list read per raw token (audit C1-04).
+  LActive: Boolean;
 begin
   LTokens := FFiles[AFileId].Tokens;
   LSkipStart := -1;
   LPull := False;
   LIdx := 0;
+  LActive := Active;
   while True do
   begin
     // StopAtImplementation: this file, or an include it opened, stopped.
     if FStopped then
       Break;
-    LWantAsm := FLiveAsm and Active;
+    LWantAsm := FLiveAsm and LActive;
     if LPull then
     begin
       if LIdx = LLexer.Count then
@@ -1646,7 +1651,8 @@ begin
             LSkipStart := -1;
           end;
           HandleDirective(AFileId, LTok);
-          if not Active then
+          LActive := Active;
+          if not LActive then
             LSkipStart := LTok.EndPos;
         end;
       tkEndOfFile:
@@ -1662,7 +1668,7 @@ begin
         end;
         // else handled by Process for the main file
     else
-      if Active then
+      if LActive then
       begin
         if not IsTrivia(LTok.Kind) then
         begin
