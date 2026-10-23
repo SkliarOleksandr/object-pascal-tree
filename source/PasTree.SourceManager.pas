@@ -193,7 +193,11 @@ type
     // are dropped by BeginRun) - and guarded by the same FIncludeLock (it
     // runs on the parse workers), so a later analysis on this manager sees
     // an include created or edited in between; SetProjectDir drops it too.
+    // Its entries keyed #1 + the file name are the search paths' answer for
+    // that name, which depends on nothing else (SearchPathInclude).
     FIncludeMemo: TDictionary<string, string>;
+    // File probes made for includes (ResolveIncludeIn), for the tests.
+    FIncludeProbes: Integer;
     function TryFile(const ADir, AName: string; out AResolved: string): Boolean;
     function DirIndex(const ADir: string): TDictionary<string, string>;
     procedure EnsureSearchIndex;
@@ -205,6 +209,8 @@ type
     function PinnedFile(const AKey: string; out AResolved: string): Boolean;
     procedure PinInPath(const AUnitName, APath: string);
     function ResolveIncludeIn(const AUnitFile, AIncludingFile, AName: string;
+      out AResolved: string): Boolean;
+    function SearchPathInclude(const AName: string;
       out AResolved: string): Boolean;
     function FindDcuFile(const AUnitName: string; out AResolved: string): Boolean;
     function DcuText(const APath: string): string;
@@ -340,6 +346,9 @@ type
       counts as a file. See ResolveIncludeIn. }
     function ResolveInclude(const AUnitFile, AIncludingFile, AName: string;
       out AResolved: string): Boolean;
+    { The file probes ResolveInclude has made on this manager - a directory
+      asked whether it holds the file. For the tests. }
+    property IncludeProbes: Integer read FIncludeProbes;
     { Indexes every *.pas/*.dpr under ARoot by basename, for unit-name
       resolution when there are no real search paths (project-dir fallback). }
     procedure BuildUnitIndex(const ARoot: string);
@@ -400,6 +409,7 @@ implementation
 uses
   System.Classes,
   System.IOUtils,
+  System.SyncObjs,
   PasTree.Lexer,
   PasTree.Dcu,
   PasTree.Dcu.Source;
@@ -1806,12 +1816,13 @@ var
 
   function TryDir(const ADir: string): Boolean;
   begin
+    TInterlocked.Increment(FIncludeProbes);
     Result := TryFile(ADir, LName, AResolved);
   end;
 
   function Sweep: Boolean;
   var
-    LCandidate, LDir, LUnitDir, LIncDir: string;
+    LCandidate, LUnitDir, LIncDir: string;
   begin
     Result := True;
     // 1. Beside the unit.
@@ -1824,9 +1835,8 @@ var
       Exit;
 
     // 3. Search paths.
-    for LDir in FSearchPaths do
-      if TryDir(LDir) then
-        Exit;
+    if SearchPathInclude(LName, AResolved) then
+      Exit;
 
     // 4. Beside the include that names it - where dcc finds nothing.
     LIncDir := TPath.GetDirectoryName(AIncludingFile);
@@ -1861,6 +1871,44 @@ begin
     Exit(False);
   LName := LBare;
   Result := Sweep;
+end;
+
+// ResolveIncludeIn's step 3, the search paths in order. Their answer depends
+// on the name alone, while ResolveInclude's memo is keyed by the unit's and
+// the includer's directories too: every unit directory that missed steps 1
+// and 2 probed every path again - one TFile.Exists per path, about 145 on the
+// client (audit C2-23). Memoized by the name as spelled (#1 + AName in
+// FIncludeMemo, so the same lock and the same lifetime: one analysis, dropped
+// with every other include answer by BeginRun, SetBuffer, SetProjectDir...).
+function TPasSourceManager.SearchPathInclude(const AName: string;
+  out AResolved: string): Boolean;
+var
+  LKey, LDir: string;
+begin
+  LKey := #1 + AName;
+  TMonitor.Enter(FIncludeLock);
+  try
+    if (FIncludeMemo <> nil) and FIncludeMemo.TryGetValue(LKey, AResolved) then
+      Exit(AResolved <> '');
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+  AResolved := '';
+  for LDir in FSearchPaths do
+  begin
+    TInterlocked.Increment(FIncludeProbes);
+    if TryFile(LDir, AName, AResolved) then
+      Break;
+  end;
+  TMonitor.Enter(FIncludeLock);
+  try
+    if FIncludeMemo = nil then
+      FIncludeMemo := TDictionary<string, string>.Create;
+    FIncludeMemo.AddOrSetValue(LKey, AResolved);
+  finally
+    TMonitor.Exit(FIncludeLock);
+  end;
+  Result := AResolved <> '';
 end;
 
 function PasIncludeFileName(const AArg: string): string;

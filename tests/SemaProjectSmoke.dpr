@@ -16060,6 +16060,43 @@ begin
       SameText(LRes, TPath.Combine(LDir, 'a\memo.inc')));
     Ok('memo: an includer elsewhere does not',
       not LSM.ResolveInclude(LUserB, LUserB, 'memo.inc', LRes));
+
+    // Audit C2-23: the search paths' answer depends on the name alone, so a
+    // second unit directory reaching step 3 for the same name does not probe
+    // every path again - it probes its own directory and the project's.
+    TDirectory.CreateDirectory(TPath.Combine(LDir, 'p1'));
+    TDirectory.CreateDirectory(TPath.Combine(LDir, 'p2'));
+    TDirectory.CreateDirectory(TPath.Combine(LDir, 'c'));
+    TFile.WriteAllText(TPath.Combine(LDir, 'lib\shared.inc'), '');
+    TFile.WriteAllText(TPath.Combine(LDir, 'c\shared.inc'), '');
+    var LSM3 := TPasSourceManager.Create([TPath.Combine(LDir, 'p1'),
+      TPath.Combine(LDir, 'p2'), TPath.Combine(LDir, 'lib')]);
+    try
+      var LProbes := LSM3.IncludeProbes;
+      Ok('include memo: the first unit directory finds it on the third path',
+        LSM3.ResolveInclude(LUserA, LUserA, 'shared.inc', LRes) and
+        SameText(LRes, TPath.Combine(LDir, 'lib\shared.inc')));
+      Ok('include memo: ...after five probes (unit dir, project dir, three '
+        + 'paths)', LSM3.IncludeProbes - LProbes = 5);
+      LProbes := LSM3.IncludeProbes;
+      Ok('include memo: a second unit directory finds the same file',
+        LSM3.ResolveInclude(LUserB, LUserB, 'shared.inc', LRes) and
+        SameText(LRes, TPath.Combine(LDir, 'lib\shared.inc')));
+      Ok('include memo: ...probing its own directory and the project''s only',
+        LSM3.IncludeProbes - LProbes = 2);
+      var LUserC := TPath.Combine(LDir, 'c\User.pas');
+      Ok('include memo: a copy beside the unit still beats the paths',
+        LSM3.ResolveInclude(LUserC, LUserC, 'shared.inc', LRes) and
+        SameText(LRes, TPath.Combine(LDir, 'c\shared.inc')));
+      Ok('include memo: a name on no path is a miss',
+        not LSM3.ResolveInclude(LUserA, LUserA, 'late.inc', LRes));
+      LSM3.SetBuffer(TPath.Combine(LDir, 'p2\late.inc'), '', 1);
+      Ok('include memo: ...until a buffer stands for it on a path',
+        LSM3.ResolveInclude(LUserB, LUserB, 'late.inc', LRes) and
+        SameText(LRes, TPath.Combine(LDir, 'p2\late.inc')));
+    finally
+      LSM3.Free;
+    end;
   finally
     LSM.Free;
     if TDirectory.Exists(LDir) then
