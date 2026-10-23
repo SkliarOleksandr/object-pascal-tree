@@ -203,11 +203,35 @@ type
     ItemAt: TArray<Integer>;
   end;
 
+  // Who owns each visible token (-1: nobody), by which own-token rule, and
+  // each node's own tokens in order (CSR: OwnStart[n] .. OwnStart[n + 1] - 1
+  // index Own). Build reads it off a CheckTree run.
+  TPasOwnership = record
+    Owner, Rule: TArray<Integer>;
+    OwnStart, Own: TArray<Integer>;
+    procedure Build(const ATree: TPasTree);
+  end;
+
+  { A tree's ownership and its whole print, made once by PrintTree and
+    shared by the CompareT3 and CheckT3r overloads that take one. Each of
+    them built the ownership - a CheckTree run - and printed on its own: a
+    clean file judged by both cost five ownership builds and two prints
+    where three builds and one print do (audit C1-46). }
+  TPasPrinted = record
+    Own: TPasOwnership;
+    Items: TPasPrintItems;   // PrintNode(ATree, 0)
+  end;
+
+function PrintTree(const ATree: TPasTree): TPasPrinted;
+
 { T3 over the subtree of ARoot (0: the whole tree). True when no defect was
   found; AResult.Sites keeps the first AMaxSites defects and the first loss
   of each finding. }
 function CompareT3(const ATree: TPasTree; ARoot: Integer;
-  out AResult: TPasT3Result; AMaxSites: Integer = 20): Boolean;
+  out AResult: TPasT3Result; AMaxSites: Integer = 20): Boolean; overload;
+{ The same over the whole tree, on APrinted = PrintTree(ATree). }
+function CompareT3(const ATree: TPasTree; const APrinted: TPasPrinted;
+  out AResult: TPasT3Result; AMaxSites: Integer = 20): Boolean; overload;
 
 { One line per reachable node, preorder, indented by depth: the kind, its
   flags (those that are facts: a word the tree keeps only there), its Aux
@@ -233,7 +257,10 @@ type
   AReparse, both fingerprints equal to ATree's. AMsg says, per layout that
   fails, where the first difference is; '' when True. }
 function CheckT3r(const ATree: TPasTree; const AReparse: TPasReparse;
-  out AMsg: string): Boolean;
+  out AMsg: string): Boolean; overload;
+{ The same on APrinted = PrintTree(ATree). }
+function CheckT3r(const ATree: TPasTree; const APrinted: TPasPrinted;
+  const AReparse: TPasReparse; out AMsg: string): Boolean; overload;
 
 implementation
 
@@ -271,12 +298,19 @@ var
   GRuleCls: TArray<TPasOwnClass>;
   GRuleFinding: TArray<string>;
   GRuleAfterEnd: TArray<Boolean>;
+  // TPasTree.KindName of every kind, once: TreeFingerprint names every node
+  // of three trees per checked file (audit C1-47).
+  GKindNames: array[TPasNodeKind] of string;
 
 procedure InitRules;
 var
   LIdx: Integer;
   LRule: TPasOwnRule;
+  LKind: TPasNodeKind;
+  LTree: TPasTree;
 begin
+  for LKind := Low(TPasNodeKind) to High(TPasNodeKind) do
+    GKindNames[LKind] := LTree.KindName(LKind);
   SetLength(GRuleCls, OwnRuleCount);
   SetLength(GRuleFinding, OwnRuleCount);
   SetLength(GRuleAfterEnd, OwnRuleCount);
@@ -353,17 +387,7 @@ end;
 
 { Ownership }
 
-type
-  // Who owns each visible token (-1: nobody), by which own-token rule, and
-  // each node's own tokens in order (CSR: OwnStart[n] .. OwnStart[n + 1] - 1
-  // index Own).
-  TOwnership = record
-    Owner, Rule: TArray<Integer>;
-    OwnStart, Own: TArray<Integer>;
-    procedure Build(const ATree: TPasTree);
-  end;
-
-procedure TOwnership.Build(const ATree: TPasTree);
+procedure TPasOwnership.Build(const ATree: TPasTree);
 var
   LReport: TPasCheckReport;
   LOwner, LRule: TArray<Integer>;
@@ -412,7 +436,7 @@ end;
 type
   TPrinter = record
     T: TPasTree;
-    Own: TOwnership;
+    Own: TPasOwnership;
     // Per node: the next of its own tokens Losses has not looked at.
     LossPos: TArray<Integer>;
     // The operator EmitChain is finishing: its left operand is printed.
@@ -2188,7 +2212,7 @@ begin
     Losses(ANode, MaxInt);
 end;
 
-function PrintWith(const ATree: TPasTree; const AOwn: TOwnership;
+function PrintWith(const ATree: TPasTree; const AOwn: TPasOwnership;
   ANode: Integer): TPasPrintItems;
 var
   LP: TPrinter;
@@ -2207,10 +2231,16 @@ end;
 
 function PrintNode(const ATree: TPasTree; ANode: Integer): TPasPrintItems;
 var
-  LOwn: TOwnership;
+  LOwn: TPasOwnership;
 begin
   LOwn.Build(ATree);
   Result := PrintWith(ATree, LOwn, ANode);
+end;
+
+function PrintTree(const ATree: TPasTree): TPasPrinted;
+begin
+  Result.Own.Build(ATree);
+  Result.Items := PrintWith(ATree, Result.Own, 0);
 end;
 
 // The original text between two glued tokens reduced to its line breaks:
@@ -2340,17 +2370,19 @@ end;
 type
   TOrigTok = record
     Vis: Integer;
-    Text: string;
+    Text: string;       // a synthesized entry's; '' for the token's own
     Owner, Rule: Integer;
     Split: Integer;     // N2: 1 the `>` half of a fused `>=`, 2 the `=`
   end;
 
-function CompareT3(const ATree: TPasTree; ARoot: Integer;
-  out AResult: TPasT3Result; AMaxSites: Integer): Boolean;
+// T3 proper, on the ownership and the print of ARoot's subtree.
+function CompareT3With(const ATree: TPasTree; const AOwn: TPasOwnership;
+  const AItems: TPasPrintItems; ARoot: Integer; out AResult: TPasT3Result;
+  AMaxSites: Integer): Boolean;
 var
-  LOwn: TOwnership;
-  LItems, LP: TPasPrintItems;
-  LPFrom: TArray<Integer>;  // LP's item -> its index in LItems
+  // The printed items compared, separators left out: an index into AItems
+  // each, not a copy (audit C1-50).
+  LPFrom: TArray<Integer>;
   LO: TArray<TOrigTok>;
   LOAt: TArray<Integer>;    // visible index -> its first entry in LO, -1
   LSkip: TArray<Boolean>;   // N8, N10: a token read elsewhere
@@ -2361,14 +2393,17 @@ var
   LTok: TPasTokenKind;
   LHasEnd: Boolean;
 
+  // AText: a synthesized entry's text ('>', '=', ',', 'of', 'end'); a plain
+  // one has none and reads its token's (OrigIs, OrigText) - CompareT3 copied
+  // every original token into a string (audit C1-50).
   procedure AddO(AVis: Integer; const AText: string; ASplit: Integer);
   begin
     if LOCount = Length(LO) then
       SetLength(LO, LOCount * 2 + 64);
     LO[LOCount].Vis := AVis;
     LO[LOCount].Text := AText;
-    LO[LOCount].Owner := LOwn.Owner[AVis];
-    LO[LOCount].Rule := LOwn.Rule[AVis];
+    LO[LOCount].Owner := AOwn.Owner[AVis];
+    LO[LOCount].Rule := AOwn.Rule[AVis];
     LO[LOCount].Split := ASplit;
     if LOAt[AVis] < 0 then
       LOAt[AVis] := LOCount;
@@ -2408,18 +2443,51 @@ var
       [ATree.Source.VisibleText(AVis), AFinding]));
   end;
 
+  // The entry's text is AText - exactly, or ASCII case aside with ANoCase.
+  function OrigIs(const AOrig: TOrigTok; const AText: string;
+    ANoCase: Boolean): Boolean;
+  var
+    LText: PChar;
+    LLen, LAt: Integer;
+    LA, LB: Char;
+  begin
+    if AOrig.Text <> '' then
+      if ANoCase then
+        Exit(SameText(AOrig.Text, AText))
+      else
+        Exit(AOrig.Text = AText);
+    ATree.Source.VisibleSlice(AOrig.Vis, LText, LLen);
+    if LLen <> Length(AText) then
+      Exit(False);
+    for LAt := 0 to LLen - 1 do
+    begin
+      LA := LText[LAt];
+      LB := AText[LAt + 1];
+      if ANoCase then
+      begin
+        if (LA >= 'a') and (LA <= 'z') then
+          Dec(LA, 32);
+        if (LB >= 'a') and (LB <= 'z') then
+          Dec(LB, 32);
+      end;
+      if LA <> LB then
+        Exit(False);
+    end;
+    Result := True;
+  end;
+
   function Matches(const AItem: TPasPrintItem; const AOrig: TOrigTok): Boolean;
   begin
     if AItem.Vis >= 0 then
       Result := (AItem.Vis = AOrig.Vis) and (AOrig.Split <> 1) and
-        (AItem.Text = AOrig.Text)
+        OrigIs(AOrig, AItem.Text, False)
     else
       // N3; and the token must be the printing node's own - but the `>`
       // half of a fused `>=`, which the operator or the type declaration
       // owns (N2).
-      Result := (SameText(AItem.Text, AOrig.Text) or
-                 ((AItem.Text = '[') and (AOrig.Text = '(.')) or
-                 ((AItem.Text = ']') and (AOrig.Text = '.)'))) and
+      Result := (OrigIs(AOrig, AItem.Text, True) or
+                 ((AItem.Text = '[') and OrigIs(AOrig, '(.', False)) or
+                 ((AItem.Text = ']') and OrigIs(AOrig, '.)', False))) and
         ((AOrig.Owner = AItem.Node) or
          ((AOrig.Split = 1) and
           (ATree.Nodes[AItem.Node].Kind in [nkTypeArgs, nkGenericParams])));
@@ -2429,15 +2497,18 @@ var
   begin
     if AItem < 0 then
       Exit('the end of the print');
-    Result := Format('`%s` of %s', [LP[AItem].Text,
-      ATree.KindName(ATree.Nodes[LP[AItem].Node].Kind)]);
+    Result := Format('`%s` of %s', [AItems[LPFrom[AItem]].Text,
+      ATree.KindName(ATree.Nodes[AItems[LPFrom[AItem]].Node].Kind)]);
   end;
 
   function OrigText(AEntry: Integer): string;
   begin
     if AEntry >= LOCount then
       Exit('the end of the original');
-    Result := '`' + LO[AEntry].Text + '`';
+    if LO[AEntry].Text <> '' then
+      Result := '`' + LO[AEntry].Text + '`'
+    else
+      Result := '`' + ATree.Source.VisibleText(LO[AEntry].Vis) + '`';
     if LO[AEntry].Owner >= 0 then
       Result := Result + ' of ' +
         ATree.KindName(ATree.Nodes[LO[AEntry].Owner].Kind);
@@ -2447,9 +2518,9 @@ var
   var
     LPos: Integer;
   begin
-    for LPos := LOwn.OwnStart[ANode] to LOwn.OwnStart[ANode + 1] - 1 do
-      if ATree.Source.VisibleToken(LOwn.Own[LPos]).Kind = AKind then
-        Exit(LOwn.Own[LPos]);
+    for LPos := AOwn.OwnStart[ANode] to AOwn.OwnStart[ANode + 1] - 1 do
+      if ATree.Source.VisibleToken(AOwn.Own[LPos]).Kind = AKind then
+        Exit(AOwn.Own[LPos]);
     Result := -1;
   end;
 
@@ -2467,7 +2538,6 @@ begin
   AResult := Default(TPasT3Result);
   if (ARoot < 0) or (ARoot > High(ATree.Nodes)) then
     Exit(False);
-  LOwn.Build(ATree);
   LSites := 0;
   LFirst := ATree.NodeLeftmostVis(ARoot);
   LLast := ATree.Nodes[ARoot].LastToken;
@@ -2489,7 +2559,7 @@ begin
               (ATree.Nodes[LNode].Aux = 1)) or
              ((ATree.Nodes[LNode].Kind = nkInterfaceType) and
               (ATree.Nodes[LNode].Aux and 2 <> 0)) or
-             (LOwn.OwnStart[LNode] = LOwn.OwnStart[LNode + 1]) then
+             (AOwn.OwnStart[LNode] = AOwn.OwnStart[LNode + 1]) then
             Continue;
           LHasEnd := OwnsTokenOf(LNode, tkEnd) >= 0;
           if not LHasEnd and (ATree.Nodes[LNode].LastToken >= 0) and
@@ -2521,15 +2591,14 @@ begin
   for LVis := LFirst to LLast do
   begin
     Inc(AResult.Original);
-    LOwner := LOwn.Owner[LVis];
-    LRule := LOwn.Rule[LVis];
+    LOwner := AOwn.Owner[LVis];
+    LRule := AOwn.Rule[LVis];
     LTok := ATree.Source.VisibleToken(LVis).Kind;
     if LMoveBefore[LVis] >= 0 then
     begin
       // N10: `of object` before the directives.
       AddO(LMoveBefore[LVis], 'of', 0);
-      AddO(LMoveBefore[LVis] + 1,
-        ATree.Source.VisibleText(LMoveBefore[LVis] + 1), 0);
+      AddO(LMoveBefore[LVis] + 1, '', 0);
     end;
     if LSkip[LVis] then
       Inc(AResult.Normalized)                                        // N8 N10
@@ -2553,13 +2622,13 @@ begin
       Inc(AResult.Normalized)                                        // N6
     else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind = nkAggregate) and
        (LTok = tkSemicolon) and (LVis < LLast) and
-       (LOwn.Owner[LVis + 1] = LOwner) and
+       (AOwn.Owner[LVis + 1] = LOwner) and
        (ATree.Source.VisibleToken(LVis + 1).Kind = tkRParen) then
       Inc(AResult.Normalized)                                        // N11
     else if (LOwner >= 0) and
        (ATree.Nodes[LOwner].Kind in [nkClassType, nkObjectType]) and
        (LTok = tkIdentifier) and (LVis > 0) and
-       (LOwn.Owner[LVis - 1] = LOwner) and
+       (AOwn.Owner[LVis - 1] = LOwner) and
        (ATree.Source.VisibleToken(LVis - 1).Kind = tkIdentifier) and
        SameText(ATree.Source.VisibleText(LVis), ATree.Source.VisibleText(
          LVis - 1)) and
@@ -2568,7 +2637,7 @@ begin
       Inc(AResult.Normalized)                                        // N12
     else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind = nkAttrGroup) and
        (LTok = tkRBracket) and (LVis < LLast) and
-       (LOwn.Owner[LVis + 1] = LOwner) and
+       (AOwn.Owner[LVis + 1] = LOwner) and
        (ATree.Source.VisibleToken(LVis + 1).Kind = tkLBracket) then
     begin
       Inc(AResult.Normalized);                                       // N8
@@ -2576,7 +2645,7 @@ begin
       LSkip[LVis + 1] := True;
     end
     else
-      AddO(LVis, ATree.Source.VisibleText(LVis), 0);
+      AddO(LVis, '', 0);
     if LEndAfter[LVis] then
     begin
       Inc(AResult.Normalized);                                       // N9
@@ -2584,22 +2653,18 @@ begin
     end;
   end;
   // The print, without its separators (N1).
-  LItems := PrintWith(ATree, LOwn, ARoot);
-  SetLength(LP, Length(LItems));
-  SetLength(LPFrom, Length(LItems));
-  SetLength(AResult.ItemAt, Length(LItems));
+  SetLength(LPFrom, Length(AItems));
+  SetLength(AResult.ItemAt, Length(AItems));
   LPCount := 0;
-  for LIdx := 0 to High(LItems) do
+  for LIdx := 0 to High(AItems) do
   begin
     AResult.ItemAt[LIdx] := -1;
-    if LItems[LIdx].Cls <> pcSeparator then
+    if AItems[LIdx].Cls <> pcSeparator then
     begin
-      LP[LPCount] := LItems[LIdx];
       LPFrom[LPCount] := LIdx;
       Inc(LPCount);
     end;
   end;
-  SetLength(LP, LPCount);
   AResult.Printed := LPCount;
   // Side by side; a defect resynchronizes at the next printed item that was
   // read from a token.
@@ -2607,11 +2672,11 @@ begin
   LJ := 0;
   while (LI < LPCount) or (LJ < LOCount) do
   begin
-    if (LI < LPCount) and (LJ < LOCount) and Matches(LP[LI], LO[LJ]) then
+    if (LI < LPCount) and (LJ < LOCount) and Matches(AItems[LPFrom[LI]], LO[LJ]) then
     begin
       Inc(AResult.Matched);
       AResult.ItemAt[LPFrom[LI]] := LO[LJ].Vis;
-      case LP[LI].Cls of
+      case AItems[LPFrom[LI]].Cls of
         pcSpan:
           Inc(AResult.Spans);
         pcLoss:
@@ -2638,14 +2703,41 @@ begin
     // Resync: the next printed item read from a token still ahead.
     LK := LI + 1;
     while (LK < LPCount) and
-          ((LP[LK].Vis < 0) or (LOAt[LP[LK].Vis] < LJ)) do
+          ((AItems[LPFrom[LK]].Vis < 0) or (LOAt[AItems[LPFrom[LK]].Vis] < LJ)) do
       Inc(LK);
     if LK >= LPCount then
       Break;
     LI := LK;
-    LJ := LOAt[LP[LK].Vis];
+    LJ := LOAt[AItems[LPFrom[LK]].Vis];
   end;
   Result := AResult.Defects = 0;
+end;
+
+function CompareT3(const ATree: TPasTree; ARoot: Integer;
+  out AResult: TPasT3Result; AMaxSites: Integer): Boolean;
+var
+  LOwn: TPasOwnership;
+begin
+  if (ARoot < 0) or (ARoot > High(ATree.Nodes)) then
+  begin
+    AResult := Default(TPasT3Result);
+    Exit(False);
+  end;
+  LOwn.Build(ATree);
+  Result := CompareT3With(ATree, LOwn, PrintWith(ATree, LOwn, ARoot), ARoot,
+    AResult, AMaxSites);
+end;
+
+function CompareT3(const ATree: TPasTree; const APrinted: TPasPrinted;
+  out AResult: TPasT3Result; AMaxSites: Integer): Boolean;
+begin
+  if Length(ATree.Nodes) = 0 then
+  begin
+    AResult := Default(TPasT3Result);
+    Exit(False);
+  end;
+  Result := CompareT3With(ATree, APrinted.Own, APrinted.Items, 0, AResult,
+    AMaxSites);
 end;
 
 { T3r }
@@ -2665,17 +2757,10 @@ begin
   SetLength(Result, LLen);
 end;
 
-function TreeFingerprint(const ATree: TPasTree): TArray<string>;
-var
-  LNodes: TArray<Integer>;
-begin
-  Result := TreeFingerprint(ATree, LNodes);
-end;
-
-function TreeFingerprint(const ATree: TPasTree;
+// TreeFingerprint proper, on the tree's ownership.
+function FingerprintWith(const ATree: TPasTree; const AOwn: TPasOwnership;
   out ANodes: TArray<Integer>): TArray<string>;
 var
-  LOwn: TOwnership;
   LStack, LDepth: TArray<Integer>;
   LTop, LNode, LDep, LCount, LIdx, LVis, LChild, LN, LRule: Integer;
   LLine, LText: string;
@@ -2686,10 +2771,10 @@ begin
   ANodes := nil;
   if Length(ATree.Nodes) = 0 then
     Exit;
-  LOwn.Build(ATree);
   SetLength(Result, Length(ATree.Nodes));
   SetLength(ANodes, Length(ATree.Nodes));
   LCount := 0;
+  LKids := nil;
   SetLength(LStack, 64);
   SetLength(LDepth, 64);
   LStack[0] := 0;
@@ -2701,7 +2786,7 @@ begin
     LNode := LStack[LTop];
     LDep := LDepth[LTop];
     LKind := ATree.Nodes[LNode].Kind;
-    LLine := StringOfChar(' ', LDep) + ATree.KindName(LKind);
+    LLine := StringOfChar(' ', LDep) + GKindNames[LKind];
     if nfNegated in ATree.Nodes[LNode].Flags then
       LLine := LLine + '!';
     if nfName in ATree.Nodes[LNode].Flags then
@@ -2749,10 +2834,10 @@ begin
     // every own token of a kind without a template. An operator's is its
     // op= above; derived and insignificant tokens are regenerated.
     if not (LKind in [nkUnaryOp, nkBinaryOp]) then
-      for LIdx := LOwn.OwnStart[LNode] to LOwn.OwnStart[LNode + 1] - 1 do
+      for LIdx := AOwn.OwnStart[LNode] to AOwn.OwnStart[LNode + 1] - 1 do
       begin
-        LVis := LOwn.Own[LIdx];
-        LRule := LOwn.Rule[LVis];
+        LVis := AOwn.Own[LIdx];
+        LRule := AOwn.Rule[LVis];
         if (ATree.Source.VisibleToken(LVis).Kind = tkEndOfFile) or
            ((LRule >= 0) and GRuleAfterEnd[LRule]) then
           Continue;
@@ -2780,8 +2865,8 @@ begin
     Result[LCount] := LLine;
     ANodes[LCount] := LNode;
     Inc(LCount);
-    // Children pushed in reverse, so they pop in order.
-    LKids := nil;
+    // Children pushed in reverse, so they pop in order. LKids is reused
+    // across nodes, not allocated per node (audit C1-47).
     LN := 0;
     LChild := ATree.Nodes[LNode].FirstChild;
     while LChild <> NIL_NODE do
@@ -2808,8 +2893,33 @@ begin
   SetLength(ANodes, LCount);
 end;
 
+function TreeFingerprint(const ATree: TPasTree): TArray<string>;
+var
+  LNodes: TArray<Integer>;
+begin
+  Result := TreeFingerprint(ATree, LNodes);
+end;
+
+function TreeFingerprint(const ATree: TPasTree;
+  out ANodes: TArray<Integer>): TArray<string>;
+var
+  LOwn: TPasOwnership;
+begin
+  ANodes := nil;
+  if Length(ATree.Nodes) = 0 then
+    Exit(nil);
+  LOwn.Build(ATree);
+  Result := FingerprintWith(ATree, LOwn, ANodes);
+end;
+
 function CheckT3r(const ATree: TPasTree; const AReparse: TPasReparse;
   out AMsg: string): Boolean;
+begin
+  Result := CheckT3r(ATree, PrintTree(ATree), AReparse, AMsg);
+end;
+
+function CheckT3r(const ATree: TPasTree; const APrinted: TPasPrinted;
+  const AReparse: TPasReparse; out AMsg: string): Boolean;
 const
   LAYOUT_NAMES: array[TPasPrintLayout] of string = ('one-line',
     'token-per-line', 'source');
@@ -2884,8 +2994,11 @@ var
   LOne: string;
 begin
   AMsg := '';
-  LItems := PrintNode(ATree, 0);
-  LOrig := TreeFingerprint(ATree, LOrigNodes);
+  LItems := APrinted.Items;
+  LOrigNodes := nil;
+  LOrig := nil;
+  if Length(ATree.Nodes) > 0 then
+    LOrig := FingerprintWith(ATree, APrinted.Own, LOrigNodes);
   // Both layouts, each on its own: a layout the parser misreads must not
   // hide what the other shows.
   for LLayout := plTokenPerLine downto plOneLine do

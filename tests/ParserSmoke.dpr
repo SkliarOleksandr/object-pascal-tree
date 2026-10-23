@@ -27,6 +27,7 @@ uses
   System.StrUtils,
   System.Classes,
   System.IOUtils,
+  System.Math,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
   PasTree.SourceManager in '..\source\PasTree.SourceManager.pas',
@@ -55,17 +56,19 @@ var
 function PrintVerdict(const ATree: TPasTree; AStatements: Boolean): string;
 var
   LT3: TPasT3Result;
+  LPrinted: TPasPrinted;
   LIdx: Integer;
   LMsg: string;
 begin
   Result := '';
-  if not CompareT3(ATree, 0, LT3) then
+  LPrinted := PrintTree(ATree);
+  if not CompareT3(ATree, LPrinted, LT3) then
     for LIdx := 0 to High(LT3.Sites) do
       if LT3.Sites[LIdx].Finding = '' then
         Result := Result + '    ' +
           VisSiteText(ATree.Source, LT3.Sites[LIdx].Vis) + ': T3: ' +
           LT3.Sites[LIdx].Msg + sLineBreak;
-  if not CheckT3r(ATree,
+  if not CheckT3r(ATree, LPrinted,
     function(const AText: string; out ABack: TPasTree; out ADiags,
       ADiagVis: Integer; out AFirstDiag: string): Boolean
     var
@@ -636,6 +639,87 @@ begin
   ];
 end;
 
+{ PrintTree shares one ownership and one print between CompareT3 and CheckT3r
+  (audit C1-46), and T3 reads a plain original token by its slice instead of
+  a copy (C1-50): the shared forms answer as the old ones, and a print
+  changed by hand is judged as before - a leaf's text must match exactly, a
+  regenerated keyword in any case (N3). }
+function BuildPrintedCases(APP: TPasPreprocessor): TPasCustomCases;
+const
+  CSrc = 'unit U;'#10'interface'#10'type TA = class(TObject) end;'#10 +
+    'const C = 7;'#10'function F(X: Integer): Integer;'#10'implementation'#10 +
+    'function F(X: Integer): Integer; begin Result := X + C; end;'#10'end.'#10;
+begin
+  Result := [
+    ChainCase('T3', 'PrintTree: CompareT3 and CheckT3r on it answer as before',
+      function: TPasCheckResult
+      var
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LPrinted: TPasPrinted;
+        LOld, LNew: TPasT3Result;
+        LIdx, LLeaf, LKw: Integer;
+        LMsgOld, LMsgNew, LWhy: string;
+        LReparse: TPasReparse;
+      begin
+        LTree := TPasParser.ParseFile(APP.ProcessText('u.pas', CSrc), LDiags);
+        LReparse :=
+          function(const AText: string; out ABack: TPasTree; out ADiags,
+            ADiagVis: Integer; out AFirstDiag: string): Boolean
+          var
+            LBack: TArray<TPasParseDiag>;
+          begin
+            ABack := TPasParser.ParseFile(APP.ProcessText('p.pas', AText),
+              LBack);
+            ADiags := Length(LBack);
+            ADiagVis := -1;
+            AFirstDiag := '';
+            Result := True;
+          end;
+        LPrinted := PrintTree(LTree);
+        LWhy := '';
+        CompareT3(LTree, 0, LOld);
+        CompareT3(LTree, LPrinted, LNew);
+        if (LOld.Matched <> LNew.Matched) or (LOld.Printed <> LNew.Printed) or
+           (LOld.Defects <> 0) or (LNew.Defects <> 0) or
+           (Length(LOld.ItemAt) <> Length(LNew.ItemAt)) then
+          LWhy := LWhy + ' T3 differs;';
+        for LIdx := 0 to Min(High(LOld.ItemAt), High(LNew.ItemAt)) do
+          if LOld.ItemAt[LIdx] <> LNew.ItemAt[LIdx] then
+            LWhy := LWhy + ' ItemAt ' + IntToStr(LIdx) + ';';
+        if not CheckT3r(LTree, LReparse, LMsgOld) or
+           not CheckT3r(LTree, LPrinted, LReparse, LMsgNew) then
+          LWhy := LWhy + ' T3r: ' + LMsgOld + ' / ' + LMsgNew + ';';
+        // A leaf printed in another case is a defect, with the old text.
+        LLeaf := -1;
+        LKw := -1;
+        for LIdx := 0 to High(LPrinted.Items) do
+          if (LLeaf < 0) and (LPrinted.Items[LIdx].Text = 'TA') then
+            LLeaf := LIdx
+          else if (LKw < 0) and (LPrinted.Items[LIdx].Text = 'class') then
+            LKw := LIdx;
+        if (LLeaf < 0) or (LKw < 0) then
+          LWhy := LWhy + ' no TA / class item;'
+        else
+        begin
+          LPrinted.Items[LLeaf].Text := 'ta';
+          LPrinted.Items[LKw].Text := 'CLASS';
+          CompareT3(LTree, LPrinted, LNew);
+          if (LNew.Defects <> 1) or (Length(LNew.Sites) <> 1) or
+             (LNew.Sites[0].Msg <> 'printed `ta` of Ident where the ' +
+               'original has `TA` of Ident') then
+          begin
+            LWhy := LWhy + Format(' case: %d defects', [LNew.Defects]);
+            for LIdx := 0 to High(LNew.Sites) do
+              LWhy := LWhy + ' [' + LNew.Sites[LIdx].Msg + ']';
+          end;
+        end;
+        Result.Passed := LWhy = '';
+        Result.Message := ' ' + LWhy + sLineBreak;
+      end)
+  ];
+end;
+
 { The checker over trees no parser bug is known to produce, but which it exists
   to catch (audit B1-32, B1-33): it reports them and returns. }
 function BuildCorruptTreeCases(APP: TPasPreprocessor): TPasCustomCases;
@@ -863,7 +947,8 @@ begin
       BuildCustomCases(GPP, GSM) + BuildRoundtripCases +
       BuildPreprocessorCases(GPP) + BuildOwnTokenCases(GPP) +
       BuildNameFlagCases(GPP) + BuildDepthCases(GPP) + BuildChainCases(GPP) +
-      BuildCorruptTreeCases(GPP) + BuildCellWordCases(GPP),
+      BuildCorruptTreeCases(GPP) + BuildCellWordCases(GPP) +
+      BuildPrintedCases(GPP),
       GPassed,
       GFailed, TreeVerdict);
     if GFailed > 0 then

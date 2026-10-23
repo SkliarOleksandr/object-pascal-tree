@@ -99,6 +99,7 @@ var
   LTree: TPasTree;
   LDiags: TArray<TPasParseDiag>;
   LResult: TPasT3Result;
+  LPrinted: TPasPrinted;
   LIdx: Integer;
   LMsg, LSite: string;
   LCount: Int64;
@@ -112,7 +113,9 @@ begin
     Exit;
   Inc(GTotals.Clean);
 
-  CompareT3(LTree, 0, LResult, GMaxPrint);
+  // One ownership build and one print for both checks.
+  LPrinted := PrintTree(LTree);
+  CompareT3(LTree, LPrinted, LResult, GMaxPrint);
   Inc(GTotals.Original, LResult.Original);
   Inc(GTotals.Normalized, LResult.Normalized);
   Inc(GTotals.Printed, LResult.Printed);
@@ -148,7 +151,7 @@ begin
       LCount + LResult.LossCounts[LIdx].Count);
   end;
 
-  if not CheckT3r(LTree,
+  if not CheckT3r(LTree, LPrinted,
     function(const AText: string; out ATree: TPasTree; out ADiags,
       ADiagVis: Integer; out AFirstDiag: string): Boolean
     var
@@ -303,16 +306,18 @@ begin
       LTree: TPasTree;
       LDiags: TArray<TPasParseDiag>;
       LT3: TPasT3Result;
+      LPrinted: TPasPrinted;
     begin
       LPre := GPP.Process(TPath.GetFullPath(AFile));
       LTree := TPasParser.ParseFile(LPre, LDiags);
+      LPrinted := PrintTree(LTree);
       if ALayout = plSource then
       begin
-        CompareT3(LTree, 0, LT3);
-        Write(RenderItems(LTree, PrintNode(LTree, 0), ALayout, LT3.ItemAt));
+        CompareT3(LTree, LPrinted, LT3);
+        Write(RenderItems(LTree, LPrinted.Items, ALayout, LT3.ItemAt));
       end
       else
-        Write(RenderItems(LTree, PrintNode(LTree, 0), ALayout));
+        Write(RenderItems(LTree, LPrinted.Items, ALayout));
     end);
 end;
 

@@ -3562,6 +3562,7 @@ end;
 procedure T3Walk;
 var
   LItems: TPasPrintItems;
+  LPrinted: TPasPrinted;
   LT3: TPasT3Result;
   LReport: TPasCheckReport;
   LOwner, LKey, LNextAt, LSiteOf, LFirstOf, LLastOf: TArray<Integer>;
@@ -3620,8 +3621,9 @@ var
   end;
 
 begin
-  LItems := PrintNode(GTree, 0);
-  if not CompareT3(GTree, 0, LT3, 1) then
+  LPrinted := PrintTree(GTree);
+  LItems := LPrinted.Items;
+  if not CompareT3(GTree, LPrinted, LT3, 1) then
     raise Exception.CreateFmt('the print has %d T3 defects, the first at ' +
       '%s: %s', [LT3.Defects, VisSiteText(GPre, LT3.Sites[0].Vis),
       LT3.Sites[0].Msg]);

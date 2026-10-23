@@ -3462,7 +3462,7 @@ var
   LModel: TPasSemaModel;
   LTree: TPasTree;
   LDiags: TArray<TPasParseDiag>;
-  LItems: TPasPrintItems;
+  LPrinted: TPasPrinted;
   LT3: TPasT3Result;
   LSM: TPasSourceManager;
   LDefines: TPasDefines;
@@ -3484,10 +3484,10 @@ begin
   // diagnostics say whether it is a tree of valid code, which is what the
   // printer and its checks are for.
   LTree := TPasParser.ParseFile(LModel.Tree.Source, LDiags);
-  LItems := PrintNode(LTree, 0);
-  CompareT3(LTree, 0, LT3);
+  LPrinted := PrintTree(LTree);
+  CompareT3(LTree, LPrinted, LT3);
   edPrint.Highlighter := FSynPasHL;
-  edPrint.Text := RenderItems(LTree, LItems, plSource, LT3.ItemAt);
+  edPrint.Text := RenderItems(LTree, LPrinted.Items, plSource, LT3.ItemAt);
   tsPrint.TabVisible := True;
   pgc.ActivePage := tsPrint;
 
@@ -3517,7 +3517,7 @@ begin
   LDefines := TPasDefines.Create([]);
   LPP := TPasPreprocessor.Create(LSM, LDefines);
   try
-    if CheckT3r(LTree,
+    if CheckT3r(LTree, LPrinted,
       function(const AText: string; out ABack: TPasTree; out ADiags,
         ADiagVis: Integer; out AFirstDiag: string): Boolean
       var
