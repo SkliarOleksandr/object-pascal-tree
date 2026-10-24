@@ -804,7 +804,10 @@ type
       same at its load, its declared-pass rounds, a rehydration and a donor's
       identity check. }
     function ProcessUnit(APP: TPasPreprocessor; const AFile: string;
-      ALight: Boolean): TPasPreprocessed;
+      ALight: Boolean): TPasPreprocessed; overload;
+    // The same over AFile's text already in hand (APP.ProcessText).
+    function ProcessUnit(APP: TPasPreprocessor; const AFile: string;
+      ALight: Boolean; const AText: string): TPasPreprocessed; overload;
     function RedecideRounds(AId: Integer; ALight: Boolean;
       out ASymLog: TArray<TPasOwnSymAnswer>): TPasSemaModel;
     { The declared pass for ONE unit outside a full run - a promotion's
@@ -3202,15 +3205,24 @@ begin
         // why a demoted stream is a first-pass stream - and grafts the
         // donor's nodes onto that stream only if it is identical to the one
         // they were parsed from. The donor is never hydrated from here.
-        for LIdx := 0 to High(LView.Source.FileNames) do
+        // Each text is read once for both uses (audit C1-45: the check read
+        // and decoded every file, then the preprocess read them again): the
+        // main file's text (FileNames[0]) goes to the preprocess below, and
+        // an include is checked against the run's shared stream, which the
+        // preprocess then takes - one read per include per run, not one per
+        // includer.
+        LText := FSM.LoadText(LView.Source.FileNames[0]);
+        if not LView.FileMatches(0, LText) then
+          Exit;
+        for LIdx := 1 to High(LView.Source.FileNames) do
           if not LView.FileMatches(LIdx,
-               FSM.LoadText(LView.Source.FileNames[LIdx])) then
+               FSM.IncludeStream(LView.Source.FileNames[LIdx]).Source) then
             Exit;
         LPP := RentPP;
         try
           LPP.OnDeclared := SeedDeclaredQuery();
           // A light donor's stream stopped at its implementation `uses`.
-          LPre := ProcessUnit(LPP, APath, LView.Light);
+          LPre := ProcessUnit(LPP, APath, LView.Light, LText);
         finally
           ReturnPP(LPP);
         end;
@@ -6254,6 +6266,17 @@ begin
     Result := APP.Process(AFile);
   finally
     APP.StopAtImplementation := False;   // the preprocessors are pooled
+  end;
+end;
+
+function TPasSemaProject.ProcessUnit(APP: TPasPreprocessor;
+  const AFile: string; ALight: Boolean; const AText: string): TPasPreprocessed;
+begin
+  APP.StopAtImplementation := ALight;
+  try
+    Result := APP.ProcessText(AFile, AText);
+  finally
+    APP.StopAtImplementation := False;
   end;
 end;
 

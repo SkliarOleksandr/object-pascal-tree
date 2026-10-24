@@ -5387,7 +5387,7 @@ const
   cUnits = 80;
   cRounds = 6;
 var
-  LDir, LInc, LRace, LMain, LSigA, LCtl, LRaised: string;
+  LDir, LInc, LRace, LShared, LMain, LSigA, LCtl, LRaised: string;
   LP1, LP2, LP3, LP4: TPasSemaProject;
   LMid, LIdx, LK, LRound, LMism, LSwap, LTmp: Integer;
   LSeed: UInt64;
@@ -5529,6 +5529,61 @@ begin
     end;
   finally
     LP4.Free;
+    LP3.Free;
+    LP2.Free;
+    LP1.Free;
+  end;
+
+  // A demoted donor checks each include against the run's shared stream and
+  // preprocesses the main text it already read (audit C1-45). Two units
+  // share an include: unchanged, every unit hits; changed on disk, both
+  // includers miss and read the new text, the plain unit still hits; an
+  // unsaved buffer over the main file is a miss that reads the buffer.
+  LShared := TPath.Combine(LDir, 'shared');
+  TDirectory.CreateDirectory(LShared);
+  TFile.WriteAllText(TPath.Combine(LShared, 'dsc.inc'), 'const C1 = 1;'#10);
+  TFile.WriteAllText(TPath.Combine(LShared, 'DscA.pas'),
+    'unit DscA;'#10'interface'#10'{$I dsc.inc}'#10 +
+    'const A = C1;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LShared, 'DscB.pas'),
+    'unit DscB;'#10'interface'#10'{$I dsc.inc}'#10 +
+    'const B = C1;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LShared, 'DscP.pas'),
+    'unit DscP;'#10'interface'#10'const P = 1;'#10'implementation'#10'end.'#10);
+  LP1 := TPasSemaProject.Create(pfWin32, [LShared], []);
+  LP2 := nil;
+  LP3 := nil;
+  try
+    LP1.AnalyzeDirectory(LShared);
+    LP1.DemoteText([]);
+    LP2 := TPasSemaProject.Create(pfWin32, [LShared], []);
+    LP2.AdoptParseDonor(LP1);
+    LP2.AnalyzeDirectory(LShared);
+    Ok('donor include: a shared include unchanged, every unit hits (' +
+      DsfHits(LP2) + ')', DsfHits(LP2) = 'donorhits=3;donormiss=0;');
+    LP2.DemoteText([]);
+    TFile.WriteAllText(TPath.Combine(LShared, 'dsc.inc'), 'const C2 = 1;'#10);
+    LP3 := TPasSemaProject.Create(pfWin32, [LShared], []);
+    LP3.AdoptParseDonor(LP2);
+    LP3.AnalyzeDirectory(LShared);
+    Ok('donor include: the include changed on disk, both includers miss (' +
+      DsfHits(LP3) + ')', DsfHits(LP3) = 'donorhits=1;donormiss=2;');
+    Ok('donor include: ... and read the new text',
+      (Pos('E2003@', DsfSig(LP3, 'dsca')) > 0) and
+      (Pos('E2003@', DsfSig(LP3, 'dscb')) > 0));
+    LP3.DemoteText([]);
+    FreeAndNil(LP2);
+    LP2 := TPasSemaProject.Create(pfWin32, [LShared], []);
+    LP2.SetBuffer(TPath.Combine(LShared, 'DscP.pas'),
+      'unit DscP;'#10'interface'#10'const P = Q;'#10'implementation'#10 +
+      'end.'#10, 1);
+    LP2.AdoptParseDonor(LP3);
+    LP2.AnalyzeDirectory(LShared);
+    Ok('donor include: a buffer over the main file misses (' +
+      DsfHits(LP2) + ')', DsfHits(LP2) = 'donorhits=2;donormiss=1;');
+    Ok('donor include: ... and reads the buffer',
+      Pos('E2003@3:', DsfSig(LP2, 'dscp')) > 0);
+  finally
     LP3.Free;
     LP2.Free;
     LP1.Free;
