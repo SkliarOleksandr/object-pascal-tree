@@ -1390,12 +1390,14 @@ var
   LP: TPasDfmProp;
   LQ, LDir, LS, LFrom, LTo: Integer;
   LMatch: Boolean;
-  LLine, LName: string;
+  LLine: string;
 begin
   Result := XNil;
   LDoc := DocOf(AEntry);
   LP := LDoc.Props[AProp];
-  LName := PasFoldName(LDoc.IdentText(LP.FirstIdent + ASeg)) + 'classname';
+  // The sibling's segment ASeg spells this one's + `ClassName`; it and the
+  // segments before it are compared on the bytes - no string is built until
+  // a line matches (audit C1-44).
   // An object's properties are read before its children, so its lines are
   // contiguous but for its collection items: walk out from AProp both ways
   // while the object is the same.
@@ -1409,14 +1411,18 @@ begin
     begin
       if (LDoc.Props[LQ].Owner = LP.Owner) and (LDoc.Props[LQ].Item = LP.Item)
          and (LDoc.Props[LQ].SegCount = ASeg + 1) and
-         (LDoc.Props[LQ].StrOffset >= 0) and SameText(LDoc.IdentText(
-         LDoc.Props[LQ].FirstIdent + ASeg), LName) then
+         (LDoc.Props[LQ].StrOffset >= 0) and LDoc.IdentIsSuffixed(
+         LDoc.Props[LQ].FirstIdent + ASeg, LP.FirstIdent + ASeg,
+         'classname') then
       begin
         LMatch := True;
         for LS := 0 to ASeg - 1 do
-          if not SameText(LDoc.IdentText(LDoc.Props[LQ].FirstIdent + LS),
-             LDoc.IdentText(LP.FirstIdent + LS)) then
+          if not LDoc.SameIdent(LDoc.Props[LQ].FirstIdent + LS,
+             LP.FirstIdent + LS) then
+          begin
             LMatch := False;
+            Break;
+          end;
         if LMatch then
         begin
           // The value is one plain literal (StrOffset): the text between

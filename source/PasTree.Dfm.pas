@@ -146,6 +146,16 @@ type
     // Every identifier spelled ANameLower (case-insensitively - form files
     // are read by the RTL with SameText rules); ANameLower must be lower case.
     function FindIdents(const ANameLower: string): TArray<Integer>;
+    // Whether identifiers A and B read the same, as SameText compares their
+    // texts: on the bytes, ASCII letters folded, no string built (both are
+    // in this file's one encoding, so equal bytes are equal texts).
+    function SameIdent(A, B: Integer): Boolean;
+    // Whether identifier AIdx reads as identifier ABase followed by
+    // ASuffixLower (lower-case ASCII), as SameText compares it with
+    // PasFoldName(IdentText(ABase)) + ASuffixLower - on the bytes for an
+    // ASCII base, through the texts otherwise.
+    function IdentIsSuffixed(AIdx, ABase: Integer;
+      const ASuffixLower: string): Boolean;
     // Whether AName occurs anywhere in the bytes, case-insensitively
     // (FoldName) - the one question an UNREADABLE file can still answer
     // ("might it name this symbol?"). True for a file whose bytes could not
@@ -205,7 +215,8 @@ uses
 {$ENDIF}
   System.IOUtils,
   System.Character,
-  System.Generics.Collections;
+  System.Generics.Collections,
+  PasTree.Types;   // PasFoldName: IdentIsSuffixed's non-ASCII base
 
 type
   // HexToBinary's output. The bytes of a `{...}` block (bitmaps, icons) are
@@ -582,6 +593,55 @@ end;
 function TPasDfmDoc.IdentText(AIdx: Integer): string;
 begin
   Result := DecodeRange(Idents[AIdx].Offset, Idents[AIdx].ByteLen);
+end;
+
+function AsciiLowerByte(AByte: Byte): Byte; inline;
+begin
+  if (AByte >= Ord('A')) and (AByte <= Ord('Z')) then
+    Result := AByte + 32
+  else
+    Result := AByte;
+end;
+
+function TPasDfmDoc.SameIdent(A, B: Integer): Boolean;
+var
+  LIdx, LOffA, LOffB: Integer;
+begin
+  if Idents[A].ByteLen <> Idents[B].ByteLen then
+    Exit(False);
+  LOffA := Idents[A].Offset;
+  LOffB := Idents[B].Offset;
+  for LIdx := 0 to Idents[A].ByteLen - 1 do
+    if AsciiLowerByte(Bytes[LOffA + LIdx]) <>
+       AsciiLowerByte(Bytes[LOffB + LIdx]) then
+      Exit(False);
+  Result := True;
+end;
+
+function TPasDfmDoc.IdentIsSuffixed(AIdx, ABase: Integer;
+  const ASuffixLower: string): Boolean;
+var
+  LIdx, LLen, LOff, LBaseOff: Integer;
+begin
+  LLen := Idents[ABase].ByteLen;
+  LBaseOff := Idents[ABase].Offset;
+  for LIdx := 0 to LLen - 1 do
+    if Bytes[LBaseOff + LIdx] >= $80 then
+      // A non-ASCII base folds through PasFoldName, which the bytes cannot.
+      Exit(SameText(IdentText(AIdx), PasFoldName(IdentText(ABase)) +
+        ASuffixLower));
+  if Idents[AIdx].ByteLen <> LLen + Length(ASuffixLower) then
+    Exit(False);
+  LOff := Idents[AIdx].Offset;
+  for LIdx := 0 to LLen - 1 do
+    if AsciiLowerByte(Bytes[LOff + LIdx]) <>
+       AsciiLowerByte(Bytes[LBaseOff + LIdx]) then
+      Exit(False);
+  for LIdx := 1 to Length(ASuffixLower) do
+    if AsciiLowerByte(Bytes[LOff + LLen + LIdx - 1]) <>
+       Ord(ASuffixLower[LIdx]) then
+      Exit(False);
+  Result := True;
 end;
 
 function TPasDfmDoc.FindIdents(const ANameLower: string): TArray<Integer>;

@@ -1033,6 +1033,59 @@ begin
   end;
 end;
 
+{ SameIdent and IdentIsSuffixed answer as SameText over the texts (audit
+  C1-44): ASCII letters in any case, a longer or shorter name, and a
+  non-ASCII base through PasFoldName. }
+procedure IdentCompareChecks;
+var
+  LDoc: IPasDfmDoc;
+  LBytes: TBytes;
+
+  function Id(const ANameLower: string; AAt: Integer = 0): Integer;
+  var
+    LHits: TArray<Integer>;
+  begin
+    LHits := LDoc.Doc.FindIdents(ANameLower);
+    if AAt <= High(LHits) then
+      Result := LHits[AAt]
+    else
+      Result := -1;
+  end;
+
+begin
+  LBytes := TEncoding.UTF8.GetPreamble + TEncoding.UTF8.GetBytes(
+    'object F: TF' + CRLF +
+    '  Style.Accent = 1' + CRLF +
+    '  sTYLE.Other = 2' + CRLF +
+    '  STYLECLASSNAME = ''A''' + CRLF +
+    '  StyleClassNames = ''B''' + CRLF +
+    '  StyleClass = ''C''' + CRLF +
+    '  '#$00DC'ber.X = 1' + CRLF +
+    '  '#$00FC'berClassName = ''D''' + CRLF +
+    'end' + CRLF);
+  LDoc := PasDfmParse('mem.dfm', LBytes);
+  Ok('identcmp: the text reads', LDoc.Doc.Error = '');
+  if (Id('style') < 0) or (Id('style', 1) < 0) or (Id(#$00FC'ber') < 0) then
+  begin
+    Ok('identcmp: the identifiers are found', False);
+    Exit;
+  end;
+  Ok('identcmp: the same name in another case is the same',
+    LDoc.Doc.SameIdent(Id('style'), Id('style', 1)));
+  Ok('identcmp: a longer name is not',
+    not LDoc.Doc.SameIdent(Id('style'), Id('styleclassname')));
+  Ok('identcmp: name + suffix in another case',
+    LDoc.Doc.IdentIsSuffixed(Id('styleclassname'), Id('style'), 'classname'));
+  Ok('identcmp: one character more is not',
+    not LDoc.Doc.IdentIsSuffixed(Id('styleclassnames'), Id('style'),
+      'classname'));
+  Ok('identcmp: one character less is not',
+    not LDoc.Doc.IdentIsSuffixed(Id('styleclass'), Id('style'), 'classname'));
+  Ok('identcmp: a non-ASCII base folds',
+    LDoc.Doc.IdentIsSuffixed(Id(#$00FC'berclassname'), Id(#$00FC'ber'),
+      'classname'));
+end;
+
 procedure ReaderChecks;
 var
   LDoc: IPasDfmDoc;
@@ -2044,6 +2097,7 @@ begin
     GNav := TPasNavigator.Create(GProj);
     try
       ReaderChecks;
+      IdentCompareChecks;
       SiteChecks;
       BrokenChecks;
       RenameChecks;
