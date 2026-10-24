@@ -215,6 +215,8 @@ type
       Path: string;
       CacheKey: string;     // PasDfmCacheKey(Path), built once (audit C1-41)
       Doc: IPasDfmDoc;      // nil until loaded; replaced when the file changes
+      // Doc is the empty failed doc of a file that is gone (Refresh).
+      Missing: Boolean;
       RootDone: Boolean;
       RootClass: TSemaXType;
       ObjDone: TArray<Boolean>;
@@ -242,6 +244,7 @@ type
     FListed: Boolean;
     FRootNames: TDictionary<string, TArray<Integer>>;
     FRootNamesBuilt: Boolean;
+    FResets: Integer;
     function IsLibrary(const APath: string): Boolean;
     procedure EnsureListed;
     procedure ListDir(ADir: TFormDir);
@@ -373,6 +376,10 @@ type
       ancestor form is RoleOf(the ancestor class).FormFile. False, with
       AInfo.Error set, for a path that is no form file of the project. }
     function DescribeForm(const APath: string; out AInfo: TPasFormInfo): Boolean;
+    { How many times a query found a form file changed and dropped what was
+      resolved against the old one - every object's class and inline state,
+      the root-name index. For a host's statistics and the tests. }
+    property Resets: Integer read FResets;
   end;
 
 implementation
@@ -546,7 +553,7 @@ procedure TPasFormBinder.Refresh;
 var
   LEntry: TFormEntry;
   LDoc: IPasDfmDoc;
-  LChanged: Boolean;
+  LChanged, LMissing: Boolean;
   LIdx: Integer;
   LDir: TFormDir;
   LStamp: Int64;
@@ -566,11 +573,25 @@ begin
   for LEntry in FForms do
   begin
     LDoc := PasDfmLoad(LEntry.Path, LEntry.CacheKey);
-    if LDoc = nil then
+    LMissing := LDoc = nil;
+    // A failure is never cached - a vanished file is parsed from no bytes,
+    // an unreadable one gets a fresh doc - so the identity test below saw a
+    // new doc on EVERY query while the file stayed gone or locked, and each
+    // one dropped every memo of every entry (audit C1-39). The same failure
+    // again keeps the doc it already has.
+    if LEntry.Doc <> nil then
+      if LMissing and LEntry.Missing then
+        Continue
+      else if not LMissing and not LEntry.Missing and
+         LDoc.Doc.Unreadable and LEntry.Doc.Doc.Unreadable and
+         (LDoc.Doc.Error = LEntry.Doc.Doc.Error) then
+        Continue;
+    if LMissing then
       LDoc := PasDfmParse(LEntry.Path, nil);   // vanished: an empty, failed doc
     if (LEntry.Doc = nil) or (LEntry.Doc.Doc <> LDoc.Doc) then
     begin
       LEntry.Doc := LDoc;
+      LEntry.Missing := LMissing;
       LEntry.RootDone := False;
       LEntry.RootClass := XNil;
       LEntry.ObjDone := nil;
@@ -588,12 +609,15 @@ begin
   // an inline frame when its ancestor's form says so (IsInlineObj) - so one
   // changed file forgets every object's class and inline state.
   if LChanged then
+  begin
+    Inc(FResets);
     for LEntry in FForms do
       for LIdx := 0 to High(LEntry.ObjDone) do
       begin
         LEntry.ObjDone[LIdx] := False;
         LEntry.ObjInline[LIdx] := 0;
       end;
+  end;
 end;
 
 // The entry's doc as of the last Refresh.

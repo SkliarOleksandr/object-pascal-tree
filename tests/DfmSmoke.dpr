@@ -1785,6 +1785,66 @@ begin
   Ok('concurrent load: every caller holds the cached doc (20 rounds)', True);
 end;
 
+{ A form file that stays gone, or stays locked, is no change: a failed read
+  is never cached, so each query used to see a new doc and drop everything
+  every entry had resolved (audit C1-39). Resets counts those drops. }
+procedure MissingChecks;
+var
+  LBinder: TPasFormBinder;
+  LTMid, LSym, LR: Integer;
+  LErr: string;
+  LLock: TFileStream;
+
+  function SiteCount: Integer;
+  begin
+    Result := Length(LBinder.SitesOf(LTMid, LSym, False, LErr));
+  end;
+
+begin
+  if not SymAt('FixLate.pas', 7, 15, LTMid, LSym) then
+  begin
+    Ok('missing: the handler is found', False);
+    Exit;
+  end;
+  LBinder := TPasFormBinder.Create(GProj, nil);
+  try
+    Ok('missing: the handler''s site is read', SiteCount = 1);
+    TFile.Delete(FilePath('FixLate.dfm'));
+    LR := LBinder.Resets;
+    Ok('missing: deleted, no site', SiteCount = 0);
+    Ok('missing: ... the deletion is one change',
+      LBinder.Resets = LR + 1);
+    SiteCount;
+    SiteCount;
+    Ok('missing: ... and staying gone is none (' +
+      IntToStr(LBinder.Resets - LR) + ')', LBinder.Resets = LR + 1);
+    TFile.WriteAllText(FilePath('FixLate.dfm'), DFM_LATE, TEncoding.ASCII);
+    Ok('missing: brought back, read again', SiteCount = 1);
+    Ok('missing: ... a change', LBinder.Resets = LR + 2);
+    // Rewritten, then locked before any query reads it: the cache's stamp
+    // no longer matches, so every read fails.
+    TFile.WriteAllText(FilePath('FixLate.dfm'), DFM_LATE + #13#10,
+      TEncoding.ASCII);
+    LLock := TFileStream.Create(FilePath('FixLate.dfm'),
+      fmOpenReadWrite or fmShareExclusive);
+    try
+      LR := LBinder.Resets;
+      Ok('missing: locked, nothing read', SiteCount = 0);
+      Ok('missing: ... the lock is one change', LBinder.Resets = LR + 1);
+      LR := LBinder.Resets;
+      SiteCount;
+      SiteCount;
+      Ok('missing: staying locked is no change (' +
+        IntToStr(LBinder.Resets - LR) + ')', LBinder.Resets = LR);
+    finally
+      LLock.Free;
+    end;
+    Ok('missing: unlocked, read again', SiteCount = 1);
+  finally
+    LBinder.Free;
+  end;
+end;
+
 procedure LateChecks;
 var
   LInfo: TPasFormInfo;
@@ -1807,6 +1867,7 @@ begin
   TFile.WriteAllText(FilePath('FixLate.dfm'), DFM_LATE, TEncoding.ASCII);
   Ok('late: brought back, read again', HasSite(Sites('FixLate.pas', 7, 15),
     'FixLate.dfm', 3, 15, fskHandler, 'LateButton'));
+  MissingChecks;
 end;
 
 { Audit B52: the form binder's name keys, its path walks and its staleness. }
