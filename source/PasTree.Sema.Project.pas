@@ -22877,9 +22877,9 @@ var
   LNamesByLen: TArray<TArray<string>>;
   LVerdict: TArray<Byte>;               // per reach slot (slot 0 = AId itself)
   LKeys: TArray<TPasRenumberKeys>;      // per reach slot, untouched ones only
-  LScan: TArray<Integer>;               // demoted consumers left to scan
-  LIdx, LArg, LRound: Integer;
-  LInst: TSemaInstance;
+  LScan: TArray<Integer>;               // reach slots of demoted consumers
+  LIdx, LArg, LRound, LN, LNSel: Integer;
+  LInsts: TArray<TSemaInstance>;
   LAny: Boolean;
   LName: string;
 begin
@@ -22891,34 +22891,43 @@ begin
   // Instances tainted by a changed symbol - as the generic, as an argument,
   // or through an argument that is itself a tainted instance. The table is
   // append-only but an argument may name a LATER entry, so iterate to a
-  // fixpoint; two rounds in practice.
-  SetLength(LInstChanged, InstanceCount);
-  repeat
-    LAny := False;
-    for LIdx := 0 to High(LInstChanged) do
-    begin
-      if LInstChanged[LIdx] then
-        Continue;
-      LInst := Instance(LIdx);
-      if (LInst.UnitId = AId) and (LInst.Sym >= 0) and
-         (LInst.Sym <= High(AChanged)) and AChanged[LInst.Sym] then
-        LInstChanged[LIdx] := True
-      else
-        for LArg := 0 to High(LInst.Args) do
-          if ((LInst.Args[LArg].UnitId = AId) and (LInst.Args[LArg].Sym >= 0) and
-              (LInst.Args[LArg].Sym <= High(AChanged)) and
-              AChanged[LInst.Args[LArg].Sym]) or
-             ((LInst.Args[LArg].Inst <> NIL_INST) and
-              (LInst.Args[LArg].Inst <= High(LInstChanged)) and
-              LInstChanged[LInst.Args[LArg].Inst]) then
-          begin
-            LInstChanged[LIdx] := True;
-            Break;
-          end;
-      LAny := LAny or LInstChanged[LIdx];
-    end;
-    Inc(LRound);
-  until not LAny or (LRound > 8);
+  // fixpoint; two rounds in practice. One monitor entry for the fixpoint and
+  // the entries read in place (InstanceBlocker's reason, audit C2-21).
+  TMonitor.Enter(FInstances);
+  try
+    LInsts := FInstances.List;
+    SetLength(LInstChanged, FInstances.Count);
+    repeat
+      LAny := False;
+      for LIdx := 0 to High(LInstChanged) do
+      begin
+        if LInstChanged[LIdx] then
+          Continue;
+        if (LInsts[LIdx].UnitId = AId) and (LInsts[LIdx].Sym >= 0) and
+           (LInsts[LIdx].Sym <= High(AChanged)) and
+           AChanged[LInsts[LIdx].Sym] then
+          LInstChanged[LIdx] := True
+        else
+          for LArg := 0 to High(LInsts[LIdx].Args) do
+            if ((LInsts[LIdx].Args[LArg].UnitId = AId) and
+                (LInsts[LIdx].Args[LArg].Sym >= 0) and
+                (LInsts[LIdx].Args[LArg].Sym <= High(AChanged)) and
+                AChanged[LInsts[LIdx].Args[LArg].Sym]) or
+               ((LInsts[LIdx].Args[LArg].Inst <> NIL_INST) and
+                (LInsts[LIdx].Args[LArg].Inst <= High(LInstChanged)) and
+                LInstChanged[LInsts[LIdx].Args[LArg].Inst]) then
+            begin
+              LInstChanged[LIdx] := True;
+              Break;
+            end;
+        LAny := LAny or LInstChanged[LIdx];
+      end;
+      Inc(LRound);
+    until not LAny or (LRound > 8);
+  finally
+    TMonitor.Exit(FInstances);
+  end;
+  LInsts := nil;
   SetLength(LNamesByLen, 256);
   for LName in AAdded.Keys do
     if (Length(LName) > 0) and (Length(LName) < Length(LNamesByLen)) then
@@ -23013,28 +23022,59 @@ begin
   // The scan reads identifier TEXT, which a text-demoted consumer (DemoteText)
   // no longer has: rehydrate those, all at once, then scan them. A consumer
   // whose file changed under it cannot be rehydrated - refused, as before.
-  LScan := nil;
+  // The scan runs on every core like the one above (audit C2-20: it was the
+  // one sequential step left), and the arrays are filled by count, not grown
+  // an element at a time over the reach.
+  SetLength(LScan, Length(AReach));
+  LN := 0;
   for LIdx := 1 to High(AReach) do
     if LVerdict[LIdx] = vNeedsScanButDemoted then
-      LScan := LScan + [AReach[LIdx]];
-  if not HydrateModels(LScan) then
-  begin
-    AWhy := 'consumer-demoted';
-    Exit(False);
-  end;
-  for LIdx := 1 to High(AReach) do
-  begin
-    if (LVerdict[LIdx] = vNeedsScanButDemoted) and
-       TreeMentionsAny(FModels[AReach[LIdx]].Tree, LNamesByLen) then
-      LVerdict[LIdx] := vSelected;
-    case LVerdict[LIdx] of
-      vSelected:
-        ASelected := ASelected + [AReach[LIdx]];
-    else
-      AUntouched := AUntouched + [AReach[LIdx]];
-      AUntouchedKeys := AUntouchedKeys + [LKeys[LIdx]];
+    begin
+      LScan[LN] := LIdx;
+      Inc(LN);
     end;
+  SetLength(LScan, LN);
+  if LN > 0 then
+  begin
+    var LMids: TArray<Integer>;
+    SetLength(LMids, LN);
+    for LIdx := 0 to LN - 1 do
+      LMids[LIdx] := AReach[LScan[LIdx]];
+    if not HydrateModels(LMids) then
+    begin
+      AWhy := 'consumer-demoted';
+      Exit(False);
+    end;
+    ParallelFor(LN - 1,
+      procedure(AIdx: Integer)
+      begin
+        if TreeMentionsAny(FModels[AReach[LScan[AIdx]]].Tree, LNamesByLen) then
+          LVerdict[LScan[AIdx]] := vSelected
+        else
+          LVerdict[LScan[AIdx]] := vUntouched;
+      end);
   end;
+  LNSel := 0;
+  for LIdx := 1 to High(AReach) do
+    if LVerdict[LIdx] = vSelected then
+      Inc(LNSel);
+  SetLength(ASelected, 1 + LNSel);
+  SetLength(AUntouched, High(AReach) - LNSel);
+  SetLength(AUntouchedKeys, High(AReach) - LNSel);
+  LNSel := 1;
+  LN := 0;
+  for LIdx := 1 to High(AReach) do
+    if LVerdict[LIdx] = vSelected then
+    begin
+      ASelected[LNSel] := AReach[LIdx];
+      Inc(LNSel);
+    end
+    else
+    begin
+      AUntouched[LN] := AReach[LIdx];
+      AUntouchedKeys[LN] := LKeys[LIdx];
+      Inc(LN);
+    end;
   Result := True;
 end;
 
@@ -25258,14 +25298,19 @@ end;
 function TPasSemaProject.HydrateModels(const AIds: TArray<Integer>): Boolean;
 var
   LTodo: TArray<Integer>;
-  LFailed: Integer;
+  LFailed, LN: Integer;
 begin
-  LTodo := nil;
+  SetLength(LTodo, Length(AIds));
+  LN := 0;
   for var LMid in AIds do
     if FModels[LMid].Demoted then
-      LTodo := LTodo + [LMid];
-  if LTodo = nil then
+    begin
+      LTodo[LN] := LMid;
+      Inc(LN);
+    end;
+  if LN = 0 then
     Exit(True);
+  SetLength(LTodo, LN);
   LFailed := 0;
   ParallelFor(High(LTodo),
     procedure(AIdx: Integer)

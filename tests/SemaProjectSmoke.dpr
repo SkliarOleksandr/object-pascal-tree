@@ -15100,6 +15100,61 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // ---- The name scan of text-demoted consumers runs on every core (audit
+  // C2-20): twelve demoted consumers of one unit - past ParallelFor's inline
+  // threshold - every odd one mentioning a name the unit's interface edit
+  // adds. Exactly those six are redone, each binding the new name, and the
+  // even ones keep their E2003-free answers untouched. ----
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_demotescan');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  var LHaText := 'unit UnitHA;'#10'interface'#10'const Base = 1;'#10 +
+    'implementation'#10'end.'#10;
+  var LHaPath := TPath.Combine(LDir, 'UnitHA.pas');
+  TFile.WriteAllText(LHaPath, LHaText);
+  for var LHc := 1 to 12 do
+    if Odd(LHc) then
+      TFile.WriteAllText(TPath.Combine(LDir, Format('UnitHC%.2d.pas', [LHc])),
+        Format('unit UnitHC%.2d;'#10'interface'#10'uses UnitHA;'#10 +
+          'implementation'#10'procedure P;'#10'var X: Integer;'#10 +
+          'begin'#10'  X := Base;'#10'  Later := X;'#10'end;'#10'end.'#10,
+          [LHc]))
+    else
+      TFile.WriteAllText(TPath.Combine(LDir, Format('UnitHC%.2d.pas', [LHc])),
+        Format('unit UnitHC%.2d;'#10'interface'#10'uses UnitHA;'#10 +
+          'implementation'#10'procedure P;'#10'var X: Integer;'#10 +
+          'begin'#10'  X := Base;'#10'end;'#10'end.'#10, [LHc]));
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('demotescan: the baseline - every odd consumer misses the name',
+      (DiagCount(ModelByName('unithc01'), 'E2003') = 1) and
+      (DiagCount(ModelByName('unithc11'), 'E2003') = 1) and
+      (DiagCount(ModelByName('unithc02'), 'E2003') = 0));
+    GProj.DemoteText([]);
+    GProj.SetBuffer(LHaPath, StringReplace(LHaText, 'implementation'#10,
+      'var Later: Integer;'#10'implementation'#10, []), 1);
+    Ok('demotescan: the interface edit is accepted [' +
+      GProj.StageTimings + ']', GProj.AnalyzeModuleOnly(LHaPath));
+    Ok('demotescan: the unit and exactly its six mentioning consumers are ' +
+      'redone [' + GProj.StageTimings + ']',
+      Pos('module=7;', GProj.StageTimings) > 0);
+    var LHcOk := True;
+    for var LHc := 1 to 12 do
+    begin
+      var LHm := ModelByName(Format('unithc%.2d', [LHc]));
+      if (LHm = nil) or (DiagCount(LHm, 'E2003') <> 0) or
+         (Odd(LHc) and not CrossRefTo(LHm, 'Later', 'Later')) then
+        LHcOk := False;
+    end;
+    Ok('demotescan: every consumer answers as a rebuild would', LHcOk);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   // ---- Guard 2 became a repoint (0.15.7). The instance table is keyed by
   // (unit, symbol) and outlives every pass; an edit that renumbers a unit's
   // symbols used to be REFUSED whenever any instance named one of them past
