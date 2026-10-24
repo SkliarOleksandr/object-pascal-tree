@@ -62,8 +62,18 @@ const
 { The interface source of AUnit. AUnresolved receives one line per place the
   printer had to fall back (an unresolved type, a property without a printable
   accessor); the same lines are in the text's header comment. }
+type
+  { Another unit's .dcu by path for the printer - nil when it cannot be
+    read. The unit stays the loader's: the printer reads it and never frees
+    it, so a loader that keeps what it read shares it between printers. }
+  TPasDcuLoader = reference to function(const APath: string): TPasDcuUnit;
+
 function DcuInterfaceSource(AUnit: TPasDcuUnit): string; overload;
 function DcuInterfaceSource(AUnit: TPasDcuUnit;
+  out AUnresolved: TArray<string>): string; overload;
+{ The same, with the other units' .dcu files read through ALoader instead of
+  loaded and freed by this one print (TPasSourceManager.DcuText's cache). }
+function DcuInterfaceSource(AUnit: TPasDcuUnit; const ALoader: TPasDcuLoader;
   out AUnresolved: TArray<string>): string; overload;
 
 implementation
@@ -107,8 +117,10 @@ type
     FInstOfFull: TDictionary<Integer, TPasDcuType>;
     FTypedConstReason: string;
     // Other units' .dcu files read for the layout of imported types, by
-    // lowercase unit name; nil for one that is not beside this file.
+    // lowercase unit name; nil for one that is not beside this file. Owned
+    // here unless they came from FLoader.
     FForeign: TObjectDictionary<string, TPasDcuUnit>;
+    FLoader: TPasDcuLoader;
     // TypeRef's nesting: a corrupt table can make a type contain itself.
     FTypeRefDepth: Integer;
     procedure Line(const AText: string);
@@ -193,7 +205,7 @@ type
     function CallKindWord(AKind: TPasDcuCallKind): string;
     function OperatorName(const AName: string): string;
   public
-    constructor Create(AUnit: TPasDcuUnit);
+    constructor Create(AUnit: TPasDcuUnit; const ALoader: TPasDcuLoader = nil);
     destructor Destroy; override;
     function Print: string;
     property UnresolvedNotes: TList<string> read FUnresolved;
@@ -213,10 +225,16 @@ end;
 
 function DcuInterfaceSource(AUnit: TPasDcuUnit;
   out AUnresolved: TArray<string>): string;
+begin
+  Result := DcuInterfaceSource(AUnit, nil, AUnresolved);
+end;
+
+function DcuInterfaceSource(AUnit: TPasDcuUnit; const ALoader: TPasDcuLoader;
+  out AUnresolved: TArray<string>): string;
 var
   LPrinter: TPasDcuPrinter;
 begin
-  LPrinter := TPasDcuPrinter.Create(AUnit);
+  LPrinter := TPasDcuPrinter.Create(AUnit, ALoader);
   try
     Result := LPrinter.Print;
     AUnresolved := LPrinter.UnresolvedNotes.ToArray;
@@ -227,15 +245,20 @@ end;
 
 { TPasDcuPrinter }
 
-constructor TPasDcuPrinter.Create(AUnit: TPasDcuUnit);
+constructor TPasDcuPrinter.Create(AUnit: TPasDcuUnit;
+  const ALoader: TPasDcuLoader);
 begin
   inherited Create;
   FUnit := AUnit;
+  FLoader := ALoader;
   FOut := TStringBuilder.Create;
   FNameSources := TDictionary<string, Integer>.Create;
   FEnumMembers := TObjectDictionary<Integer, TList<TPasDcuDecl>>.Create([doOwnsValues]);
   FConsumed := TDictionary<TPasDcuDecl, Boolean>.Create;
-  FForeign := TObjectDictionary<string, TPasDcuUnit>.Create([doOwnsValues]);
+  if Assigned(ALoader) then
+    FForeign := TObjectDictionary<string, TPasDcuUnit>.Create([])
+  else
+    FForeign := TObjectDictionary<string, TPasDcuUnit>.Create([doOwnsValues]);
   FDeclared := TDictionary<Integer, Boolean>.Create;
   FDefined := TDictionary<Integer, Boolean>.Create;
   FPrinting := TDictionary<Integer, Boolean>.Create;
@@ -1425,7 +1448,8 @@ end;
 
 // The .dcu of the unit that entry AUnitIdx of AOwner's uses list names,
 // read from the directory this file is in; nil when it is not there or
-// cannot be read. Cached for the printer's lifetime.
+// cannot be read. Cached for the printer's lifetime, and through FLoader,
+// when there is one, beyond it.
 function TPasDcuPrinter.ForeignUnit(AOwner: TPasDcuUnit; AUnitIdx: Integer): TPasDcuUnit;
 var
   LUses: TPasDcuUses;
@@ -1442,12 +1466,15 @@ begin
   Result := nil;
   LPath := TPath.Combine(TPath.GetDirectoryName(FUnit.FileName), LUses.Name + '.dcu');
   if FileExists(LPath) then
-    try
-      Result := LoadDcu(LPath);
-    except
-      on E: Exception do
-        Result := nil;
-    end;
+    if Assigned(FLoader) then
+      Result := FLoader(LPath)
+    else
+      try
+        Result := LoadDcu(LPath);
+      except
+        on E: Exception do
+          Result := nil;
+      end;
   FForeign.Add(LKey, Result);
 end;
 

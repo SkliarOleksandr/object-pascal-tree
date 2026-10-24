@@ -200,8 +200,10 @@ resourcestring's text is the unnamed `.` constant in the slot right after it.
 An imported type carries only its name in this file. System's types are
 known by name (`ImportSize`, with the compiler's own `@AnsiChr`/`@PAnsiChr`
 spellings mapped back); any other import is followed into **its own unit's
-`.dcu` beside this file** (`ForeignUnit`/`ResolveImport`, cached per
-printer), which is what turns `const PKEY_X: TPropertyKey = ...` in a Winapi
+`.dcu` beside this file** (`ForeignUnit`/`ResolveImport`; under a
+`TPasSourceManager` the units read are shared by every print of the manager
+and read again only when the file's stamp moves, a standalone
+`DcuInterfaceSource` caches them for its one print), which is what turns `const PKEY_X: TPropertyKey = ...` in a Winapi
 unit into `(fmtid: '{...}'; pid: 7)` and reads `TColor` arrays, imported
 enumerations and sets with their member names. The same lookup decides
 whether a helper of an imported type is a class or a record helper (25 of

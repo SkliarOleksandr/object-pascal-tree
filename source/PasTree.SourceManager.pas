@@ -124,6 +124,18 @@ type
     FDcuFailures: TDictionary<string, string>;
     // The file's write time and size when its text or failure was recorded.
     FDcuStamps: TDictionary<string, string>;
+    // Other units' .dcu files DcuText's prints read for the layout, members
+    // and enumeration names of imported types (DcuForeign), by folded full
+    // path: (the stamp read at, the TPasDcuUnit or nil when unreadable).
+    // Shared by every print of this manager - a printer's own cache lived
+    // for one unit, and System.dcu was read again for each unit that
+    // imported from it (audit C1-37). A unit read again after a rebuild
+    // retires the old object to FDcuRetired: a print on another worker may
+    // still be reading it. Both are freed by ReleaseAnalysisCaches, when no
+    // print runs. Guarded by FDcuLock.
+    FDcuUnits: TDictionary<string, TPair<string, TObject>>;
+    FDcuRetired: TObjectList<TObject>;
+    FDcuForeignLoads: Integer;
     FDcuLock: TObject;
     // In-memory file-content repository, filled by Prefetch (below): LoadText
     // serves from here before touching the disk. One analysis long - dropped
@@ -274,6 +286,8 @@ type
       out AResolved: string): Boolean;
     function FindDcuFile(const AUnitName: string; out AResolved: string): Boolean;
     function DcuText(const APath: string): string;
+    function DcuForeign(const APath: string): TObject;
+    procedure FreeDcuUnits;
     function ReadFileText(const APath: string): string;
     function DecodeText(const ABytes: TBytes; const APath: string): string;
     procedure NoteRecovered(const APath, AHow: string);
@@ -446,6 +460,10 @@ type
     { Why the .dcu at APath could not be read in this analysis, '' when it
       could (or was never asked for). }
     function DcuFailure(const APath: string): string;
+    { How many times a print of a compiled unit's interface read ANOTHER
+      unit's .dcu from disk for its imported types - once per file and
+      stamp, whatever the number of units importing from it. }
+    property DcuForeignLoads: Integer read FDcuForeignLoads;
     { The decode itself, without an instance. Exposed because a HOST must show
       the reader exactly the text the analysis ran on: a separate loader is a
       second source of truth, and the two disagree precisely on the files that
@@ -526,6 +544,7 @@ begin
   FIncludePaths.Free;
   FIncludeDirStamps.Free;
   FUnitMemo.Free;
+  FreeDcuUnits;
   FDcuFailures.Free;
   FDcuTexts.Free;
   FDcuStamps.Free;
@@ -1336,6 +1355,69 @@ begin
   end;
 end;
 
+// Another unit's .dcu for DcuText's printer, shared (see FDcuUnits): read
+// outside the lock, a racing reader's copy adopted and this one freed.
+function TPasSourceManager.DcuForeign(const APath: string): TObject;
+var
+  LKey, LStamp: string;
+  LHit: TPair<string, TObject>;
+  LUnit: TPasDcuUnit;
+begin
+  LKey := PasFoldName(TPath.GetFullPath(APath));
+  LStamp := FileStamp(APath);
+  TMonitor.Enter(FDcuLock);
+  try
+    if (FDcuUnits <> nil) and FDcuUnits.TryGetValue(LKey, LHit) and
+       (LHit.Key = LStamp) then
+      Exit(LHit.Value);
+  finally
+    TMonitor.Exit(FDcuLock);
+  end;
+  try
+    LUnit := LoadDcu(APath);
+  except
+    LUnit := nil;
+  end;
+  TMonitor.Enter(FDcuLock);
+  try
+    Inc(FDcuForeignLoads);
+    if FDcuUnits = nil then
+      FDcuUnits := TDictionary<string, TPair<string, TObject>>.Create;
+    if FDcuUnits.TryGetValue(LKey, LHit) then
+    begin
+      if LHit.Key = LStamp then
+      begin
+        LUnit.Free;
+        Exit(LHit.Value);
+      end;
+      if LHit.Value <> nil then
+      begin
+        if FDcuRetired = nil then
+          FDcuRetired := TObjectList<TObject>.Create(True);
+        FDcuRetired.Add(LHit.Value);
+      end;
+    end;
+    FDcuUnits.AddOrSetValue(LKey, TPair<string, TObject>.Create(LStamp, LUnit));
+    Result := LUnit;
+  finally
+    TMonitor.Exit(FDcuLock);
+  end;
+end;
+
+procedure TPasSourceManager.FreeDcuUnits;
+begin
+  TMonitor.Enter(FDcuLock);
+  try
+    if FDcuUnits <> nil then
+      for var LHit in FDcuUnits.Values do
+        LHit.Value.Free;
+    FreeAndNil(FDcuUnits);
+    FreeAndNil(FDcuRetired);
+  finally
+    TMonitor.Exit(FDcuLock);
+  end;
+end;
+
 // The interface source of a compiled unit, generated once per path and
 // stamp. A failure is remembered for DcuFailure and re-raised: the caller's
 // tolerant load path (TPasSemaProject.LoadFile) turns it into the
@@ -1347,6 +1429,7 @@ function TPasSourceManager.DcuText(const APath: string): string;
 var
   LKey, LMsg, LStamp, LOld: string;
   LUnit: TPasDcuUnit;
+  LNotes: TArray<string>;
 begin
   LKey := PasFoldName(TPath.GetFullPath(APath));
   LStamp := FileStamp(APath);
@@ -1364,11 +1447,17 @@ begin
     TMonitor.Exit(FDcuLock);
   end;
   // Read and print OUTSIDE the lock (two workers racing to the same unit at
-  // worst generate it twice; the loser adopts the winner's text).
+  // worst generate it twice; the loser adopts the winner's text). The unit
+  // itself is this print's own - the printer writes to its constants - and
+  // the units it imports from are the shared ones.
   try
     LUnit := LoadDcu(APath);
     try
-      Result := DcuInterfaceSource(LUnit);
+      Result := DcuInterfaceSource(LUnit,
+        function(const AForeign: string): TPasDcuUnit
+        begin
+          Result := TPasDcuUnit(DcuForeign(AForeign));
+        end, LNotes);
     finally
       LUnit.Free;
     end;
@@ -2040,6 +2129,7 @@ end;
 procedure TPasSourceManager.ReleaseAnalysisCaches;
 begin
   FreeAndNil(FContentCache);
+  FreeDcuUnits;
   TMonitor.Enter(FIncludeLock);
   try
     FreeAndNil(FIncludeStreams);

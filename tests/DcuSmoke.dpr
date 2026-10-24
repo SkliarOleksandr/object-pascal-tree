@@ -27,6 +27,7 @@ uses
   System.SysUtils,
   System.Classes,
   System.IOUtils,
+  System.DateUtils,
   System.Generics.Collections,
   PasTree.Types in '..\source\PasTree.Types.pas',
   PasTree.Lexer in '..\source\PasTree.Lexer.pas',
@@ -269,17 +270,87 @@ end;
 
 // Compiles the fixture with the given compiler into ALibDir and removes the
 // intermediate files, leaving DcuFix.dcu (and Both.dcu + Both.pas) there.
-function CompileFixture(const ACompiler, ASrcDir, ALibDir, APlatform: string): Boolean;
+function CompileUnit(const ACompiler, ASrcDir, ALibDir, APlatform,
+  AFile: string): Boolean;
 var
   LCmd: string;
 begin
   TDirectory.CreateDirectory(ALibDir);
   LCmd := Format('"%s\bin\%s" -B -Q -N0"%s" -E"%s" -U"%s\lib\%s\release" ' +
     '-NSSystem;Winapi "%s"', [StudioRoot, ACompiler, ALibDir, ALibDir, StudioRoot,
-    APlatform, TPath.Combine(ASrcDir, 'DcuFix.pas')]);
+    APlatform, TPath.Combine(ASrcDir, AFile)]);
   Result := RunProcess(LCmd, ASrcDir) = 0;
   if not Result then
     Writeln('  (fixture compile failed: ', LCmd, ')');
+end;
+
+function CompileFixture(const ACompiler, ASrcDir, ALibDir, APlatform: string): Boolean;
+begin
+  Result := CompileUnit(ACompiler, ASrcDir, ALibDir, APlatform, 'DcuFix.pas');
+end;
+
+{ C1-37: two compiled units importing an enumeration from a third print it
+  by name, and the source manager reads the third's .dcu ONCE for both - a
+  printer's own cache used to read it again for each. A rebuilt .dcu is read
+  again; the text is the one a standalone print gives. }
+procedure CheckSharedForeign(const ADir: string);
+var
+  LSrc, LLib, LA, LB, LAlone: string;
+  LSM: TPasSourceManager;
+  LUnit: TPasDcuUnit;
+begin
+  LSrc := TPath.Combine(ADir, 'shsrc');
+  LLib := TPath.Combine(ADir, 'shlib');
+  TDirectory.CreateDirectory(LSrc);
+  TFile.WriteAllText(TPath.Combine(LSrc, 'DcuShBase.pas'),
+    'unit DcuShBase;'#13#10'interface'#13#10'type'#13#10 +
+    '  TShColor = (shRed, shGreen, shBlue);'#13#10'implementation'#13#10 +
+    'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LSrc, 'DcuShA.pas'),
+    'unit DcuShA;'#13#10'interface'#13#10'uses DcuShBase;'#13#10 +
+    'procedure PA(C: TShColor = shBlue);'#13#10'implementation'#13#10 +
+    'procedure PA(C: TShColor); begin end;'#13#10'end.'#13#10);
+  TFile.WriteAllText(TPath.Combine(LSrc, 'DcuShB.pas'),
+    'unit DcuShB;'#13#10'interface'#13#10'uses DcuShBase;'#13#10 +
+    'procedure PB(C: TShColor = shGreen);'#13#10'implementation'#13#10 +
+    'procedure PB(C: TShColor); begin end;'#13#10'end.'#13#10);
+  if not (CompileUnit('dcc32.exe', LSrc, LLib, 'win32', 'DcuShA.pas') and
+     CompileUnit('dcc32.exe', LSrc, LLib, 'win32', 'DcuShB.pas')) then
+  begin
+    Ok('shared foreign: the fixtures compile', False);
+    Exit;
+  end;
+  LSM := TPasSourceManager.Create([LLib]);
+  try
+    LA := LSM.LoadText(TPath.Combine(LLib, 'DcuShA.dcu'));
+    LB := LSM.LoadText(TPath.Combine(LLib, 'DcuShB.dcu'));
+    Ok('shared foreign: both print the imported value by name',
+      LA.Contains('shBlue') and LB.Contains('shGreen'));
+    Ok('shared foreign: the imported unit is read once for both (' +
+      IntToStr(LSM.DcuForeignLoads) + ')', LSM.DcuForeignLoads = 1);
+    LUnit := LoadDcu(TPath.Combine(LLib, 'DcuShA.dcu'));
+    try
+      LAlone := DcuInterfaceSource(LUnit);
+    finally
+      LUnit.Free;
+    end;
+    Ok('shared foreign: the text is the standalone print''s', LA = LAlone);
+    // Rebuilt: both stamps move, the imported unit is read again.
+    TFile.SetLastWriteTime(TPath.Combine(LLib, 'DcuShA.dcu'),
+      IncSecond(TFile.GetLastWriteTime(TPath.Combine(LLib, 'DcuShA.dcu')), 5));
+    TFile.SetLastWriteTime(TPath.Combine(LLib, 'DcuShBase.dcu'),
+      IncSecond(TFile.GetLastWriteTime(TPath.Combine(LLib, 'DcuShBase.dcu')),
+      5));
+    Ok('shared foreign: a rebuilt unit prints the same',
+      LSM.LoadText(TPath.Combine(LLib, 'DcuShA.dcu')) = LAlone);
+    Ok('shared foreign: ... reading its rebuilt import again (' +
+      IntToStr(LSM.DcuForeignLoads) + ')', LSM.DcuForeignLoads = 2);
+    LSM.ReleaseAnalysisCaches;
+    Ok('shared foreign: released, the text stays',
+      LSM.LoadText(TPath.Combine(LLib, 'DcuShB.dcu')) = LB);
+  finally
+    LSM.Free;
+  end;
 end;
 
 function MidByName(const ANameLower: string): Integer;
@@ -795,6 +866,7 @@ begin
     end;
     if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
       CheckStamp(TPath.Combine(GLib32, 'DcuFix.dcu'));
+    CheckSharedForeign(GDir);
     if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
       CheckCorruption(TPath.Combine(GLib32, 'DcuFix.dcu'), 'corrupt/win32');
     if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then
