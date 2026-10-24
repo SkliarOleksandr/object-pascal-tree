@@ -57,6 +57,20 @@ type
 
   TPasDcuPlatform = (dcuWin32, dcuWin64);
 
+  { What a System type known by name is: an import carries only the name
+    (TPasDcuType.ImportName), so every reader of one asks this table. }
+  TPasDcuSysClass = (dscSigned, dscUnsigned, dscBoolean, dscChar, dscFloat,
+    dscCurrency, dscComp, dscUString, dscAString, dscWString, dscShortString,
+    dscVariant, dscPChar, dscPAnsiChar, dscPointer, dscGuid);
+  TPasDcuSysType = record
+    Cls: TPasDcuSysClass;
+    // Bytes on the platform asked for; 0 for a type whose size the name
+    // does not give (ShortString, Variant).
+    Size: Integer;
+    // Pointer-sized (NativeInt, THandle, the strings, PChar, TObject ...).
+    PtrSized: Boolean;
+  end;
+
   TPasDcuCallKind = (dcRegister, dcCdecl, dcPascal, dcStdCall, dcSafeCall);
 
   { What a declaration record is. The compiler's record tags map onto these
@@ -350,6 +364,13 @@ function DcuVersionSupported(AVersionByte: Byte): Boolean;
 function DcuPlatformSupported(APlatformByte: Byte): Boolean;
 { 'Delphi 13' for $25, 'version byte $1B' for an unknown one. }
 function DcuVersionName(AVersionByte: Byte): string;
+{ The System type ANameLower names (lower case, `@AnsiChr`-style spellings
+  already mapped), sized for APlatform; False for a name that is no System
+  type this table knows. The one table behind IntegerType and the printer's
+  ImportSize, OrdinalText, TryDataValue and DefaultAllowed - four hand-kept
+  lists had drifted apart (audit C1-38). }
+function DcuSystemType(const ANameLower: string; APlatform: TPasDcuPlatform;
+  out AType: TPasDcuSysType): Boolean;
 
 const
   // Member flag bits (LocFlags), as the compiler stores them.
@@ -763,8 +784,7 @@ function TPasDcuUnit.IntegerType(AIdx: Integer; out ASize: Integer;
   out AUnsigned: Boolean): Boolean;
 var
   LType: TPasDcuType;
-  LName: string;
-  LPtr: Integer;
+  LSys: TPasDcuSysType;
 begin
   Result := False;
   ASize := 0;
@@ -782,53 +802,12 @@ begin
         Result := True;
       end;
     tkImport:
+      if DcuSystemType(LowerCase(LType.ImportName), Platform, LSys) and
+         (LSys.Cls in [dscSigned, dscUnsigned]) then
       begin
-        if Platform = dcuWin64 then
-          LPtr := 8
-        else
-          LPtr := 4;
-        LName := LowerCase(LType.ImportName);
+        ASize := LSys.Size;
+        AUnsigned := LSys.Cls = dscUnsigned;
         Result := True;
-        if (LName = 'shortint') or (LName = 'int8') then
-          ASize := 1
-        else if (LName = 'byte') or (LName = 'uint8') then
-        begin
-          ASize := 1;
-          AUnsigned := True;
-        end
-        else if (LName = 'smallint') or (LName = 'int16') then
-          ASize := 2
-        else if (LName = 'word') or (LName = 'uint16') then
-        begin
-          ASize := 2;
-          AUnsigned := True;
-        end
-        else if (LName = 'integer') or (LName = 'longint') or
-           (LName = 'int32') or (LName = 'fixedint') then
-          ASize := 4
-        else if (LName = 'cardinal') or (LName = 'longword') or
-           (LName = 'uint32') or (LName = 'fixeduint') then
-        begin
-          ASize := 4;
-          AUnsigned := True;
-        end
-        else if LName = 'int64' then
-          ASize := 8
-        else if LName = 'uint64' then
-        begin
-          ASize := 8;
-          AUnsigned := True;
-        end
-        else if (LName = 'nativeint') or (LName = 'intptr') then
-          ASize := LPtr
-        else if (LName = 'nativeuint') or (LName = 'uintptr') or
-           (LName = 'thandle') then
-        begin
-          ASize := LPtr;
-          AUnsigned := True;
-        end
-        else
-          Result := False;
       end;
   end;
 end;
@@ -907,6 +886,110 @@ end;
 function DcuPlatformSupported(APlatformByte: Byte): Boolean;
 begin
   Result := (APlatformByte = cPlatformWin32) or (APlatformByte = cPlatformWin64);
+end;
+
+type
+  TSysRow = record
+    Name: string;
+    Cls: TPasDcuSysClass;
+    Size: Integer;   // -1 pointer size, -2 Extended (8 on Win64, else 10)
+  end;
+
+const
+  cSysRows: array[0..59] of TSysRow = (
+    (Name: 'shortint'; Cls: dscSigned; Size: 1),
+    (Name: 'int8'; Cls: dscSigned; Size: 1),
+    (Name: 'smallint'; Cls: dscSigned; Size: 2),
+    (Name: 'int16'; Cls: dscSigned; Size: 2),
+    (Name: 'integer'; Cls: dscSigned; Size: 4),
+    (Name: 'longint'; Cls: dscSigned; Size: 4),
+    (Name: 'int32'; Cls: dscSigned; Size: 4),
+    (Name: 'fixedint'; Cls: dscSigned; Size: 4),
+    (Name: 'hresult'; Cls: dscSigned; Size: 4),
+    (Name: 'int64'; Cls: dscSigned; Size: 8),
+    (Name: 'nativeint'; Cls: dscSigned; Size: -1),
+    (Name: 'intptr'; Cls: dscSigned; Size: -1),
+    (Name: 'byte'; Cls: dscUnsigned; Size: 1),
+    (Name: 'uint8'; Cls: dscUnsigned; Size: 1),
+    (Name: 'word'; Cls: dscUnsigned; Size: 2),
+    (Name: 'uint16'; Cls: dscUnsigned; Size: 2),
+    (Name: 'cardinal'; Cls: dscUnsigned; Size: 4),
+    (Name: 'longword'; Cls: dscUnsigned; Size: 4),
+    (Name: 'uint32'; Cls: dscUnsigned; Size: 4),
+    (Name: 'fixeduint'; Cls: dscUnsigned; Size: 4),
+    (Name: 'ucs4char'; Cls: dscUnsigned; Size: 4),
+    (Name: 'uint64'; Cls: dscUnsigned; Size: 8),
+    (Name: 'nativeuint'; Cls: dscUnsigned; Size: -1),
+    (Name: 'uintptr'; Cls: dscUnsigned; Size: -1),
+    (Name: 'thandle'; Cls: dscUnsigned; Size: -1),
+    (Name: 'boolean'; Cls: dscBoolean; Size: 1),
+    (Name: 'bytebool'; Cls: dscBoolean; Size: 1),
+    (Name: 'wordbool'; Cls: dscBoolean; Size: 2),
+    (Name: 'longbool'; Cls: dscBoolean; Size: 4),
+    (Name: 'ansichar'; Cls: dscChar; Size: 1),
+    (Name: 'utf8char'; Cls: dscChar; Size: 1),
+    (Name: 'char'; Cls: dscChar; Size: 2),
+    (Name: 'widechar'; Cls: dscChar; Size: 2),
+    (Name: 'single'; Cls: dscFloat; Size: 4),
+    (Name: 'double'; Cls: dscFloat; Size: 8),
+    (Name: 'real'; Cls: dscFloat; Size: 8),
+    (Name: 'tdatetime'; Cls: dscFloat; Size: 8),
+    (Name: 'tdate'; Cls: dscFloat; Size: 8),
+    (Name: 'ttime'; Cls: dscFloat; Size: 8),
+    (Name: 'extended'; Cls: dscFloat; Size: -2),
+    (Name: 'currency'; Cls: dscCurrency; Size: 8),
+    (Name: 'comp'; Cls: dscComp; Size: 8),
+    (Name: 'string'; Cls: dscUString; Size: -1),
+    (Name: 'unicodestring'; Cls: dscUString; Size: -1),
+    (Name: 'ansistring'; Cls: dscAString; Size: -1),
+    (Name: 'rawbytestring'; Cls: dscAString; Size: -1),
+    (Name: 'utf8string'; Cls: dscAString; Size: -1),
+    (Name: 'widestring'; Cls: dscWString; Size: -1),
+    (Name: 'shortstring'; Cls: dscShortString; Size: 0),
+    (Name: 'variant'; Cls: dscVariant; Size: 0),
+    (Name: 'olevariant'; Cls: dscVariant; Size: 0),
+    (Name: 'pchar'; Cls: dscPChar; Size: -1),
+    (Name: 'pwidechar'; Cls: dscPChar; Size: -1),
+    (Name: 'pansichar'; Cls: dscPAnsiChar; Size: -1),
+    (Name: 'pointer'; Cls: dscPointer; Size: -1),
+    (Name: 'tobject'; Cls: dscPointer; Size: -1),
+    (Name: 'tclass'; Cls: dscPointer; Size: -1),
+    (Name: 'iinterface'; Cls: dscPointer; Size: -1),
+    (Name: 'iunknown'; Cls: dscPointer; Size: -1),
+    (Name: 'tguid'; Cls: dscGuid; Size: 16)
+    );
+
+var
+  // Name -> row of cSysRows, filled once by the unit's initialization and
+  // only read after it.
+  GSysRows: TDictionary<string, Integer>;
+
+function DcuSystemType(const ANameLower: string; APlatform: TPasDcuPlatform;
+  out AType: TPasDcuSysType): Boolean;
+var
+  LRow: Integer;
+begin
+  AType := Default(TPasDcuSysType);
+  Result := GSysRows.TryGetValue(ANameLower, LRow);
+  if not Result then
+    Exit;
+  AType.Cls := cSysRows[LRow].Cls;
+  AType.Size := cSysRows[LRow].Size;
+  AType.PtrSized := AType.Size = -1;
+  if AType.Size = -1 then
+  begin
+    if APlatform = dcuWin64 then
+      AType.Size := 8
+    else
+      AType.Size := 4;
+  end
+  else if AType.Size = -2 then
+  begin
+    if APlatform = dcuWin64 then
+      AType.Size := 8
+    else
+      AType.Size := 10;
+  end;
 end;
 
 function DcuVersionName(AVersionByte: Byte): string;
@@ -3116,5 +3199,13 @@ begin
       LDecl.ValueInt := LDecl.ValueInt and ((Int64(1) shl (8 * LSize)) - 1);
   end;
 end;
+
+initialization
+  GSysRows := TDictionary<string, Integer>.Create(Length(cSysRows));
+  for var LRow := 0 to High(cSysRows) do
+    GSysRows.Add(cSysRows[LRow].Name, LRow);
+
+finalization
+  GSysRows.Free;
 
 end.

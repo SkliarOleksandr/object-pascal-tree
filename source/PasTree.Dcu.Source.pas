@@ -164,6 +164,7 @@ type
     // values in the data block (typed constants)
     function PtrSize: Integer;
     function ImportSize(const ALowerName: string): Integer;
+    function ImportIs(AType: TPasDcuType; ACls: TPasDcuSysClass): Boolean;
     function ForeignUnit(AOwner: TPasDcuUnit; AUnitIdx: Integer): TPasDcuUnit;
     function ResolveImport(var AUnit: TPasDcuUnit; var AIdx: Integer): Boolean;
     function EnumMemberName(AUnit: TPasDcuUnit; AEnumIdx: Integer; AValue: Int64;
@@ -1122,6 +1123,8 @@ var
   LName: string;
   LOther: TPasDcuUnit;
   LOtherIdx, LUnsignedSize: Integer;
+  LSys: TPasDcuSysType;
+  LKnown: Boolean;
 begin
   LType := AUnit.TypeAt(ATypeIdx);
   if LType <> nil then
@@ -1163,32 +1166,26 @@ begin
       tkImport:
         begin
           LName := LowerCase(LType.ImportName);
-          if (LName = 'boolean') or (LName = 'bytebool') or
-             (LName = 'wordbool') or (LName = 'longbool') then
+          LKnown := DcuSystemType(LName, FUnit.Platform, LSys);
+          if LKnown and (LSys.Cls = dscBoolean) then
           begin
             if AValue = 0 then
               Exit('False');
             if AValue = 1 then
               Exit('True');
           end
-          else if (LName = 'char') or (LName = 'ansichar') or
-                  (LName = 'widechar') or (LName = 'utf8char') then
+          else if LKnown and (LSys.Cls = dscChar) then
             Exit(CharLiteral(Integer(AValue)))
-          else if (LName = 'pointer') or (LName = 'tobject') or
-                  (LName = 'tclass') or (LName = 'iinterface') or
-                  (LName = 'iunknown') or (LName = 'pchar') or
-                  (LName = 'pansichar') or (LName = 'pwidechar') or
-                  (LName = 'string') or (LName = 'unicodestring') or
-                  (LName = 'ansistring') or (LName = 'widestring') or
-                  (LName = 'rawbytestring') or (LName = 'utf8string') then
+          else if LKnown and (LSys.Cls in [dscPointer, dscPChar, dscPAnsiChar,
+                  dscUString, dscAString, dscWString]) then
           begin
             if AValue = 0 then
               Exit('nil');
           end
-          // Every other System type ImportSize knows is a number: following
+          // Every other System type the table sizes is a number: following
           // it read System.dcu (and, for an alias such as HRESULT, the unit
           // between) only to print the number this does (audit C1-38).
-          else if (LName <> '') and (ImportSize(LName) = 0) then
+          else if (LName <> '') and (not LKnown or (LSys.Size = 0)) then
           begin
             // An imported ordinal type that is not a number: an enumeration
             // declared in another unit, whose member names live there. Read
@@ -1338,7 +1335,7 @@ begin
         LScale := 1;
         if (LType <> nil) and
            (((LType.Kind = tkFloat) and (LType.FloatKind = 5)) or
-            ((LType.Kind = tkImport) and SameText(LType.ImportName, 'Currency'))) then
+            ImportIs(LType, dscCurrency)) then
           LScale := 10000;
         Exit(FloatLiteral(AConst.ValueBytes, LScale));
       end;
@@ -1359,8 +1356,7 @@ begin
         if (Length(AConst.ValueBytes) = 8) and (LSetType <> nil) then
         begin
           if ((LSetType.Kind = tkFloat) and (LSetType.FloatKind = 4)) or
-             ((LSetType.Kind = tkImport) and
-              SameText(LSetType.ImportName, 'Comp')) then
+             ImportIs(LSetType, dscComp) then
             Exit(IntToStr(PInt64(@AConst.ValueBytes[0])^) + '.0');
           if (LSetType.Kind = tkRange) or
              LUnit.IntegerType(LIdx, LScale, LUnsigned) then
@@ -1405,42 +1401,24 @@ end;
 // The storage size of a System type known only by name (an import carries
 // no size), 0 when the name is not one this table knows.
 function TPasDcuPrinter.ImportSize(const ALowerName: string): Integer;
+var
+  LSys: TPasDcuSysType;
 begin
-  Result := 0;
-  if (ALowerName = 'byte') or (ALowerName = 'shortint') or (ALowerName = 'int8') or
-     (ALowerName = 'uint8') or (ALowerName = 'boolean') or (ALowerName = 'bytebool') or
-     (ALowerName = 'ansichar') or (ALowerName = 'utf8char') then
-    Result := 1
-  else if (ALowerName = 'word') or (ALowerName = 'smallint') or (ALowerName = 'int16') or
-     (ALowerName = 'uint16') or (ALowerName = 'wordbool') or (ALowerName = 'char') or
-     (ALowerName = 'widechar') then
-    Result := 2
-  else if (ALowerName = 'integer') or (ALowerName = 'cardinal') or (ALowerName = 'longint') or
-     (ALowerName = 'longword') or (ALowerName = 'int32') or (ALowerName = 'uint32') or
-     (ALowerName = 'fixedint') or (ALowerName = 'fixeduint') or (ALowerName = 'longbool') or
-     (ALowerName = 'single') or (ALowerName = 'hresult') or (ALowerName = 'ucs4char') then
-    Result := 4
-  else if (ALowerName = 'int64') or (ALowerName = 'uint64') or (ALowerName = 'double') or
-     (ALowerName = 'currency') or (ALowerName = 'comp') or (ALowerName = 'real') or
-     (ALowerName = 'tdatetime') or (ALowerName = 'tdate') or (ALowerName = 'ttime') then
-    Result := 8
-  else if ALowerName = 'tguid' then
-    Result := 16
-  else if ALowerName = 'extended' then
-  begin
-    if FUnit.Platform = dcuWin64 then
-      Result := 8
-    else
-      Result := 10;
-  end
-  else if (ALowerName = 'pointer') or (ALowerName = 'nativeint') or (ALowerName = 'nativeuint') or
-     (ALowerName = 'intptr') or (ALowerName = 'uintptr') or (ALowerName = 'string') or
-     (ALowerName = 'unicodestring') or (ALowerName = 'ansistring') or (ALowerName = 'widestring') or
-     (ALowerName = 'rawbytestring') or (ALowerName = 'utf8string') or (ALowerName = 'pchar') or
-     (ALowerName = 'pansichar') or (ALowerName = 'pwidechar') or (ALowerName = 'tclass') or
-     (ALowerName = 'tobject') or (ALowerName = 'iinterface') or (ALowerName = 'iunknown') or
-     (ALowerName = 'thandle') then
-    Result := PtrSize;
+  if DcuSystemType(ALowerName, FUnit.Platform, LSys) then
+    Result := LSys.Size
+  else
+    Result := 0;
+end;
+
+// Whether AType is an import of the System type of class ACls.
+function TPasDcuPrinter.ImportIs(AType: TPasDcuType;
+  ACls: TPasDcuSysClass): Boolean;
+var
+  LSys: TPasDcuSysType;
+begin
+  Result := (AType <> nil) and (AType.Kind = tkImport) and
+    DcuSystemType(LowerCase(SystemAlias(AType.ImportName)), FUnit.Platform,
+      LSys) and (LSys.Cls = ACls);
 end;
 
 // The .dcu of the unit that entry AUnitIdx of AOwner's uses list names,
@@ -1696,6 +1674,7 @@ var
   LGuid: TGUID;
   LOther: TPasDcuUnit;
   LOtherIdx: Integer;
+  LSys: TPasDcuSysType;
 begin
   Result := False;
   AText := '';
@@ -1709,7 +1688,8 @@ begin
     tkImport:
       begin
         LName := LowerCase(SystemAlias(LType.ImportName));
-        if ImportSize(LName) = 0 then
+        if not DcuSystemType(LName, FUnit.Platform, LSys) or
+           (LSys.Size = 0) then
         begin
           // Not a System type: read its definition from its own unit.
           LOther := AUnit;
@@ -1718,58 +1698,54 @@ begin
             Exit(TryDataValue(LOther, LOtherIdx, AOfs, AAvail, AText));
           Exit;
         end;
-        if (LName = 'string') or (LName = 'unicodestring') then
-          Exit(TryPointerValue(AOfs, 1, AText));
-        if (LName = 'ansistring') or (LName = 'rawbytestring') or (LName = 'utf8string') then
-          Exit(TryPointerValue(AOfs, 2, AText));
-        if (LName = 'pchar') or (LName = 'pwidechar') then
-          Exit(TryPointerValue(AOfs, 3, AText));
-        if LName = 'pansichar' then
-          Exit(TryPointerValue(AOfs, 4, AText));
-        if LName = 'widestring' then
-          Exit;   // a BSTR: not a literal block this reader follows
-        if LName = 'tguid' then
-        begin
-          Move(FUnit.DataBlock[AOfs], LGuid, 16);
-          AText := '''' + GUIDToString(LGuid) + '''';
-          Exit(True);
+        case LSys.Cls of
+          dscUString:
+            Exit(TryPointerValue(AOfs, 1, AText));
+          dscAString:
+            Exit(TryPointerValue(AOfs, 2, AText));
+          dscPChar:
+            Exit(TryPointerValue(AOfs, 3, AText));
+          dscPAnsiChar:
+            Exit(TryPointerValue(AOfs, 4, AText));
+          dscWString:
+            Exit;   // a BSTR: not a literal block this reader follows
+          dscGuid:
+            begin
+              Move(FUnit.DataBlock[AOfs], LGuid, 16);
+              AText := '''' + GUIDToString(LGuid) + '''';
+              Exit(True);
+            end;
+          dscCurrency:
+            begin
+              AText := CurrencyAt(AOfs);
+              Exit(True);
+            end;
+          dscFloat:
+            begin
+              AText := FloatLiteral(Copy(FUnit.DataBlock, AOfs, LSize), 1);
+              Exit(True);
+            end;
+          dscComp:
+            begin
+              AText := CompAt(AOfs);
+              Exit(True);
+            end;
+          dscPointer:
+            Exit(TryPointerValue(AOfs, 0, AText));
         end;
-        if LName = 'currency' then
-        begin
-          AText := CurrencyAt(AOfs);
-          Exit(True);
-        end;
-        if (LName = 'single') or (LName = 'double') or (LName = 'extended') or
-           (LName = 'real') or (LName = 'tdatetime') or (LName = 'tdate') or
-           (LName = 'ttime') then
-        begin
-          AText := FloatLiteral(Copy(FUnit.DataBlock, AOfs, LSize), 1);
-          Exit(True);
-        end;
-        if LName = 'comp' then
-        begin
-          AText := CompAt(AOfs);
-          Exit(True);
-        end;
-        if (LName = 'nativeint') or (LName = 'intptr') then
+        if LSys.PtrSized and (LSys.Cls = dscSigned) then
         begin
           AText := IntToStr(DataInt(AOfs, LSize, True));
           Exit(True);
         end;
-        if (LName = 'nativeuint') or (LName = 'uintptr') or (LName = 'thandle') then
+        if LSys.PtrSized and (LSys.Cls = dscUnsigned) then
         begin
           AText := UIntToStr(UInt64(DataInt(AOfs, LSize, False)));
           Exit(True);
         end;
-        if (LName = 'pointer') or (LName = 'tclass') or (LName = 'tobject') or
-           (LName = 'iinterface') or (LName = 'iunknown') then
-          Exit(TryPointerValue(AOfs, 0, AText));
         // An ordinal: signed when the name says so.
         AText := OrdinalText(AUnit, ATypeIdx, DataInt(AOfs, LSize,
-          (LName = 'shortint') or (LName = 'smallint') or (LName = 'integer') or
-          (LName = 'longint') or (LName = 'int8') or (LName = 'int16') or
-          (LName = 'int32') or (LName = 'int64') or (LName = 'fixedint') or
-          (LName = 'hresult')));
+          LSys.Cls = dscSigned));
         Exit(True);
       end;
     tkRange, tkEnum:
@@ -2440,14 +2416,6 @@ end;
 // there, and printed `default nil` / `default 0` by a name list. Only an
 // import no unit beside this one describes falls back to that name list.
 function TPasDcuPrinter.DefaultAllowed(AType: TPasDcuType): Boolean;
-const
-  cNonOrdinal: array[0..20] of string = ('string', 'unicodestring',
-    'ansistring', 'widestring', 'shortstring', 'rawbytestring', 'pointer',
-    'tobject', 'tclass', 'iinterface', 'single', 'double', 'extended',
-    'currency', 'comp', 'real', 'variant', 'olevariant', 'tdatetime',
-    'tdate', 'ttime');
-  cOrdinal: array[0..6] of string = ('boolean', 'bytebool', 'wordbool',
-    'longbool', 'char', 'ansichar', 'widechar');
 
   function Allowed(AUnit: TPasDcuUnit; AIdx, ADepth: Integer): Boolean;
   var
@@ -2457,6 +2425,7 @@ const
     LUnsigned: Boolean;
     LOther: TPasDcuUnit;
     LOtherIdx: Integer;
+    LSys: TPasDcuSysType;
   begin
     Result := False;
     LType := AUnit.TypeAt(AIdx);
@@ -2468,11 +2437,13 @@ const
       tkImport:
         begin
           LName := LowerCase(SystemAlias(LType.ImportName));
-          if AUnit.IntegerType(AIdx, LSize, LUnsigned) or
-             (IndexStr(LName, cOrdinal) >= 0) then
+          if AUnit.IntegerType(AIdx, LSize, LUnsigned) then
             Exit(True);
-          if IndexStr(LName, cNonOrdinal) >= 0 then
-            Exit(False);
+          // A System type by name: an ordinal is an integer, a Boolean or a
+          // character; the rest (floats, strings, pointers, TGUID ...) have
+          // no `default`.
+          if DcuSystemType(LName, FUnit.Platform, LSys) then
+            Exit(LSys.Cls in [dscSigned, dscUnsigned, dscBoolean, dscChar]);
           LOther := AUnit;
           LOtherIdx := AIdx;
           if ResolveImport(LOther, LOtherIdx) then

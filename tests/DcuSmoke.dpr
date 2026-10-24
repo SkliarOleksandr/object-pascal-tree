@@ -289,6 +289,39 @@ begin
   Result := CompileUnit(ACompiler, ASrcDir, ALibDir, APlatform, 'DcuFix.pas');
 end;
 
+{ C1-38: the one System-type table every reader of an import's name asks. }
+procedure CheckSystemTable;
+var
+  LSys: TPasDcuSysType;
+begin
+  Ok('systable: HRESULT is a signed 4-byte integer',
+    DcuSystemType('hresult', dcuWin32, LSys) and (LSys.Cls = dscSigned) and
+    (LSys.Size = 4) and not LSys.PtrSized);
+  Ok('systable: UCS4Char is an unsigned 4-byte integer',
+    DcuSystemType('ucs4char', dcuWin64, LSys) and (LSys.Cls = dscUnsigned) and
+    (LSys.Size = 4));
+  Ok('systable: THandle is pointer-sized and unsigned',
+    DcuSystemType('thandle', dcuWin32, LSys) and (LSys.Size = 4) and
+    LSys.PtrSized and DcuSystemType('thandle', dcuWin64, LSys) and
+    (LSys.Size = 8) and (LSys.Cls = dscUnsigned));
+  Ok('systable: Extended is 10 bytes on Win32, 8 on Win64',
+    DcuSystemType('extended', dcuWin32, LSys) and (LSys.Size = 10) and
+    DcuSystemType('extended', dcuWin64, LSys) and (LSys.Size = 8) and
+    (LSys.Cls = dscFloat));
+  Ok('systable: UTF8Char is a 1-byte char',
+    DcuSystemType('utf8char', dcuWin64, LSys) and (LSys.Cls = dscChar) and
+    (LSys.Size = 1));
+  Ok('systable: Variant and ShortString are known, with no size',
+    DcuSystemType('variant', dcuWin64, LSys) and (LSys.Size = 0) and
+    DcuSystemType('shortstring', dcuWin64, LSys) and (LSys.Size = 0));
+  Ok('systable: TGUID is 16 bytes',
+    DcuSystemType('tguid', dcuWin32, LSys) and (LSys.Cls = dscGuid) and
+    (LSys.Size = 16));
+  Ok('systable: a name it does not know, or not lower case, is no System type',
+    not DcuSystemType('tpoint', dcuWin64, LSys) and
+    not DcuSystemType('Integer', dcuWin64, LSys));
+end;
+
 // The first line of ASource containing AText, trimmed; '' when none does.
 function LineHaving(const ASource, AText: string): string;
 begin
@@ -884,6 +917,7 @@ begin
     if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
       CheckStamp(TPath.Combine(GLib32, 'DcuFix.dcu'));
     CheckSharedForeign(GDir);
+    CheckSystemTable;
     if TFile.Exists(TPath.Combine(GLib32, 'DcuFix.dcu')) then
       CheckCorruption(TPath.Combine(GLib32, 'DcuFix.dcu'), 'corrupt/win32');
     if TFile.Exists(TPath.Combine(GLib64, 'DcuFix.dcu')) then
