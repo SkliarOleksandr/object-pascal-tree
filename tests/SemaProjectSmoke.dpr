@@ -7134,7 +7134,9 @@ const
     'implementation'#13#10'end.'#13#10;
   LIBD =
     'unit LibD;'#13#10'interface'#13#10'procedure DPub;'#13#10 +
-    'implementation'#13#10'procedure DPub;'#13#10'var'#13#10 +
+    'implementation'#13#10'procedure DPub;'#13#10'type'#13#10 +
+    '  TDLocal = record'#13#10'    DLocalField: Integer;'#13#10'  end;'#13#10 +
+    'var'#13#10 +
     '  LCount: Integer;'#13#10'begin'#13#10'  LCount := 0;'#13#10 +
     '  Inc(LCount);'#13#10'end;'#13#10'end.'#13#10;
 var
@@ -7265,6 +7267,10 @@ begin
     Ok('find: a wildcard qualifier - as full', Same('*Hidden.*'));
     Ok('find: a unit by name, nobody loaded it - as full',
       Same('LibB') and (Pos('libb.pas|1|6|LibB||True', FullRows('LibB')) > 0));
+    Ok('find: a type declared in a library routine''s header - as full',
+      Same('TDLocal') and (FullRows('TDLocal') <> ''));
+    Ok('find: ... its field - as full',
+      Same('TDLocal.DLocalField') and (FullRows('TDLocal.DLocalField') <> ''));
     Ok('find: a name nothing declares - nothing made full',
       (Light('NoSuchName') = '') and (LWS.Status.Promoted = 0) and
       (LWS.Status.Loaded = 0));
@@ -7298,7 +7304,11 @@ begin
       '  LOuter: Integer;'#13#10 +
       '  procedure Inner;'#13#10'  var'#13#10'    LInner: Integer;'#13#10 +
       '  begin'#13#10'    if LInner = 0 then begin LInner := 1; end;'#13#10 +
-      '  end;'#13#10'begin'#13#10'  try case LOuter of 1: ; end; finally end;'#13#10 +
+      '  end;'#13#10'type'#13#10'  TLocalRec = record'#13#10 +
+      '    LocalField: Integer;'#13#10'  end;'#13#10 +
+      '  TLocalProc = procedure(var AV: Integer);'#13#10 +
+      '  TLocalAfter = Integer;'#13#10'var'#13#10'  LAfterType: Integer;'#13#10 +
+      'begin'#13#10'  try case LOuter of 1: ; end; finally end;'#13#10 +
       '  var LInline: Integer := 0;'#13#10'end;'#13#10 +
       'procedure Fwd; forward;'#13#10 +
       'type'#13#10'  TLater = class'#13#10'    procedure M(AParam: Integer);'#13#10 +
@@ -7311,7 +7321,8 @@ begin
       'procedure Fwd;'#13#10'begin'#13#10'end;'#13#10 +
       'procedure InInc;'#13#10'{$I InIncBody.inc}'#13#10 +
       'const'#13#10'  CAfterInc = 2;'#13#10'end.', False);
-    Ok('find: locals left out of the declared words, the module''s kept',
+    Ok('find: locals left out of the declared words, the module''s and a ' +
+      'header''s types kept',
       PasWordSetHas(LScan.DeclWords, PasWordHash('Outer')) and
       PasWordSetHas(LScan.DeclWords, PasWordHash('TLater')) and
       PasWordSetHas(LScan.DeclWords, PasWordHash('M')) and
@@ -7322,6 +7333,12 @@ begin
       PasWordSetHas(LScan.DeclWords, PasWordHash('CLater')) and
       PasWordSetHas(LScan.DeclWords, PasWordHash('VLast')) and
       PasWordSetHas(LScan.DeclWords, PasWordHash('CAfterInc')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('TLocalRec')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('LocalField')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('TLocalProc')) and
+      PasWordSetHas(LScan.DeclWords, PasWordHash('TLocalAfter')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('AV')) and
+      not PasWordSetHas(LScan.DeclWords, PasWordHash('LAfterType')) and
       not PasWordSetHas(LScan.DeclWords, PasWordHash('AArg')) and
       not PasWordSetHas(LScan.DeclWords, PasWordHash('LOuter')) and
       not PasWordSetHas(LScan.DeclWords, PasWordHash('LInner')) and

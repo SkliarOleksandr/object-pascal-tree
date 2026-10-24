@@ -1775,7 +1775,14 @@ const
     'procedure Plain;'#10 +                                      // 24
     '  procedure Helper; begin end;'#10 +                        // 25
     'begin Helper; end;'#10 +                                    // 26
-    'end.'#10;                                                   // 27
+    'type'#10 +                                                  // 27
+    '  TVarRec = record'#10 +                                    // 28
+    '    Tag: Integer;'#10 +                                     // 29
+    '    case Kind: Integer of'#10 +                             // 30 Kind col 10
+    '      0: (VInt: Integer);'#10 +                             // 31
+    '      1: (case Byte of 0: (VB: Byte));'#10 +                // 32
+    '  end;'#10 +                                                // 33
+    'end.'#10;                                                   // 34
 
   // DefinesAt and an `$I` below the cursor with no main-file directive
   // between them (audit A2-22): FROMINC counts from line 7 on, not before.
@@ -6214,7 +6221,7 @@ begin
         // The project was demoted further up: the module outline reads text.
         Ok('nested: NavNest hydrated', GProj.EnsureHydrated(LMidNest));
         var LNOut := PasModuleOutline(GProj.Model(LMidNest).Tree);
-        Ok('nested outline: 12 rows', Length(LNOut) = 12);
+        Ok('nested outline: 17 rows', Length(LNOut) = 17);
         CheckOut(LNOut, 5, okRoutine, 'procedure', 'TCid', 'Click', '', 8, 11,
           True);
         CheckOut(LNOut, 6, okRoutine, 'function', 'TCid.Click', 'IsOutside',
@@ -6229,8 +6236,18 @@ begin
           True);
         CheckOut(LNOut, 11, okRoutine, 'procedure', 'Plain', 'Helper', '', 25,
           13, True);
+        // A variant record's named tag is a field (object-pascal-spec
+        // 9.1.3); an anonymous `case Byte of` has no row.
+        CheckOut(LNOut, 13, okVar, 'field', 'TVarRec', 'Tag', ': Integer', 29,
+          5, False);
+        CheckOut(LNOut, 14, okVar, 'field', 'TVarRec', 'Kind', ': Integer', 30,
+          10, False);
+        CheckOut(LNOut, 15, okVar, 'field', 'TVarRec', 'VInt', ': Integer', 31,
+          11, False);
+        CheckOut(LNOut, 16, okVar, 'field', 'TVarRec', 'VB', ': Byte', 32,
+          28, False);
         Ok('nested outline: rows in the implementation section',
-          (Length(LNOut) = 12) and (LNOut[6].Section = osImplementation) and
+          (Length(LNOut) = 17) and (LNOut[6].Section = osImplementation) and
           (LNOut[9].Section = osImplementation));
 
         // The project outline, before and after the unit's text is demoted:
@@ -6262,8 +6279,11 @@ begin
             (OutRow(LNPO, 'TCid.Click', 'LConst') = -1) and
             (OutRow(LNPO, 'TCid.Click.IsOutside', 'A') = -1) and
             (OutRow(LNPO, 'TCid.Click.IsOutside', 'Result') = -1));
-          // TCid, Click, IsOutside, Deeper, TLocalRec, LField, Plain, Helper.
-          Ok(LTag + ': 9 rows', Length(LNPO) = 9);
+          // TCid, Click, IsOutside, Deeper, TLocalRec, LField, Plain, Helper;
+          // TVarRec and its Tag, Kind (the variant tag), VInt, VB.
+          Ok(LTag + ': 14 rows', Length(LNPO) = 14);
+          Ok(LTag + ': a variant tag is a field row, as in the module outline',
+            OutRow(LNPO, 'TVarRec', 'Kind') >= 0);
           if LRIs >= 0 then
           begin
             var LNHit: TPasRefHit;

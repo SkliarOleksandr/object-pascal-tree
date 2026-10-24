@@ -777,12 +777,29 @@ begin
 end;
 
 // A record's variant part (9.1.3): [tag] type + branches, each branch a
-// label list followed by fields, possibly another nested variant part. The
-// tag itself is an nkVarDecl when it has a name.
+// label list followed by fields, possibly another nested variant part. A
+// named tag (`case Kind: T of`) is a field of the record (9.1.3): the part's
+// first child past its attributes is then the name, a `:` after it - the
+// node kind alone does not tell it from the type of `case Integer of`.
 procedure TOutlineWalker.WalkVariant(ANode: Integer; const AOwner: string);
 var
   LChild, LInner: Integer;
+  LDetail: string;
+  LTypes: TArray<TPasTextSpan>;
 begin
+  LChild := FirstChild(ANode);
+  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
+    LChild := NextSib(LChild);
+  if (LChild <> NIL_NODE) and (Kind(LChild) = nkIdent) and
+     (TokenKindAfter(LChild) = tkColon) then
+  begin
+    LTypes := nil;
+    LDetail := TypedSpanText(NextSib(LChild), True, 2, LTypes);
+    if LDetail <> '' then
+      LDetail := ': ' + LDetail;
+    Emit(okVar, 'field', AOwner, FTree.NodeText(LChild), LDetail, False,
+      ANode, LChild, LTypes);
+  end;
   LChild := FirstChild(ANode);
   while LChild <> NIL_NODE do
   begin

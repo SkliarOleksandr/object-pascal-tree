@@ -230,13 +230,15 @@ end;
 type
   { The words DeclWords' tracking of routine bodies reacts to. }
   TDeclKw = (dkNone, dkRoutine, dkProperty, dkBegin, dkInit, dkBlock, dkEnd,
-    dkNoBody, dkImplementation, dkClass, dkTypeKw, dkPacked, dkOf, dkTo);
+    dkNoBody, dkImplementation, dkClass, dkTypeKw, dkPacked, dkOf, dkTo,
+    dkTypeSec, dkOtherSec);
 
   { Where DeclWords' tracking stands: the routine bodies and the type
     bodies open, the routine headers whose body has not begun (their local
-    declarations follow), the parameter lists' brackets. }
+    declarations follow), the parameter lists' brackets, and whether a
+    header's local declarations are a `type` section (TypeSec 1). }
   TDeclDepths = record
-    Body, Typ, Pend, Param: Integer;
+    Body, Typ, Pend, Param, TypeSec: Integer;
   end;
 
   { A conditional's branches: the state at its `$IF`, and the branches
@@ -900,15 +902,21 @@ begin
       else if Is_('asm') then
         Result := dkBegin
       else if Is_('try') then
-        Result := dkBlock;
+        Result := dkBlock
+      else if Is_('var') then
+        Result := dkOtherSec;
     4:
       if Is_('case') then
-        Result := dkBlock;
+        Result := dkBlock
+      else if Is_('type') then
+        Result := dkTypeSec;
     5:
       if Is_('begin') then
         Result := dkBegin
       else if Is_('class') then
-        Result := dkClass;
+        Result := dkClass
+      else if Is_('const') or Is_('label') then
+        Result := dkOtherSec;
     6:
       if Is_('record') or Is_('object') then
         Result := dkTypeKw
@@ -928,7 +936,9 @@ begin
       if Is_('procedure') then
         Result := dkRoutine
       else if Is_('interface') then
-        Result := dkTypeKw;
+        Result := dkTypeKw
+      else if Is_('threadvar') then
+        Result := dkOtherSec;
     10:
       if Is_('destructor') then
         Result := dkRoutine;
@@ -945,7 +955,9 @@ begin
       if Is_('implementation') then
         Result := dkImplementation
       else if Is_('initialization') then
-        Result := dkInit;
+        Result := dkInit
+      else if Is_('resourcestring') then
+        Result := dkOtherSec;
   end;
 end;
 
@@ -998,7 +1010,10 @@ end;
   to their `end` (Body); `forward` and `external` end a header with no
   body; a routine keyword at a line's start (or after `class` there) is at
   module level whatever the count says (a block left open across a
-  conditional branch); a body's `begin` leaves any type body. Every guess
+  conditional branch); a body's `begin` leaves any type body. A header's
+  `type` section is recorded (TypeSec, up to the next section keyword, the
+  next header or the `begin`): its types are named under the routine and a
+  search finds them; its variables and constants are not. Every guess
   errs toward recording a word: a local declaration recorded only makes a
   unit match a name it does not declare (one more unit made full). }
 procedure TWordScanner.Declared(AStart, ALen: Integer; ADeclKw: Boolean);
@@ -1009,8 +1024,11 @@ begin
   LTracked := SeenImpl;
   // `procedure(A: T)`: the keyword's list, not a name after it.
   ADeclKw := ADeclKw and (Depths.Param = 0);
+  // A header's local types are recorded: a type declared there is named
+  // under its routine (TFoo.Run.TLocalRec), and a search finds it.
   if ADeclKw or (DeclFollows(LDot) and (Depths.Param = 0) and
-     not (LTracked and ((Depths.Body > 0) or (Depths.Pend > 0)))) then
+     not (LTracked and ((Depths.Body > 0) or
+       ((Depths.Pend > 0) and (Depths.TypeSec = 0))))) then
     DeclWords.Add(Words.Last);
   if ADeclKw then
   begin
@@ -1039,9 +1057,20 @@ begin
           if (Depths.Body = 0) and (Depths.Typ = 0) and
              not CharInSet(LastPunct, ['=', ':', '(', ',']) and
              not (PrevKw in [dkOf, dkTo]) then
+          begin
             Inc(Depths.Pend);
+            Depths.TypeSec := 0;
+          end;
         end;
       end;
+    dkTypeSec:
+      if LTracked and (Depths.Body = 0) and (Depths.Pend > 0) then
+        Depths.TypeSec := 1;
+    dkOtherSec:
+      // `var` in a local record is its own field section, not the header's,
+      // and `procedure(var A: T)` a parameter's.
+      if (Depths.Body = 0) and (Depths.Typ = 0) and (Depths.Param = 0) then
+        Depths.TypeSec := 0;
     dkBegin:
       begin
         Depths.Param := 0;
@@ -1052,6 +1081,7 @@ begin
           begin
             Depths.Body := 1;
             Depths.Typ := 0;
+            Depths.TypeSec := 0;
             if Depths.Pend > 0 then
               Dec(Depths.Pend);
           end;
@@ -1106,6 +1136,7 @@ procedure TWordScanner.Conditional(const AName: string);
     Result.Pend := Min(A.Pend, B.Pend);
     Result.Param := Min(A.Param, B.Param);
     Result.Typ := Max(A.Typ, B.Typ);
+    Result.TypeSec := Max(A.TypeSec, B.TypeSec);
   end;
 
 begin
