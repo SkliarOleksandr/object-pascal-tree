@@ -4657,8 +4657,26 @@ begin
         LP.Next;
         LP.FB.Adopt(LRoot, LP.ParseQualifiedName);
         LP.Expect(tkSemicolon, '";"');
-        while LP.IsWord('requires') or LP.IsWord('contains') do
-        begin
+        repeat
+          // Stray text between the clauses (`ff` typed after the directives,
+          // a clause's item list cut short): dcc stops there with E2029; an
+          // editor's parse reports the same once, keeps the run as one nkError
+          // child, and goes on with the clauses after it - until 2026-10-24 the
+          // whole package from that token on was one nkError, and an outline,
+          // a Structure pane or a unit list of the broken file was empty.
+          if not (LP.IsWord('requires') or LP.IsWord('contains') or
+             (LP.CurKind in [tkEnd, tkEndOfFile])) then
+          begin
+            LP.Error('"end" expected');
+            LSec := LP.FB.AddNode(nkError, NIL_NODE, LP.FPos);
+            while not (LP.IsWord('requires') or LP.IsWord('contains') or
+               (LP.CurKind in [tkEnd, tkEndOfFile])) and (LP.FPos < LP.FLast) do
+              LP.Next;
+            LP.FB.SetLast(LSec, LP.FPos - 1);
+            LP.FB.Adopt(LRoot, LSec);
+          end;
+          if not (LP.IsWord('requires') or LP.IsWord('contains')) then
+            Break;
           // Same item shape as a real uses clause (nkUsesItem with the
           // optional `in 'path'` string adopted), so the semantic layer can
           // walk a package's contains-graph like a program's uses-graph.
@@ -4689,7 +4707,7 @@ begin
           LP.Expect(tkSemicolon, '";"');
           LP.FB.SetLast(LSec, LP.FPos - 1);
           LP.FB.Adopt(LRoot, LSec);
-        end;
+        until False;
         LP.Expect(tkEnd, '"end"');
         LP.Expect(tkDot, '"."');
       end

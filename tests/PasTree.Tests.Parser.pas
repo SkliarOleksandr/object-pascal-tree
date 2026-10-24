@@ -3434,6 +3434,70 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { A package with stray text between its head and its clauses - `ff` typed
+    after the directives, as in a real .dpk being edited - still has both
+    clauses with all their items: the parser reports the text once ("end"
+    expected, where dcc stops with E2029), keeps it as one nkError child of
+    the package, and goes on. The whole package from the stray token on used
+    to be one nkError, and every outline of the file came back empty. Stray
+    text after a clause's items (`vcl ff;`) is the same recovery. }
+  function PackageStrayTextCase: TPasCustomCase;
+  begin
+    Result.Section := '1.1.3';
+    Result.Name := 'package stray text before clauses';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        SRC =
+          'package MyPack;'#13#10 +
+          '{$R *.res}'#13#10 +
+          'ff'#13#10 +
+          'requires rtl, vcl ff;'#13#10 +
+          'contains UnitA in ''UnitA.pas'', UnitB;'#13#10 +
+          'end.'#13#10;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LIdx, LReq, LCon, LErrors, LRootErrors: Integer;
+      begin
+        LPre := GPP.ProcessText('mypack.dpk', SRC);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        LReq := 0;
+        LCon := 0;
+        LErrors := 0;
+        LRootErrors := 0;
+        for LIdx := 0 to High(LTree.Nodes) do
+          case LTree.Nodes[LIdx].Kind of
+            nkUsesItem:
+              if LTree.Nodes[LTree.Nodes[LIdx].Parent].Aux = 1 then
+                Inc(LReq)
+              else
+                Inc(LCon);
+            nkError:
+              begin
+                Inc(LErrors);
+                if (LTree.Nodes[LIdx].Parent >= 0) and
+                   (LTree.Nodes[LTree.Nodes[LIdx].Parent].Kind = nkPackage) then
+                  Inc(LRootErrors);
+              end;
+          end;
+        // Two diagnostics: `ff` before requires, and `ff` after `vcl` (the
+        // `;` expected there; the run up to `contains` is then skipped).
+        Result.Passed := (LReq = 2) and (LCon = 2) and (LRootErrors = 2) and
+          (LErrors = 2) and (Length(LDiags) >= 2);
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := Format(
+            '  requires items: %d (2), contains items: %d (2), ' +
+            'nkError: %d (2) under the package: %d (2), parse diags: %d',
+            [LReq, LCon, LErrors, LRootErrors, Length(LDiags)]) + sLineBreak;
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          False);
+      end;
+  end;
+
   { 1.1.1: the PROGRAM file's own top-level shape -- a `program` head, its
     uses clause, and the body block -- never dumped as a whole before
     (every other case wraps a fragment inside a unit's interface section). }
@@ -4161,7 +4225,8 @@ begin
       'end;'#13#10, '',
       '', 3)];
   AddMultilineIndentCases(Result);
-  Result := Result + [OutParamAuxCase, PackageHeadTokensCase];
+  Result := Result + [OutParamAuxCase, PackageHeadTokensCase,
+    PackageStrayTextCase];
 end;
 
 
