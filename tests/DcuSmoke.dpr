@@ -289,6 +289,15 @@ begin
   Result := CompileUnit(ACompiler, ASrcDir, ALibDir, APlatform, 'DcuFix.pas');
 end;
 
+// The first line of ASource containing AText, trimmed; '' when none does.
+function LineHaving(const ASource, AText: string): string;
+begin
+  for var LLine in ASource.Split([#10]) do
+    if LLine.Contains(AText) then
+      Exit(LLine.Trim);
+  Result := '';
+end;
+
 { C1-37: two compiled units importing an enumeration from a third print it
   by name, and the source manager reads the third's .dcu ONCE for both - a
   printer's own cache used to read it again for each. A rebuilt .dcu is read
@@ -308,6 +317,7 @@ begin
     'end.'#13#10);
   TFile.WriteAllText(TPath.Combine(LSrc, 'DcuShA.pas'),
     'unit DcuShA;'#13#10'interface'#13#10'uses DcuShBase;'#13#10 +
+    'const'#13#10'  KHr = HRESULT(7);'#13#10'  KU8 = UTF8Char(65);'#13#10 +
     'procedure PA(C: TShColor = shBlue);'#13#10'implementation'#13#10 +
     'procedure PA(C: TShColor); begin end;'#13#10'end.'#13#10);
   TFile.WriteAllText(TPath.Combine(LSrc, 'DcuShB.pas'),
@@ -326,6 +336,13 @@ begin
     LB := LSM.LoadText(TPath.Combine(LLib, 'DcuShB.dcu'));
     Ok('shared foreign: both print the imported value by name',
       LA.Contains('shBlue') and LB.Contains('shGreen'));
+    // C1-38: a System number or char type is printed from its name, with
+    // no System.dcu at hand (none is beside these units).
+    Ok('shared foreign: an HRESULT constant prints as a number (' +
+      LineHaving(LA, 'KHr') + ')', LineHaving(LA, 'KHr').Contains('= 7;'));
+    Ok('shared foreign: a UTF8Char constant prints as a char (' +
+      LineHaving(LA, 'KU8') + ')', LineHaving(LA, 'KU8').Contains('= ''A'';') or
+      LineHaving(LA, 'KU8').Contains('= #65;'));
     Ok('shared foreign: the imported unit is read once for both (' +
       IntToStr(LSM.DcuForeignLoads) + ')', LSM.DcuForeignLoads = 1);
     LUnit := LoadDcu(TPath.Combine(LLib, 'DcuShA.dcu'));

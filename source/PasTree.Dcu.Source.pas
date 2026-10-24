@@ -1172,26 +1172,23 @@ begin
               Exit('True');
           end
           else if (LName = 'char') or (LName = 'ansichar') or
-                  (LName = 'widechar') then
+                  (LName = 'widechar') or (LName = 'utf8char') then
             Exit(CharLiteral(Integer(AValue)))
           else if (LName = 'pointer') or (LName = 'tobject') or
-                  (LName = 'tclass') or (LName = 'iinterface') then
+                  (LName = 'tclass') or (LName = 'iinterface') or
+                  (LName = 'iunknown') or (LName = 'pchar') or
+                  (LName = 'pansichar') or (LName = 'pwidechar') or
+                  (LName = 'string') or (LName = 'unicodestring') or
+                  (LName = 'ansistring') or (LName = 'widestring') or
+                  (LName = 'rawbytestring') or (LName = 'utf8string') then
           begin
             if AValue = 0 then
               Exit('nil');
           end
-          else if (LName <> '') and (LName <> 'integer') and
-                  (LName <> 'cardinal') and (LName <> 'byte') and
-                  (LName <> 'word') and (LName <> 'shortint') and
-                  (LName <> 'smallint') and (LName <> 'longint') and
-                  (LName <> 'longword') and (LName <> 'int64') and
-                  (LName <> 'uint64') and (LName <> 'nativeint') and
-                  (LName <> 'nativeuint') and (LName <> 'int8') and
-                  (LName <> 'uint8') and (LName <> 'int16') and
-                  (LName <> 'uint16') and (LName <> 'int32') and
-                  (LName <> 'uint32') and (LName <> 'fixedint') and
-                  (LName <> 'fixeduint') and (LName <> 'intptr') and
-                  (LName <> 'uintptr') then
+          // Every other System type ImportSize knows is a number: following
+          // it read System.dcu (and, for an alias such as HRESULT, the unit
+          // between) only to print the number this does (audit C1-38).
+          else if (LName <> '') and (ImportSize(LName) = 0) then
           begin
             // An imported ordinal type that is not a number: an enumeration
             // declared in another unit, whose member names live there. Read
