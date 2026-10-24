@@ -346,11 +346,13 @@ begin
   TDirectory.CreateDirectory(LSrc);
   TFile.WriteAllText(TPath.Combine(LSrc, 'DcuShBase.pas'),
     'unit DcuShBase;'#13#10'interface'#13#10'type'#13#10 +
-    '  TShColor = (shRed, shGreen, shBlue);'#13#10'implementation'#13#10 +
+    '  TShColor = (shRed, shGreen, shBlue);'#13#10 +
+    '  TShWord = Cardinal;'#13#10'implementation'#13#10 +
     'end.'#13#10);
   TFile.WriteAllText(TPath.Combine(LSrc, 'DcuShA.pas'),
     'unit DcuShA;'#13#10'interface'#13#10'uses DcuShBase;'#13#10 +
     'const'#13#10'  KHr = HRESULT(7);'#13#10'  KU8 = UTF8Char(65);'#13#10 +
+    '  KW = TShWord(5);'#13#10 +
     'procedure PA(C: TShColor = shBlue);'#13#10'implementation'#13#10 +
     'procedure PA(C: TShColor); begin end;'#13#10'end.'#13#10);
   TFile.WriteAllText(TPath.Combine(LSrc, 'DcuShB.pas'),
@@ -398,6 +400,22 @@ begin
     LSM.ReleaseAnalysisCaches;
     Ok('shared foreign: released, the text stays',
       LSM.LoadText(TPath.Combine(LLib, 'DcuShB.dcu')) = LB);
+  finally
+    LSM.Free;
+  end;
+  // An alias of a System integer in another unit (TShWord = Cardinal) is a
+  // number once that unit is read: System.dcu, even beside the units, is
+  // not read for it (C1-38, ResolveImport's stop).
+  TFile.Copy(TPath.Combine(StudioRoot, 'lib\win32\release\System.dcu'),
+    TPath.Combine(LLib, 'System.dcu'));
+  LSM := TPasSourceManager.Create([LLib]);
+  try
+    LA := LSM.LoadText(TPath.Combine(LLib, 'DcuShA.dcu'));
+    Ok('shared foreign: an alias of a System integer prints the number (' +
+      LineHaving(LA, 'KW') + ')', LineHaving(LA, 'KW').Contains('= 5;'));
+    Ok('shared foreign: ... with System.dcu beside, only the alias''s unit ' +
+      'is read (' + IntToStr(LSM.DcuForeignLoads) + ')',
+      LSM.DcuForeignLoads = 1);
   finally
     LSM.Free;
   end;

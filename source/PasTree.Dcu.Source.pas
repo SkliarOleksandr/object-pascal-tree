@@ -1454,7 +1454,8 @@ begin
 end;
 
 // Follows an import to the definition it names: on return AUnit/AIdx name
-// a type that is not itself an import. False when the defining unit is not
+// a type that is not itself an import - or an import of one of System's
+// integer types, which the name describes. False when the defining unit is not
 // at hand or does not declare the name (generics carry an arity suffix and
 // are not followed).
 function TPasDcuPrinter.ResolveImport(var AUnit: TPasDcuUnit; var AIdx: Integer): Boolean;
@@ -1463,6 +1464,8 @@ var
   LOther: TPasDcuUnit;
   LDecl: TPasDcuDecl;
   LHops: Integer;
+  LUses: TPasDcuUses;
+  LSys: TPasDcuSysType;
 begin
   Result := False;
   for LHops := 1 to 8 do
@@ -1474,6 +1477,17 @@ begin
       Exit(True);
     if (LType.ImportName = '') or (LType.ImportName.IndexOf('`') >= 0) then
       Exit;
+    // System's integer types are an outcome by name (DcuSystemType): an
+    // alias such as DWORD -> FixedUInt or UINT -> Cardinal read System.dcu
+    // only to learn what the table says (audit C1-38). Only the integers:
+    // every caller reads an integer import by its name (IntegerType,
+    // ImportSize, OrdinalText), while a class, a pointer or a float import
+    // still leads to the declaration a caller may need (a helper's class).
+    LUses := AUnit.UsesOf(LType.UnitIdx);
+    if (LUses <> nil) and SameText(LUses.Name, 'System') and
+       DcuSystemType(LowerCase(LType.ImportName), FUnit.Platform, LSys) and
+       (LSys.Cls in [dscSigned, dscUnsigned]) then
+      Exit(True);
     LOther := ForeignUnit(AUnit, LType.UnitIdx);
     if LOther = nil then
       Exit;
