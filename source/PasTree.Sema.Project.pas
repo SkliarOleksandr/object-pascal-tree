@@ -854,6 +854,15 @@ type
     // itself was renumbered. False is no longer a refusal by itself - see
     // MatchSymbols / RepointInstances for what happens then.
     function InstancesSafeFor(AId, ASymN: Integer): Boolean;
+    // The walk under InstancesSafeFor and InstancesRepointable: True, with
+    // the symbol in ASym, when an instance-table entry names a symbol of
+    // model AId - its generic or an argument - that the swap cannot carry:
+    // one at or past ASymN when ASymN >= 0, one AMap does not map otherwise.
+    // One monitor entry for the whole table and the entries read in place:
+    // InstanceRead per entry locked and copied the record, Args refcount
+    // included, on every edit (audit C2-21).
+    function InstanceBlocker(AId, ASymN: Integer; const AMap: TArray<Integer>;
+      out ASym: Integer): Boolean;
     { Old-to-new symbol map between two models of the SAME unit - the analyzed
       one and its fresh re-parse. Result[old] is the new index of the symbol
       with the same identity, or NIL_SYM when the new model has none.
@@ -21572,24 +21581,55 @@ begin
   Result := True;
 end;
 
-function TPasSemaProject.InstancesSafeFor(AId, ASymN: Integer): Boolean;
+function TPasSemaProject.InstanceBlocker(AId, ASymN: Integer;
+  const AMap: TArray<Integer>; out ASym: Integer): Boolean;
+
+  function Blocks(ASymIdx: Integer): Boolean;
+  begin
+    if ASymN >= 0 then
+      Result := ASymIdx >= ASymN
+    else
+      Result := (ASymIdx < 0) or (ASymIdx > High(AMap)) or
+        (AMap[ASymIdx] = NIL_SYM);
+  end;
+
 var
   LIdx, LArg: Integer;
-  LInst: TSemaInstance;
+  LList: TArray<TSemaInstance>;
+begin
+  ASym := NIL_SYM;
+  TMonitor.Enter(FInstances);
+  try
+    LList := FInstances.List;
+    for LIdx := 0 to FInstances.Count - 1 do
+    begin
+      if (LList[LIdx].UnitId = AId) and Blocks(LList[LIdx].Sym) then
+      begin
+        ASym := LList[LIdx].Sym;
+        Exit(True);
+      end;
+      for LArg := 0 to High(LList[LIdx].Args) do
+        if (LList[LIdx].Args[LArg].UnitId = AId) and
+           Blocks(LList[LIdx].Args[LArg].Sym) then
+        begin
+          ASym := LList[LIdx].Args[LArg].Sym;
+          Exit(True);
+        end;
+    end;
+    Result := False;
+  finally
+    TMonitor.Exit(FInstances);
+  end;
+end;
+
+function TPasSemaProject.InstancesSafeFor(AId, ASymN: Integer): Boolean;
+var
+  LSym: Integer;
 begin
   // The instance table OUTLIVES every pass (it is never cleared), so an entry
   // whose generic - or any of its argument types - is an implementation-local
   // symbol of this model would index a symbol the swap replaces.
-  for LIdx := 0 to InstanceCount - 1 do
-  begin
-    LInst := Instance(LIdx);
-    if (LInst.UnitId = AId) and (LInst.Sym >= ASymN) then
-      Exit(False);
-    for LArg := 0 to High(LInst.Args) do
-      if (LInst.Args[LArg].UnitId = AId) and (LInst.Args[LArg].Sym >= ASymN) then
-        Exit(False);
-  end;
-  Result := True;
+  Result := not InstanceBlocker(AId, Max(ASymN, 0), nil, LSym);
 end;
 
 class function TPasSemaProject.MatchSymbols(AOld,
@@ -21743,36 +21783,20 @@ end;
 
 function TPasSemaProject.InstancesRepointable(AId: Integer;
   const AMap: TArray<Integer>; out AWhy: string): Boolean;
-
-  function Mapped(ASym: Integer): Boolean;
-  begin
-    Result := (ASym >= 0) and (ASym <= High(AMap)) and (AMap[ASym] <> NIL_SYM);
-    // The name only from an index the model holds: the rejected one may be
-    // stale (audit A3-37), and Symbols' capacity runs past SymCount - a
-    // garbage name within it, an access violation beyond.
-    if not Result then
-      if (ASym >= 0) and (ASym < FModels[AId].SymCount) then
-        AWhy := 'instance-unmatched-sym(' +
-          FModels[AId].Symbols[ASym].NameLower + ')'
-      else
-        AWhy := Format('instance-unmatched-sym(#%d)', [ASym]);
-  end;
-
 var
-  LIdx, LArg: Integer;
-  LInst: TSemaInstance;
+  LSym: Integer;
 begin
   AWhy := '';
-  for LIdx := 0 to InstanceCount - 1 do
-  begin
-    LInst := Instance(LIdx);
-    if (LInst.UnitId = AId) and not Mapped(LInst.Sym) then
-      Exit(False);
-    for LArg := 0 to High(LInst.Args) do
-      if (LInst.Args[LArg].UnitId = AId) and not Mapped(LInst.Args[LArg].Sym) then
-        Exit(False);
-  end;
-  Result := True;
+  Result := not InstanceBlocker(AId, -1, AMap, LSym);
+  // The name only from an index the model holds: the rejected one may be
+  // stale (audit A3-37), and Symbols' capacity runs past SymCount - a
+  // garbage name within it, an access violation beyond.
+  if not Result then
+    if (LSym >= 0) and (LSym < FModels[AId].SymCount) then
+      AWhy := 'instance-unmatched-sym(' +
+        FModels[AId].Symbols[LSym].NameLower + ')'
+    else
+      AWhy := Format('instance-unmatched-sym(#%d)', [LSym]);
 end;
 
 function TPasSemaProject.RepointInstances(AId: Integer;
