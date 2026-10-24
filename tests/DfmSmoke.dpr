@@ -1791,9 +1791,10 @@ end;
 procedure MissingChecks;
 var
   LBinder: TPasFormBinder;
-  LTMid, LSym, LR: Integer;
+  LTMid, LSym, LCSym, LR: Integer;
   LErr: string;
   LLock: TFileStream;
+  LInfo: TPasFormInfo;
 
   function SiteCount: Integer;
   begin
@@ -1840,6 +1841,23 @@ begin
       LLock.Free;
     end;
     Ok('missing: unlocked, read again', SiteCount = 1);
+
+    // The root-class index and the path index (audit C1-43) follow the
+    // files: a root class renamed on disk is no longer the class's form, and
+    // back again it is; a path is found in any letter case.
+    Ok('index: the form class is found',
+      SymAt('FixLate.pas', 5, 3, LTMid, LCSym) and SameText(ExtractFileName(
+      LBinder.RoleOf(LTMid, LCSym).FormFile), 'FixLate.dfm'));
+    TFile.WriteAllText(FilePath('FixLate.dfm'), StringReplace(DFM_LATE,
+      ': TFixLateForm', ': TFixOtherForm', []), TEncoding.ASCII);
+    Ok('index: a root class renamed on disk is no longer its form',
+      LBinder.RoleOf(LTMid, LCSym).FormFile = '');
+    TFile.WriteAllText(FilePath('FixLate.dfm'), DFM_LATE, TEncoding.ASCII);
+    Ok('index: ... and back again it is', SameText(ExtractFileName(
+      LBinder.RoleOf(LTMid, LCSym).FormFile), 'FixLate.dfm'));
+    Ok('index: a path in another letter case is the same form file',
+      LBinder.DescribeForm(UpperCase(FilePath('FixLate.dfm')), LInfo) and
+      (LInfo.Error = ''));
   finally
     LBinder.Free;
   end;

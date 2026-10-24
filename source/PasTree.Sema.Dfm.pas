@@ -244,6 +244,13 @@ type
     FListed: Boolean;
     FRootNames: TDictionary<string, TArray<Integer>>;
     FRootNamesBuilt: Boolean;
+    // Root class (UnitId:Sym) -> the first entry of that root class, built
+    // lazily by RootEntryOfClass and dropped with FRootNames. The entries by
+    // lower-cased path, filled by ListDir, for EntryOf. Both replace scans
+    // over every form file (audit C1-43).
+    FRootOfClass: TDictionary<Int64, TFormEntry>;
+    FRootOfClassBuilt: Boolean;
+    FByPath: TDictionary<string, TFormEntry>;
     FResets: Integer;
     function IsLibrary(const APath: string): Boolean;
     procedure EnsureListed;
@@ -405,10 +412,14 @@ begin
   FDirs := TObjectList<TFormDir>.Create(True);
   FFormOfMid := TDictionary<Integer, TFormEntry>.Create;
   FRootNames := TDictionary<string, TArray<Integer>>.Create;
+  FRootOfClass := TDictionary<Int64, TFormEntry>.Create;
+  FByPath := TDictionary<string, TFormEntry>.Create;
 end;
 
 destructor TPasFormBinder.Destroy;
 begin
+  FByPath.Free;
+  FRootOfClass.Free;
   FRootNames.Free;
   FFormOfMid.Free;
   FDirs.Free;
@@ -537,6 +548,9 @@ begin
         LEntry.RootClass := XNil;
         FForms.Add(LEntry);
         FFormOfMid.Add(LMid, LEntry);
+        FByPath.TryAdd(LowerCase(LFound), LEntry);
+        FRootNamesBuilt := False;
+        FRootOfClassBuilt := False;
       end;
     end;
   finally
@@ -602,6 +616,7 @@ begin
       LEntry.ObjInline := nil;
       SetLength(LEntry.ObjInline, Length(LDoc.Doc.Objects));
       FRootNamesBuilt := False;
+      FRootOfClassBuilt := False;
       LChanged := True;
     end;
   end;
@@ -702,13 +717,29 @@ end;
 function TPasFormBinder.RootEntryOfClass(const AClass: TSemaXType): TFormEntry;
 var
   LEntry: TFormEntry;
+  LRoot: TSemaXType;
 begin
   Result := nil;
   if not XValid(AClass) then
     Exit;
-  for LEntry in FForms do
-    if SameType(RootClassOf(LEntry), AClass) then
-      Exit(LEntry);
+  // A class-chain walk asks once per level, and most levels (TForm ..
+  // TObject) have no form: one scan of the root classes per change of the
+  // form files, then a lookup. TryAdd keeps the first entry, as the scan did.
+  if not FRootOfClassBuilt then
+  begin
+    FRootOfClass.Clear;
+    for LEntry in FForms do
+    begin
+      LRoot := RootClassOf(LEntry);
+      if XValid(LRoot) then
+        FRootOfClass.TryAdd(Int64(LRoot.UnitId) shl 32 or Cardinal(LRoot.Sym),
+          LEntry);
+    end;
+    FRootOfClassBuilt := True;
+  end;
+  if not FRootOfClass.TryGetValue(
+     Int64(AClass.UnitId) shl 32 or Cardinal(AClass.Sym), Result) then
+    Result := nil;
 end;
 
 { WHETHER AObj'S BLOCK IS AN INLINE FRAME'S - the lookup root inside it is
@@ -1438,13 +1469,9 @@ begin
 end;
 
 function TPasFormBinder.EntryOf(const APath: string): TFormEntry;
-var
-  LEntry: TFormEntry;
 begin
-  for LEntry in FForms do
-    if SameText(LEntry.Path, APath) then
-      Exit(LEntry);
-  Result := nil;
+  if not FByPath.TryGetValue(LowerCase(APath), Result) then
+    Result := nil;
 end;
 
 function TPasFormBinder.SitesOf(ATMid, ASym: Integer; ARename: Boolean;
@@ -1888,7 +1915,7 @@ end;
 function TPasFormBinder.RoleOf(ATMid, ASym: Integer;
   ARefresh: Boolean): TPasFormRole;
 var
-  LOwner, LRoot: TSemaXType;
+  LOwner: TSemaXType;
   LEntry: TFormEntry;
 begin
   Result := Default(TPasFormRole);
@@ -1912,15 +1939,9 @@ begin
   // - unless the caller's operation read them already (SitesOf's ARefresh).
   if ARefresh or not FListed then
     Refresh;
-  for LEntry in FForms do
-  begin
-    LRoot := RootClassOf(LEntry);
-    if SameType(LRoot, LOwner) then
-    begin
-      Result.FormFile := LEntry.Path;
-      Break;
-    end;
-  end;
+  LEntry := RootEntryOfClass(LOwner);
+  if LEntry <> nil then
+    Result.FormFile := LEntry.Path;
 end;
 
 function TPasFormBinder.DescribeForm(const APath: string;
