@@ -1467,7 +1467,7 @@ var
   LId: TPasDfmIdent;
   LIsMethod: Boolean;
   LVia: TPasFormSiteVia;
-  LDeclared, LOpen: Boolean;
+  LDeclared, LOpen, LTake, LSure: Boolean;
   LSite: TPasFormSite;
 
   function Where: string;
@@ -1637,31 +1637,35 @@ begin
             begin
               LClass := PropHolder(LEntry, LId.Prop, LId.Seg, LDeclared,
                 LOpen);
-              LSite := SiteOf(LEntry, LIdx, fskProperty,
-                HeaderVia(LEntry, LId.Obj));
-              LSite.Unsure := True;
+              // The site is built only for a line that is taken - most hits
+              // are a namesake of another class (audit C1-42).
+              LSure := False;
               if not XValid(LClass) then
+                LTake := LOpen and (FProj.Model(ATMid).Symbols[ASym].Visibility
+                  in [svDefault, svPublished])
+              else if MemberNamed(LEntry.Mid, LClass, LNameLower, LTMid,
+                LTSym) then
               begin
-                if LOpen and (FProj.Model(ATMid).Symbols[ASym].Visibility in
-                   [svDefault, svPublished]) then
-                  LList.Add(LSite);
-                Continue;
-              end;
-              if MemberNamed(LEntry.Mid, LClass, LNameLower, LTMid, LTSym) then
-              begin
+                LTake := False;
                 if SymIsKind(LTMid, LTSym, skProperty, True) then
                 begin
                   FProj.PropertyRedeclRoot(LTMid, LTSym, LPMid, LPSym);
-                  if (LPMid = LRootMid) and (LPSym = LRootSym) then
-                    LList.Add(SiteOf(LEntry, LIdx, fskProperty,
-                      HeaderVia(LEntry, LId.Obj)));
+                  LTake := (LPMid = LRootMid) and (LPSym = LRootSym);
+                  LSure := LTake;
                 end;
               end
-              else if LDeclared and not SameType(LClass, LOwner) and
-                FProj.XDescendsFrom(LOwner, LClass) and
-                (FProj.Model(ATMid).Symbols[ASym].Visibility in [svDefault,
-                svPublished]) then
+              else
+                LTake := LDeclared and not SameType(LClass, LOwner) and
+                  FProj.XDescendsFrom(LOwner, LClass) and
+                  (FProj.Model(ATMid).Symbols[ASym].Visibility in [svDefault,
+                  svPublished]);
+              if LTake then
+              begin
+                LSite := SiteOf(LEntry, LIdx, fskProperty,
+                  HeaderVia(LEntry, LId.Obj));
+                LSite.Unsure := not LSure;
                 LList.Add(LSite);
+              end;
             end
             // A rename: refused where a form file may set it - for a published
             // property, as before properties of any visibility were searched.
