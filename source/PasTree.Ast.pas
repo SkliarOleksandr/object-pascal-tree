@@ -40,6 +40,22 @@ const
   // System.Classes and System.Threading); System declares AlignAttribute.
   amaAlign = 5;
 
+  // The operator and operand sets of the expression grammar (4.2.1, B.9),
+  // as the parser reads them; the tree checker reads the same constants
+  // (it must not depend on the parser). The additive and multiplicative
+  // levels:
+  PAS_ADD_OPS = [tkPlus, tkMinus, tkOr, tkXor];
+  PAS_MUL_OPS = [tkStar, tkSlash, tkDiv, tkMod, tkAnd, tkShl, tkShr, tkAs];
+  // What ParseTypeExpr tests after an identifier-headed type reference: an
+  // arithmetic continuation makes it re-read the whole as a constant
+  // expression (`type T = A+1..B;`).
+  PAS_REREAD_TOKENS = PAS_ADD_OPS + PAS_MUL_OPS - [tkAs];
+  // What starts a factor - ParseFactor's cases.
+  PAS_OPERAND_STARTS = [tkPlus, tkMinus, tkNot, tkAt, tkIntLiteral,
+    tkRealLiteral, tkStringLiteral, tkMultilineString, tkControlChar, tkNil,
+    tkCaret, tkCaretChar, tkLParen, tkLBracket, tkIf, tkInherited,
+    tkProcedure, tkFunction, tkIdentifier, tkString, tkFile];
+
 type
   TPasNodeKind = (
     nkError,          // parse error recovery node

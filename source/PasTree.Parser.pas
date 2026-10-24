@@ -147,10 +147,20 @@ type
       factor. The right side of `is` needs both - see ParseExpression. }
     function ParseSimpleExprFrom(ALeft: Integer): Integer;
     function ParseTermFrom(ALeft: Integer): Integer;
+    { The nkBinaryOp over two parsed operands, its operator at AOp (Aux),
+      ending before the cursor. }
+    function MakeBinary(AOp, ALeft, ARight: Integer): Integer;
+    { An expression, or `lo..hi` as an nkRange - a set constructor's element,
+      a case label. }
+    function ParseRangeElem: Integer;
     function IsNameShaped(ANode: Integer): Boolean;
     function ParseFactor: Integer;
     function ParseSelectors(ABase: Integer): Integer;
     function ParseTypeRef: Integer;
+    { The nkTypeArgs over AHead, from the `<` at the cursor through its
+      close - an expression's generic list (after ScanGenericArgs said so)
+      and a type reference's. }
+    function ParseTypeArgs(AHead: Integer): Integer;
     function ScanGenericArgs(AFrom: Integer; ADotted: Boolean): Integer;
     function AtMemberName: Boolean;
     function MaybeNamedArg(AArg: Integer): Integer;
@@ -171,6 +181,12 @@ type
       (nfName, PasTree.Ast): a name of a var, field, parameter or inline var
       list, or a segment of a routine's name. Neither adopted nor consumed. }
     function AddName: Integer;
+    { The `, Name` rest of a name list - a var, field, parameter or inline
+      var declaration's - each name adopted by ADecl; AAttrs: an attribute
+      group may stand before each (a parameter's). A comma with no name
+      after it reports AMissing. }
+    procedure ParseMoreNames(ADecl: Integer; AAttrs: Boolean;
+      const AMissing: string);
     function ParseQualifiedName: Integer;
     function ParseUsesClause: Integer;
     function ParseProgramParams(ALibrary: Boolean): Integer;
@@ -212,6 +228,9 @@ type
     function IsDirectiveWord: Boolean; overload;
     function IsDirectiveWord(AVisIndex: Integer): Boolean; overload;
     function IsHintWord(AVisIndex: Integer): Boolean;
+    { At `class` with the word `operator` after it: an operator overload,
+      not a class member of another kind. }
+    function AtClassOperator: Boolean;
     procedure SkipToModuleHead;
     function IsCallConvStarter(AVisIndex: Integer): Boolean;
     function IsVisibilityWord: Boolean;
@@ -273,6 +292,11 @@ type
     procedure MarkContextKeyword;
     procedure ParseDeclSections(AParent: Integer; AAllowBodies: Boolean;
       const ATerminators: array of TPasTokenKind);
+    { A parser over ASource at its first token: the fuel budget and the
+      arena sized for it. Finish hands out the diagnostics and the tree.
+      Every entry point is Start, its own parse, Finish. }
+    class function Start(const ASource: TPasPreprocessed): TPasParser; static;
+    function Finish(out ADiags: TArray<TPasParseDiag>): TPasTree;
   public
     class function ParseStatements(const ASource: TPasPreprocessed;
       out ADiags: TArray<TPasParseDiag>): TPasTree; static;
@@ -570,7 +594,7 @@ end;
 // expression's own.
 function TPasParser.ParseExpression(AEqualEnds: Boolean): Integer;
 var
-  LOp, LRight, LNode: Integer;
+  LOp, LRight: Integer;
   LNegated, LTypeTest, LTypeName: Boolean;
 begin
   Result := ParseSimpleExpr;
@@ -630,14 +654,9 @@ begin
     end
     else
       LRight := ParseSimpleExpr;
-    LNode := FB.AddNode(nkBinaryOp, NIL_NODE, LOp);
-    FB.SetAux(LNode, LOp);
+    Result := MakeBinary(LOp, Result, LRight);
     if LNegated then
-      FB.AddFlag(LNode, nfNegated);
-    FB.Adopt(LNode, Result);
-    FB.Adopt(LNode, LRight);
-    FB.SetLast(LNode, FPos - 1);
-    Result := LNode;
+      FB.AddFlag(Result, nfNegated);
     if LTypeName then
       Result := ParseSimpleExprFrom(ParseTermFrom(Result));
   end;
@@ -660,22 +679,25 @@ begin
   Result := ParseSimpleExprFrom(ParseTerm);
 end;
 
+function TPasParser.MakeBinary(AOp, ALeft, ARight: Integer): Integer;
+begin
+  Result := FB.AddNode(nkBinaryOp, NIL_NODE, AOp);
+  FB.SetAux(Result, AOp);
+  FB.Adopt(Result, ALeft);
+  FB.Adopt(Result, ARight);
+  FB.SetLast(Result, FPos - 1);
+end;
+
 function TPasParser.ParseSimpleExprFrom(ALeft: Integer): Integer;
 var
-  LOp, LRight, LNode: Integer;
+  LOp: Integer;
 begin
   Result := ALeft;
-  while CurKind in [tkPlus, tkMinus, tkOr, tkXor] do
+  while CurKind in PAS_ADD_OPS do
   begin
     LOp := FPos;
     Next;
-    LRight := ParseTerm;
-    LNode := FB.AddNode(nkBinaryOp, NIL_NODE, LOp);
-    FB.SetAux(LNode, LOp);
-    FB.Adopt(LNode, Result);
-    FB.Adopt(LNode, LRight);
-    FB.SetLast(LNode, FPos - 1);
-    Result := LNode;
+    Result := MakeBinary(LOp, Result, ParseTerm);
   end;
 end;
 
@@ -686,21 +708,30 @@ end;
 
 function TPasParser.ParseTermFrom(ALeft: Integer): Integer;
 var
-  LOp, LRight, LNode: Integer;
+  LOp: Integer;
 begin
   Result := ALeft;
-  while CurKind in [tkStar, tkSlash, tkDiv, tkMod, tkAnd, tkShl, tkShr, tkAs]
-  do
+  while CurKind in PAS_MUL_OPS do
   begin
     LOp := FPos;
     Next;
-    LRight := ParseFactor;
-    LNode := FB.AddNode(nkBinaryOp, NIL_NODE, LOp);
-    FB.SetAux(LNode, LOp);
-    FB.Adopt(LNode, Result);
-    FB.Adopt(LNode, LRight);
-    FB.SetLast(LNode, FPos - 1);
-    Result := LNode;
+    Result := MakeBinary(LOp, Result, ParseFactor);
+  end;
+end;
+
+function TPasParser.ParseRangeElem: Integer;
+var
+  LRange: Integer;
+begin
+  Result := ParseExpression;
+  if CurKind = tkDotDot then
+  begin
+    LRange := FB.AddNode(nkRange, NIL_NODE, FPos);
+    FB.Adopt(LRange, Result);
+    Next;
+    FB.Adopt(LRange, ParseExpression);
+    FB.SetLast(LRange, FPos - 1);
+    Result := LRange;
   end;
 end;
 
@@ -814,17 +845,7 @@ begin
         Next;
         while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
         begin
-          LChild := ParseExpression;
-          if CurKind = tkDotDot then
-          begin
-            LStart := FB.AddNode(nkRange, NIL_NODE, FPos);
-            FB.Adopt(LStart, LChild);
-            Next;
-            FB.Adopt(LStart, ParseExpression);
-            FB.SetLast(LStart, FPos - 1);
-            LChild := LStart;
-          end;
-          FB.Adopt(LNode, LChild);
+          FB.Adopt(LNode, ParseRangeElem);
           if CurKind = tkComma then
             Next
           else
@@ -1018,20 +1039,7 @@ begin
           LScan := ScanGenericArgs(FPos, FB.Kind(Result) = nkMember);
           if LScan < 0 then
             Break;
-          LNode := FB.AddNode(nkTypeArgs, NIL_NODE, FPos);
-          FB.Adopt(LNode, Result);
-          Next; // '<'
-          while not AtGenericClose and (CurKind <> tkEndOfFile) do
-          begin
-            FB.Adopt(LNode, ParseTypeRef);
-            if CurKind = tkComma then
-              Next
-            else
-              Break;
-          end;
-          CloseGeneric('">"');
-          FB.SetLast(LNode, FPos - 1);
-          Result := LNode;
+          Result := ParseTypeArgs(Result);
         end;
     else
       Break;
@@ -1204,31 +1212,7 @@ begin
             Result := LNode;
           end;
         tkLess:
-          begin
-            LNode := FB.AddNode(nkTypeArgs, NIL_NODE, FPos);
-            FB.Adopt(LNode, Result);
-            Next;
-            // A guard level per `<`: a type argument recurses here, and in a
-            // type position nothing else bounds the nesting (B1-02).
-            if not EnterGuard then
-            begin
-              FB.Adopt(LNode, FB.AddNode(nkError, NIL_NODE, FPos));
-              Next;
-            end
-            else
-              while not AtGenericClose and (CurKind <> tkEndOfFile) do
-              begin
-                FB.Adopt(LNode, ParseTypeRef);
-                if CurKind = tkComma then
-                  Next
-                else
-                  Break;
-              end;
-            LeaveGuard;
-            CloseGeneric('">"');
-            FB.SetLast(LNode, FPos - 1);
-            Result := LNode;
-          end;
+          Result := ParseTypeArgs(Result);
       else
         Break;
       end;
@@ -1239,6 +1223,32 @@ begin
     Result := FB.AddNode(nkError, NIL_NODE, FPos);
     Next;
   end;
+end;
+
+function TPasParser.ParseTypeArgs(AHead: Integer): Integer;
+begin
+  Result := FB.AddNode(nkTypeArgs, NIL_NODE, FPos);
+  FB.Adopt(Result, AHead);
+  Next; // '<'
+  // A guard level per `<`: a type argument recurses here, and in a type
+  // position nothing else bounds the nesting (B1-02).
+  if not EnterGuard then
+  begin
+    FB.Adopt(Result, FB.AddNode(nkError, NIL_NODE, FPos));
+    Next;
+  end
+  else
+    while not AtGenericClose and (CurKind <> tkEndOfFile) do
+    begin
+      FB.Adopt(Result, ParseTypeRef);
+      if CurKind = tkComma then
+        Next
+      else
+        Break;
+    end;
+  LeaveGuard;
+  CloseGeneric('">"');
+  FB.SetLast(Result, FPos - 1);
 end;
 
 function TPasParser.ScanGenericArgs(AFrom: Integer; ADotted: Boolean): Integer;
@@ -1269,10 +1279,8 @@ begin
   // call above) `^ [ + -` are generic: the comparison reading would compare
   // a Boolean with a number, set or pointer. A bare head keeps them as
   // operands, so a Variant chain `VA < VB > -VC` stays comparisons.
-  LOperand := [tkIdentifier, tkIntLiteral, tkRealLiteral, tkStringLiteral,
-    tkMultilineString, tkControlChar, tkNil, tkNot, tkAt, tkInherited,
-    tkPlus, tkMinus, tkCaret, tkCaretChar, tkLBracket, tkIf, tkProcedure,
-    tkFunction, tkString];
+  // `(` is left out: it reads as a call or cast, see below.
+  LOperand := PAS_OPERAND_STARTS - [tkLParen];
   if ADotted then
     LOperand := LOperand - [tkPlus, tkMinus, tkCaret, tkLBracket];
   while (LIdx <= FLast) and (LSteps < 64) do
@@ -1499,7 +1507,7 @@ end;
 
 function TPasParser.ParseCaseStmt: Integer;
 var
-  LNode, LSel, LLabels, LExpr, LRange, LElse, LArmStart: Integer;
+  LNode, LSel, LLabels, LElse, LArmStart: Integer;
 begin
   // 5.3.2: ordinal selector; labels are const-exprs/ranges.
   LNode := FB.AddNode(nkCaseStmt, NIL_NODE, FPos);
@@ -1518,17 +1526,7 @@ begin
     FB.Adopt(LSel, LLabels);
     while True do
     begin
-      LExpr := ParseExpression;
-      if CurKind = tkDotDot then
-      begin
-        LRange := FB.AddNode(nkRange, NIL_NODE, FPos);
-        FB.Adopt(LRange, LExpr);
-        Next;
-        FB.Adopt(LRange, ParseExpression);
-        FB.SetLast(LRange, FPos - 1);
-        LExpr := LRange;
-      end;
-      FB.Adopt(LLabels, LExpr);
+      FB.Adopt(LLabels, ParseRangeElem);
       if CurKind = tkComma then
         Next
       else
@@ -1712,17 +1710,7 @@ begin
     // Inline vars may declare several names: var V, S: string; (10.3+). An
     // inline const takes one (`const A, B = 5` is E2029) - read alike, for
     // the recovery.
-    while CurKind = tkComma do
-    begin
-      Next;
-      if CurKind = tkIdentifier then
-      begin
-        FB.Adopt(Result, AddName);
-        Next;
-      end
-      else
-        Error('name expected');
-    end;
+    ParseMoreNames(Result, False, 'name expected');
   end
   else
     Error('name expected');
@@ -1956,6 +1944,30 @@ begin
   FB.AddFlag(Result, nfName);
 end;
 
+procedure TPasParser.ParseMoreNames(ADecl: Integer; AAttrs: Boolean;
+  const AMissing: string);
+var
+  LAttrs: Integer;
+begin
+  while CurKind = tkComma do
+  begin
+    Next;
+    if AAttrs then
+    begin
+      LAttrs := ParseAttrGroups;
+      if LAttrs <> NIL_NODE then
+        FB.Adopt(ADecl, LAttrs);
+    end;
+    if CurKind = tkIdentifier then
+    begin
+      FB.Adopt(ADecl, AddName);
+      Next;
+    end
+    else
+      Error(AMissing);
+  end;
+end;
+
 function TPasParser.ParseQualifiedName: Integer;
 var
   LNode, LChild: Integer;
@@ -2130,7 +2142,7 @@ end;
 
 function TPasParser.ParseAttrGroups: Integer;
 var
-  LAttr, LExpr, LRange: Integer;
+  LAttr: Integer;
   LNameLower: string;
 begin
   // 19.3.2: one node collecting all adjacent [ ... ] groups.
@@ -2170,17 +2182,7 @@ begin
       else
       begin
         // F32: one expression, a range too (`[1..2]` compiles).
-        LExpr := ParseExpression;
-        if CurKind = tkDotDot then
-        begin
-          LRange := FB.AddNode(nkRange, NIL_NODE, FPos);
-          FB.Adopt(LRange, LExpr);
-          Next;
-          FB.Adopt(LRange, ParseExpression);
-          FB.SetLast(LRange, FPos - 1);
-          LExpr := LRange;
-        end;
-        FB.Adopt(LAttr, LExpr);
+        FB.Adopt(LAttr, ParseRangeElem);
         FB.SetAux(LAttr, amaNone);
       end;
       FB.SetLast(LAttr, FPos - 1);
@@ -2198,36 +2200,26 @@ end;
 procedure TPasParser.ParseHintsOpt(ANode: Integer);
 var
   LHint: Integer;
+  LMessage: Boolean;
 begin
   // 2.5.2 hint directives after a declaration. Each hint is its own
   // nkDirective child (mirroring ParseRoutineDirectives), so the demo
   // highlighter's AST-precise BuildWeakKeywordSpans can color it - a hint
   // consumed by plain Next with no node (the old behavior) is invisible to
   // that walk and stays uncolored (real bug: `X = 1 deprecated 'msg';`).
-  while True do
+  while IsHintWord(FPos) do
   begin
-    if IsWord('deprecated') then
+    LHint := FB.AddNode(nkDirective, NIL_NODE, FPos);
+    LMessage := IsWord('deprecated');
+    Next;
+    // `deprecated 'use Y'`: the one hint with a message.
+    if LMessage and (CurKind = tkStringLiteral) then
     begin
-      LHint := FB.AddNode(nkDirective, NIL_NODE, FPos);
+      FB.Adopt(LHint, FB.AddNode(nkStrLit, NIL_NODE, FPos));
       Next;
-      if CurKind = tkStringLiteral then
-      begin
-        FB.Adopt(LHint, FB.AddNode(nkStrLit, NIL_NODE, FPos));
-        Next;
-      end;
-      FB.SetLast(LHint, FPos - 1);
-      FB.Adopt(ANode, LHint);
-    end
-    else if IsWord('platform') or IsWord('experimental') or
-      (CurKind = tkLibrary) then
-    begin
-      LHint := FB.AddNode(nkDirective, NIL_NODE, FPos);
-      Next;
-      FB.SetLast(LHint, FPos - 1);
-      FB.Adopt(ANode, LHint);
-    end
-    else
-      Break;
+    end;
+    FB.SetLast(LHint, FPos - 1);
+    FB.Adopt(ANode, LHint);
   end;
   FB.SetLast(ANode, FPos - 1);
 end;
@@ -2399,8 +2391,7 @@ begin
         // whole thing as the constant expression it is - the literal- and
         // call-headed forms below already take that route. The node built by
         // the type-reference attempt is simply left unadopted.
-        if CurKind in [tkPlus, tkMinus, tkStar, tkSlash, tkDiv, tkMod,
-           tkShl, tkShr, tkAnd, tkOr, tkXor] then
+        if CurKind in PAS_REREAD_TOKENS then
         begin
           FPos := LStart;
           FSplitEq := False;
@@ -2829,8 +2820,7 @@ begin
                 FB.Adopt(AOwner, ParseProperty(True));
               end;
           else
-            if (PeekKind(1) = tkIdentifier) and
-               FSrc.VisibleTextEquals(FPos + 1, 'operator') then
+            if AtClassOperator then
             begin
               Next;
               FB.Adopt(AOwner, ParseRoutine(True, False));
@@ -2905,17 +2895,7 @@ begin
     LDecl := FB.AddNode(nkVarDecl, NIL_NODE, FPos);
     FB.Adopt(LDecl, AddName);
     Next;
-    while CurKind = tkComma do
-    begin
-      Next;
-      if CurKind = tkIdentifier then
-      begin
-        FB.Adopt(LDecl, AddName);
-        Next;
-      end
-      else
-        Error('field name expected');
-    end;
+    ParseMoreNames(LDecl, False, 'field name expected');
     // A field with no `:` yet, the next member or the `end` right behind
     // it: declared as it is, nothing consumed (recovery, see AtDeclHead).
     if not Expect(tkColon, '":"') and
@@ -3202,20 +3182,9 @@ begin
     begin
       FB.Adopt(LParam, AddName);
       Next;
-      while CurKind = tkComma do
-      begin
-        Next;
-        // Attributes may precede EACH name in the list:
-        // const [REF] CLSID, [REF] IID: TGUID  (Datasnap.DSIntf.pas)
-        LAttrs := ParseAttrGroups;
-        if LAttrs <> NIL_NODE then
-          FB.Adopt(LParam, LAttrs);
-        if CurKind = tkIdentifier then
-        begin
-          FB.Adopt(LParam, AddName);
-          Next;
-        end;
-      end;
+      // Attributes may precede EACH name in the list:
+      // const [REF] CLSID, [REF] IID: TGUID  (Datasnap.DSIntf.pas)
+      ParseMoreNames(LParam, True, 'parameter name expected');
     end
     else
       Error('parameter name expected');
@@ -3323,6 +3292,12 @@ begin
   else
     Result := False;
   end;
+end;
+
+function TPasParser.AtClassOperator: Boolean;
+begin
+  Result := (PeekKind(1) = tkIdentifier) and
+    FSrc.VisibleTextEquals(FPos + 1, 'operator');
 end;
 
 // What starts a procedural type's directive run after a `;` (dcc64 37.0,
@@ -3851,21 +3826,18 @@ begin
     // Integer read FP deprecated;` - the one place a hint is not after a `;`
     // (dcc-probed 2026-09-17: `read FP; deprecated;` is an error). It ends
     // the specifiers; ParseHintsOpt takes it and whatever hints follow.
-    if IsWord('deprecated') or IsWord('platform') or IsWord('experimental') or
-       (CurKind = tkLibrary) then
+    if IsHintWord(FPos) then
     begin
       ParseHintsOpt(Result);
       Break;
     end;
-    if (CurKind = tkIdentifier) and (IsWord('read') or IsWord('write') or
-       IsWord('index') or IsWord('stored') or IsWord('default') or
-       IsWord('nodefault') or IsWord('implements') or IsWord('readonly') or
-       IsWord('writeonly') or IsWord('dispid')) then
+    LArgless := IsWord('nodefault') or IsWord('readonly') or
+      IsWord('writeonly');
+    if LArgless or IsWord('read') or IsWord('write') or IsWord('index') or
+       IsWord('stored') or IsWord('default') or IsWord('implements') or
+       IsWord('dispid') then
     begin
       LSpec := FB.AddNode(nkPropSpec, NIL_NODE, FPos);
-      LArgless := FSrc.VisibleTextEquals(FPos, 'nodefault') or
-        FSrc.VisibleTextEquals(FPos, 'readonly') or
-        FSrc.VisibleTextEquals(FPos, 'writeonly');
       Next;
       if not LArgless and (CurKind <> tkSemicolon) then
       begin
@@ -4230,17 +4202,7 @@ begin
       FB.Adopt(LDecl, LAttrs);
     FB.Adopt(LDecl, AddName);
     Next;
-    while CurKind = tkComma do
-    begin
-      Next;
-      if CurKind = tkIdentifier then
-      begin
-        FB.Adopt(LDecl, AddName);
-        Next;
-      end
-      else
-        Error('name expected');
-    end;
+    ParseMoreNames(LDecl, False, 'name expected');
     // Recovery, see AtDeclHead.
     LHasColon := Expect(tkColon, '":"');
     if (not LHasColon and (AtDeclHead or AtSectionBoundary)) or
@@ -4443,8 +4405,7 @@ begin
           Next;
           FB.Adopt(AParent, ParseRoutine(True, AAllowBodies));
         end
-        else if (PeekKind(1) = tkIdentifier) and
-          FSrc.VisibleTextEquals(FPos + 1, 'operator') then
+        else if AtClassOperator then
         begin
           Next;
           FB.Adopt(AParent, ParseRoutine(True, AAllowBodies));
@@ -4526,16 +4487,12 @@ class function TPasParser.ParseFile(const ASource: TPasPreprocessed;
 var
   LP: TPasParser;
   LRoot, LSec: Integer;
-  LIsBegin, LStopEarly: Boolean;
+  LIsBegin, LStopEarly, LIsRequires: Boolean;
 begin
   // Every mode but pmFull stops early; the implementation's `uses` clause
   // is the one part pmInterfaceAndImplUses reads past the interface.
   LStopEarly := AMode <> pmFull;
-  LP := Default(TPasParser);
-  LP.FSrc := ASource;
-  LP.FLast := High(ASource.Visible);
-  LP.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
-  LP.FB.Init(Length(ASource.Visible) * 3 div 4 + 64);
+  LP := Start(ASource);
   LP.SkipToModuleHead;
   case LP.CurKind of
     tkUnit:
@@ -4677,35 +4634,15 @@ begin
           end;
           if not (LP.IsWord('requires') or LP.IsWord('contains')) then
             Break;
-          // Same item shape as a real uses clause (nkUsesItem with the
-          // optional `in 'path'` string adopted), so the semantic layer can
-          // walk a package's contains-graph like a program's uses-graph.
-          // Aux = 1 marks `requires` (references to PACKAGES, not units).
-          LSec := LP.FB.AddNode(nkUsesClause, NIL_NODE, LP.FPos);
-          if LP.IsWord('requires') then
+          // A real uses clause, read by ParseUsesClause (its recovery
+          // included: a missing comma, `UA in 'UA.pas'` and `UB in 'UB.pas'`
+          // on the next line, keeps UB), so the semantic layer can walk a
+          // package's contains-graph like a program's uses-graph. Aux = 1
+          // marks `requires` (references to PACKAGES, not units).
+          LIsRequires := LP.IsWord('requires');
+          LSec := LP.ParseUsesClause;
+          if LIsRequires then
             LP.FB.SetAux(LSec, 1);
-          LP.Next;
-          repeat
-            var LItem := LP.FB.AddNode(nkUsesItem, NIL_NODE, LP.FPos);
-            LP.FB.Adopt(LItem, LP.ParseQualifiedName);
-            if LP.CurKind = tkIn then
-            begin
-              LP.Next;
-              if LP.CurKind = tkStringLiteral then
-              begin
-                LP.FB.Adopt(LItem, LP.FB.AddNode(nkStrLit, NIL_NODE, LP.FPos));
-                LP.Next;
-              end;
-            end;
-            LP.FB.SetLast(LItem, LP.FPos - 1);
-            LP.FB.Adopt(LSec, LItem);
-            if LP.CurKind = tkComma then
-              LP.Next
-            else
-              Break;
-          until False;
-          LP.Expect(tkSemicolon, '";"');
-          LP.FB.SetLast(LSec, LP.FPos - 1);
           LP.FB.Adopt(LRoot, LSec);
         until False;
         LP.Expect(tkEnd, '"end"');
@@ -4738,9 +4675,23 @@ begin
     LP.FPos := LP.FLast;
   end;
   LP.FB.SetLast(LRoot, LP.FPos);
-  SetLength(LP.FDiags, LP.FDiagCount);
-  ADiags := LP.FDiags;
-  Result := LP.FB.Build(ASource);
+  Result := LP.Finish(ADiags);
+end;
+
+class function TPasParser.Start(const ASource: TPasPreprocessed): TPasParser;
+begin
+  Result := Default(TPasParser);
+  Result.FSrc := ASource;
+  Result.FLast := High(ASource.Visible);
+  Result.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
+  Result.FB.Init(Length(ASource.Visible) * 3 div 4 + 64);
+end;
+
+function TPasParser.Finish(out ADiags: TArray<TPasParseDiag>): TPasTree;
+begin
+  SetLength(FDiags, FDiagCount);
+  ADiags := FDiags;
+  Result := FB.Build(FSrc);
 end;
 
 class function TPasParser.ParseStatements(const ASource: TPasPreprocessed;
@@ -4749,17 +4700,11 @@ var
   LParser: TPasParser;
   LRoot: Integer;
 begin
-  LParser := Default(TPasParser);
-  LParser.FSrc := ASource;
-  LParser.FLast := High(ASource.Visible);
-  LParser.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
-  LParser.FB.Init(Length(ASource.Visible) * 3 div 4 + 64);
+  LParser := Start(ASource);
   LRoot := LParser.FB.AddNode(nkBlock, NIL_NODE, 0);
   LParser.ParseBlockUntil(LRoot, [tkEndOfFile]);
   LParser.FB.SetLast(LRoot, LParser.FPos);
-  SetLength(LParser.FDiags, LParser.FDiagCount);
-  ADiags := LParser.FDiags;
-  Result := LParser.FB.Build(ASource);
+  Result := LParser.Finish(ADiags);
 end;
 
 class function TPasParser.ParseExpressionText(const AText: string;
@@ -4792,15 +4737,9 @@ begin
   SetLength(LVisible, LCount);
   LPre.Visible := LVisible;
 
-  LParser := Default(TPasParser);
-  LParser.FSrc := LPre;
-  LParser.FLast := High(LPre.Visible);
-  LParser.FFuel := Int64(Length(LPre.Visible)) * 200 + 10000;
-  LParser.FB.Init;
+  LParser := Start(LPre);
   ARoot := LParser.ParseExpression;
-  SetLength(LParser.FDiags, LParser.FDiagCount);
-  ADiags := LParser.FDiags;
-  Result := LParser.FB.Build(LPre);
+  Result := LParser.Finish(ADiags);
 end;
 
 end.

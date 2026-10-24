@@ -871,7 +871,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..250] of TPasCaseRow = (
+  DECL_CASES: array[0..251] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1206,6 +1206,13 @@ const
      Expected: 'Routine''procedure''(Ident''P''#name ' +
        'Params(Param#var(Ident''X''#name)))';
      ExpectDiags: 0),
+    // A comma with no name after it is reported, as in a var section (audit
+    // D1-02: the parameter list's copy of the name loop had no message).
+    (Section: '6.2.1'; Name: 'recovery: parameter name missing after a comma';
+     Source: 'procedure P(A, : Integer);';
+     Expected: 'Routine''procedure''(Ident''P''#name ' +
+       'Params(Param(Ident''A''#name Ident''Integer'')))';
+     ExpectDiags: 1),
 
     // ---- 6.7.1 external, never exercised at all (varargs alone was) ----
     // F13: each value carries its clause (#extname, #extindex,
@@ -2724,6 +2731,9 @@ var
 
 implementation
 
+uses
+  PasTree.Ast.Check;
+
 function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
   TPasCustomCases;
 
@@ -3439,8 +3449,13 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
     clauses with all their items: the parser reports the text once ("end"
     expected, where dcc stops with E2029), keeps it as one nkError child of
     the package, and goes on. The whole package from the stray token on used
-    to be one nkError, and every outline of the file came back empty. Stray
-    text after a clause's items (`vcl ff;`) is the same recovery. }
+    to be one nkError, and every outline of the file came back empty. A
+    clause is a uses clause (ParseUsesClause) and recovers as one: a word
+    after a clause's items (`vcl ff;`) is an item with a missing comma
+    before it, and so is a unit on the next line of a contains list
+    (`UnitA in 'UnitA.pas'` / `UnitB in ...`) - the copy the package parser
+    had of the clause stopped there and lost every unit after it (audit
+    D1-01). }
   function PackageStrayTextCase: TPasCustomCase;
   begin
     Result.Section := '1.1.3';
@@ -3453,7 +3468,8 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
           '{$R *.res}'#13#10 +
           'ff'#13#10 +
           'requires rtl, vcl ff;'#13#10 +
-          'contains UnitA in ''UnitA.pas'', UnitB;'#13#10 +
+          'contains UnitA in ''UnitA.pas'''#13#10 +
+          '  UnitB in ''UnitB.pas'', UnitC;'#13#10 +
           'end.'#13#10;
       var
         LPre: TPasPreprocessed;
@@ -3482,19 +3498,71 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
                   Inc(LRootErrors);
               end;
           end;
-        // Two diagnostics: `ff` before requires, and `ff` after `vcl` (the
-        // `;` expected there; the run up to `contains` is then skipped).
-        Result.Passed := (LReq = 2) and (LCon = 2) and (LRootErrors = 2) and
-          (LErrors = 2) and (Length(LDiags) >= 2);
+        // Three diagnostics: `ff` before requires ("end" expected), and the
+        // missing comma before `ff` and before `UnitB`.
+        Result.Passed := (LReq = 3) and (LCon = 3) and (LRootErrors = 1) and
+          (LErrors = 1) and (Length(LDiags) = 3);
         if Result.Passed then
           Result.Message := ''
         else
           Result.Message := Format(
-            '  requires items: %d (2), contains items: %d (2), ' +
-            'nkError: %d (2) under the package: %d (2), parse diags: %d',
+            '  requires items: %d (3), contains items: %d (3), ' +
+            'nkError: %d (1) under the package: %d (1), parse diags: %d (3)',
             [LReq, LCon, LErrors, LRootErrors, Length(LDiags)]) + sLineBreak;
         ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
           False);
+      end;
+  end;
+
+  { 16.3.1: a `>=` fused from the `>` closing type arguments and an `=` -
+    the shape the tree checker counts (csFusedGreaterEqual) and the printer
+    splits back (N2), one rule both ask (IsFusedGreaterEqual). Nested type
+    arguments close on `>` and then the fused `>=`: the checker's own copy
+    of the rule took that for the spaced `> >=` and did not count it (audit
+    B1-36). The spaced form is no fused one. }
+  function FusedGreaterEqualCase: TPasCustomCase;
+  begin
+    Result.Section := '16.3.1';
+    Result.Name := 'fused >= after nested type arguments';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        SRC =
+          'B := V.AsType<Integer>=5;'#13#10 +
+          'B := V.AsType<TList<Integer>>=nil;'#13#10 +
+          'B := V.AsType<Integer> >= 5;'#13#10;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LReport: TPasCheckReport;
+        LIdx, LFused, LOps: Integer;
+      begin
+        LPre := GPP.ProcessText('fused.pas', SRC);
+        LTree := TPasParser.ParseStatements(LPre, LDiags);
+        LFused := 0;
+        LOps := 0;
+        for LIdx := 0 to High(LTree.Nodes) do
+          if (LTree.Nodes[LIdx].Kind = nkBinaryOp) and
+             (LPre.VisibleToken(LTree.Nodes[LIdx].Aux).Kind = tkGreaterEqual) then
+          begin
+            Inc(LOps);
+            if IsFusedGreaterEqual(LTree, LIdx) then
+              Inc(LFused);
+          end;
+        LReport.Init;
+        CheckTree(LTree, True, LReport);
+        Result.Passed := (LOps = 3) and (LFused = 2) and
+          (LReport.Shapes[csFusedGreaterEqual] = 2) and (Length(LDiags) = 0);
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := Format(
+            '  >= operators: %d (3), fused: %d (2), checker count: %d (2), ' +
+            'parse diags: %d (0)', [LOps, LFused,
+            LReport.Shapes[csFusedGreaterEqual], Length(LDiags)]) + sLineBreak;
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, True,
+          Length(LDiags) = 0);
       end;
   end;
 
@@ -4226,7 +4294,7 @@ begin
       '', 3)];
   AddMultilineIndentCases(Result);
   Result := Result + [OutParamAuxCase, PackageHeadTokensCase,
-    PackageStrayTextCase];
+    PackageStrayTextCase, FusedGreaterEqualCase];
 end;
 
 

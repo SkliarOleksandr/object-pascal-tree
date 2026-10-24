@@ -277,7 +277,6 @@ const
   LIST_KINDS = [nkBlock, nkCaseStmt, nkExceptPart, nkInitSec, nkFinalSec,
     nkClassType, nkRecordType, nkObjectType, nkHelperType, nkInterfaceType,
     nkVariantPart, nkVariantBranch, nkVarSec, nkRoutine, nkPropertyDecl];
-  ZERO_WIDTH = [nkEmptyStmt, nkMissing];
   UNIT_KINDS = [nkUnit, nkProgram, nkLibrary, nkPackage];
   // The bodies whose members may be `class` ones, and whose var sections
   // have their head word outside their span (the own-token table).
@@ -344,44 +343,6 @@ begin
   begin
     Result := LChild;
     LChild := ATree.Nodes[LChild].NextSibling;
-  end;
-end;
-
-// A node that stands between tokens and owns none (PasTree.Ast.Check, EMPTY
-// nodes).
-function IsEmptyNode(const ATree: TPasTree; ANode: Integer): Boolean;
-begin
-  Result := (ATree.Nodes[ANode].Kind in ZERO_WIDTH) or
-    (ATree.Nodes[ANode].LastToken < ATree.Nodes[ANode].FirstToken);
-end;
-
-{ N2: is ANode an nkBinaryOp whose operator token is a `>=` fused from the
-  `>` closing type arguments on its left and its own `=`? CloseGeneric splits
-  such a token, so the type arguments end one token BEFORE it and own no `>`
-  - their span ends where their last argument does. Read from the tree: the
-  operator token (the contract read) and the spans along the left operand's
-  right edge. }
-function IsFusedGreaterEqual(const ATree: TPasTree; ANode: Integer): Boolean;
-var
-  LOp, LNode, LLast: Integer;
-begin
-  Result := False;
-  if ATree.Nodes[ANode].Kind <> nkBinaryOp then
-    Exit;
-  LOp := ATree.Nodes[ANode].Aux;
-  if (LOp < 0) or (LOp > High(ATree.Source.Visible)) or
-     (ATree.Source.VisibleToken(LOp).Kind <> tkGreaterEqual) then
-    Exit;
-  LNode := ATree.Nodes[ANode].FirstChild;
-  while (LNode <> NIL_NODE) and (ATree.Nodes[LNode].LastToken = LOp - 1) do
-  begin
-    if ATree.Nodes[LNode].Kind = nkTypeArgs then
-    begin
-      LLast := LastChild(ATree, LNode);
-      Exit((LLast <> NIL_NODE) and
-        (ATree.Nodes[LLast].LastToken = ATree.Nodes[LNode].LastToken));
-    end;
-    LNode := LastChild(ATree, LNode);
   end;
 end;
 

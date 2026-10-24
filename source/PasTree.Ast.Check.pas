@@ -233,6 +233,24 @@ function CheckShapeName(AShape: TPasCheckShape): string;
 function VisSiteText(const ASource: TPasPreprocessed;
   AVisIndex: Integer): string;
 
+const
+  // The kinds that stand between tokens and own none, whatever their span.
+  PAS_ZERO_WIDTH_KINDS = [nkEmptyStmt, nkMissing];
+
+{ A node that stands between tokens and owns none: a zero-width kind, or a
+  span that ends before it starts (EMPTY nodes, above). }
+function IsEmptyNode(const ATree: TPasTree; ANode: Integer): Boolean;
+
+{ Is ANode an nkBinaryOp whose operator token is a `>=` fused from the `>`
+  closing type arguments on its left and its own `=`? CloseGeneric splits
+  such a token, so the type arguments end one token BEFORE it and own no `>`
+  - their span ends where their last argument does. Read from the tree: the
+  operator token (the contract read) and the spans along the left operand's
+  right edge. Safe on a corrupt tree: every link is range-checked and every
+  walk bounded. The checker's csFusedGreaterEqual and the printer's N2 rule
+  both ask it. }
+function IsFusedGreaterEqual(const ATree: TPasTree; ANode: Integer): Boolean;
+
 { One line per kept violation, 'file(line,col): class: message'; '' when the
   report holds none. }
 function CheckReportText(const ATree: TPasTree;
@@ -258,15 +276,9 @@ const
   CONTEXT_WORDS: array[0..4] of string = (
     'reference', 'operator', 'abstract', 'sealed', 'helper');
 
-  ZERO_WIDTH_KINDS = [nkEmptyStmt, nkMissing];
   BINARY_OP_TOKENS = [tkEqual, tkNotEqual, tkLess, tkGreater, tkLessEqual,
-    tkGreaterEqual, tkIn, tkIs, tkPlus, tkMinus, tkOr, tkXor, tkStar, tkSlash,
-    tkDiv, tkMod, tkAnd, tkShl, tkShr, tkAs];
+    tkGreaterEqual, tkIn, tkIs] + PAS_ADD_OPS + PAS_MUL_OPS;
   UNARY_OP_TOKENS = [tkPlus, tkMinus, tkNot, tkAt];
-  // What ParseTypeExpr tests after an identifier-headed type reference: one
-  // of these makes it re-read the whole as a constant expression.
-  REREAD_TOKENS = [tkPlus, tkMinus, tkStar, tkSlash, tkDiv, tkMod, tkShl,
-    tkShr, tkAnd, tkOr, tkXor];
 
   CHECK_CLASS_NAMES: array[TPasCheckClass] of string = (
     'I1.range', 'I1.span', 'I2.order', 'I2.contain', 'I3.link', 'I3.orphan',
@@ -1093,11 +1105,22 @@ begin
     Result := Result + ' ' + GOwnRules[ARule].Finding;
 end;
 
+// The line and column of a visible token in range; its file id is the result.
+function VisLineCol(const ASource: TPasPreprocessed; AVisIndex: Integer;
+  out ALine, ACol: Integer): Integer;
+var
+  LVis: TPasVisibleToken;
+begin
+  LVis := ASource.Visible[AVisIndex];
+  ASource.Files[LVis.FileId].OffsetToLineCol(
+    ASource.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start, ALine, ACol);
+  Result := LVis.FileId;
+end;
+
 function VisSiteText(const ASource: TPasPreprocessed;
   AVisIndex: Integer): string;
 var
-  LVis: TPasVisibleToken;
-  LLine, LCol: Integer;
+  LFile, LLine, LCol: Integer;
 begin
   if (AVisIndex < 0) or (AVisIndex > High(ASource.Visible)) then
   begin
@@ -1105,10 +1128,64 @@ begin
       Exit(ASource.FileNames[0]);
     Exit('?');
   end;
-  LVis := ASource.Visible[AVisIndex];
-  ASource.Files[LVis.FileId].OffsetToLineCol(
-    ASource.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start, LLine, LCol);
-  Result := Format('%s(%d,%d)', [ASource.FileNames[LVis.FileId], LLine, LCol]);
+  LFile := VisLineCol(ASource, AVisIndex, LLine, LCol);
+  Result := Format('%s(%d,%d)', [ASource.FileNames[LFile], LLine, LCol]);
+end;
+
+function IsEmptyNode(const ATree: TPasTree; ANode: Integer): Boolean;
+begin
+  Result := (ATree.Nodes[ANode].Kind in PAS_ZERO_WIDTH_KINDS) or
+    (ATree.Nodes[ANode].LastToken < ATree.Nodes[ANode].FirstToken);
+end;
+
+function IsFusedGreaterEqual(const ATree: TPasTree; ANode: Integer): Boolean;
+var
+  LCount, LOp, LNode, LLast, LSteps: Integer;
+
+  function Valid(AIdx: Integer): Boolean;
+  begin
+    Result := (AIdx >= 0) and (AIdx < LCount);
+  end;
+
+  // The last child reachable through valid links.
+  function LastKid(AParent: Integer): Integer;
+  var
+    LKid, LGuard: Integer;
+  begin
+    Result := NIL_NODE;
+    LKid := ATree.Nodes[AParent].FirstChild;
+    LGuard := 0;
+    while Valid(LKid) and (LGuard < LCount) do
+    begin
+      Result := LKid;
+      LKid := ATree.Nodes[LKid].NextSibling;
+      Inc(LGuard);
+    end;
+  end;
+
+begin
+  Result := False;
+  LCount := Length(ATree.Nodes);
+  if not Valid(ANode) or (ATree.Nodes[ANode].Kind <> nkBinaryOp) then
+    Exit;
+  LOp := ATree.Nodes[ANode].Aux;
+  if (LOp < 1) or (LOp > High(ATree.Source.Visible)) or
+     (ATree.Source.VisibleToken(LOp).Kind <> tkGreaterEqual) then
+    Exit;
+  LNode := ATree.Nodes[ANode].FirstChild;
+  LSteps := 0;
+  while Valid(LNode) and (LSteps < LCount) and
+        (ATree.Nodes[LNode].LastToken = LOp - 1) do
+  begin
+    if ATree.Nodes[LNode].Kind = nkTypeArgs then
+    begin
+      LLast := LastKid(LNode);
+      Exit(Valid(LLast) and
+        (ATree.Nodes[LLast].LastToken = ATree.Nodes[LNode].LastToken));
+    end;
+    LNode := LastKid(LNode);
+    Inc(LSteps);
+  end;
 end;
 
 function CheckReportText(const ATree: TPasTree;
@@ -1202,15 +1279,11 @@ var
   // 'line:col' of a visible token, for the second position in a message.
   function At(AVis: Integer): string;
   var
-    LVis: TPasVisibleToken;
     LLine, LCol: Integer;
   begin
     if (AVis < 0) or (AVis > LLastVis) then
       Exit(Format('#%d', [AVis]));
-    LVis := ATree.Source.Visible[AVis];
-    ATree.Source.Files[LVis.FileId].OffsetToLineCol(
-      ATree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start,
-      LLine, LCol);
+    VisLineCol(ATree.Source, AVis, LLine, LCol);
     Result := Format('%d:%d', [LLine, LCol]);
   end;
 
@@ -1404,7 +1477,7 @@ var
       end;
       LKid := ATree.Nodes[LKid].NextSibling;
     end;
-    if Kind(ANode) in ZERO_WIDTH_KINDS then
+    if Kind(ANode) in PAS_ZERO_WIDTH_KINDS then
     begin
       LEmpty[ANode] := True;
       LLo[ANode] := LFirst;
@@ -1553,7 +1626,7 @@ var
        (ATree.Nodes[ARoot].FirstToken = ATree.Nodes[ARoot].LastToken) and
        WordAt(ATree.Nodes[ARoot].FirstToken, CONTEXT_WORDS) then
       LOrphan.Shape := csContextKeyword
-    else if not LEmpty[ARoot] and (TokKind(LHi[ARoot] + 1) in REREAD_TOKENS)
+    else if not LEmpty[ARoot] and (TokKind(LHi[ARoot] + 1) in PAS_REREAD_TOKENS)
        and ReReadCovers(ARoot) then
       LOrphan.Shape := csTypeRefReread
     else
@@ -1700,32 +1773,6 @@ var
       if ((GOwnRules[LRule].Mult = omOnce) and (LCount <> 1)) or
          ((GOwnRules[LRule].Mult = omOpt) and (LCount > 1)) then
         ReportMult(LRule, LCount);
-    end;
-  end;
-
-  // csFusedGreaterEqual: the left operand ends in type arguments that close
-  // on this very `>=` - their LastToken is the token before it.
-  function FusedClose(ALeft, AOp: Integer): Boolean;
-  var
-    LAt, LKid, LIdx, LSteps: Integer;
-  begin
-    Result := False;
-    if TokKind(AOp - 1) = tkGreater then
-      Exit;
-    LAt := ALeft;
-    LSteps := 0;
-    while LinkOk(LAt) and (LSteps < LCount) do
-    begin
-      if (Kind(LAt) = nkTypeArgs) and (ATree.Nodes[LAt].LastToken = AOp - 1) then
-        Exit(True);
-      // Down to the last child: the rightmost designator segment.
-      if LKidCount[LAt] = 0 then
-        Exit;
-      LKid := ATree.Nodes[LAt].FirstChild;
-      for LIdx := 2 to LKidCount[LAt] do
-        LKid := ATree.Nodes[LKid].NextSibling;
-      LAt := LKid;
-      Inc(LSteps);
     end;
   end;
 
@@ -1993,7 +2040,7 @@ var
                  ((LOpKind = tkIn) and (TokKind(LAux - 1) = tkNot))) then
                 AReport.Add(ccFlags, ANode, Site(ANode),
                   'BinaryOp is negated but reads neither `is not` nor `not in`');
-            if (LOpKind = tkGreaterEqual) and FusedClose(LFirstKid, LAux) then
+            if (LOpKind = tkGreaterEqual) and IsFusedGreaterEqual(ATree, ANode) then
               AReport.AddShape(csFusedGreaterEqual, LAux);
           end;
         end;
