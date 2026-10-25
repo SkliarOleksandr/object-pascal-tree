@@ -8114,11 +8114,10 @@ end;
 procedure TPasSemaProject.FixCrossArity(AId: Integer; AModel: TPasSemaModel;
   ANode: Integer; const ANameLower: string; var AUnit, ASym: Integer);
 var
-  LWant, LProbe, LDepth, LUid, LFound: Integer;
+  LWant, LProbe, LUid, LFound: Integer;
   LKey: Int64;
   LMemo: TDictionary<Int64, TPasExtRef>;
   LExt: TPasExtRef;
-  LHit: Boolean;
 begin
   if FModels[AUnit].Symbols[ASym].Kind <> skType then
     Exit;
@@ -8142,22 +8141,11 @@ begin
       Exit;
     end;
   end;
-  LHit := False;
-  LProbe := FModels[AUnit].Symbols[ASym].NextOverload;
-  for LDepth := 1 to 32 do
-  begin
-    if LProbe = NIL_SYM then
-      Break;
-    if (FModels[AUnit].Symbols[LProbe].Kind = skType) and
-       (ArityOfTypeSym(AUnit, LProbe) = LWant) then
-    begin
-      ASym := LProbe;
-      LHit := True;
-      Break;
-    end;
-    LProbe := FModels[AUnit].Symbols[LProbe].NextOverload;
-  end;
-  if not LHit then
+  LProbe := TypeOfArityInChain(AUnit, FModels[AUnit].Symbols[ASym].NextOverload,
+    LWant);
+  if LProbe <> NIL_SYM then
+    ASym := LProbe
+  else
     if FindTypeInUsesArity(AId, ANameLower, LWant, LUid, LFound) then
     begin
       AUnit := LUid;
@@ -8286,15 +8274,8 @@ end;
 // (`[S + '']`) is the GUID's: no suffix there.
 function TPasSemaProject.IsAttributeTypeRef(AModel: TPasSemaModel;
   ANode: Integer): Boolean;
-var
-  LParent: Integer;
 begin
-  LParent := AModel.Tree.Nodes[ANode].Parent;
-  Result := (LParent <> NIL_NODE) and
-    ((AModel.Tree.Nodes[LParent].Kind = nkAttribute) or
-     ((AModel.Tree.Nodes[LParent].Kind = nkGuid) and
-      (AModel.Tree.Nodes[ANode].Kind in [nkIdent, nkMember]))) and
-    (AModel.Tree.Nodes[LParent].FirstChild = ANode);
+  Result := PasIsAttributeTypeRef(AModel.Tree, ANode);
 end;
 
 // ...and specifically the type ref of a COMPILER-RECOGNIZED one (19.3.3).
@@ -10664,17 +10645,10 @@ begin
   // a ROUTINE head.
   if ArityOfTypeSym(Result.UnitId, Result.Sym) <> AArity then
   begin
-    LSym := FModels[Result.UnitId].Symbols[Result.Sym].NextOverload;
-    while LSym <> NIL_SYM do
-    begin
-      if (FModels[Result.UnitId].Symbols[LSym].Kind = skType) and
-         (ArityOfTypeSym(Result.UnitId, LSym) = AArity) then
-      begin
-        Result.Sym := LSym;
-        Break;
-      end;
-      LSym := FModels[Result.UnitId].Symbols[LSym].NextOverload;
-    end;
+    LSym := TypeOfArityInChain(Result.UnitId,
+      FModels[Result.UnitId].Symbols[Result.Sym].NextOverload, AArity);
+    if LSym <> NIL_SYM then
+      Result.Sym := LSym;
     // The chain only links declarations in ONE model. When the arities
     // live in DIFFERENT used units there is nothing to chain, and the
     // ordinary lookup returned whichever was imported last - so
@@ -17769,7 +17743,7 @@ end;
 function TPasSemaProject.PropertyParamCount(AMid, ASym: Integer): Integer;
 var
   LM: TPasSemaModel;
-  LDecl, LChild, LParam, LName, LPrevMid, LPrevSym: Integer;
+  LDecl, LChild, LPrevMid, LPrevSym: Integer;
 begin
   Result := 0;
   LM := FModels[AMid];
@@ -17788,24 +17762,7 @@ begin
   LChild := LM.Tree.Nodes[LDecl].FirstChild;
   while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind <> nkParams) do
     LChild := LM.Tree.Nodes[LChild].NextSibling;
-  if LChild = NIL_NODE then
-    Exit;
-  LParam := LM.Tree.Nodes[LChild].FirstChild;
-  while LParam <> NIL_NODE do
-  begin
-    if LM.Tree.Nodes[LParam].Kind = nkParam then
-    begin
-      LName := LM.Tree.Nodes[LParam].FirstChild;
-      while LName <> NIL_NODE do
-      begin
-        if (LM.Tree.Nodes[LName].Kind = nkIdent) and
-           (nfName in LM.Tree.Nodes[LName].Flags) then
-          Inc(Result);
-        LName := LM.Tree.Nodes[LName].NextSibling;
-      end;
-    end;
-    LParam := LM.Tree.Nodes[LParam].NextSibling;
-  end;
+  Result := PasParamNameCount(LM.Tree, LChild);
 end;
 
 // Stamped by Phase 1 (TPasSemaResolver.StampRetainedFlags): the specifier

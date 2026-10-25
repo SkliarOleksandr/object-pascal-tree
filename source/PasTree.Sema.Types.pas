@@ -161,7 +161,7 @@ type
     function IsValuePos(N: Integer): Boolean;
     function DeclaresConversion(ASym: Integer; AExplicitToo: Boolean): Boolean;
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
-    function IsVarargs(AScope: Integer): Boolean;
+
     function SelectOverload(ACall, AHead: Integer): Integer;
     function MemberResult(N: Integer): Integer;
     procedure Diag(const ACode, AMsg: string; ANode: Integer);
@@ -2586,23 +2586,6 @@ begin
   end;
 end;
 
-// A `varargs` directive (cdecl external) accepts any number of trailing args.
-function TPasSemaTyper.IsVarargs(AScope: Integer): Boolean;
-var
-  LRoutine, LChild: Integer;
-begin
-  Result := False;
-  LRoutine := M.Scopes[AScope].OwnerNode;
-  if LRoutine = NIL_NODE then
-    Exit;
-  LChild := Child(LRoutine);
-  while LChild <> NIL_NODE do
-  begin
-    if (Kind(LChild) = nkDirective) and T.NodeTextEquals(LChild, 'varargs') then
-      Exit(True);
-    LChild := Sib(LChild);
-  end;
-end;
 
 
 // Pick the best overload for typing/navigation; emit an arg-count diagnostic
@@ -2664,7 +2647,9 @@ begin
           Break
         else
           Inc(LReq);
-      LVariadic := IsVarargs(M.Symbols[LCand].MemberScope);
+      // A `varargs` directive (cdecl external) accepts any number of
+      // trailing args - stamped by the resolver (StampRetainedFlags).
+      LVariadic := sfVarArgs in M.Symbols[LCand].Flags;
       if LVariadic then
         LAnyVariadic := True;
       if LReq < LMinReq then LMinReq := LReq;

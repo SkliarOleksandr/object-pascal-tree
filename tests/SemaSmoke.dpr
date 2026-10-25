@@ -2114,6 +2114,18 @@ begin
     'unit U; interface type TC = class function M(Result: Integer): Integer; ' +
     'end; implementation function TC.M(Result: Integer): Integer; ' +
     'begin end; end.', 1);
+  // A function literal's own Result follows the rule (spec 17, dcc64 37.0
+  // E2004 at the literal's begin; audit D2-04); a procedure literal and a
+  // procedural type's parameter list have no Result to collide with.
+  Expect('a function literal''s parameter named Result',
+    'unit U; interface implementation uses System.SysUtils; procedure P; ' +
+    'var F: TFunc<Integer, Integer>; begin ' +
+    'F := function(Result: Integer): Integer begin end; end; end.', 1);
+  Expect('silent: a procedure literal''s and a procedural type''s Result',
+    'unit U; interface type TF = reference to function(Result: Integer): ' +
+    'Integer; implementation uses System.SysUtils; procedure P; ' +
+    'var Q: TProc<Integer>; begin ' +
+    'Q := procedure(Result: Integer) begin end; end; end.', 0);
 
   Expect('silent: the routine''s own name',
     'unit U; interface type TC = class function M: Integer; end; ' +

@@ -139,6 +139,14 @@ type
     // collect
     procedure MarkDeclName(ANode, ASym: Integer);
     procedure ReportRedeclared(ADeclNode: Integer);
+    { A parameter list's names, each nkParam declared into AScope, which is
+      the list's own scope too (a climb from inside it lands there). }
+    procedure DeclareParamList(AParams, AScope: Integer);
+    { The implicit `Result` of a function - a routine or a literal - in its
+      scope, typed by ATypeNode (NIL_NODE: the procedure literal's shadow).
+      A parameter already named Result is E2004 when AReport (03 3.1.3, 17). }
+    procedure DeclareImplicitResult(AScope, ATypeNode: Integer;
+      AReport: Boolean);
     function BodyScope(AScope: Integer): Integer;
     function RedeclaresOwnName(AScope: Integer; AKind: TSemaSymbolKind;
       ADeclNode: Integer; const AKey: TSemaKey): Boolean;
@@ -163,6 +171,17 @@ type
     function GenericArityOfParamsNode(ANode: Integer): Integer;
     function GenericArityOfDecl(ATypeDeclNode: Integer): Integer;
     function GenericArityOfSym(ASym: Integer): Integer;
+    { The first type on the overload chain from AHead (AHead included) that
+      declares AArity type parameters; NIL_SYM when none. A name's arities
+      share one chain (CollectTypeDecl), and only its first is registered
+      under the name. }
+    function ArityOnChain(AHead, AArity: Integer): Integer;
+    { A type symbol's definition node - the sibling after its name, past the
+      generic parameters; NIL_NODE when there is none (a seeded type, a
+      parameter). The alias walks (AliasedMemberScope, AliasStructSym,
+      ElementOfTypeSym, PointeeTypeSym) read a link or their terminal kind
+      from it. }
+    function TypeDefNode(ASym: Integer): Integer;
     procedure DeclareNamesAndType(ADecl, AScope: Integer;
       AKind: TSemaSymbolKind);
     function IsForwardTypeSym(ASym: Integer): Boolean;
@@ -406,14 +425,8 @@ end;
 // at the use site. The name an interface's nkGuid holds is looked up the
 // same way (14.1.1).
 function TPasSemaResolver.IsAttributeTypeRef(ANode: Integer): Boolean;
-var
-  LParent: Integer;
 begin
-  LParent := FTree.Nodes[ANode].Parent;
-  Result := (LParent <> NIL_NODE) and
-    ((KindOf(LParent) = nkAttribute) or
-     ((KindOf(LParent) = nkGuid) and (KindOf(ANode) in [nkIdent, nkMember])))
-    and (FirstChild(LParent) = ANode);
+  Result := PasIsAttributeTypeRef(FTree, ANode);
 end;
 
 { True when ANode is a name written WITHOUT type arguments - i.e. not the head of
@@ -654,30 +667,14 @@ end;
 // omitted (external / forward completion that doesn't repeat the params).
 function TPasSemaResolver.CountImplParamNames(ARoutineNode: Integer): Integer;
 var
-  LParams, LParam, LChild: Integer;
+  LParams: Integer;
 begin
   LParams := FindChildKind(ARoutineNode, nkParams);
   if LParams = NIL_NODE then
     Exit(-1);
-  Result := 0;
-  LParam := FirstChild(LParams);
-  while LParam <> NIL_NODE do
-  begin
-    if KindOf(LParam) = nkParam then
-    begin
-      // The names carry nfName; the type after them does not.
-      LChild := SkipAttr(FirstChild(LParam));
-      while (LChild <> NIL_NODE) and IsDeclName(LChild) do
-      begin
-        Inc(Result);
-        // SkipAttr: an attribute group can sit mid-list (see
-        // DeclareNamesAndType), and undercounting names here mismatches an
-        // implementation against the wrong interface overload.
-        LChild := SkipAttr(NextSib(LChild));
-      end;
-    end;
-    LParam := NextSib(LParam);
-  end;
+  // Attribute groups mid-list skipped: undercounting the names mismatches an
+  // implementation against the wrong interface overload.
+  Result := PasParamNameCount(FTree, LParams);
 end;
 
 // Parameter count of an already-collected routine symbol (its param scope).
@@ -1067,6 +1064,36 @@ begin
   end;
 end;
 
+procedure TPasSemaResolver.DeclareParamList(AParams, AScope: Integer);
+var
+  LParam: Integer;
+begin
+  FNodeScope[AParams] := AScope;
+  LParam := FirstChild(AParams);
+  while LParam <> NIL_NODE do
+  begin
+    if KindOf(LParam) = nkParam then
+      DeclareNamesAndType(LParam, AScope, skParam);
+    LParam := NextSib(LParam);
+  end;
+end;
+
+procedure TPasSemaResolver.DeclareImplicitResult(AScope, ATypeNode: Integer;
+  AReport: Boolean);
+var
+  LRes: Integer;
+begin
+  LRes := FModel.FindLocal(AScope, 'result');
+  if LRes = NIL_SYM then
+  begin
+    LRes := FModel.AddSymbol(AScope, skVar, 'Result', NIL_NODE, 'result');
+    FModel.Symbols[LRes].TypeNode := ATypeNode;
+    FModel.BindName(AScope, LRes);
+  end
+  else if AReport and (FModel.Symbols[LRes].Kind = skParam) then
+    ReportRedeclared(FModel.Symbols[LRes].DeclNode);
+end;
+
 procedure TPasSemaResolver.ReportRedeclared(ADeclNode: Integer);
 var
   LFileId, LLine, LCol: Integer;
@@ -1365,14 +1392,7 @@ begin
     Exit(HoldsName(FIntf, AKey));
   // A generic type clashes only with a type of its own arity - the chain
   // holds a name's arities (CollectTypeDecl).
-  while LSym <> NIL_SYM do
-  begin
-    if (FModel.Symbols[LSym].Kind = skType) and
-       (GenericArityOfSym(LSym) = LArity) then
-      Exit(True);
-    LSym := FModel.Symbols[LSym].NextOverload;
-  end;
-  Result := False;
+  Result := ArityOnChain(LSym, LArity) <> NIL_SYM;
 end;
 
 { A declaration its own scope has no clash for, but that takes a name dcc64
@@ -1637,12 +1657,14 @@ begin
 end;
 
 // Same, for an already-declared type symbol (via its declaration's nkTypeDecl).
+// A type without sfGeneric has none: CollectTypeDecl sets the flag as it
+// declares the type, before anything can ask.
 function TPasSemaResolver.GenericArityOfSym(ASym: Integer): Integer;
 var
   LDecl, LParent: Integer;
 begin
   Result := 0;
-  if ASym = NIL_SYM then
+  if (ASym = NIL_SYM) or not (sfGeneric in FModel.Symbols[ASym].Flags) then
     Exit;
   LDecl := FModel.Symbols[ASym].DeclNode;
   if LDecl = NIL_NODE then
@@ -1650,6 +1672,32 @@ begin
   LParent := FTree.Nodes[LDecl].Parent;
   if (LParent <> NIL_NODE) and (KindOf(LParent) = nkTypeDecl) then
     Result := GenericArityOfDecl(LParent);
+end;
+
+function TPasSemaResolver.TypeDefNode(ASym: Integer): Integer;
+begin
+  if FModel.Symbols[ASym].DeclNode = NIL_NODE then
+    Exit(NIL_NODE);
+  Result := NextSib(FModel.Symbols[ASym].DeclNode);
+  while (Result <> NIL_NODE) and (KindOf(Result) = nkGenericParams) do
+    Result := NextSib(Result);
+end;
+
+function TPasSemaResolver.ArityOnChain(AHead, AArity: Integer): Integer;
+var
+  LDepth: Integer;
+begin
+  Result := AHead;
+  for LDepth := 1 to 64 do
+  begin
+    if Result = NIL_SYM then
+      Exit;
+    if (FModel.Symbols[Result].Kind = skType) and
+       (GenericArityOfSym(Result) = AArity) then
+      Exit;
+    Result := FModel.Symbols[Result].NextOverload;
+  end;
+  Result := NIL_SYM;
 end;
 
 { Is ASym's declaration a forward one - `TFoo = class;`, `IFoo =
@@ -1684,7 +1732,7 @@ end;
 procedure TPasSemaResolver.CollectTypeDecl(ANode, AScope: Integer);
 var
   LName, LChild, LSym, LExisting, LGen, LBody: Integer;
-  LMatch, LProbe, LDepth: Integer;
+  LMatch: Integer;
 begin
   LChild := FirstChild(ANode);
   if (LChild <> NIL_NODE) and (KindOf(LChild) = nkAttrGroup) then
@@ -1713,20 +1761,7 @@ begin
   // fields and its inherited members. ~60 false E2003 in that one unit, and it
   // did not reproduce until the fixture also had the non-generic sibling.
   LExisting := FModel.FindLocal(AScope, NodeKey(LName));
-  LMatch := NIL_SYM;
-  LProbe := LExisting;
-  for LDepth := 1 to 64 do
-  begin
-    if LProbe = NIL_SYM then
-      Break;
-    if (FModel.Symbols[LProbe].Kind = skType) and
-       (GenericArityOfDecl(ANode) = GenericArityOfSym(LProbe)) then
-    begin
-      LMatch := LProbe;
-      Break;
-    end;
-    LProbe := FModel.Symbols[LProbe].NextOverload;
-  end;
+  LMatch := ArityOnChain(LExisting, GenericArityOfDecl(ANode));
   // Only a FORWARD is completed: `TX = Integer; TX = string;`, a complete
   // class followed by another, `TE = class(TObject);` and then a body, a
   // forward completed twice - each is E2004 (dcc64 37.0; audit B4-19).
@@ -1941,14 +1976,7 @@ begin
             begin
               if LPropSig = NIL_SCOPE then
                 LPropSig := FModel.AddScope(sckRoutine, LMembers, LChild);
-              FNodeScope[LC] := LPropSig;
-              var LParam := FirstChild(LC);
-              while LParam <> NIL_NODE do
-              begin
-                if KindOf(LParam) = nkParam then
-                  DeclareNamesAndType(LParam, LPropSig, skParam);
-                LParam := NextSib(LParam);
-              end;
+              DeclareParamList(LC, LPropSig);
             end
             else
               Collect(LC, LMembers);
@@ -2377,17 +2405,10 @@ begin
       // name, so walk the chain for the one this segment actually declares.
       if GenericArityOfSym(LCand) <> LQualArity[LSegIdx] then
       begin
-        var LAlt := FModel.Symbols[LCand].NextOverload;
-        while LAlt <> NIL_SYM do
-        begin
-          if (FModel.Symbols[LAlt].Kind = skType) and
-             (GenericArityOfSym(LAlt) = LQualArity[LSegIdx]) then
-          begin
-            LCand := LAlt;
-            Break;
-          end;
-          LAlt := FModel.Symbols[LAlt].NextOverload;
-        end;
+        var LAlt := ArityOnChain(FModel.Symbols[LCand].NextOverload,
+          LQualArity[LSegIdx]);
+        if LAlt <> NIL_SYM then
+          LCand := LAlt;
       end;
       LTy := LCand;
       if FModel.Symbols[LTy].MemberScope <> NIL_SCOPE then
@@ -2486,15 +2507,7 @@ begin
   begin
     case KindOf(LChild) of
       nkParams:
-        begin
-          var LParam := FirstChild(LChild);
-          while LParam <> NIL_NODE do
-          begin
-            if KindOf(LParam) = nkParam then
-              DeclareNamesAndType(LParam, LRoutine, skParam);
-            LParam := NextSib(LParam);
-          end;
-        end;
+        DeclareParamList(LChild, LRoutine);
       nkGenericParams, nkRoutineBody, nkDirective, nkAttrGroup:
         Collect(LChild, LRoutine);
     else
@@ -2515,17 +2528,8 @@ begin
         // DeclareSym reports only against a Result already in the scope. A
         // parameter named Result is E2004 as well - once, at a body's begin,
         // where dcc declares Result - so a bodiless declaration stays silent.
-        var LRes := FModel.FindLocal(LRoutine, 'result');
-        if LRes = NIL_SYM then
-        begin
-          LRes := FModel.AddSymbol(LRoutine, skVar, 'Result', NIL_NODE,
-            'result');
-          FModel.Symbols[LRes].TypeNode := LResultNode;
-          FModel.BindName(LRoutine, LRes);
-        end
-        else if (FModel.Symbols[LRes].Kind = skParam) and
-                (FindChildKind(ANode, nkRoutineBody) <> NIL_NODE) then
-          ReportRedeclared(FModel.Symbols[LRes].DeclNode);
+        DeclareImplicitResult(LRoutine, LResultNode,
+          FindChildKind(ANode, nkRoutineBody) <> NIL_NODE);
       end;
     end;
     LChild := NextSib(LChild);
@@ -2757,28 +2761,16 @@ begin
         begin
           if KindOf(LChild) = nkParams then
           begin
-            FNodeScope[LChild] := LAnon;
-            var LParam := FirstChild(LChild);
-            while LParam <> NIL_NODE do
-            begin
-              if KindOf(LParam) = nkParam then
-                DeclareNamesAndType(LParam, LAnon, skParam);
-              LParam := NextSib(LParam);
-            end;
+            DeclareParamList(LChild, LAnon);
             LChild := NextSib(LChild);
             Continue;
           end;
           // The result type is the child that is neither the parameters, a
-          // directive (`procedure stdcall begin`) nor the body.
-          if not (KindOf(LChild) in [nkAnonParams, nkDirective,
-             nkRoutineBody]) and
-             (FModel.FindLocal(LAnon, 'result') = NIL_SYM) then
-          begin
-            var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE,
-              'result');
-            FModel.Symbols[LRes].TypeNode := LChild;
-            FModel.BindName(LAnon, LRes);
-          end;
+          // directive (`procedure stdcall begin`) nor the body. A parameter
+          // named Result is E2004, as in a named function (17: dcc64 37.0
+          // reports it at the literal's begin).
+          if not (KindOf(LChild) in [nkDirective, nkRoutineBody]) then
+            DeclareImplicitResult(LAnon, LChild, True);
           Collect(LChild, LAnon);
           LChild := NextSib(LChild);
         end;
@@ -2792,11 +2784,7 @@ begin
            (LOuterRes <> NIL_SYM) and
            (FModel.Symbols[LOuterRes].DeclNode = NIL_NODE) and
            (FModel.Symbols[LOuterRes].Kind = skVar) then
-        begin
-          var LRes := FModel.AddSymbol(LAnon, skVar, 'Result', NIL_NODE,
-            'result');
-          FModel.BindName(LAnon, LRes);
-        end;
+          DeclareImplicitResult(LAnon, NIL_NODE, False);
       end;
 
     nkMethodResolution:
@@ -2908,16 +2896,7 @@ begin
         while LChild <> NIL_NODE do
         begin
           if KindOf(LChild) = nkParams then
-          begin
-            FNodeScope[LChild] := LSig;
-            var LParam := FirstChild(LChild);
-            while LParam <> NIL_NODE do
-            begin
-              if KindOf(LParam) = nkParam then
-                DeclareNamesAndType(LParam, LSig, skParam);
-              LParam := NextSib(LParam);
-            end;
-          end
+            DeclareParamList(LChild, LSig)
           else
             Collect(LChild, LSig);
           LChild := NextSib(LChild);
@@ -3108,11 +3087,7 @@ var
         Exit;
       if FModel.Symbols[LSym].MemberScope <> NIL_SCOPE then
         Exit(FModel.Symbols[LSym].MemberScope);
-      if FModel.Symbols[LSym].DeclNode = NIL_NODE then
-        Exit;
-      LDef := NextSib(FModel.Symbols[LSym].DeclNode);
-      while (LDef <> NIL_NODE) and (KindOf(LDef) = nkGenericParams) do
-        LDef := NextSib(LDef);
+      LDef := TypeDefNode(LSym);
       if (LDef = NIL_NODE) or (KindOf(LDef) <> nkIdent) then
         Exit;
       LSym := FModel.Resolve(FNodeScope[LDef], NodeKey(LDef));
@@ -3303,17 +3278,10 @@ begin
                (FModel.Symbols[LBound].Kind = skType) and
                (GenericArityOfSym(LBound) <> LWantArity) then
             begin
-              var LAlt := FModel.Symbols[LBound].NextOverload;
-              while LAlt <> NIL_SYM do
-              begin
-                if (FModel.Symbols[LAlt].Kind = skType) and
-                   (GenericArityOfSym(LAlt) = LWantArity) then
-                begin
-                  FModel.RefMap[ANode] := LAlt;
-                  Break;
-                end;
-                LAlt := FModel.Symbols[LAlt].NextOverload;
-              end;
+              var LAlt := ArityOnChain(FModel.Symbols[LBound].NextOverload,
+                LWantArity);
+              if LAlt <> NIL_SYM then
+                FModel.RefMap[ANode] := LAlt;
             end;
           end;
         end;
@@ -3503,17 +3471,10 @@ begin
            (KindOf(NextSib(LSegs[0])) = nkGenericParams) then
         begin
           var LWant := MethodResolutionArity(NextSib(LSegs[0]));
-          var LAlt := FModel.Resolve(FNodeScope[LSegs[0]], NodeKey(LSegs[0]));
-          while LAlt <> NIL_SYM do
-          begin
-            if (FModel.Symbols[LAlt].Kind = skType) and
-               (GenericArityOfSym(LAlt) = LWant) then
-            begin
-              FModel.RefMap[LSegs[0]] := LAlt;
-              Break;
-            end;
-            LAlt := FModel.Symbols[LAlt].NextOverload;
-          end;
+          var LAlt := ArityOnChain(
+            FModel.Resolve(FNodeScope[LSegs[0]], NodeKey(LSegs[0])), LWant);
+          if LAlt <> NIL_SYM then
+            FModel.RefMap[LSegs[0]] := LAlt;
           // None of that arity here: the project's pass binds it across the
           // uses (FixCrossArity), which a wrong local binding would block.
           if (FModel.RefMap[LSegs[0]] <> NIL_SYM) and
@@ -3580,17 +3541,10 @@ begin
                 LQWant := GenericArityOfParamsNode(LQParent);
               if GenericArityOfSym(LQSym) <> LQWant then
               begin
-                var LQAlt := FModel.Symbols[LQSym].NextOverload;
-                while LQAlt <> NIL_SYM do
-                begin
-                  if (FModel.Symbols[LQAlt].Kind = skType) and
-                     (GenericArityOfSym(LQAlt) = LQWant) then
-                  begin
-                    FModel.RefMap[LName] := LQAlt;
-                    Break;
-                  end;
-                  LQAlt := FModel.Symbols[LQAlt].NextOverload;
-                end;
+                var LQAlt := ArityOnChain(FModel.Symbols[LQSym].NextOverload,
+                  LQWant);
+                if LQAlt <> NIL_SYM then
+                  FModel.RefMap[LName] := LQAlt;
               end;
             end;
           end;
@@ -3665,11 +3619,7 @@ begin
     Inc(LDepth);
     if FModel.Symbols[LSym].MemberScope <> NIL_SCOPE then
       Exit(LSym);
-    if FModel.Symbols[LSym].DeclNode = NIL_NODE then
-      Exit;
-    LDef := NextSib(FModel.Symbols[LSym].DeclNode);
-    while (LDef <> NIL_NODE) and (KindOf(LDef) = nkGenericParams) do
-      LDef := NextSib(LDef);
+    LDef := TypeDefNode(LSym);
     if (LDef <> NIL_NODE) and (KindOf(LDef) in [nkIdent, nkMember, nkTypeArgs])
     then
       LSym := DesignatorHead(LDef)
@@ -3902,9 +3852,8 @@ end;
   declared type per-ELEMENT already, so the type symbol IS the element's. }
 function TPasSemaResolver.DefaultArrayPropTypeSym(ATypeSym: Integer): Integer;
 var
-  LScope, LDepth, LIdx, LSym, LDecl, LChild: Integer;
+  LScope, LDepth, LIdx, LSym: Integer;
   LSyms: TSemaSymList;
-  LHasParams, LHasDefault: Boolean;
   LRedecl: string;
 begin
   Result := NIL_SYM;
@@ -3935,34 +3884,15 @@ begin
         for LIdx := 0 to LSyms.Count - 1 do
         begin
           LSym := LSyms[LIdx];
-          if FModel.Symbols[LSym].Kind <> skProperty then
+          // StampRetainedFlags read the bare `default` of an array property
+          // or of a typeless redeclaration; it runs before the with pass.
+          if (FModel.Symbols[LSym].Kind <> skProperty) or
+             not (sfDefaultArrayProp in FModel.Symbols[LSym].Flags) then
             Continue;
-          LDecl := FModel.Symbols[LSym].DeclNode;
-          if LDecl = NIL_NODE then
-            Continue;
-          LDecl := FTree.Nodes[LDecl].Parent;
-          if (LDecl = NIL_NODE) or (KindOf(LDecl) <> nkPropertyDecl) then
-            Continue;
-          LHasParams := False;
-          LHasDefault := False;
-          LChild := FirstChild(LDecl);
-          while LChild <> NIL_NODE do
-          begin
-            if KindOf(LChild) = nkParams then
-              LHasParams := True
-            else if (KindOf(LChild) = nkPropSpec) and
-                    FTree.NodeTextEquals(LChild, 'default') and
-                    (FirstChild(LChild) = NIL_NODE) then
-              LHasDefault := True;
-            LChild := NextSib(LChild);
-          end;
-          if LHasParams and LHasDefault then
+          if FModel.Symbols[LSym].TypeNode <> NIL_NODE then
             Exit(FModel.Symbols[LSym].TypeSym);
-          if LHasDefault and (FModel.Symbols[LSym].TypeNode = NIL_NODE) then
-          begin
-            LRedecl := FModel.Symbols[LSym].NameLower;
-            Break;
-          end;
+          LRedecl := FModel.Symbols[LSym].NameLower;
+          Break;
         end;
     end;
     ATypeSym := AncestorTypeSym(ATypeSym);
@@ -4259,11 +4189,9 @@ begin
   LSym := ATypeSym;
   for LDepth := 1 to 32 do
   begin
-    if (LSym = NIL_SYM) or (FModel.Symbols[LSym].DeclNode = NIL_NODE) then
+    if LSym = NIL_SYM then
       Exit(NIL_SYM);
-    LDef := NextSib(FModel.Symbols[LSym].DeclNode);
-    while (LDef <> NIL_NODE) and (KindOf(LDef) = nkGenericParams) do
-      LDef := NextSib(LDef);
+    LDef := TypeDefNode(LSym);
     if LDef = NIL_NODE then
       Exit(NIL_SYM);
     case KindOf(LDef) of
@@ -4291,11 +4219,9 @@ begin
   LSym := ATypeSym;
   for LDepth := 1 to 32 do
   begin
-    if (LSym = NIL_SYM) or (FModel.Symbols[LSym].DeclNode = NIL_NODE) then
+    if LSym = NIL_SYM then
       Exit;
-    LDef := NextSib(FModel.Symbols[LSym].DeclNode);
-    while (LDef <> NIL_NODE) and (KindOf(LDef) = nkGenericParams) do
-      LDef := NextSib(LDef);
+    LDef := TypeDefNode(LSym);
     if LDef = NIL_NODE then
       Exit;
     case KindOf(LDef) of

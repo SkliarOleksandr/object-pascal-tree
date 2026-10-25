@@ -513,6 +513,21 @@ type
   function PasPropertyHasParams(const ATree: TPasTree;
     ANameNode: Integer): Boolean;
 
+  { Is ANode an attribute's type reference - the FIRST child of an
+    nkAttribute (`[Table]`; its `(...)` arguments are not), or a name or
+    dotted name heading an interface's nkGuid (`[Mark]`, looked up as an
+    attribute's first, 14.1.1)? 19.3.1 lets the `Attribute` suffix be
+    omitted at such a use, so its lookup tries the suffixed name. The
+    resolver and the project ask the same question. }
+  function PasIsAttributeTypeRef(const ATree: TPasTree;
+    ANode: Integer): Boolean;
+
+  { The parameter NAMES an nkParams list declares - each nkParam's leading
+    nfName idents, attribute groups between them skipped (`const [Ref] A,
+    [Ref] B: TGUID`); 0 for NIL_NODE. }
+  function PasParamNameCount(const ATree: TPasTree;
+    AParams: Integer): Integer;
+
 implementation
 
 uses
@@ -615,6 +630,43 @@ begin
     Dec(Result);
   if Result < 1 then
     Result := 1;
+end;
+
+function PasIsAttributeTypeRef(const ATree: TPasTree;
+  ANode: Integer): Boolean;
+var
+  LParent: Integer;
+begin
+  LParent := ATree.Nodes[ANode].Parent;
+  Result := (LParent <> NIL_NODE) and
+    ((ATree.Nodes[LParent].Kind = nkAttribute) or
+     ((ATree.Nodes[LParent].Kind = nkGuid) and
+      (ATree.Nodes[ANode].Kind in [nkIdent, nkMember]))) and
+    (ATree.Nodes[LParent].FirstChild = ANode);
+end;
+
+function PasParamNameCount(const ATree: TPasTree;
+  AParams: Integer): Integer;
+var
+  LParam, LName: Integer;
+begin
+  Result := 0;
+  if AParams = NIL_NODE then
+    Exit;
+  LParam := ATree.Nodes[AParams].FirstChild;
+  while LParam <> NIL_NODE do
+  begin
+    if ATree.Nodes[LParam].Kind = nkParam then
+    begin
+      LName := PasSkipAttrGroups(ATree, ATree.Nodes[LParam].FirstChild);
+      while (LName <> NIL_NODE) and (nfName in ATree.Nodes[LName].Flags) do
+      begin
+        Inc(Result);
+        LName := PasSkipAttrGroups(ATree, ATree.Nodes[LName].NextSibling);
+      end;
+    end;
+    LParam := ATree.Nodes[LParam].NextSibling;
+  end;
 end;
 
 function PasPropertyHasParams(const ATree: TPasTree;
