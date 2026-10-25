@@ -255,6 +255,14 @@ type
       (the library ones light) - Project's models are the full closure's
       units, for a host counting them. }
     procedure EnsureClosure;
+    { The demands of FindOverrides (AOverrides) and FindImplementations
+      (AImpls) of every key met in one query, nothing searched: for a host
+      whose own walk reads the hierarchy from Project's models (a callee
+      walk's dispatch targets) and needs only the units that may declare an
+      override or an implementation made full. One query for a whole walk's
+      methods: asked one by one, each search's cost is paid for an answer
+      thrown away, and each promotion restarts the host's walk. }
+    procedure EnsureDispatch(const AOverrides, AImpls: TArray<TPasSymbolKey>);
     { ---- renames ---- }
     function PlanRename(const AKey: TPasSymbolKey; const ANewName: string;
       out AEdits: TArray<TPasRenameEdit>;
@@ -1006,6 +1014,37 @@ begin
     begin
       Result := ANav.DemandClosure;
     end);
+end;
+
+procedure TPasWorkspace.EnsureDispatch(const AOverrides,
+  AImpls: TArray<TPasSymbolKey>);
+var
+  LOverrides, LImpls: TArray<TPasSymbolKey>;
+begin
+  LOverrides := AOverrides;
+  LImpls := AImpls;
+  Prepare(
+    function(ANav: TPasNavigator): TPasDemand
+    var
+      LM, LS: Integer;
+    begin
+      Result := Default(TPasDemand);
+      // A key not in this closure (yet): its unit first, as SymDemand.
+      for var LK in LOverrides do
+        if LK.Valid then
+          if LK.Resolve(ANav.Project, LM, LS) then
+            Result := PasMergeDemand(Result, ANav.DemandOverrides(LM, LS))
+          else
+            Result := PasMergeDemand(Result, ANav.DemandFilePath(LK.MainFile));
+      for var LK in LImpls do
+        if LK.Valid then
+          if LK.Resolve(ANav.Project, LM, LS) then
+            Result := PasMergeDemand(Result,
+              ANav.DemandImplementations(LM, LS))
+          else
+            Result := PasMergeDemand(Result, ANav.DemandFilePath(LK.MainFile));
+    end);
+  Finish;
 end;
 
 function TPasWorkspace.FindDefines: TArray<TPasDefineSite>;

@@ -7778,6 +7778,23 @@ begin
       Length(LWS.FindUnusedUses([TPath.Combine(LOwn, 'UOwn2.pas')])) =
       Length(FindUnusedUses(LFullNav,
         [LFull.ModelIdOf(TPath.Combine(LOwn, 'UOwn2.pas'))])));
+    // EnsureDispatch: the overrides' demand met, nothing searched - the
+    // host's own walk then reads TXImpl.V from LibX's body.
+    LWS.Adopt(Run(True));
+    LWS.EnsureDispatch(nil, [Default(TPasSymbolKey)]);
+    Ok('workspace: EnsureDispatch of no valid key - no round',
+      (LWS.Status.Rounds = 0) and not LWS.Status.Changed);
+    LWS.EnsureDispatch([UKey(LWS.Project, 'V')], nil);
+    Ok('workspace: EnsureDispatch of TFoo.V - the bodies below TFoo made full',
+      LWS.Status.Changed and (LWS.Status.Promoted > 0) and
+      (LWS.Status.NotSearched = 0) and
+      (Length(LWS.Nav.FindOverrides(LWS.Project.ModelIdOf(LUPath),
+        FileSym(LWS.Project, LUPath, 'V'))) =
+      Length(LFullNav.FindOverrides(LFull.ModelIdOf(LUPath),
+        FileSym(LFull, LUPath, 'V')))));
+    LWS.EnsureDispatch([UKey(LWS.Project, 'V')], nil);
+    Ok('workspace: ...asked again, nothing to do',
+      (LWS.Status.Rounds = 0) and not LWS.Status.Changed);
     // A position: Go to Implementation lands in a light unit's body.
     LWS.Adopt(Run(True));
     Ok('workspace: Adopt takes a new analysis, LibU light again',
