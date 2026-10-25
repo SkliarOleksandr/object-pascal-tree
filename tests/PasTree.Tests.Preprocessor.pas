@@ -176,7 +176,7 @@ function BuildPreprocessorCases(APP: TPasPreprocessor): TPasCustomCases;
       end;
   end;
 
-  // {$Z}/{$MINENUMSIZE} is POSITIONAL state (TPasMinEnumEvent) -- the enum
+  // {$Z}/{$MINENUMSIZE} is POSITIONAL state (TPasStateEvent) -- the enum
   // SizeOf oracle reads it at each declaration site, so the case asserts
   // MinEnumSizeAt at a given visible index, not just a final value.
   function MinEnumCase(const AName, ASource: string;
@@ -554,7 +554,7 @@ begin
     // identical code. PasTree tracks the STATE only and emits no E2282, so
     // nothing here can turn a legal unit into a reported one; a real E2282
     // check would want this positionally (per property site), the way
-    // TPasScopedEnumsEvent does for enums. ----
+    // TPasStateEvent does for enums. ----
     VarPropSetterCase('OFF by default -- a var setter is E2282 territory',
       '', False),
     VarPropSetterCase('{$VARPROPSETTER ON} opens the gate',

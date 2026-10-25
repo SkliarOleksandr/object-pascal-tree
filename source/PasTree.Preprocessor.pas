@@ -103,41 +103,28 @@ type
     EndPos: Integer;
   end;
 
-  // One {$SCOPEDENUMS ON/OFF} state change, positioned in the VISIBLE stream:
-  // the new value applies to every visible token at index >= VisIndex. This
-  // is the first positional directive-state record (the "Show Defines" plan
-  // needs the same shape for $DEFINE later): the resolver needs to know the
-  // state AT AN ENUM'S DECLARATION SITE, which a single final flag cannot
-  // answer - System.Threading turns it ON for the whole unit while most of
-  // the RTL never does, and one unit routinely toggles it around a group of
-  // declarations.
-  TPasScopedEnumsEvent = record
+  // One change of a positional option, at its place in the VISIBLE stream:
+  // the new Value applies to every visible token at index >= VisIndex. The
+  // resolver needs an option's state AT A DECLARATION'S SITE, which a single
+  // final value cannot answer - a unit routinely brackets one type with a
+  // switch, and System.pas flips $Z mid-file. Three options are journaled
+  // this way, each in its own array of TPasPreprocessed:
+  // - {$SCOPEDENUMS ON/OFF}, Value 1 / 0 (ScopedEnumsEvents): an enum's
+  //   values are scoped by the state at its declaration - System.Threading
+  //   turns it ON for the whole unit while most of the RTL never does.
+  // - {$Z1/2/4} / {$MINENUMSIZE}, Value the bytes 1, 2 or 4
+  //   (MinEnumEvents): an enum's SIZE (what `$IF SizeOf(TEnum)` needs on the
+  //   second pass). {$Z+} is {$Z4} and {$Z-} is {$Z1}, dcc's own
+  //   equivalences.
+  // - {$A}/{$ALIGN}, Value the bytes 1, 2, 4, 8 or 16 (AlignEvents): a
+  //   record's SIZE. The value is the CAP on any single field's alignment,
+  //   not a forced alignment: dcc-probed, `{$ALIGN 16}` and `{$ALIGN 8}`
+  //   produce identical layouts because no builtin's natural alignment
+  //   exceeds 8, while {$ALIGN 4/2/1} really do shrink it. {$A-} is {$A1}
+  //   and {$A+} is {$A8}, dcc's own equivalences.
+  TPasStateEvent = record
     VisIndex: Integer;
-    Value: Boolean;
-  end;
-
-  // One {$Z1/2/4} / {$MINENUMSIZE} state change, positioned like the
-  // SCOPEDENUMS events above and for the same reason: an enum's SIZE (what
-  // `$IF SizeOf(TEnum)` needs on the second pass) depends on the state AT
-  // ITS DECLARATION SITE, and System.pas flips the switch mid-file.
-  // {$Z+} is {$Z4} and {$Z-} is {$Z1}, dcc's own equivalences.
-  TPasMinEnumEvent = record
-    VisIndex: Integer;
-    Bytes: Integer;   // 1, 2 or 4
-  end;
-
-  // One {$A}/{$ALIGN} state change, positioned exactly like the two above and
-  // for the same reason: a record's SIZE depends on the alignment cap at ITS
-  // declaration site, and a unit routinely brackets one type with it.
-  //
-  // The value is the CAP on any single field's alignment, not a forced
-  // alignment: dcc-probed, `{$ALIGN 16}` and `{$ALIGN 8}` produce identical
-  // layouts because no builtin's natural alignment exceeds 8, while
-  // {$ALIGN 4/2/1} really do shrink it. {$A-} is {$A1} and {$A+} is {$A8},
-  // dcc's own equivalences.
-  TPasAlignEvent = record
-    VisIndex: Integer;
-    Bytes: Integer;   // 1, 2, 4, 8 or 16
+    Value: Integer;
   end;
 
   // A live `{$APPTYPE CONSOLE}` / `{$APPTYPE GUI}`, at the visible-stream
@@ -345,7 +332,7 @@ type
     Diagnostics: TArray<TPasPPDiagnostic>;
     // {$SCOPEDENUMS} state changes, ascending by VisIndex; empty for the
     // overwhelming majority of units (the switch defaults to OFF).
-    ScopedEnumsEvents: TArray<TPasScopedEnumsEvent>;
+    ScopedEnumsEvents: TArray<TPasStateEvent>;
     // Names a `$IF Declared(X)` guard asked about that no one could answer,
     // in source order, deduplicated. Empty unless the unit uses that guard AND
     // the run had no OnDeclared to ask - which is the signal a caller with a
@@ -359,10 +346,10 @@ type
     UnresolvedSymbols: TArray<TPasUnresolvedSymbol>;
     // {$Z}/{$MINENUMSIZE} state changes, ascending by VisIndex; empty for
     // the overwhelming majority of units (the default is 1).
-    MinEnumEvents: TArray<TPasMinEnumEvent>;
+    MinEnumEvents: TArray<TPasStateEvent>;
     // {$A}/{$ALIGN} state changes, ascending by VisIndex; empty for the
     // overwhelming majority of units (the default is 8).
-    AlignEvents: TArray<TPasAlignEvent>;
+    AlignEvents: TArray<TPasStateEvent>;
     // {$APPTYPE} directives taken, ascending by VisIndex - see
     // TPasAppTypeEvent. Retained across DemoteText (it is not text).
     AppTypeEvents: TArray<TPasAppTypeEvent>;
@@ -484,19 +471,31 @@ type
       lsReferenceInfo, lsTypeInfo, lsDefinitionInfo, lsStackChecks, lsYD,
       lsAppType, lsImportedData, lsVarStringChecks, lsScopedEnums, lsRtti,
       lsMinEnumSize, lsAlign, lsVarPropSetter);
+  private type
+    // One open conditional: whether the code around it is live
+    // (ParentActive), whether a branch has been taken (AnyTaken), whether the
+    // current branch is live (ThisActive) and whether an $ELSE was met; and
+    // its opening directive (OpenFile, OpenStart, OpenLen) for the
+    // unterminated-conditional diagnostics.
+    TCondFrame = record
+      ParentActive: Boolean;
+      AnyTaken: Boolean;
+      ThisActive: Boolean;
+      SeenElse: Boolean;
+      OpenFile: Integer;
+      OpenStart: Integer;
+      OpenLen: Integer;
+    end;
   private
     FSourceManager: TPasSourceManager;
     FBaseDefines: TPasDefines;   // caller-owned project defines
     FDefines: TPasDefines;       // per-run clone: $DEFINE is unit-local!
-    FSwitches: TPasSwitchState;
-    FScopedEnums: Boolean;
-    FScopedEnumsEvents: TList<TPasScopedEnumsEvent>;
-    FRttiState: TPasRttiState;
-    FVarPropSetter: Boolean;
-    FMinEnumSize: Integer;
-    FMinEnumEvents: TList<TPasMinEnumEvent>;
-    FAlign: Integer;
-    FAlignEvents: TList<TPasAlignEvent>;
+    // The option state at the cursor; the positional options' changes are
+    // journaled (TPasStateEvent) by their setters.
+    FOpt: TPasOptState;
+    FScopedEnumsEvents: TList<TPasStateEvent>;
+    FMinEnumEvents: TList<TPasStateEvent>;
+    FAlignEvents: TList<TPasStateEvent>;
     FDefineRefs: TList<TPasDefineRef>;
     FDefineNames: TPasSpellingPool;   // DefineRefs' Name, across runs
     FIncludeRefs: TList<TPasIncludeRef>;
@@ -528,15 +527,10 @@ type
     FDiags: TList<TPasPPDiagnostic>;
     FIncludePathStack: TList<string>;
     // Conditional stack - shared across include boundaries (a tolerance,
-    // diagnosed: see the unit header). FCondOpener holds each entry's
-    // opening directive (FileId, Start, Len); FCondBase is the depth at
-    // which the file being processed began - an entry below it is its
-    // includer's.
-    FCondParentActive: TList<Boolean>;
-    FCondAnyTaken: TList<Boolean>;
-    FCondThisActive: TList<Boolean>;
-    FCondSeenElse: TList<Boolean>;
-    FCondOpener: TList<TPasIncludeRef>;
+    // diagnosed: see the unit header), one TCondFrame per open conditional;
+    // FCondBase is the depth at which the file being processed began - an
+    // entry below it is its includer's.
+    FCond: TList<TCondFrame>;
     FCondBase: Integer;
     FCompilerVersion: Double;
     FTarget: TPasBuiltinTarget;
@@ -556,15 +550,18 @@ type
     procedure HandleDirective(AFileId: Integer; const AToken: TPasToken);
     procedure HandleInclude(AFileId: Integer; const AToken: TPasToken;
       const AArg: string);
-    procedure AddCondOpener(AFileId: Integer; const AToken: TPasToken);
+    { Opens a conditional at AToken: the code around it live or not
+      (AParent), its first branch taken or not. }
+    procedure PushCond(AFileId: Integer; const AToken: TPasToken;
+      AParent, ATaken: Boolean);
     procedure CheckCrossInclude(AFileId: Integer; const AToken: TPasToken;
       ATop: Integer);
-    procedure ResetSwitches;
+    procedure ResetOptions;
     procedure ApplySwitches(const ABody: string);
     procedure ApplyLongSwitch(AKind: TLongSwitch; const AArg: string);
-    function CurrentOptState: TPasOptState;
     procedure AddOptionRef(AFileId: Integer; const AToken: TPasToken;
       AKind: TPasOptionRefKind);
+    procedure Journal(AEvents: TList<TPasStateEvent>; AValue: Integer);
     procedure SetScopedEnums(AValue: Boolean);
     procedure SetMinEnumSize(AValue: Integer);
     procedure SetAlign(AValue: Integer);
@@ -660,7 +657,7 @@ type
       code compiles). Tracked as state only -- PasTree emits no E2282 of its
       own, so nothing here can turn a legal unit into a reported one. A real
       E2282 check would want this POSITIONALLY (the state at each property's
-      declaration site, the way `TPasScopedEnumsEvent` does for enums), not
+      declaration site, the way `TPasStateEvent` does for enums), not
       just the end-of-file value this accessor answers. }
     function VarPropSetterFinal: Boolean;
   end;
@@ -886,20 +883,22 @@ begin
   end;
 end;
 
-function TPasPreprocessed.ScopedEnumsAt(AVisIndex: Integer): Boolean;
+// The value of the last event at or before AVisIndex (the events ascend by
+// VisIndex); ADefault when there is none - dcc's default for the option.
+function StateAt(const AEvents: TArray<TPasStateEvent>;
+  AVisIndex, ADefault: Integer): Integer;
 var
   LLo, LHi, LMid: Integer;
 begin
-  // Greatest event with VisIndex <= AVisIndex; none -> the OFF default.
-  Result := False;
+  Result := ADefault;
   LLo := 0;
-  LHi := High(ScopedEnumsEvents);
+  LHi := High(AEvents);
   while LLo <= LHi do
   begin
     LMid := (LLo + LHi) div 2;
-    if ScopedEnumsEvents[LMid].VisIndex <= AVisIndex then
+    if AEvents[LMid].VisIndex <= AVisIndex then
     begin
-      Result := ScopedEnumsEvents[LMid].Value;
+      Result := AEvents[LMid].Value;
       LLo := LMid + 1;
     end
     else
@@ -907,25 +906,14 @@ begin
   end;
 end;
 
-function TPasPreprocessed.MinEnumSizeAt(AVisIndex: Integer): Integer;
-var
-  LLo, LHi, LMid: Integer;
+function TPasPreprocessed.ScopedEnumsAt(AVisIndex: Integer): Boolean;
 begin
-  // Greatest event with VisIndex <= AVisIndex; none -> the {$Z1} default.
-  Result := 1;
-  LLo := 0;
-  LHi := High(MinEnumEvents);
-  while LLo <= LHi do
-  begin
-    LMid := (LLo + LHi) div 2;
-    if MinEnumEvents[LMid].VisIndex <= AVisIndex then
-    begin
-      Result := MinEnumEvents[LMid].Bytes;
-      LLo := LMid + 1;
-    end
-    else
-      LHi := LMid - 1;
-  end;
+  Result := StateAt(ScopedEnumsEvents, AVisIndex, 0) <> 0;   // OFF
+end;
+
+function TPasPreprocessed.MinEnumSizeAt(AVisIndex: Integer): Integer;
+begin
+  Result := StateAt(MinEnumEvents, AVisIndex, 1);   // {$Z1}
 end;
 
 function TPasPreprocessed.AppTypeBefore(AVisIndex: Integer;
@@ -944,24 +932,8 @@ begin
 end;
 
 function TPasPreprocessed.AlignAt(AVisIndex: Integer): Integer;
-var
-  LLo, LHi, LMid: Integer;
 begin
-  // Greatest event with VisIndex <= AVisIndex; none -> the {$A8} default.
-  Result := 8;
-  LLo := 0;
-  LHi := High(AlignEvents);
-  while LLo <= LHi do
-  begin
-    LMid := (LLo + LHi) div 2;
-    if AlignEvents[LMid].VisIndex <= AVisIndex then
-    begin
-      Result := AlignEvents[LMid].Bytes;
-      LLo := LMid + 1;
-    end
-    else
-      LHi := LMid - 1;
-  end;
+  Result := StateAt(AlignEvents, AVisIndex, 8);   // {$A8}
 end;
 
 { TPasSpellingPool ----------------------------------------------------------- }
@@ -1115,9 +1087,9 @@ begin
     ALongBytes);
   FSwitchStack := TStack<TPasOptState>.Create;
   FOptionRefs := TList<TPasOptionRef>.Create;
-  FScopedEnumsEvents := TList<TPasScopedEnumsEvent>.Create;
-  FMinEnumEvents := TList<TPasMinEnumEvent>.Create;
-  FAlignEvents := TList<TPasAlignEvent>.Create;
+  FScopedEnumsEvents := TList<TPasStateEvent>.Create;
+  FMinEnumEvents := TList<TPasStateEvent>.Create;
+  FAlignEvents := TList<TPasStateEvent>.Create;
   FDefineRefs := TList<TPasDefineRef>.Create;
   FIncludeRefs := TList<TPasIncludeRef>.Create;
   FIfNameRefs := TList<TPasIfNameRef>.Create;
@@ -1131,14 +1103,10 @@ begin
   FUnresolvedDeclared := TList<string>.Create;
   FDeclaredAsks := TList<TPasDeclaredAsk>.Create;
   FUnresolvedSymbols := TList<TPasUnresolvedSymbol>.Create;
-  FCondParentActive := TList<Boolean>.Create;
-  FCondAnyTaken := TList<Boolean>.Create;
-  FCondThisActive := TList<Boolean>.Create;
-  FCondSeenElse := TList<Boolean>.Create;
-  FCondOpener := TList<TPasIncludeRef>.Create;
+  FCond := TList<TCondFrame>.Create;
   FAppTypeEvents := TList<TPasAppTypeEvent>.Create;
   FStartState := PasStartOptState([]);
-  ResetSwitches;
+  ResetOptions;
 end;
 
 procedure TPasPreprocessor.SetProgramDefines(const AFile: string;
@@ -1150,31 +1118,24 @@ end;
 
 function TPasPreprocessor.SwitchState(ASwitch: Char): Boolean;
 begin
-  Result := FSwitches[UpCase(ASwitch)];
+  Result := FOpt.Switches[UpCase(ASwitch)];
 end;
 
 function TPasPreprocessor.ScopedEnumsFinal: Boolean;
 begin
-  Result := FScopedEnums;
+  Result := FOpt.ScopedEnums;
 end;
 
 function TPasPreprocessor.RttiState: TPasRttiState;
 begin
-  Result := FRttiState;
+  Result := FOpt.Rtti;
 end;
 
 function TPasPreprocessor.VarPropSetterFinal: Boolean;
 begin
-  Result := FVarPropSetter;
+  Result := FOpt.VarPropSetter;
 end;
 
-procedure TPasPreprocessor.ResetSwitches;
-begin
-  // Re-applied per processed file: switch changes are unit-local, like
-  // defines. The start is the host's (StartState), dcc's no-config state by
-  // default - see PasStartOptState.
-  FSwitches := FStartState.Switches;
-end;
 
 // dcc's no-config start state, the same on every dcc 37.0 target (probed
 // with $IFOPT over A..Z: A C D G H I L N O P V X Y on).
@@ -1202,6 +1163,17 @@ begin
   Result.Align := 8;              // {$A8}
 end;
 
+procedure TPasPreprocessor.ResetOptions;
+begin
+  // Re-applied per processed file: option changes are unit-local, like
+  // defines. The switches start as the host's (StartState), dcc's no-config
+  // state by default - see PasStartOptState; everything else at dcc's
+  // defaults (SCOPEDENUMS OFF, $Z1, $A8, RTTI inherit, VARPROPSETTER OFF
+  // (13.1.6)). ProcessText then journals the host's $A / $Z start.
+  FOpt := NoConfigOptState;
+  FOpt.Switches := FStartState.Switches;
+end;
+
 // One group of single-letter switches - `X+`, `X-`, `X+,Y-`, `Zn`, `An`,
 // `Dn`, `YD` - applied to AState, the one reader of an in-file `{$...}`
 // switch and of a command-line `-$...` (PasStartOptState). Anything else
@@ -1212,7 +1184,8 @@ procedure ApplySwitchText(var AState: TPasOptState; const ABody: string;
 
   procedure SkipSeparators(var AIdx: Integer);
   begin
-    // Comma-separated list: {$O+,W-}
+    // Comma-separated list: {$O+,W-} - after every switch but the last
+    // branch's.
     while (AIdx <= Length(ABody)) and CharInSet(ABody[AIdx], [',', ' ', #9]) do
       Inc(AIdx);
   end;
@@ -1246,23 +1219,21 @@ begin
         else
           AState.Align := 1;
       LIdx := LIdx + 2;
-      SkipSeparators(LIdx);
     end
     else if (LSwitch = 'Z') and CharInSet(ABody[LIdx + 1], ['1', '2', '4']) then
     begin
       // {$Z1/2/4}: minimum enum size, tracked positionally (see
-      // TPasMinEnumEvent). $IFOPT Z+ is any size above 1.
+      // TPasStateEvent). $IFOPT Z+ is any size above 1.
       AState.MinEnumSize := Ord(ABody[LIdx + 1]) - Ord('0');
       AState.Switches['Z'] := AState.MinEnumSize > 1;
       Include(ATouched, optZ);
       LIdx := LIdx + 2;
-      SkipSeparators(LIdx);
     end
     else if (LSwitch = 'A') and
             CharInSet(ABody[LIdx + 1], ['1', '2', '4', '8']) then
     begin
       // {$A1/2/4/8/16}: the record field-alignment cap, tracked positionally
-      // (see TPasAlignEvent). Two digits only for 16, and 16 caps nothing a
+      // (see TPasStateEvent). Two digits only for 16, and 16 caps nothing a
       // builtin can exceed - it lands on the same layout as 8, but it is
       // recorded as written rather than normalized. $IFOPT A+ is any cap
       // above 1.
@@ -1279,7 +1250,6 @@ begin
       end;
       AState.Switches['A'] := AState.Align > 1;
       Include(ATouched, optA);
-      SkipSeparators(LIdx);
     end
     else if (LSwitch = 'D') and CharInSet(ABody[LIdx + 1], ['0', '1', '2']) then
     begin
@@ -1288,7 +1258,6 @@ begin
       AState.Switches['D'] := ABody[LIdx + 1] <> '0';
       Include(ATouched, optD);
       LIdx := LIdx + 2;
-      SkipSeparators(LIdx);
     end
     else if (LSwitch = 'Y') and CharInSet(ABody[LIdx + 1], ['D', 'd']) then
     begin
@@ -1300,6 +1269,7 @@ begin
     end
     else
       Exit; // {$R *.res} etc. - no state to track
+    SkipSeparators(LIdx);
   end;
 end;
 
@@ -1379,11 +1349,7 @@ end;
 destructor TPasPreprocessor.Destroy;
 begin
   FDefines.Free;   // the per-run clone; FBaseDefines is caller-owned
-  FCondOpener.Free;
-  FCondSeenElse.Free;
-  FCondThisActive.Free;
-  FCondAnyTaken.Free;
-  FCondParentActive.Free;
+  FCond.Free;
   FIncludePathStack.Free;
   FUnresolvedDeclared.Free;
   FDeclaredAsks.Free;
@@ -1408,8 +1374,7 @@ end;
 
 function TPasPreprocessor.Active: Boolean;
 begin
-  Result := (FCondThisActive.Count = 0) or
-    FCondThisActive[FCondThisActive.Count - 1];
+  Result := (FCond.Count = 0) or FCond.List[FCond.Count - 1].ThisActive;
 end;
 
 procedure TPasPreprocessor.Diag(ACode: TPasPPDiagCode; AFileId, AStart,
@@ -1481,7 +1446,7 @@ begin
     FDefines := FProgramDefines.Clone
   else
     FDefines := FBaseDefines.Clone;
-  ResetSwitches;
+  ResetOptions;
   FFileNames.Clear;
   FFiles.Clear;
   // Count := 0, not Clear: Clear drops CAPACITY, and this instance is reused
@@ -1495,25 +1460,16 @@ begin
   FUnresolvedDeclared.Clear;
   FDeclaredAsks.Clear;
   FUnresolvedSymbols.Clear;
-  FCondParentActive.Clear;
-  FCondAnyTaken.Clear;
-  FCondThisActive.Clear;
-  FCondSeenElse.Clear;
-  FCondOpener.Clear;
+  FCond.Clear;
   FCondBase := 0;
   FSwitchStack.Clear;
-  FScopedEnums := False;         // dcc default; unit-local like the switches
   FScopedEnumsEvents.Clear;
-  FMinEnumSize := 1;             // dcc default ({$Z1}); unit-local likewise
   FMinEnumEvents.Clear;
-  FAlign := 8;                   // dcc default ({$A8}); unit-local likewise
   FAlignEvents.Clear;
   FDefineRefs.Clear;
   FIncludeRefs.Clear;
   FIfNameRefs.Clear;
   FOptionRefs.Clear;
-  FRttiState := Default(TPasRttiState);   // Mode = rmInherit, the dcc default
-  FVarPropSetter := False;                // dcc default: OFF (13.1.6)
   FAppTypeEvents.Clear;
   // The host's $A / $Z start (the project's -$A4, -$Z4): an event at the
   // first token when it is not dcc's default, so AlignAt / MinEnumSizeAt
@@ -1544,8 +1500,8 @@ begin
   // An entry an include opened was diagnosed at that include's end. A run
   // that stopped at the implementation has no end to judge it by.
   if not FStopped then
-  for LIdx := 0 to FCondOpener.Count - 1 do
-    if FCondOpener[LIdx].FileId = 0 then
+  for LIdx := 0 to FCond.Count - 1 do
+    if FCond.List[LIdx].OpenFile = 0 then
     begin
       Diag(ppUnterminatedConditional, 0, Length(LStream.Source), 0);
       Break;
@@ -1737,20 +1693,26 @@ var
   LArgStart, LSymLen: Integer;
 
   // The argument after the name run, left-trimmed (the right edge was trimmed
-  // with the body) - materialized ONLY by the branches that consume one.
+  // with the body), as a slice; LArgStart is its file offset.
+  procedure ArgSlice(out AP: PChar; out AN: Integer);
+  begin
+    AP := LText + LNameLen;
+    AN := LLen - LNameLen;
+    while (AN > 0) and (AP^ <= ' ') do
+    begin
+      Inc(AP);
+      Dec(AN);
+    end;
+    LArgStart := AP - PChar(Pointer(FFiles[AFileId].Source));
+  end;
+
+  // The argument - materialized ONLY by the branches that consume one.
   function Arg: string;
   var
     LP: PChar;
     LN: Integer;
   begin
-    LP := LText + LNameLen;
-    LN := LLen - LNameLen;
-    while (LN > 0) and (LP^ <= ' ') do
-    begin
-      Inc(LP);
-      Dec(LN);
-    end;
-    LArgStart := LP - PChar(Pointer(FFiles[AFileId].Source));
+    ArgSlice(LP, LN);
     SetString(Result, LP, LN);
   end;
 
@@ -1782,20 +1744,13 @@ var
     LP: PChar;
     LN, LIdent: Integer;
   begin
-    LP := LText + LNameLen;
-    LN := LLen - LNameLen;
-    while (LN > 0) and (LP^ <= ' ') do
-    begin
-      Inc(LP);
-      Dec(LN);
-    end;
+    ArgSlice(LP, LN);
     // dcc's identifier characters (PasIsIdentChar): a name starting with
     // A-umlaut is that name, where the ASCII scan read the empty name and
     // every non-ASCII IFDEF was true (dcc64 37.0, local/probe-b57 D1).
     LIdent := 0;
     while (LIdent < LN) and PasIsIdentChar(LP[LIdent]) do
       Inc(LIdent);
-    LArgStart := LP - PChar(Pointer(FFiles[AFileId].Source));
     LSymLen := LIdent;
     Result := FDefineNames.Intern(LP, LIdent);
   end;
@@ -1838,9 +1793,9 @@ begin
 
   // Is the directive itself dead code? See TPasPreprocessed.DeadDirectives.
   // Recorded here, before anything below can recurse into an include.
-  LTop := FCondThisActive.Count - 1;
+  LTop := FCond.Count - 1;
   if LKind in [pdElseif, pdElse, pdEndif] then
-    LParent := (LTop < 0) or FCondParentActive[LTop]
+    LParent := (LTop < 0) or FCond.List[LTop].ParentActive
   else
     LParent := Active;
   if not LParent then
@@ -1857,11 +1812,7 @@ begin
     LParent := Active;
     AddSymbolRef(LArg, drIfdef, LParent);
     LTaken := LParent and FDefines.IsDefined(LArg);
-    FCondParentActive.Add(LParent);
-    FCondAnyTaken.Add(LTaken);
-    FCondThisActive.Add(LTaken);
-    FCondSeenElse.Add(False);
-    AddCondOpener(AFileId, AToken);
+    PushCond(AFileId, AToken, LParent, LTaken);
   end
   else if LKind = pdIfndef then
   begin
@@ -1869,11 +1820,7 @@ begin
     LParent := Active;
     AddSymbolRef(LArg, drIfndef, LParent);
     LTaken := LParent and not FDefines.IsDefined(LArg);
-    FCondParentActive.Add(LParent);
-    FCondAnyTaken.Add(LTaken);
-    FCondThisActive.Add(LTaken);
-    FCondSeenElse.Add(False);
-    AddCondOpener(AFileId, AToken);
+    PushCond(AFileId, AToken, LParent, LTaken);
   end
   else if LKind = pdIf then
   begin
@@ -1886,11 +1833,7 @@ begin
       LTaken := False;
       RecordUnevaluatedIf(LArg, AFileId, LArgStart, LParent);
     end;
-    FCondParentActive.Add(LParent);
-    FCondAnyTaken.Add(LTaken);
-    FCondThisActive.Add(LTaken);
-    FCondSeenElse.Add(False);
-    AddCondOpener(AFileId, AToken);
+    PushCond(AFileId, AToken, LParent, LTaken);
   end
   else if LKind = pdIfopt then
   begin
@@ -1902,41 +1845,39 @@ begin
     begin
       LSwitch := UpCase(LArg[1]);
       LWant := LArg[2] = '+';
-      LTaken := LParent and (FSwitches[LSwitch] = LWant);
+      LTaken := LParent and (FOpt.Switches[LSwitch] = LWant);
     end;
-    FCondParentActive.Add(LParent);
-    FCondAnyTaken.Add(LTaken);
-    FCondThisActive.Add(LTaken);
-    FCondSeenElse.Add(False);
-    AddCondOpener(AFileId, AToken);
+    PushCond(AFileId, AToken, LParent, LTaken);
   end
   else if LKind = pdElseif then
   begin
-    LTop := FCondThisActive.Count - 1;
+    LTop := FCond.Count - 1;
     CheckCrossInclude(AFileId, AToken, LTop);
     if LTop < 0 then
       Diag(ppUnbalancedElse, AFileId, AToken.Start, AToken.Len)
-    else if FCondSeenElse[LTop] then
+    else if FCond.List[LTop].SeenElse then
       Diag(ppUnbalancedElse, AFileId, AToken.Start, AToken.Len)
     else
     begin
       LArg := Arg;
-      if FCondParentActive[LTop] and not FCondAnyTaken[LTop] then
-        LTaken := EvalIfExpression(LArg, AFileId, LArgStart,
-          FCondParentActive[LTop], AToken)
+      LParent := FCond.List[LTop].ParentActive;
+      if LParent and not FCond.List[LTop].AnyTaken then
+        LTaken := EvalIfExpression(LArg, AFileId, LArgStart, LParent, AToken)
       else
       begin
         LTaken := False;
-        RecordUnevaluatedIf(LArg, AFileId, LArgStart, FCondParentActive[LTop]);
+        RecordUnevaluatedIf(LArg, AFileId, LArgStart, LParent);
       end;
-      FCondThisActive[LTop] := LTaken;
+      // The list again, not a pointer kept across the evaluation: a
+      // `Declared` query may recurse into another file's processing.
+      FCond.List[LTop].ThisActive := LTaken;
       if LTaken then
-        FCondAnyTaken[LTop] := True;
+        FCond.List[LTop].AnyTaken := True;
     end;
   end
   else if LKind = pdElse then
   begin
-    LTop := FCondThisActive.Count - 1;
+    LTop := FCond.Count - 1;
     CheckCrossInclude(AFileId, AToken, LTop);
     if LTop < 0 then
       Diag(ppUnbalancedElse, AFileId, AToken.Start, AToken.Len)
@@ -1946,26 +1887,22 @@ begin
       // ships `...{$ELSE}...{$ELSE OTHERCPU}...`). Each $ELSE activates
       // iff no earlier branch was taken - so we deliberately do NOT error
       // on a repeated $ELSE.
-      FCondSeenElse[LTop] := True;
-      FCondThisActive[LTop] :=
-        FCondParentActive[LTop] and not FCondAnyTaken[LTop];
-      if FCondThisActive[LTop] then
-        FCondAnyTaken[LTop] := True;
+      FCond.List[LTop].SeenElse := True;
+      FCond.List[LTop].ThisActive := FCond.List[LTop].ParentActive and
+        not FCond.List[LTop].AnyTaken;
+      if FCond.List[LTop].ThisActive then
+        FCond.List[LTop].AnyTaken := True;
     end;
   end
   else if LKind = pdEndif then
   begin
-    LTop := FCondThisActive.Count - 1;
+    LTop := FCond.Count - 1;
     CheckCrossInclude(AFileId, AToken, LTop);
     if LTop < 0 then
       Diag(ppUnbalancedEndif, AFileId, AToken.Start, AToken.Len)
     else
     begin
-      FCondParentActive.Delete(LTop);
-      FCondAnyTaken.Delete(LTop);
-      FCondThisActive.Delete(LTop);
-      FCondSeenElse.Delete(LTop);
-      FCondOpener.Delete(LTop);
+      FCond.Delete(LTop);
       if LTop < FCondBase then
         FCondBase := LTop;
     end;
@@ -1999,7 +1936,7 @@ begin
       // GROUP - `{$I-,R+}` - so the remainder goes through the ordinary
       // switch parser instead of being dropped on the floor.
       FTouched := [optI];
-      FSwitches['I'] := LArg[1] = '+';
+      FOpt.Switches['I'] := LArg[1] = '+';
       if Length(LArg) > 1 then
         ApplySwitches('I' + LArg);
       AddOptionRef(AFileId, AToken, orSet);
@@ -2011,20 +1948,20 @@ begin
   end
   else if LKind = pdPushopt then
   begin
-    FSwitchStack.Push(CurrentOptState);
+    FSwitchStack.Push(FOpt);
     AddOptionRef(AFileId, AToken, orPush);
   end
   else if LKind = pdPopopt then
   begin
     if FSwitchStack.Count > 0 then
     begin
+      // The snapshot back whole; the positional options through their
+      // setters first, which journal a change.
       var LOpt := FSwitchStack.Pop;
-      FSwitches := LOpt.Switches;
       SetScopedEnums(LOpt.ScopedEnums);
-      FRttiState := LOpt.Rtti;
-      FVarPropSetter := LOpt.VarPropSetter;
       SetMinEnumSize(LOpt.MinEnumSize);
       SetAlign(LOpt.Align);
+      FOpt := LOpt;
       AddOptionRef(AFileId, AToken, orPop);
     end
     else
@@ -2054,15 +1991,6 @@ begin
   end;
 end;
 
-function TPasPreprocessor.CurrentOptState: TPasOptState;
-begin
-  Result.Switches := FSwitches;
-  Result.ScopedEnums := FScopedEnums;
-  Result.Rtti := FRttiState;
-  Result.VarPropSetter := FVarPropSetter;
-  Result.MinEnumSize := FMinEnumSize;
-  Result.Align := FAlign;
-end;
 
 procedure TPasPreprocessor.AddOptionRef(AFileId: Integer;
   const AToken: TPasToken; AKind: TPasOptionRefKind);
@@ -2077,7 +2005,7 @@ begin
     LRef.Touched := FTouched
   else
     LRef.Touched := [];
-  LRef.State := CurrentOptState;
+  LRef.State := FOpt;
   FOptionRefs.Add(LRef);
 end;
 
@@ -2161,7 +2089,7 @@ begin
   FIncludeRefs[LRefIdx] := LRef;
 
   LBase := FCondBase;
-  FCondBase := FCondThisActive.Count;
+  FCondBase := FCond.Count;
   FIncludePathStack.Add(LKey);
   try
     ProcessFile(LNewId);
@@ -2172,26 +2100,29 @@ begin
   // include (F22). It stays open here and the includer may close it. Not
   // after a stop inside the include (StopAtImplementation).
   if not FStopped then
-  for LIdx := 0 to FCondOpener.Count - 1 do
-    if FCondOpener[LIdx].FileId = LNewId then
-      Diag(ppUnterminatedConditional, LNewId, FCondOpener[LIdx].Start,
-        FCondOpener[LIdx].Len);
-  if LBase < FCondThisActive.Count then
+  for LIdx := 0 to FCond.Count - 1 do
+    if FCond.List[LIdx].OpenFile = LNewId then
+      Diag(ppUnterminatedConditional, LNewId, FCond.List[LIdx].OpenStart,
+        FCond.List[LIdx].OpenLen);
+  if LBase < FCond.Count then
     FCondBase := LBase
   else
-    FCondBase := FCondThisActive.Count;
+    FCondBase := FCond.Count;
 end;
 
-procedure TPasPreprocessor.AddCondOpener(AFileId: Integer;
-  const AToken: TPasToken);
+procedure TPasPreprocessor.PushCond(AFileId: Integer; const AToken: TPasToken;
+  AParent, ATaken: Boolean);
 var
-  LOpener: TPasIncludeRef;
+  LFrame: TCondFrame;
 begin
-  LOpener := Default(TPasIncludeRef);
-  LOpener.FileId := AFileId;
-  LOpener.Start := AToken.Start;
-  LOpener.Len := AToken.Len;
-  FCondOpener.Add(LOpener);
+  LFrame.ParentActive := AParent;
+  LFrame.AnyTaken := ATaken;
+  LFrame.ThisActive := ATaken;
+  LFrame.SeenElse := False;
+  LFrame.OpenFile := AFileId;
+  LFrame.OpenStart := AToken.Start;
+  LFrame.OpenLen := AToken.Len;
+  FCond.Add(LFrame);
 end;
 
 // An $ELSE/$ELSEIF/$ENDIF/$IFEND whose conditional (ATop) the includer of
@@ -2210,27 +2141,31 @@ var
 begin
   // One reader for the in-file switch and the command line (ApplySwitchText);
   // a changed $A / $Z goes through its setter, which records the event.
-  LOpt := Default(TPasOptState);
-  LOpt.Switches := FSwitches;
-  LOpt.MinEnumSize := FMinEnumSize;
-  LOpt.Align := FAlign;
+  LOpt := FOpt;
   ApplySwitchText(LOpt, ABody, FTouched);
-  FSwitches := LOpt.Switches;
+  FOpt.Switches := LOpt.Switches;
   SetMinEnumSize(LOpt.MinEnumSize);
   SetAlign(LOpt.Align);
 end;
 
+// The ON / OFF argument of a long-form switch; False for anything else, which
+// changes nothing.
+function TryOnOff(const AArg: string; out AOn: Boolean): Boolean;
+begin
+  AOn := SameText(AArg, 'ON');
+  Result := AOn or SameText(AArg, 'OFF');
+end;
+
 procedure TPasPreprocessor.ApplyLongSwitch(AKind: TLongSwitch;
   const AArg: string);
+var
+  LOn: Boolean;
 
   procedure SetSwitch(ALetter: Char);
   begin
-    if SameText(AArg, 'ON') then
-      FSwitches[ALetter] := True
-    else if SameText(AArg, 'OFF') then
-      FSwitches[ALetter] := False
-    else
+    if not TryOnOff(AArg, LOn) then
       Exit;
+    FOpt.Switches[ALetter] := LOn;
     Include(FTouched, TPasOption(Ord(ALetter) - Ord('A')));
   end;
 
@@ -2263,7 +2198,7 @@ begin
   // switch group; it is Y+ and ends the group (ApplySwitchText's rule).
   else if AKind = lsYD then
   begin
-    FSwitches['Y'] := True;
+    FOpt.Switches['Y'] := True;
     Include(FTouched, optY);
   end
   else if AKind = lsAppType then
@@ -2281,13 +2216,10 @@ begin
   else if AKind = lsScopedEnums then
   begin
     // Long-form only (no single-letter twin). Positional: the resolver reads
-    // the state at each enum's declaration site - see TPasScopedEnumsEvent.
-    if SameText(AArg, 'ON') then
-      SetScopedEnums(True)
-    else if SameText(AArg, 'OFF') then
-      SetScopedEnums(False)
-    else
+    // the state at each enum's declaration site - see TPasStateEvent.
+    if not TryOnOff(AArg, LOn) then
       Exit;
+    SetScopedEnums(LOn);
     Include(FTouched, optScopedEnums);
   end
   else if AKind = lsRtti then
@@ -2298,7 +2230,7 @@ begin
   else if AKind = lsMinEnumSize then
   begin
     // The long form of {$Z1/2/4} (13.0 docs list both). Positional - see
-    // TPasMinEnumEvent.
+    // TPasStateEvent.
     if (Length(AArg) = 1) and CharInSet(AArg[1], ['1', '2', '4']) then
     begin
       SetMinEnumSize(Ord(AArg[1]) - Ord('0'));
@@ -2308,13 +2240,16 @@ begin
   else if AKind = lsAlign then
   begin
     // The long form of {$A1/2/4/8/16}, plus ON/OFF for {$A+}/{$A-}.
-    // Positional - see TPasAlignEvent. dcc rejects any other value (E1030 on
+    // Positional - see TPasStateEvent. dcc rejects any other value (E1030 on
     // `{$ALIGN 32}`), so an unrecognized argument changes nothing rather than
     // inventing a cap.
-    if SameText(AArg, 'ON') then
-      SetAlign(8)
-    else if SameText(AArg, 'OFF') then
-      SetAlign(1)
+    if TryOnOff(AArg, LOn) then
+    begin
+      if LOn then
+        SetAlign(8)
+      else
+        SetAlign(1);
+    end
     else if (AArg = '1') or (AArg = '2') or (AArg = '4') or (AArg = '8') or
             (AArg = '16') then
       SetAlign(StrToInt(AArg))
@@ -2326,12 +2261,9 @@ begin
   begin
     // 13.1.6. Long-form-only ON/OFF like SCOPEDENUMS, but NOT positional:
     // nothing reads it per-declaration yet, because PasTree emits no E2282.
-    if SameText(AArg, 'ON') then
-      FVarPropSetter := True
-    else if SameText(AArg, 'OFF') then
-      FVarPropSetter := False
-    else
+    if not TryOnOff(AArg, LOn) then
       Exit;
+    FOpt.VarPropSetter := LOn;
     Include(FTouched, optVarPropSetter);
   end;
 end;
@@ -2443,9 +2375,9 @@ begin
   LPos := 1;
   LWord := ReadIdent;
   if LWord = 'EXPLICIT' then
-    FRttiState.Mode := rmExplicit
+    FOpt.Rtti.Mode := rmExplicit
   else if LWord = 'INHERIT' then
-    FRttiState.Mode := rmInherit
+    FOpt.Rtti.Mode := rmInherit
   else
     Exit; // no recognizable mode word -- nothing else to trust either
 
@@ -2460,74 +2392,70 @@ begin
     if LWord = 'METHODS' then
     begin
       if not ReadCategory(LWord, LSet) then Exit;
-      FRttiState.HasMethods := True;
-      FRttiState.Methods := LSet;
+      FOpt.Rtti.HasMethods := True;
+      FOpt.Rtti.Methods := LSet;
     end
     else if LWord = 'FIELDS' then
     begin
       if not ReadCategory(LWord, LSet) then Exit;
-      FRttiState.HasFields := True;
-      FRttiState.Fields := LSet;
+      FOpt.Rtti.HasFields := True;
+      FOpt.Rtti.Fields := LSet;
     end
     else if LWord = 'PROPERTIES' then
     begin
       if not ReadCategory(LWord, LSet) then Exit;
-      FRttiState.HasProperties := True;
-      FRttiState.Properties := LSet;
+      FOpt.Rtti.HasProperties := True;
+      FOpt.Rtti.Properties := LSet;
     end
     else
       Exit; // unrecognized clause -- stop rather than guess
   end;
 end;
 
-// Flips the {$SCOPEDENUMS} state and journals the change at the CURRENT end
-// of the visible stream: the directive token itself is trivia (never visible),
-// so the new state holds from the next visible token on. No-op (and no event)
-// when the value does not actually change, so the journal stays minimal.
-procedure TPasPreprocessor.SetScopedEnums(AValue: Boolean);
+// A positional option's change (TPasStateEvent), journaled at the CURRENT end
+// of the visible stream: the directive token itself is trivia (never
+// visible), so the new state holds from the next visible token on. The
+// setters below call it only for a real change, so the journal stays
+// minimal.
+procedure TPasPreprocessor.Journal(AEvents: TList<TPasStateEvent>;
+  AValue: Integer);
 var
-  LEvent: TPasScopedEnumsEvent;
+  LEvent: TPasStateEvent;
 begin
-  if FScopedEnums = AValue then
-    Exit;
-  FScopedEnums := AValue;
   LEvent.VisIndex := FVisible.Count;
   LEvent.Value := AValue;
-  FScopedEnumsEvents.Add(LEvent);
+  AEvents.Add(LEvent);
 end;
 
-// Same journaling contract as SetScopedEnums, for {$Z}/{$MINENUMSIZE}.
+procedure TPasPreprocessor.SetScopedEnums(AValue: Boolean);
+begin
+  if FOpt.ScopedEnums = AValue then
+    Exit;
+  FOpt.ScopedEnums := AValue;
+  Journal(FScopedEnumsEvents, Ord(AValue));
+end;
+
 procedure TPasPreprocessor.SetMinEnumSize(AValue: Integer);
-var
-  LEvent: TPasMinEnumEvent;
 begin
   // The boolean table and the SIZE are two views of one setting, and every
   // writer has to keep both: `{$Z4}` and `{$MINENUMSIZE 4}` used to move the
   // size only, so `{$IFOPT Z+}` right after them read the stale default.
   // dcc's own equivalence is {$Z+} = {$Z4}, so anything above 1 is "+".
-  FSwitches['Z'] := AValue > 1;
-  if FMinEnumSize = AValue then
+  FOpt.Switches['Z'] := AValue > 1;
+  if FOpt.MinEnumSize = AValue then
     Exit;
-  FMinEnumSize := AValue;
-  LEvent.VisIndex := FVisible.Count;
-  LEvent.Bytes := AValue;
-  FMinEnumEvents.Add(LEvent);
+  FOpt.MinEnumSize := AValue;
+  Journal(FMinEnumEvents, AValue);
 end;
 
-// Same journaling contract again, for {$A}/{$ALIGN}. See TPasAlignEvent.
 procedure TPasPreprocessor.SetAlign(AValue: Integer);
-var
-  LEvent: TPasAlignEvent;
 begin
-  FSwitches['A'] := AValue > 1;   // {$A+} is {$A8} - see SetMinEnumSize
-  if FAlign = AValue then
+  FOpt.Switches['A'] := AValue > 1;   // {$A+} is {$A8} - see SetMinEnumSize
+  if FOpt.Align = AValue then
     Exit;
-  FAlign := AValue;
-  LEvent.VisIndex := FVisible.Count;
-  LEvent.Bytes := AValue;
-  FAlignEvents.Add(LEvent);
+  FOpt.Align := AValue;
+  Journal(FAlignEvents, AValue);
 end;
-
 // The DefineRefs and IfNameRefs of one `$IF`/`$ELSEIF` expression, from spans
 // relative to its text (CondEval's DefinedSpans / NameSpans). Not a method:
 // TPasCondSpan is CondEval's, which only the implementation may use.

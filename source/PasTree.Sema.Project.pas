@@ -5169,7 +5169,7 @@ end;
   (dcc-probed - `(c1 = 5, c2 = 9)` is one byte, `(f1 = 200, f2 = 300)` is
   two), then raised to the `$Z`/`$MINENUMSIZE` state AT THE DECLARATION SITE,
   which is positional because System.pas flips it mid-file (see
-  TPasMinEnumEvent). An enum aligns to its size. }
+  TPasStateEvent). An enum aligns to its size. }
 function TPasSemaProject.OracleEnumLayout(AMid, ADefNode, ADepth: Integer;
   out ABytes: Double; out AAlign: Integer): Boolean;
 var
