@@ -333,19 +333,6 @@ begin
   Result := not (AKind in SPAN_KINDS);
 end;
 
-function LastChild(const ATree: TPasTree; ANode: Integer): Integer;
-var
-  LChild: Integer;
-begin
-  Result := NIL_NODE;
-  LChild := ATree.Nodes[ANode].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    Result := LChild;
-    LChild := ATree.Nodes[LChild].NextSibling;
-  end;
-end;
-
 { Ownership }
 
 procedure TPasOwnership.Build(const ATree: TPasTree);
@@ -1035,7 +1022,7 @@ begin
   if T.Nodes[ANode].Aux = 1 then
     LElem := NIL_NODE
   else
-    LElem := LastChild(T, ANode);
+    LElem := T.LastChild(ANode);
   if (LChild <> NIL_NODE) and (LChild <> LElem) then
   begin
     Kw('[', ANode);

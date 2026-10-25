@@ -3656,10 +3656,7 @@ begin
       // diagnostics over them stay withheld (audit B4-23).
       if Assigned(ATargetsTyped) and not ATargetsTyped(LWith) then
         Continue;
-      LBody := AModel.Tree.Nodes[LWith].FirstChild;
-      while (LBody <> NIL_NODE) and
-            (AModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE) do
-        LBody := AModel.Tree.Nodes[LBody].NextSibling;
+      LBody := AModel.Tree.WithBody(LWith);
       if LBody = NIL_NODE then
         Continue;
       LT.TypeNode(LBody);

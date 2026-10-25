@@ -3755,7 +3755,7 @@ function TPasSemaProject.OracleResolve(AId: Integer; const ANameLower: string;
   out AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LScope, LIdx: Integer;
+  LScope: Integer;
 begin
   AMid := AId;
   ASym := NIL_SYM;
@@ -3763,15 +3763,7 @@ begin
   // The unit's own scopes first: the implementation scope's parent chain
   // covers the interface and system scopes, so one Resolve from there sees
   // everything the unit itself declares.
-  LScope := NIL_SCOPE;
-  for LIdx := 0 to LM.Scopes.Count - 1 do
-    if LM.Scopes[LIdx].Kind = sckImplementation then
-    begin
-      LScope := LIdx;
-      Break;
-    end;
-  if LScope = NIL_SCOPE then
-    LScope := LM.InterfaceScope;
+  LScope := LM.OwnDeclScope;
   if LScope <> NIL_SCOPE then
   begin
     ASym := LM.Resolve(LScope, ANameLower);
@@ -3962,15 +3954,7 @@ begin
   LUid := UnitNamedBy(AId, LUnit);
   if LUid = AId then
   begin
-    LScope := NIL_SCOPE;
-    for LIdx := 0 to FModels[AId].Scopes.Count - 1 do
-      if FModels[AId].Scopes[LIdx].Kind = sckImplementation then
-      begin
-        LScope := LIdx;
-        Break;
-      end;
-    if LScope = NIL_SCOPE then
-      LScope := FModels[AId].InterfaceScope;
+    LScope := FModels[AId].OwnDeclScope;
     if LScope <> NIL_SCOPE then
       ASym := FModels[AId].UnitDeclBefore(LScope, SemaKey(LMember), MaxInt);
     AMid := AId;
@@ -4033,15 +4017,7 @@ begin
   LM := FModels[AMid];
   // The unit's own declarations: the implementation scope's parent chain
   // covers the interface, as in OracleResolve.
-  LScope := NIL_SCOPE;
-  for LIdx := 0 to LM.Scopes.Count - 1 do
-    if LM.Scopes[LIdx].Kind = sckImplementation then
-    begin
-      LScope := LIdx;
-      Break;
-    end;
-  if LScope = NIL_SCOPE then
-    LScope := LM.InterfaceScope;
+  LScope := LM.OwnDeclScope;
   if LScope <> NIL_SCOPE then
   begin
     AGSym := LM.ResolveByArityAt(LScope, LKey, -1, True);
@@ -4987,12 +4963,10 @@ begin
   LM := FModels[AMid];
   if LM.Tree.Nodes[ADefNode].Aux = 1 then
     Exit;   // `array of const`: an open TVarRec list, not storage we size
-  LElem := LM.Tree.Nodes[ADefNode].FirstChild;
+  // The LAST child is the element type; everything before it is a dimension.
+  LElem := LM.Tree.LastChild(ADefNode);
   if LElem = NIL_NODE then
     Exit;
-  // The LAST child is the element type; everything before it is a dimension.
-  while LM.Tree.Nodes[LElem].NextSibling <> NIL_NODE do
-    LElem := LM.Tree.Nodes[LElem].NextSibling;
   if LElem = LM.Tree.Nodes[ADefNode].FirstChild then
   begin
     // No dimensions at all: a dynamic array, one reference.
@@ -5998,9 +5972,7 @@ begin
   LIdx := FModels[LArrMid].Tree.Nodes[LType].FirstChild;
   if LIdx = NIL_NODE then
     Exit;
-  LElem := LIdx;
-  while FModels[LArrMid].Tree.Nodes[LElem].NextSibling <> NIL_NODE do
-    LElem := FModels[LArrMid].Tree.Nodes[LElem].NextSibling;
+  LElem := FModels[LArrMid].Tree.LastChild(LType);
   if LElem = LIdx then
     Exit;
   Result := OracleOrdinalCount(LArrMid, LIdx, ADepth + 1, ALen) and
@@ -8409,10 +8381,7 @@ begin
       Result := AModel.RefMap[ANode];
     nkMember:
       begin
-        LLast := AModel.Tree.Nodes[ANode].FirstChild;
-        while (LLast <> NIL_NODE) and
-              (AModel.Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
-          LLast := AModel.Tree.Nodes[LLast].NextSibling;
+        LLast := AModel.Tree.LastChild(ANode);
         if LLast <> NIL_NODE then
           Result := AModel.RefMap[LLast]
         else
@@ -10578,10 +10547,7 @@ begin
         LName := ANode;
         if LM.Tree.Nodes[ANode].Kind = nkMember then
         begin
-          LName := LM.Tree.Nodes[ANode].FirstChild;
-          while (LName <> NIL_NODE) and
-                (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-            LName := LM.Tree.Nodes[LName].NextSibling;
+          LName := LM.Tree.LastChild(ANode);
           if LName = NIL_NODE then
             Exit;
         end;
@@ -12257,10 +12223,7 @@ begin
           LName := LNode;
           if LM.Tree.Nodes[LName].Kind = nkMember then
           begin
-            LName := LM.Tree.Nodes[LName].FirstChild;
-            while (LName <> NIL_NODE) and
-                  (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-              LName := LM.Tree.Nodes[LName].NextSibling;
+            LName := LM.Tree.LastChild(LName);
             if LName = NIL_NODE then
               Exit;
           end;
@@ -12382,9 +12345,7 @@ begin
         LChild := LM.Tree.Nodes[LDef].FirstChild;
         if LChild = NIL_NODE then
           Exit;
-        LLast := LChild;
-        while LM.Tree.Nodes[LLast].NextSibling <> NIL_NODE do
-          LLast := LM.Tree.Nodes[LLast].NextSibling;
+        LLast := LM.Tree.LastChild(LDef);
         if LLast = LChild then
           // Exactly one child: no dimension bound, so DYNAMIC -- the array
           // value itself is always refcounted, regardless of its element.
@@ -13131,10 +13092,7 @@ var
       LName := LM.Tree.Nodes[LName].FirstChild;
     if (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkMember) then
     begin
-      LName := LM.Tree.Nodes[LName].FirstChild;
-      while (LName <> NIL_NODE) and
-            (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-        LName := LM.Tree.Nodes[LName].NextSibling;
+      LName := LM.Tree.LastChild(LName);
     end;
     if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
       Exit;
@@ -13170,10 +13128,7 @@ var
         LName := N;
       nkMember:
         begin
-          LName := LM.Tree.Nodes[N].FirstChild;
-          while (LName <> NIL_NODE) and
-                (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-            LName := LM.Tree.Nodes[LName].NextSibling;
+          LName := LM.Tree.LastChild(N);
           if LName = NIL_NODE then
             Exit;
         end;
@@ -15597,11 +15552,9 @@ var
           if (LChild = NIL_NODE) or
              not (LM.Tree.Nodes[LChild].Kind in [nkForInStmt, nkForStmt]) then
           begin
-            LChild := LM.Tree.Nodes[N].FirstChild;
+            LChild := LM.Tree.LastChild(N);
             if LChild <> NIL_NODE then
             begin
-              while LM.Tree.Nodes[LChild].NextSibling <> NIL_NODE do
-                LChild := LM.Tree.Nodes[LChild].NextSibling;
               if IsInlineInitializer(LChild) then
                 InferInlineDecl(N, LChild);
             end;
@@ -17193,10 +17146,7 @@ begin
   case LM.Tree.Nodes[ANode].Kind of
     nkMember:
       begin
-        LName := LM.Tree.Nodes[ANode].FirstChild;
-        while (LName <> NIL_NODE) and
-              (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-          LName := LM.Tree.Nodes[LName].NextSibling;
+        LName := LM.Tree.LastChild(ANode);
       end;
     nkParen, nkDeref, nkIndex:
       Exit(DesignatorSymX(AId, LM.Tree.Nodes[ANode].FirstChild, AMid, ASym,
@@ -18724,10 +18674,7 @@ begin
               LArg := LM.Tree.Nodes[ACall].FirstChild;
               if LM.Tree.Nodes[LArg].Kind = nkMember then
               begin
-                LArg := LM.Tree.Nodes[LArg].FirstChild;
-                while (LArg <> NIL_NODE) and
-                      (LM.Tree.Nodes[LArg].NextSibling <> NIL_NODE) do
-                  LArg := LM.Tree.Nodes[LArg].NextSibling;
+                LArg := LM.Tree.LastChild(LArg);
               end;
               if (LArg <> NIL_NODE) and (LM.Tree.Nodes[LArg].Kind = nkIdent)
                  and (LM.Tree.NodeNameLower(LArg) = 'high') then
@@ -19026,10 +18973,7 @@ begin
     LName := AVNode;
     if LM.Tree.Nodes[LName].Kind = nkMember then
     begin
-      LName := LM.Tree.Nodes[LName].FirstChild;
-      while (LName <> NIL_NODE) and
-            (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-        LName := LM.Tree.Nodes[LName].NextSibling;
+      LName := LM.Tree.LastChild(LName);
       if LName = NIL_NODE then
         Exit;
     end;
@@ -20108,26 +20052,8 @@ end;
 // evaluated in the enclosing one), hence the last-child test.
 function TPasSemaProject.InsideWithBody(AModel: TPasSemaModel;
   ANode: Integer): Boolean;
-var
-  LCur, LParent, LLast: Integer;
 begin
-  Result := False;
-  LCur := ANode;
-  LParent := AModel.Tree.Nodes[LCur].Parent;
-  while LParent <> NIL_NODE do
-  begin
-    if AModel.Tree.Nodes[LParent].Kind = nkWithStmt then
-    begin
-      LLast := AModel.Tree.Nodes[LParent].FirstChild;
-      while (LLast <> NIL_NODE) and
-            (AModel.Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
-        LLast := AModel.Tree.Nodes[LLast].NextSibling;
-      if LCur = LLast then
-        Exit(True);
-    end;
-    LCur := LParent;
-    LParent := AModel.Tree.Nodes[LCur].Parent;
-  end;
+  Result := AModel.Tree.EnclosingWith(ANode) <> NIL_NODE;
 end;
 
 { True when ANode sits inside a with TARGET that is not the FIRST one.
@@ -20198,10 +20124,7 @@ begin
       // Children are target1..targetN then the body (last).
       LTargets := nil;
       LChild := LM.Tree.Nodes[LParent].FirstChild;
-      LLast := LChild;
-      while (LLast <> NIL_NODE) and
-            (LM.Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
-        LLast := LM.Tree.Nodes[LLast].NextSibling;
+      LLast := LM.Tree.WithBody(LParent);
       while (LChild <> NIL_NODE) and (LChild <> LLast) do
       begin
         LTargets := LTargets + [LChild];
@@ -21433,16 +21356,10 @@ var
 begin
   ASymN := 0;
   AScopeN := 0;
-  // A model without an implementation scope (a program, or an implementation
-  // that declares nothing at all) has no boundary to compare against - refuse
-  // rather than invent one.
-  AImplScope := -1;
-  for LIdx := 0 to AModel.Scopes.Count - 1 do
-    if AModel.Scopes[LIdx].Kind = sckImplementation then
-    begin
-      AImplScope := LIdx;
-      Break;
-    end;
+  // The resolver opens an implementation scope for every module, a program
+  // included; a model it has not run on has none and no boundary to compare
+  // against - refuse rather than invent one.
+  AImplScope := AModel.ImplementationScope;
   if AImplScope < 0 then
   begin
     FLastBoundaryNote := 'no implementation scope';

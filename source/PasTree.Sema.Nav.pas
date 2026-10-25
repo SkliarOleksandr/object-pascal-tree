@@ -1705,7 +1705,7 @@ function TPasNavigator.UsesQualifierInfo(AMid, ANode: Integer;
   out ALeaf, ASpanFirstVis, ASpanLastVis: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LTop, LParent, LLeaf, LFirst: Integer;
+  LTop, LParent, LLeaf: Integer;
 begin
   Result := False;
   LM := FProj.Model(AMid);
@@ -1721,18 +1721,10 @@ begin
 
   LLeaf := LTop;
   while LM.Tree.Nodes[LLeaf].Kind = nkMember do
-  begin
-    LLeaf := LM.Tree.Nodes[LLeaf].FirstChild;
-    while LM.Tree.Nodes[LLeaf].NextSibling <> NIL_NODE do
-      LLeaf := LM.Tree.Nodes[LLeaf].NextSibling;
-  end;
-
-  LFirst := LTop;
-  while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
-    LFirst := LM.Tree.Nodes[LFirst].FirstChild;
+    LLeaf := LM.Tree.LastChild(LLeaf);
 
   ALeaf := LLeaf;
-  ASpanFirstVis := LM.Tree.Nodes[LFirst].FirstToken;
+  ASpanFirstVis := LM.Tree.NodeLeftmostVis(LTop);
   ASpanLastVis := LM.Tree.Nodes[LTop].LastToken;
   Result := True;
 end;
@@ -1745,7 +1737,7 @@ var
   LCache: TNavCache;
   LTS: TPasTokenStream;   // record copy - the arrays inside are shared refs
   LLeaf, LSpanFirstVis, LSpanLastVis, LRawFrom, LRawTo, LEndLine: Integer;
-  LQUid, LMatchNode, LFirst: Integer;
+  LQUid, LMatchNode: Integer;
 begin
   Result := False;
   if (AMid < 0) or (AMid >= FProj.ModelCount) then
@@ -1807,10 +1799,7 @@ begin
       LQUid := FProj.QualifierUnitAt(AMid, LNode, LMatchNode);
       if LQUid >= 0 then
       begin
-        LFirst := LMatchNode;
-        while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
-          LFirst := LM.Tree.Nodes[LFirst].FirstChild;
-        LSpanFirstVis := LM.Tree.Nodes[LFirst].FirstToken;
+        LSpanFirstVis := LM.Tree.NodeLeftmostVis(LMatchNode);
         LSpanLastVis := LM.Tree.Nodes[LMatchNode].LastToken;
         if (LSpanFirstVis >= 0) and
            (LSpanFirstVis <= High(LM.Tree.Source.Visible)) and
@@ -2376,7 +2365,7 @@ end;
 function TPasNavigator.HitFromNode(LM: TPasSemaModel; ANode: Integer;
   out AHit: TPasRefHit): Boolean;
 var
-  LVisTok, LTokLen, LFirst: Integer;
+  LVisTok, LTokLen: Integer;
   LVis: TPasVisibleToken;
   LTS: TPasTokenStream;
 begin
@@ -2386,11 +2375,10 @@ begin
   // leftmost leaf would be the base, `FList` of `FList.Obj[I]`.
   AHit.Implicit := LM.Tree.Nodes[ANode].Kind = nkIndex;
   AHit.IndexNode := ANode;
-  LFirst := ANode;
-  if not AHit.Implicit then
-    while LM.Tree.Nodes[LFirst].FirstChild <> NIL_NODE do
-      LFirst := LM.Tree.Nodes[LFirst].FirstChild;
-  LVisTok := LM.Tree.Nodes[LFirst].FirstToken;
+  if AHit.Implicit then
+    LVisTok := LM.Tree.Nodes[ANode].FirstToken
+  else
+    LVisTok := LM.Tree.NodeLeftmostVis(ANode);
   if (LVisTok < 0) or (LVisTok > High(LM.Tree.Source.Visible)) then
     Exit;
   LVis := LM.Tree.Source.Visible[LVisTok];
@@ -4393,10 +4381,7 @@ begin
         LName := LM.Tree.Nodes[LName].FirstChild;
       nkMember:
         begin
-          LName := LM.Tree.Nodes[LName].FirstChild;
-          while (LName <> NIL_NODE) and
-                (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) do
-            LName := LM.Tree.Nodes[LName].NextSibling;
+          LName := LM.Tree.LastChild(LName);
         end;
     else
       Break;
@@ -5353,10 +5338,7 @@ begin
     case LM.Tree.Nodes[Result].Kind of
       nkMember:
         begin
-          Result := LM.Tree.Nodes[Result].FirstChild;
-          while (Result <> NIL_NODE) and
-                (LM.Tree.Nodes[Result].NextSibling <> NIL_NODE) do
-            Result := LM.Tree.Nodes[Result].NextSibling;
+          Result := LM.Tree.LastChild(Result);
         end;
       nkIndex, nkDeref, nkParen, nkCall, nkTypeArgs:
         Result := LM.Tree.Nodes[Result].FirstChild;
@@ -6375,10 +6357,7 @@ begin
   LBody := RTFindChildKind(LM, AImplNode, nkRoutineBody);
   if LBody = NIL_NODE then
     Exit;
-  LBlockOrAsm := LM.Tree.Nodes[LBody].FirstChild;
-  while (LBlockOrAsm <> NIL_NODE) and
-        (LM.Tree.Nodes[LBlockOrAsm].NextSibling <> NIL_NODE) do
-    LBlockOrAsm := LM.Tree.Nodes[LBlockOrAsm].NextSibling;
+  LBlockOrAsm := LM.Tree.LastChild(LBody);
   if LBlockOrAsm = NIL_NODE then
     Exit;
   LFirstStmt := NIL_NODE;

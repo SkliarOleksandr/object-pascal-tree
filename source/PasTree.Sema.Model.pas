@@ -480,6 +480,16 @@ type
     FNamePool: TSemaNamePool;
     FNamePoolOn: Boolean;
     procedure GrowSyms;
+    { Is ASym, found in AScope, visible at AAtToken (3.1.3): a block's
+      inline declarations only from their declaration on, everything else
+      throughout; AAtToken < 0 skips the test. ResolveAt's and
+      ResolveByArityAt's one rule. }
+    function VisibleAt(AScope, ASym, AAtToken: Integer): Boolean; inline;
+    { A new symbol slot with every field but the names at its default -
+      NIL_SYM, NIL_NODE and NIL_SCOPE are not the zero GrowSyms leaves, and
+      0 is a real index. Both AddSymbol overloads start here. }
+    function NewSymbol(AScope: Integer; AKind: TSemaSymbolKind;
+      ADeclNode: Integer): Integer;
     function FindByArityDeepK(AScope: Integer; const AKey: TSemaKey;
       AWantGeneric: Boolean; ADepth: Integer = 0): Integer;
     procedure SnapshotRoutineScopeNames;
@@ -491,6 +501,11 @@ type
     Diags: TArray<TSemaDiag>;
     // Phase 2: cross-unit state.
     InterfaceScope: Integer;        // scope importers may read; NIL_SCOPE
+    // The unit's implementation scope (a program's too: the resolver opens
+    // one for every module), whose parent chain covers the interface and
+    // System scopes - one Resolve from it sees everything the module itself
+    // declares. NIL_SCOPE before the resolver has run.
+    ImplementationScope: Integer;
     // The implicit System scope seeded with the compiler-provided names
     // (PasTree.Sema.Builtins). Kept separately from InterfaceScope, which
     // JOINS it: answering "is this name compiler-provided?" must NOT also see
@@ -780,6 +795,10 @@ type
     function InUnopenedWithBody(ANode: Integer): Boolean;
     // WithUnopenedSorted from WithUnopened - once Phase 1 has listed them all.
     procedure SealWithUnopened;
+    { The scope a lookup of the module's own declarations starts at:
+      ImplementationScope, else InterfaceScope; NIL_SCOPE before the
+      resolver has run. }
+    function OwnDeclScope: Integer;
     { True when ANode, an identifier in a METHOD body, is bound to a
       declaration dcc reaches only after the method's own type and its
       ancestors: a unit-level declaration of this unit (either section, an
@@ -1741,6 +1760,7 @@ begin
   inherited Create;
   Tree := ATree;
   InterfaceScope := NIL_SCOPE;
+  ImplementationScope := NIL_SCOPE;
   SystemScope := NIL_SCOPE;
   AllUsesResolved := False;
   SetLength(Symbols, 64);
@@ -1823,14 +1843,30 @@ begin
     LOut[LIdx] := PasFoldChar(AName[LFrom + LIdx]);
 end;
 
-function TPasSemaModel.AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
-  const AName: string; ADeclNode: Integer;
-  const ANameKey: string): Integer;
+function TPasSemaModel.NewSymbol(AScope: Integer; AKind: TSemaSymbolKind;
+  ADeclNode: Integer): Integer;
 begin
   GrowSyms;
   Result := FSymCount;
   Inc(FSymCount);
   Symbols[Result].Kind := AKind;
+  Symbols[Result].DeclNode := ADeclNode;
+  Symbols[Result].Scope := AScope;
+  Symbols[Result].TypeSym := NIL_SYM;
+  Symbols[Result].TypeNode := NIL_NODE;
+  Symbols[Result].Flags := [];
+  Symbols[Result].Visibility := svDefault;
+  Symbols[Result].NextOverload := NIL_SYM;
+  Symbols[Result].MemberScope := NIL_SCOPE;
+  Symbols[Result].TypeCat := tcUnknown;
+  Symbols[Result].NumRank := 0;
+end;
+
+function TPasSemaModel.AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
+  const AName: string; ADeclNode: Integer;
+  const ANameKey: string): Integer;
+begin
+  Result := NewSymbol(AScope, AKind, ADeclNode);
   if not FNamePoolOn then
   begin
     Symbols[Result].Name := AName;
@@ -1851,17 +1887,8 @@ begin
     else
       Symbols[Result].Name := FNamePool.Intern(AName);
   end;
-  Symbols[Result].DeclNode := ADeclNode;
-  Symbols[Result].Scope := AScope;
-  Symbols[Result].TypeSym := NIL_SYM;
-  Symbols[Result].TypeNode := NIL_NODE;
-  Symbols[Result].Flags := [];
-  Symbols[Result].Visibility := svDefault;
-  Symbols[Result].NextOverload := NIL_SYM;
-  Symbols[Result].MemberScope := NIL_SCOPE;
-  Symbols[Result].TypeCat := tcUnknown;
-  Symbols[Result].NumRank := 0;
 end;
+
 
 function TPasSemaModel.AddSymbol(AScope: Integer; AKind: TSemaSymbolKind;
   ANameNode, ADeclNode: Integer; const AKey: TSemaKey): Integer;
@@ -1893,27 +1920,15 @@ begin
       SetString(LName, LText, LLen);
     Exit(AddSymbol(AScope, AKind, LName, ADeclNode, LKeyText));
   end;
-  GrowSyms;
-  Result := FSymCount;
-  Inc(FSymCount);
-  Symbols[Result].Kind := AKind;
+  Result := NewSymbol(AScope, AKind, ADeclNode);
   Symbols[Result].NameLower := FNamePool.InternSlice(AKey.Text, AKey.Len,
     True);
   if LIsKey then
     Symbols[Result].Name := Symbols[Result].NameLower
   else
     Symbols[Result].Name := FNamePool.InternSlice(LText, LLen, False);
-  Symbols[Result].DeclNode := ADeclNode;
-  Symbols[Result].Scope := AScope;
-  Symbols[Result].TypeSym := NIL_SYM;
-  Symbols[Result].TypeNode := NIL_NODE;
-  Symbols[Result].Flags := [];
-  Symbols[Result].Visibility := svDefault;
-  Symbols[Result].NextOverload := NIL_SYM;
-  Symbols[Result].MemberScope := NIL_SCOPE;
-  Symbols[Result].TypeCat := tcUnknown;
-  Symbols[Result].NumRank := 0;
 end;
+
 
 procedure TPasSemaModel.BeginNamePool;
 begin
@@ -2221,6 +2236,12 @@ end;
   means "no candidate of the wanted arity anywhere", and the caller then keeps
   the binding it has rather than losing the reference: that is dcc's error, not a
   reason to unbind. }
+function TPasSemaModel.VisibleAt(AScope, ASym, AAtToken: Integer): Boolean;
+begin
+  Result := (AAtToken < 0) or (Scopes[AScope].Kind <> sckBlock) or
+    not DeclaredAfter(ASym, AAtToken);
+end;
+
 function TPasSemaModel.ResolveByArityAt(AScope: Integer;
   const ANameLower: string; AAtToken: Integer;
   AWantGeneric: Boolean): Integer;
@@ -2238,10 +2259,8 @@ begin
   while LCur <> NIL_SCOPE do
   begin
     Result := FindByArityDeepK(LCur, AKey, AWantGeneric);
-    if Result <> NIL_SYM then
-      if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or
-         not DeclaredAfter(Result, AAtToken) then
-        Exit;
+    if (Result <> NIL_SYM) and VisibleAt(LCur, Result, AAtToken) then
+      Exit;
     LCur := Scopes[LCur].Parent;
   end;
   Result := NIL_SYM;
@@ -2278,8 +2297,7 @@ begin
     Result := FindLocalDeep(LCur, AKey, 0);
     if Result <> NIL_SYM then
     begin
-      if (AAtToken < 0) or (Scopes[LCur].Kind <> sckBlock) or
-         not DeclaredAfter(Result, AAtToken) then
+      if VisibleAt(LCur, Result, AAtToken) then
         // A hit dcc ranks after the unit's own declarations (an outer type's
         // member of a nested method, F52, and the rest) is moved by the
         // resolver - TPasSemaResolver.RanksAfterUnit.
@@ -2913,8 +2931,18 @@ begin
   end;
 end;
 
-// DemotedStreamMatches / DemotedFileMatches over explicit fingerprints, so a
-// TPasSemaDonorView answers from its copy exactly as the model does.
+// DemotedFileMatches / DemotedStreamMatches over explicit fingerprints, so a
+// TPasSemaDonorView answers from its copy exactly as the model does. One
+// file's identity is its length and its SourceFingerprint; a stream's, its
+// visible count and every file's identity and token count.
+function FingerprintFileMatches(AFileIdx: Integer; const AText: string;
+  const ASizes: TArray<Integer>; const AHashes: TArray<Cardinal>): Boolean;
+begin
+  Result := (AFileIdx >= 0) and (AFileIdx <= High(ASizes)) and
+    (AFileIdx <= High(AHashes)) and (Length(AText) = ASizes[AFileIdx]) and
+    (SourceFingerprint(AText) = AHashes[AFileIdx]);
+end;
+
 function FingerprintStreamMatches(const APre: TPasPreprocessed;
   AVisCount: Integer; const ASizes, ACounts: TArray<Integer>;
   const AHashes: TArray<Cardinal>): Boolean;
@@ -2929,20 +2957,13 @@ begin
      (Length(APre.Files) <> Length(AHashes)) then
     Exit;
   for LIdx := 0 to High(APre.Files) do
-    if (Length(APre.Files[LIdx].Source) <> ASizes[LIdx]) or
-       (Length(APre.Files[LIdx].Tokens) <> ACounts[LIdx]) or
-       (SourceFingerprint(APre.Files[LIdx].Source) <> AHashes[LIdx]) then
+    if (Length(APre.Files[LIdx].Tokens) <> ACounts[LIdx]) or
+       not FingerprintFileMatches(LIdx, APre.Files[LIdx].Source, ASizes,
+         AHashes) then
       Exit;
   Result := True;
 end;
 
-function FingerprintFileMatches(AFileIdx: Integer; const AText: string;
-  const ASizes: TArray<Integer>; const AHashes: TArray<Cardinal>): Boolean;
-begin
-  Result := (AFileIdx >= 0) and (AFileIdx <= High(ASizes)) and
-    (AFileIdx <= High(AHashes)) and (Length(AText) = ASizes[AFileIdx]) and
-    (SourceFingerprint(AText) = AHashes[AFileIdx]);
-end;
 
 function TPasSemaModel.DemotedStreamMatches(
   const APre: TPasPreprocessed): Boolean;
@@ -3084,7 +3105,7 @@ function TPasSemaModel.InUnopenedWithBody(ANode: Integer): Boolean;
   end;
 
 var
-  LCur, LParent, LLast: Integer;
+  LWith: Integer;
 begin
   Result := False;
   // Bounds-checked, not just nil-checked - same cross-generation-id class the
@@ -3096,23 +3117,20 @@ begin
   // seal now - the only writer is the resolver, on this thread.
   if Length(WithUnopenedSorted) <> Length(WithUnopened) then
     SealWithUnopened;
-  LCur := ANode;
-  LParent := Tree.Nodes[LCur].Parent;
-  while LParent <> NIL_NODE do
+  LWith := Tree.EnclosingWith(ANode);
+  while LWith <> NIL_NODE do
   begin
-    if (Tree.Nodes[LParent].Kind = nkWithStmt) and Listed(LParent) then
-    begin
-      // Children are target1..targetN then the body (last one).
-      LLast := Tree.Nodes[LParent].FirstChild;
-      while (LLast <> NIL_NODE) and
-            (Tree.Nodes[LLast].NextSibling <> NIL_NODE) do
-        LLast := Tree.Nodes[LLast].NextSibling;
-      if LCur = LLast then
-        Exit(True);
-    end;
-    LCur := LParent;
-    LParent := Tree.Nodes[LCur].Parent;
+    if Listed(LWith) then
+      Exit(True);
+    LWith := Tree.EnclosingWith(LWith);
   end;
+end;
+
+function TPasSemaModel.OwnDeclScope: Integer;
+begin
+  Result := ImplementationScope;
+  if Result = NIL_SCOPE then
+    Result := InterfaceScope;
 end;
 
 procedure TPasSemaModel.SealWithUnopened;

@@ -306,14 +306,10 @@ type
     // The nkTypeDecl that heritage list belongs to - the type being declared,
     // which cannot be its own ancestor; NIL_NODE outside one.
     FHeritageDecl: Integer;
-    // The last-good model's sckImplementation scope (lazy; -2 = not yet
-    // looked up, NIL_SCOPE = the model has none) - OwnModelTypeX resolves
-    // from it so implementation-section types bridge too.
-    FOwnImplScope: Integer;
+
     function RawTokenAt(AOffset: Integer): Integer;
     function CaretOffset(ALine, ACol: Integer; out AOffset: Integer): Boolean;
     function PrevVisibleRaw(ARaw: Integer): Integer;
-    function LeftmostVis(ANode: Integer): Integer;
     function InnermostNodeAt(AVis: Integer): Integer;
     function MemberBaseOfDot(ADotRaw: Integer): Integer;
     // typing (mixed overlay/project space)
@@ -534,7 +530,7 @@ begin
   FModel := AModel;
   FProj := AProject;
   FProjMid := AProjectMid;
-  FOwnImplScope := -2;
+
   FIsProjectModel := (FProj <> nil) and (FProjMid >= 0) and
     (FProjMid < FProj.ModelCount) and (FProj.Model(FProjMid) = FModel);
   // FSeen is CompleteAt's alone, created there per request at the size its
@@ -617,21 +613,6 @@ end;
 // left edge exist by design (nkMember's FirstToken is the DOT; consumers
 // everywhere walk to the leftmost descendant), so take the smaller of the
 // node's own FirstToken and its deepest-first-child's.
-function TPasCompletion.LeftmostVis(ANode: Integer): Integer;
-var
-  LNode, LTok: Integer;
-begin
-  Result := FModel.Tree.Nodes[ANode].FirstToken;
-  LNode := FModel.Tree.Nodes[ANode].FirstChild;
-  while LNode <> NIL_NODE do
-  begin
-    LTok := FModel.Tree.Nodes[LNode].FirstToken;
-    if (LTok >= 0) and ((Result < 0) or (LTok < Result)) then
-      Result := LTok;
-    LNode := FModel.Tree.Nodes[LNode].FirstChild;
-  end;
-end;
-
 // Innermost node whose [leftmost visible .. LastToken] span contains AVis: a
 // descent from the root, taking the first child that covers the position at
 // each level. The arena cannot be binary-searched for this (Adopt re-parents
@@ -661,7 +642,7 @@ begin
       // each was the review's finding #3.)
       if FModel.Tree.Nodes[LChild].LastToken >= AVis then
       begin
-        LFirst := LeftmostVis(LChild);
+        LFirst := FModel.Tree.NodeLeftmostVis(LChild);
         if (LFirst >= 0) and (LFirst <= AVis) then
         begin
           Result := LChild;
@@ -993,21 +974,11 @@ begin
       Result := XPlain(FProjMid, LSym);
     Exit;
   end;
-  if FOwnImplScope = -2 then
-  begin
-    FOwnImplScope := NIL_SCOPE;
-    for LScope := 0 to LM.Scopes.Count - 1 do
-      if LM.Scopes[LScope].Kind = sckImplementation then
-      begin
-        FOwnImplScope := LScope;
-        Break;
-      end;
-    if (FOwnImplScope = NIL_SCOPE) and (LM.InterfaceScope <> NIL_SCOPE) then
-      FOwnImplScope := LM.InterfaceScope;
-  end;
-  if FOwnImplScope = NIL_SCOPE then
+  // Implementation-section types bridge too.
+  LScope := LM.OwnDeclScope;
+  if LScope = NIL_SCOPE then
     Exit;
-  LSym := LM.Resolve(FOwnImplScope, FModel.Symbols[AOvSym].NameLower);
+  LSym := LM.Resolve(LScope, FModel.Symbols[AOvSym].NameLower);
   if (LSym <> NIL_SYM) and
      (LM.Symbols[LSym].Kind in [skType, skBuiltinType]) then
     Result := XPlain(FProjMid, LSym);
@@ -1443,10 +1414,7 @@ begin
         LNameNode := LChild;
         if FModel.Tree.Nodes[LNameNode].Kind = nkMember then
         begin
-          LNameNode := FModel.Tree.Nodes[LNameNode].FirstChild;
-          while (LNameNode <> NIL_NODE) and
-                (FModel.Tree.Nodes[LNameNode].NextSibling <> NIL_NODE) do
-            LNameNode := FModel.Tree.Nodes[LNameNode].NextSibling;
+          LNameNode := FModel.Tree.LastChild(LNameNode);
         end;
         if LNameNode <> NIL_NODE then
           LBase.X := FProj.TypeAtArityX(FProjMid, LBase.X, LCount, NIL_NODE,
@@ -1914,11 +1882,9 @@ begin
     Exit;
   for LIdx := High(FModel.WithUnopened) downto 0 do
   begin
-    LBody := FModel.Tree.Nodes[FModel.WithUnopened[LIdx]].FirstChild;
+    LBody := FModel.Tree.WithBody(FModel.WithUnopened[LIdx]);
     if LBody = NIL_NODE then
       Continue;
-    while FModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE do
-      LBody := FModel.Tree.Nodes[LBody].NextSibling;
     if not IsDescendantNode(ANode, LBody) then
       Continue;
     LTargets := nil;
@@ -3620,10 +3586,7 @@ begin
   begin
     if FModel.Tree.Nodes[LWith].Kind = nkWithStmt then
     begin
-      LBody := FModel.Tree.Nodes[LWith].FirstChild;
-      while (LBody <> NIL_NODE) and
-            (FModel.Tree.Nodes[LBody].NextSibling <> NIL_NODE) do
-        LBody := FModel.Tree.Nodes[LBody].NextSibling;
+      LBody := FModel.Tree.WithBody(LWith);
       if (LBody <> NIL_NODE) and
          (LBody <> FModel.Tree.Nodes[LWith].FirstChild) and
          IsDescendantNode(AInfo.Node, LBody) then
@@ -4903,15 +4866,8 @@ begin
     // B2-33).
     LOther := NIL_SCOPE;
     if LScope = LM.InterfaceScope then
-    begin
-      for var LS := 0 to LM.Scopes.Count - 1 do
-        if LM.Scopes[LS].Kind = sckImplementation then
-        begin
-          LOther := LS;
-          Break;
-        end;
-    end
-    else if LM.Scopes[LScope].Kind = sckImplementation then
+      LOther := LM.ImplementationScope
+    else if LScope = LM.ImplementationScope then
       LOther := LM.InterfaceScope;
     if LOther <> NIL_SCOPE then
       AddChain(AMid, LM.FindLocal(LOther, LKey));
@@ -5148,7 +5104,7 @@ begin
                FModel.Tree.Nodes[LNode].LastToken].TokenIndex >= LCaretRaw)
           then
             Exit;
-          LVis := LeftmostVis(LNode);
+          LVis := FModel.Tree.NodeLeftmostVis(LNode);
           if (LVis < 0) or (FModel.Tree.Source.Visible[LVis].FileId <> 0) then
             Exit;
           LRaw := PrevVisibleRaw(
@@ -5267,10 +5223,7 @@ begin
           // stands down under an address-of.
           if FClassSide then
           begin
-            LNode := LInfo.DotBase;
-            while FModel.Tree.Nodes[LNode].FirstChild <> NIL_NODE do
-              LNode := FModel.Tree.Nodes[LNode].FirstChild;
-            LNode := FModel.Tree.Nodes[LNode].FirstToken;   // visible idx
+            LNode := FModel.Tree.NodeLeftmostVis(LInfo.DotBase);   // visible idx
             if (LNode >= 0) and (LNode <= High(FModel.Tree.Source.Visible))
                and (FModel.Tree.Source.Visible[LNode].FileId = 0) then
             begin

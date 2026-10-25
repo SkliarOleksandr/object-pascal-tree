@@ -346,6 +346,16 @@ type
       is not their left edge exist by design (nkMember's is the dot). -1 for
       a bad index or a node with no tokens. }
     function NodeLeftmostVis(AIndex: Integer): Integer;
+    { The node's last child, NIL_NODE when it has none - a walk of the
+      sibling chain (the built tree keeps no last-child link). }
+    function LastChild(ANode: Integer): Integer;
+    { An nkWithStmt's body: its last child (docs/tree-contract.md - the
+      targets are the children before it). NIL_NODE when it has none. }
+    function WithBody(AWith: Integer): Integer;
+    { The nearest nkWithStmt that holds ANode in its BODY - not in one of
+      its targets, which are evaluated in the enclosing scope. NIL_NODE when
+      none; called with the result, the next one out. }
+    function EnclosingWith(ANode: Integer): Integer;
     { The operands of an operator chain, for a walk that does nothing at an
       operator but visit its children. `A + B + C + ...` is a LEFT spine of
       nkBinaryOp nodes as deep as the chain is long - the parser's operator
@@ -813,6 +823,39 @@ begin
     if (LTok >= 0) and ((Result < 0) or (LTok < Result)) then
       Result := LTok;
     LNode := Nodes[LNode].FirstChild;
+  end;
+end;
+
+function TPasTree.LastChild(ANode: Integer): Integer;
+var
+  LChild: Integer;
+begin
+  Result := NIL_NODE;
+  LChild := Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    Result := LChild;
+    LChild := Nodes[LChild].NextSibling;
+  end;
+end;
+
+function TPasTree.WithBody(AWith: Integer): Integer;
+begin
+  Result := LastChild(AWith);
+end;
+
+function TPasTree.EnclosingWith(ANode: Integer): Integer;
+var
+  LCur: Integer;
+begin
+  LCur := ANode;
+  Result := Nodes[LCur].Parent;
+  while Result <> NIL_NODE do
+  begin
+    if (Nodes[Result].Kind = nkWithStmt) and (WithBody(Result) = LCur) then
+      Exit;
+    LCur := Result;
+    Result := Nodes[LCur].Parent;
   end;
 end;
 

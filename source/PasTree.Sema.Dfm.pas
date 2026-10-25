@@ -670,7 +670,7 @@ function TPasFormBinder.TypeInUnit(AMid: Integer;
   const ANameLower: string): TSemaXType;
 var
   LM: TPasSemaModel;
-  LSym, LScope, LRMid, LRSym: Integer;
+  LSym, LRMid, LRSym: Integer;
 begin
   Result := XNil;
   if ANameLower = '' then
@@ -682,12 +682,8 @@ begin
   if (LSym = NIL_SYM) or (LM.Symbols[LSym].Kind <> skType) then
   begin
     LSym := NIL_SYM;
-    for LScope := 0 to LM.Scopes.Count - 1 do
-      if LM.Scopes[LScope].Kind = sckImplementation then
-      begin
-        LSym := LM.FindLocal(LScope, ANameLower);
-        Break;
-      end;
+    if LM.ImplementationScope <> NIL_SCOPE then
+      LSym := LM.FindLocal(LM.ImplementationScope, ANameLower);
   end;
   if (LSym <> NIL_SYM) and (LM.Symbols[LSym].Kind = skType) then
     Exit(FProj.CanonTypeX(XPlain(AMid, LSym)));

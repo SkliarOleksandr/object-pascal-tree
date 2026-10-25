@@ -3566,6 +3566,67 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { 5.7: the tree's with helpers (TPasTree.WithBody, EnclosingWith,
+    LastChild - audit D1-21), over the layout docs/tree-contract.md fixes: an
+    nkWithStmt's targets, then its body as the last child. A name in the body
+    is enclosed by its with, the inner one first; a name in a target is
+    enclosed only by the withs whose body holds that with. }
+  function WithBodyCase: TPasCustomCase;
+  begin
+    Result.Section := '5.7';
+    Result.Name := 'with body and enclosing with';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        SRC = 'with A, B do with C do X := Y;'#13#10;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LIdx, LOuter, LInner, LX, LC, LB: Integer;
+      begin
+        LPre := GPP.ProcessText('with.pas', SRC);
+        LTree := TPasParser.ParseStatements(LPre, LDiags);
+        LOuter := NIL_NODE;
+        LInner := NIL_NODE;
+        LX := NIL_NODE;
+        LC := NIL_NODE;
+        LB := NIL_NODE;
+        for LIdx := 0 to High(LTree.Nodes) do
+          case LTree.Nodes[LIdx].Kind of
+            nkWithStmt:
+              if LOuter = NIL_NODE then
+                LOuter := LIdx
+              else
+                LInner := LIdx;
+            nkIdent:
+              case LPre.VisibleText(LTree.Nodes[LIdx].FirstToken)[1] of
+                'X': LX := LIdx;
+                'C': LC := LIdx;
+                'B': LB := LIdx;
+              end;
+          end;
+        Result.Passed := (LOuter <> NIL_NODE) and (LInner <> NIL_NODE) and
+          (LTree.WithBody(LOuter) = LInner) and
+          (LTree.LastChild(LOuter) = LInner) and
+          (LTree.LastChild(LX) = NIL_NODE) and
+          (LTree.EnclosingWith(LX) = LInner) and
+          (LTree.EnclosingWith(LInner) = LOuter) and
+          (LTree.EnclosingWith(LOuter) = NIL_NODE) and
+          (LTree.EnclosingWith(LC) = LOuter) and
+          (LTree.EnclosingWith(LB) = NIL_NODE) and (Length(LDiags) = 0);
+        if Result.Passed then
+          Result.Message := ''
+        else
+          Result.Message := Format('  withs %d %d, body %d, X in %d, ' +
+            'C in %d, B in %d', [LOuter, LInner, LTree.WithBody(LOuter),
+            LTree.EnclosingWith(LX), LTree.EnclosingWith(LC),
+            LTree.EnclosingWith(LB)]) + sLineBreak;
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, True,
+          Length(LDiags) = 0);
+      end;
+  end;
+
   { 1.1.1: the PROGRAM file's own top-level shape -- a `program` head, its
     uses clause, and the body block -- never dumped as a whole before
     (every other case wraps a fragment inside a unit's interface section). }
@@ -4294,7 +4355,7 @@ begin
       '', 3)];
   AddMultilineIndentCases(Result);
   Result := Result + [OutParamAuxCase, PackageHeadTokensCase,
-    PackageStrayTextCase, FusedGreaterEqualCase];
+    PackageStrayTextCase, FusedGreaterEqualCase, WithBodyCase];
 end;
 
 

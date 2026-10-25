@@ -1588,10 +1588,7 @@ begin
       begin
         // The qualifier (a unit name, mostly) is skipped; the name is the
         // last child.
-        LChild := ATree.Nodes[ANode].FirstChild;
-        while (LChild <> NIL_NODE) and
-              (ATree.Nodes[LChild].NextSibling <> NIL_NODE) do
-          LChild := ATree.Nodes[LChild].NextSibling;
+        LChild := ATree.LastChild(ANode);
         if (LChild <> NIL_NODE) and (ATree.Nodes[LChild].Kind = nkIdent) then
           CollectNameSpans(ATree, LChild, ASpans);
         Exit;

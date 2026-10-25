@@ -1021,9 +1021,7 @@ var
     // A qualified qualifier: its last segment.
     while (LQ <> NIL_NODE) and (LM.Tree.Nodes[LQ].Kind = nkMember) do
     begin
-      LC := LM.Tree.Nodes[LQ].FirstChild;
-      while (LC <> NIL_NODE) and (LM.Tree.Nodes[LC].NextSibling <> NIL_NODE) do
-        LC := LM.Tree.Nodes[LC].NextSibling;
+      LC := LM.Tree.LastChild(LQ);
       LQ := LC;
     end;
     if LQ = NIL_NODE then

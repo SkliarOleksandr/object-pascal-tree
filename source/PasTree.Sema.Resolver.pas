@@ -5235,6 +5235,7 @@ begin
   FModel.JoinScope(FIntf, FSys);            // implicit 'uses System'
   FImpl := FModel.AddScope(sckImplementation, FIntf, 0);
   FModel.InterfaceScope := FIntf;
+  FModel.ImplementationScope := FImpl;
   CollectRoot(0);
   StampRetainedFlags; // needs every symbol and param scope - see its header
   CollectBuiltinShadows; // every interface symbol - see its header
