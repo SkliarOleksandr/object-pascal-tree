@@ -542,7 +542,7 @@ type
       Committed after the parallel phase, each model by its own worker. }
     FXNewExprType: TArray<TList<TPair<Integer, TSemaXType>>>;
     { Same treatment for CheckCalls' arity-error re-point, which runs in the
-      parallel 'cross-resolve' pass - see RunCallChecksPass. Nil outside it,
+      parallel 'calls' pass - see RunCallChecksPass. Nil outside it,
       and then the write goes straight to the model. }
     FCallNewExt: TArray<TDictionary<Integer, TPasExtRef>>;
     FSingleThreaded: Boolean;
@@ -740,8 +740,7 @@ type
     procedure NoteLoadFailure(const AFull, AClass, AMsg: string);
     function LoadFailureOf(const AFull: string): string;
     function LoadFile(const APath: string): Integer;
-    procedure LoadFilesParallel(const APaths: TArray<string>;
-      AInterfaceOnly: Boolean = False);
+    procedure LoadFilesParallel(const APaths: TArray<string>);
     // Continuous closure loader - see the implementation. Returns False when
     // the run was cancelled part-way (committed models stay published).
     function RunLoadEngine(const ASeedLoads: TArray<string>;
@@ -964,6 +963,25 @@ type
       ASym: Integer): Boolean; static;
     class function XTaintedIn(AId: Integer; const AChanged,
       AInstChanged: TArray<Boolean>; const AX: TSemaXType): Boolean; static;
+    { A consumer's cross maps, scanned for unit AId: True when one holds a
+      changed pair (the consumer is redone), else AKeys gains every key
+      naming AId, for RenumberConsumer. The model's cross maps are two of
+      each kind - ExtRefMap and CallTargetX, SymTypeX and ExprTypeX - and
+      SelectConsumers and RenumberConsumer each name all four. }
+    class function ScanExt(const AMap: TPasIntMap<TPasExtRef>; AId: Integer;
+      const AChanged: TArray<Boolean>; var AKeys: TArray<Integer>;
+      var ACount: Integer): Boolean; static;
+    class function ScanX(const AMap: TPasIntMap<TSemaXType>; AId: Integer;
+      const AChanged, AInstChanged: TArray<Boolean>;
+      var AKeys: TArray<Integer>; var ACount: Integer): Boolean; static;
+    { AKeys' entries renumbered through AMap (old symbol -> new), in place:
+      existing keys only, so Items[] is a value write - no rehash. }
+    class procedure RenumberExt(var AMap: TPasIntMap<TPasExtRef>;
+      const AKeys, ASymMap: TArray<Integer>); static;
+    class procedure RenumberX(var AMap: TPasIntMap<TSemaXType>;
+      const AKeys, ASymMap: TArray<Integer>); static;
+    class function FollowSym(const ASymMap: TArray<Integer>;
+      ASym: Integer): Integer; static;
     { Does any nkIdent in ATree spell one of the names (lower-case), ampersand
       stripped, case-insensitively? ANamesByLen[n] = the names of length n, so
       an identifier is compared only against candidates of its own length,
@@ -1143,6 +1161,31 @@ type
     procedure ReleaseUsesMemo;
     procedure CrossResolveDecl(AId: Integer;
       var APending: TArray<TPasInhPending>; AEmit: Boolean);
+    { The pass drivers run over a SET of model ids: the full pipeline's is
+      0..ACount-1 (the Run*Pass(ACount) wrappers), the module path's the
+      models an edit reaches (RunModulePasses) - one copy of each fixpoint,
+      commit and buffer discipline for both (audit D2-26). Every compute
+      phase is parallel over the set, every commit sequential in set order. }
+    function IdsUpTo(ACount: Integer): TArray<Integer>;
+    { What each slot's worker pended for its own model, committed in slot
+      order and cleared; the count is the fixpoint loops' "anything new".
+      AClearRef is the inherited / with shape - RefMap cleared (every
+      consumer reads it first), the frame-substituted type stored; the decl
+      pass writes ExtRefMap alone. }
+    function CommitPending(const AIds: TArray<Integer>;
+      var APending: TArray<TArray<TPasInhPending>>; AClearRef: Boolean): Integer;
+    procedure RunDeclOver(const AIds: TArray<Integer>);
+    procedure RunInheritedOver(const AIds: TArray<Integer>);
+    procedure RunWithOver(const AIds: TArray<Integer>);
+    procedure RunCallChecksOver(const AIds: TArray<Integer>);
+    procedure RunCrossTypeOver(const AIds: TArray<Integer>);
+    { CrossType's overlay into AId's maps - an EXT_TOMBSTONE_UNIT entry
+      removes the ExtRefMap binding, any other is written, then the inferred
+      symbol types. Sequential, after every worker: a sibling reads AId's
+      ExtRefMap while it runs (see RunCrossTypeOver). Either map may be nil. }
+    procedure MergeCrossTypeOverlay(AId: Integer;
+      ANewExt: TDictionary<Integer, TPasExtRef>;
+      ANewSymType: TDictionary<Integer, TSemaXType>);
     procedure RunDeclPass(ACount: Integer);
     procedure RunInheritedPass(ACount: Integer);
     { AEmit=False computes bindings only and RECORDS the still-unresolved
@@ -1182,6 +1225,11 @@ type
     function UnknownAncestryX(const AX: TSemaXType): Boolean;
     procedure EmitAt(AModel: TPasSemaModel; ANode: Integer;
       const ACode, AMsg: string);
+    { The line and column of ANode's first token, AFile its file id; zeros
+      and False when the token is out of range. EmitAt's, EmitE2003's and
+      NodeSite's one position. }
+    class function NodeLineCol(AModel: TPasSemaModel; ANode: Integer;
+      out AFile, ALine, ACol: Integer): Boolean; static;
     function CalleeShadowsUses(AModel: TPasSemaModel;
       ACallee, ALocalSym: Integer): Boolean;
     procedure CheckCalls(AId: Integer);
@@ -1371,6 +1419,25 @@ type
       ANewExt: TDictionary<Integer, TPasExtRef>);
     procedure CommitXNewExprType(AId: Integer);
     procedure RunCrossTypePass(ACount: Integer);
+    function KeepSetOf(const AKeepFiles: TArray<string>): TArray<Boolean>;
+    { The cross passes over models 0..ALN-1, in the one order every driver
+      needs (audit D2-28): CrossResolve, the inherited pass (heritage first),
+      BindTypesX for every loaded model BEFORE the with pass (its target
+      typing is the expression walk, which reads SymTypeX), the with pass
+      (it reads type nodes the inherited pass just committed), the call
+      checks, CrossType. AStep is called with each finished stage's name -
+      the driver's timing and progress - and with '' as a bare cancel point
+      inside the BindTypesX loop; False stops the run (cancelled), and so
+      does the result. }
+    function RunCrossPipeline(ALN: Integer;
+      const AStep: TFunc<string, Boolean>): Boolean;
+    { The analysis is over: diagnostics trimmed, the cross-work and uses
+      memos released, the raw-bytes repository dropped (a full second copy
+      of every closure file nothing reads from here on - hundreds of MB on a
+      real project) with the include cache's stream references, the
+      preprocessors trimmed. }
+    procedure FinishCrossRun;
+    function Demotable(AIdx: Integer): Boolean;
   public
     // The nkGenericParams node of the type or method declaration ASym of LM
     // (NIL_NODE when it declares none), and the number of parameters it
@@ -3035,8 +3102,7 @@ function TPasSemaProject.NodeSite(AId, ANode: Integer; out AFilePath: string;
   out ALine, ACol: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LVis: TPasVisibleToken;
-  LTok: Integer;
+  LFile: Integer;
 begin
   AFilePath := ''; ALine := 0; ACol := 0;
   Result := False;
@@ -3048,14 +3114,9 @@ begin
   // The position is in the text layer, which a demoted model lost.
   if not EnsureHydrated(AId) then
     Exit;
-  LTok := LM.Tree.Nodes[ANode].FirstToken;
-  if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+  if not NodeLineCol(LM, ANode, LFile, ALine, ACol) then
     Exit;
-  LVis := LM.Tree.Source.Visible[LTok];
-  AFilePath := LM.Tree.Source.FileNames[LVis.FileId];
-  LM.Tree.Source.Files[LVis.FileId].OffsetToLineCol(
-    LM.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start,
-    ALine, ACol);
+  AFilePath := LM.Tree.Source.FileNames[LFile];
   Result := True;
 end;
 
@@ -6980,12 +7041,12 @@ end;
 // file: each worker owns its preprocessor (which clones the shared defines
 // per run); the source manager and define set are read-only during the loop -
 // the same no-locks model as TPasProject.ParseFiles.
-procedure TPasSemaProject.LoadFilesParallel(const APaths: TArray<string>;
-  AInterfaceOnly: Boolean = False);
+procedure TPasSemaProject.LoadFilesParallel(const APaths: TArray<string>);
 var
   LTodo: TArray<string>;
   LKeys: TArray<string>;
   LDone: TArray<TPasSemaModel>;
+  LErrClass, LErrMsg: TArray<string>;
   LSeen: TDictionary<string, Boolean>;
   LIdx, LDummy, LTodoCount: Integer;
   LFull, LKey: string;
@@ -7026,41 +7087,17 @@ begin
   FSM.Prefetch(LTodo);
 
   SetLength(LDone, Length(LTodo));
+  SetLength(LErrClass, Length(LTodo));
+  SetLength(LErrMsg, Length(LTodo));
+  // The engine's worker body (ComputeLoad): the donor first, else a full
+  // parse and analysis; a failure comes back as its class and message.
   ForEachIndex(High(LTodo), 'load',
     procedure(AIndex: Integer)
     var
-      LPP: TPasPreprocessor;
+      LDonor: Boolean;
     begin
-      LPP := RentPP;
-      try
-        try
-          // Donor reuse first - full batches only: this driver's status
-          // logic has no way to mark a donor-full model inside an
-          // interface batch (unlike RunLoadEngine's FullDonor flag), and
-          // the interface wave that matters runs through the engine anyway.
-          if not AInterfaceOnly then
-            LDone[AIndex] := TryDonorLoad(LKeys[AIndex], LTodo[AIndex]);
-          if LDone[AIndex] = nil then
-            LDone[AIndex] := ParseAnalyze(LPP, LTodo[AIndex], AInterfaceOnly);
-        except
-          on E: Exception do
-          begin
-            PasRecoverStackOverflow;   // the worker goes on to the next unit
-            LDone[AIndex] := nil;   // registered as known-bad below
-            // Keep WHY. Swallowing this made an internal defect indistinguish-
-            // able from a missing file: the unit ended up cached as known-bad,
-            // and its importers then reported F1027 "no source on the search
-            // path" for a file sitting right there. That cost a day of chasing
-            // a phantom search-path problem before a trace showed the real
-            // cause (an ERangeError inside Phase 1). Tolerating the failure is
-            // still right - one bad unit must not sink an analysis - but it has
-            // to be tolerated OUT LOUD.
-            NoteLoadFailure(LTodo[AIndex], E.ClassName, E.Message);
-          end;
-        end;
-      finally
-        ReturnPP(LPP);
-      end;
+      LDone[AIndex] := ComputeLoad(LTodo[AIndex], {AIntf} False,
+        LErrClass[AIndex], LErrMsg[AIndex], LDonor);
     end,
     // This pass walks FILE PATHS - the models do not exist yet - so there is
     // no unit to blame; -1 sends the note to the project-level list.
@@ -7069,19 +7106,12 @@ begin
       Result := -1;
     end);
 
-  // Interface-only -> msIntfReady (later upgraded); full parse -> msFullReady.
-  // Per item, not per batch: program/library/package files IGNORE
-  // AInterfaceOnly (no interface section - ParseFile parses them fully), so
-  // they register as already-full and wave 2 never pays a pointless reparse
-  // for a .dpr/.dpk root.
+  // A full parse is msFullReady; a light model (an interface parse for good)
+  // is msIntfReady.
   for LIdx := 0 to High(LTodo) do
     if LDone[LIdx] <> nil then
     begin
-      // A light model (an interface parse for good) is msIntfReady in a
-      // full batch too.
-      if LDone[LIdx].Light or (AInterfaceOnly and
-         (Length(LDone[LIdx].Tree.Nodes) > 0) and
-         (LDone[LIdx].Tree.Nodes[0].Kind = nkUnit)) then
+      if LDone[LIdx].Light then
         LStatus := msIntfReady
       else
         LStatus := msFullReady;
@@ -7090,7 +7120,18 @@ begin
       RegisterUnitName(FModels.Count - 1);
     end
     else
+    begin
+      // Keep WHY, in input order. Swallowing a failure made an internal
+      // defect indistinguishable from a missing file: the unit was cached as
+      // known-bad, and its importers reported F1027 "no source on the search
+      // path" for a file sitting right there - a day chasing a phantom
+      // search-path problem before a trace showed an ERangeError inside
+      // Phase 1. One bad unit must not sink an analysis, but it is tolerated
+      // OUT LOUD.
+      if LErrClass[LIdx] <> '' then
+        NoteLoadFailure(LTodo[LIdx], LErrClass[LIdx], LErrMsg[LIdx]);
       FByPath.Add(LKeys[LIdx], -1);
+    end;
 end;
 
 type
@@ -7117,8 +7158,9 @@ function TPasSemaProject.ComputeLoad(const APath: string; AIntf: Boolean;
 var
   LPP: TPasPreprocessor;
 begin
-  // LoadFilesParallel's worker body: ParseAnalyze, and the failure handed to
-  // the driver, which records it (NoteLoadFailure).
+  // The worker body of both loaders (RunLoadEngine, LoadFilesParallel):
+  // ParseAnalyze, and the failure handed to the driver, which records it
+  // (NoteLoadFailure).
   AErrClass := '';
   AErrMsg := '';
   AFullDonor := False;
@@ -7154,9 +7196,10 @@ function TPasSemaProject.ComputeUpgrade(const ASource: TPasPreprocessed;
 var
   LDiags: TArray<TPasParseDiag>;
 begin
-  // Mirrors UpgradeChunked's worker body: reparse from the SAME token layer
-  // (stage 1 preprocessed the whole file; re-preprocessing would double-pay
-  // lex+PP and break the prefix invariant against on-disk changes).
+  // The engine's upgrade of an interface model: reparse from the SAME token
+  // layer (stage 1 preprocessed the whole file; re-preprocessing would
+  // double-pay lex+PP and break the prefix invariant against on-disk
+  // changes).
   AErrClass := '';
   AErrMsg := '';
   try
@@ -7481,7 +7524,7 @@ begin
         end
         else
           // Keep the interface snapshot rather than losing the unit - but
-          // SAY SO (UpgradeChunked's contract).
+          // SAY SO, as an internal error of the full parse.
           NoteInternalError(LItem.Mid, 'full-parse',
             LRes.ErrClass, LRes.ErrMsg);
       end;
@@ -8698,9 +8741,7 @@ end;
 procedure TPasSemaProject.EmitE2003(AModel: TPasSemaModel; ANode: Integer;
   AId: Integer = -1);
 var
-  LVis: TPasVisibleToken;
-  LFile, LLine, LCol, LTok, LStruct: Integer;
-  LName: string;
+  LStruct: Integer;
 begin
   // A COMPILER-RECOGNIZED attribute name (19.3.3) - `[Ref]`, `[Align(8)]`,
   // `[weak]` and friends - is System's declaration, which an analysis without
@@ -8727,37 +8768,34 @@ begin
     if (LStruct <> NIL_SYM) and UnknownAncestryX(XPlain(AId, LStruct)) then
       Exit;
   end;
-  LFile := 0; LLine := 0; LCol := 0;
+  EmitAt(AModel, ANode, 'E2003', Format(SE2003_UndeclaredIdentifier,
+    [AModel.Tree.NodeText(ANode)]));
+end;
+
+class function TPasSemaProject.NodeLineCol(AModel: TPasSemaModel;
+  ANode: Integer; out AFile, ALine, ACol: Integer): Boolean;
+var
+  LVis: TPasVisibleToken;
+  LTok: Integer;
+begin
+  AFile := 0; ALine := 0; ACol := 0;
   LTok := AModel.Tree.Nodes[ANode].FirstToken;
-  if (LTok >= 0) and (LTok <= High(AModel.Tree.Source.Visible)) then
-  begin
-    LVis := AModel.Tree.Source.Visible[LTok];
-    LFile := LVis.FileId;
-    AModel.Tree.Source.Files[LVis.FileId].OffsetToLineCol(
-      AModel.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start,
-      LLine, LCol);
-  end;
-  LName := AModel.Tree.NodeText(ANode);
-  AModel.AddDiag(MakeDiag('E2003',
-    Format(SE2003_UndeclaredIdentifier, [LName]), ANode, LFile, LLine, LCol));
+  Result := (LTok >= 0) and (LTok <= High(AModel.Tree.Source.Visible));
+  if not Result then
+    Exit;
+  LVis := AModel.Tree.Source.Visible[LTok];
+  AFile := LVis.FileId;
+  AModel.Tree.Source.Files[LVis.FileId].OffsetToLineCol(
+    AModel.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start,
+    ALine, ACol);
 end;
 
 procedure TPasSemaProject.EmitAt(AModel: TPasSemaModel; ANode: Integer;
   const ACode, AMsg: string);
 var
-  LVis: TPasVisibleToken;
-  LFile, LLine, LCol, LTok: Integer;
+  LFile, LLine, LCol: Integer;
 begin
-  LFile := 0; LLine := 0; LCol := 0;
-  LTok := AModel.Tree.Nodes[ANode].FirstToken;
-  if (LTok >= 0) and (LTok <= High(AModel.Tree.Source.Visible)) then
-  begin
-    LVis := AModel.Tree.Source.Visible[LTok];
-    LFile := LVis.FileId;
-    AModel.Tree.Source.Files[LVis.FileId].OffsetToLineCol(
-      AModel.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start,
-      LLine, LCol);
-  end;
+  NodeLineCol(AModel, ANode, LFile, LLine, LCol);
   AModel.AddDiag(MakeDiag(ACode, AMsg, ANode, LFile, LLine, LCol));
 end;
 
@@ -8905,6 +8943,23 @@ var
   LKey: TSemaKey;
   LSweep: TSweep;
 
+  // One candidate into the call's verdict: the set's arity range, and
+  // whether any candidate fits the written arguments (TPasSemaTyper.ArityFits
+  // holds the trailing-comma rule).
+  procedure Fold(AReq, ATot: Integer; AVariadic: Boolean);
+  begin
+    LHaveAny := True;
+    if AVariadic then
+      LAnyVariadic := True;
+    if AReq < LMinReq then
+      LMinReq := AReq;
+    if ATot > LMaxTot then
+      LMaxTot := ATot;
+    if AVariadic or TPasSemaTyper.ArityFits(LArgCount, AReq, ATot, LTrailing)
+    then
+      LAnyFit := True;
+  end;
+
   procedure Consider(AMid, AHead: Integer);
   var
     LCand, LReq, LTot: Integer;
@@ -8922,14 +8977,7 @@ var
         LSkip := True;   // a candidate with no param info (builtin) -> bail
         Exit;
       end;
-      LHaveAny := True;
-      if LVariadic then
-        LAnyVariadic := True;
-      if LReq < LMinReq then LMinReq := LReq;
-      if LTot > LMaxTot then LMaxTot := LTot;
-      if LVariadic or
-         TPasSemaTyper.ArityFits(LArgCount, LReq, LTot, LTrailing) then
-        LAnyFit := True;
+      Fold(LReq, LTot, LVariadic);
       LCand := FModels[AMid].Symbols[LCand].NextOverload;
     end;
   end;
@@ -9099,17 +9147,8 @@ begin
           if (LIdx >= LSweep.ImplicitFrom) and not LAnyOverload and
              not LSweep.Overload then
             Break;
-          LHaveAny := True;
-          if LSweep.Arities[LIdx].Variadic then
-            LAnyVariadic := True;
-          if LSweep.Arities[LIdx].Req < LMinReq then
-            LMinReq := LSweep.Arities[LIdx].Req;
-          if LSweep.Arities[LIdx].Tot > LMaxTot then
-            LMaxTot := LSweep.Arities[LIdx].Tot;
-          if LSweep.Arities[LIdx].Variadic or
-             TPasSemaTyper.ArityFits(LArgCount, LSweep.Arities[LIdx].Req,
-               LSweep.Arities[LIdx].Tot, LTrailing) then
-            LAnyFit := True;
+          Fold(LSweep.Arities[LIdx].Req, LSweep.Arities[LIdx].Tot,
+            LSweep.Arities[LIdx].Variadic);
         end;
     end;
 
@@ -9176,25 +9215,39 @@ end;
   under a concurrent TryGetValue. So the re-points go into a per-model overlay
   and are merged here, sequentially, once every worker has finished. }
 procedure TPasSemaProject.RunCallChecksPass(ACount: Integer);
-var
-  LIdx: Integer;
 begin
-  SetLength(FCallNewExt, ACount);
-  for LIdx := 0 to ACount - 1 do
-    FCallNewExt[LIdx] := TDictionary<Integer, TPasExtRef>.Create;
+  RunCallChecksOver(IdsUpTo(ACount));
+end;
+
+// The deferred-write buffers are sized to the whole model table (CheckCalls
+// indexes them by model id) and created for the set's slots only - a nil slot
+// means "write straight through", which no model outside the set does here
+// because none is visited.
+procedure TPasSemaProject.RunCallChecksOver(const AIds: TArray<Integer>);
+var
+  LId: Integer;
+begin
+  SetLength(FCallNewExt, FModels.Count);
+  for LId in AIds do
+    FCallNewExt[LId] := TDictionary<Integer, TPasExtRef>.Create;
   try
-    ForEachIndex(ACount - 1, 'cross-resolve',      procedure(AIdx: Integer)
+    ForEachIndex(High(AIds), 'calls',
+      procedure(ASlot: Integer)
       begin
-        CheckCalls(AIdx);
-        CheckConstraints(AIdx);
-        CheckAttributes(AIdx);
+        CheckCalls(AIds[ASlot]);
+        CheckConstraints(AIds[ASlot]);
+        CheckAttributes(AIds[ASlot]);
+      end,
+      function(ASlot: Integer): Integer
+      begin
+        Result := AIds[ASlot];
       end);
-    for LIdx := 0 to ACount - 1 do
-      for var LPair in FCallNewExt[LIdx] do
-        FModels[LIdx].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+    for LId in AIds do
+      for var LPair in FCallNewExt[LId] do
+        FModels[LId].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
   finally
-    for LIdx := 0 to ACount - 1 do
-      FCallNewExt[LIdx].Free;
+    for LId in AIds do
+      FCallNewExt[LId].Free;
     SetLength(FCallNewExt, 0);
   end;
 end;
@@ -13050,15 +13103,36 @@ var
       Result := AQualX;
   end;
 
+  { Records "node N now means (AMid, ASym)" - the one rule every binding this
+    walk makes follows: a same-model target into RefMap plus a tombstone in
+    the overlay (the merge removes a stale committed ExtRefMap entry), a
+    cross-model one into the overlay with RefMap cleared (every consumer
+    reads RefMap first, and Find References counts a node bound in BOTH maps
+    twice). Through the mode-switched accessors, so a probe's binding stays
+    inside the probe. }
+  procedure BindNode(N, AMid, ASym: Integer);
+  var
+    LExt: TPasExtRef;
+  begin
+    if AMid = AId then
+    begin
+      SetRefAt(N, ASym);
+      LExt.UnitId := EXT_TOMBSTONE_UNIT;   // deferred Remove - see the constant
+      LExt.Sym := NIL_SYM;
+      LNewExt.AddOrSetValue(N, LExt);
+      Exit;
+    end;
+    SetRefAt(N, NIL_SYM);
+    LExt.UnitId := AMid;
+    LExt.Sym := ASym;
+    LNewExt.AddOrSetValue(N, LExt);
+  end;
+
   { Re-points callee or member name node ACalleeNode at (AMid, ASym), the way
-    CheckCalls' own re-point does - a same-model target into RefMap plus a
-    tombstone in the overlay, a cross-model one into the overlay with RefMap
-    cleared - but through the mode-switched accessors, so a probe's
-    re-pointing stays inside the probe. }
+    CheckCalls' own re-point does: its name node, bound by BindNode. }
   procedure Repoint(ACalleeNode, AMid, ASym: Integer);
   var
     LName: Integer;
-    LExt: TPasExtRef;
   begin
     LName := ACalleeNode;
     // `Obj.M<T>`: the designator is the type-argument node's first child.
@@ -13070,18 +13144,7 @@ var
     end;
     if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
       Exit;
-    if AMid = AId then
-    begin
-      SetRefAt(LName, ASym);
-      LExt.UnitId := EXT_TOMBSTONE_UNIT;   // deferred Remove - see the constant
-      LExt.Sym := NIL_SYM;
-      LNewExt.AddOrSetValue(LName, LExt);
-      Exit;
-    end;
-    SetRefAt(LName, NIL_SYM);
-    LExt.UnitId := AMid;
-    LExt.Sym := ASym;
-    LNewExt.AddOrSetValue(LName, LExt);
+    BindNode(LName, AMid, ASym);
   end;
 
   // The (mid, sym) a designator resolved to - the last segment of a dotted
@@ -14308,7 +14371,6 @@ var
   var
     LStruct, LMemMid, LMemSym, LCtx: Integer;
     LAnc: TSemaXType;
-    LExt: TPasExtRef;
     LNoHelpers: Boolean;
   begin
     LStruct := StructSymOfNode(LM, N);
@@ -14320,17 +14382,7 @@ var
     if not FindMemberX(AId, LAnc, PasNodeKey(LM.Tree, N),
          LMemMid, LMemSym, LCtx, 0, LNoHelpers) then
       Exit;
-    if LMemMid = AId then
-      SetRefAt(N, LMemSym)
-    else
-    begin
-      // The cross-model binding is the one that must be READ, so the local
-      // one has to go: the typing below prefers RefMap over ExtRefMap.
-      SetRefAt(N, NIL_SYM);
-      LExt.UnitId := LMemMid;
-      LExt.Sym := LMemSym;
-      LNewExt.AddOrSetValue(N, LExt);
-    end;
+    BindNode(N, LMemMid, LMemSym);
     SetCtxAt(N, LCtx);
   end;
 
@@ -15070,22 +15122,11 @@ var
               LMemSym := LBestSym;
               LCtx := LMemCtx;
             end;
-            // Record the discovered member reference for navigation.
-            if LMemMid = AId then
-              SetRefAt(LName, LMemSym)
-            else
-            begin
-              // RefMap must be CLEARED alongside, the way ResolveInheritedHead
-              // does it: this branch is reached with a SEED binding still
-              // sitting there (dropped above only as a local variable), and
-              // every consumer reads RefMap first - so navigation went to the
-              // DeclNode-less seed, and Find References, which reads both maps
-              // as independent evidence, counted the node twice.
-              SetRefAt(LName, NIL_SYM);
-              LExt.UnitId := LMemMid;
-              LExt.Sym := LMemSym;
-              LNewExt.AddOrSetValue(LName, LExt);
-            end;
+            // Record the discovered member reference for navigation. This
+            // branch is reached with a SEED binding possibly still sitting in
+            // RefMap (dropped above only as a local variable) - BindNode
+            // clears it for a cross-model member.
+            BindNode(LName, LMemMid, LMemSym);
             SetXAt(N, MemberTypeX(LMemMid, LMemSym, LCtx, LBX));
             SetCtxAt(N, LCtx);
           end
@@ -15389,16 +15430,7 @@ var
               // the navigator tells such a key from a name (TPasRefHit.
               // Implicit). Nothing else keys a map on a non-identifier node.
               if LIdxSym <> NIL_SYM then
-              begin
-                if LIdxMid = AId then
-                  SetRefAt(N, LIdxSym)
-                else
-                begin
-                  LExt.UnitId := LIdxMid;
-                  LExt.Sym := LIdxSym;
-                  LNewExt.AddOrSetValue(N, LExt);
-                end;
-              end;
+                BindNode(N, LIdxMid, LIdxSym);
               // Nothing from the base's TYPE: the element is read off the
               // base's declaration NODE instead. Two shapes need it - a type
               // that could not be named at all, an inline `array[..] of T` on
@@ -15590,27 +15622,20 @@ begin
     LFallback.Free;
     LUsesHeads.Free;
     LAmbig.Free;
+    // Unmanaged case (AnalyzeFile): single-threaded, so the overlay goes
+    // straight in - through the SAME merge RunCrossTypeOver performs,
+    // tombstones included. Writing a tombstone through as an entry once left
+    // AnalyzeFile with a stale binding the full pipeline had removed: 27
+    // extra ExtRefMap entries on a 3676-unit closure's hub unit, caught by
+    // the differential harness on a BODY edit (2026-09-03).
     if (AId > High(FXNewSymType)) or (FXNewSymType[AId] = nil) then
     begin
-      // Unmanaged case (AnalyzeFile, the module path): single-threaded, so
-      // the inferred types can go straight in.
-      for var LPair in LNewSymType do
-        LM.SymTypeX.AddOrSetValue(LPair.Key, LPair.Value);
+      MergeCrossTypeOverlay(AId, nil, LNewSymType);
       LNewSymType.Free;
     end;
     if (AId > High(FXNewExt)) or (FXNewExt[AId] = nil) then
     begin
-      // Unmanaged case: commit and drop it here - the SAME merge
-      // RunCrossTypePass performs, tombstones included. Writing a tombstone
-      // through as an entry left the module path (and AnalyzeFile) with a
-      // stale binding the full pipeline had removed: 27 extra ExtRefMap
-      // entries on a 3676-unit closure's hub unit, caught by the differential
-      // harness on a BODY edit (2026-09-03).
-      for var LPair in LNewExt do
-        if LPair.Value.UnitId = EXT_TOMBSTONE_UNIT then
-          LM.ExtRefMap.Remove(LPair.Key)
-        else
-          LM.ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+      MergeCrossTypeOverlay(AId, LNewExt, nil);
       LNewExt.Free;
     end;
   end;
@@ -15669,53 +15694,79 @@ end;
   that is single-digit milliseconds, not a reason to redesign the instance
   table. }
 procedure TPasSemaProject.RunCrossTypePass(ACount: Integer);
+begin
+  RunCrossTypeOver(IdsUpTo(ACount));
+end;
+
+procedure TPasSemaProject.MergeCrossTypeOverlay(AId: Integer;
+  ANewExt: TDictionary<Integer, TPasExtRef>;
+  ANewSymType: TDictionary<Integer, TSemaXType>);
 var
-  LIdx: Integer;
+  LM: TPasSemaModel;
+begin
+  LM := FModels[AId];
+  if ANewExt <> nil then
+    for var LPair in ANewExt do
+      if LPair.Value.UnitId = EXT_TOMBSTONE_UNIT then
+        LM.ExtRefMap.Remove(LPair.Key)
+      else
+        LM.ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
+  if ANewSymType <> nil then
+    for var LPair in ANewSymType do
+      LM.SymTypeX.AddOrSetValue(LPair.Key, LPair.Value);
+end;
+
+// The buffers are sized to the whole model table and created for the set's
+// slots only, as RunCallChecksOver's.
+procedure TPasSemaProject.RunCrossTypeOver(const AIds: TArray<Integer>);
+var
+  LId: Integer;
+  LMidOf: TFunc<Integer, Integer>;
 begin
 {$IFDEF PASTREE_MEMBERSTATS}
   FStatsPass := 'xtype';
 {$ENDIF}
-  SetLength(FXNewExt, ACount);
-  SetLength(FXNewSymType, ACount);
-  SetLength(FXNewExprType, ACount);
-  for LIdx := 0 to ACount - 1 do
+  LMidOf :=
+    function(ASlot: Integer): Integer
+    begin
+      Result := AIds[ASlot];
+    end;
+  SetLength(FXNewExt, FModels.Count);
+  SetLength(FXNewSymType, FModels.Count);
+  SetLength(FXNewExprType, FModels.Count);
+  for LId in AIds do
   begin
-    FXNewExt[LIdx] := TDictionary<Integer, TPasExtRef>.Create;
-    FXNewSymType[LIdx] := TDictionary<Integer, TSemaXType>.Create;
-    FXNewExprType[LIdx] := TList<TPair<Integer, TSemaXType>>.Create;
+    FXNewExt[LId] := TDictionary<Integer, TPasExtRef>.Create;
+    FXNewSymType[LId] := TDictionary<Integer, TSemaXType>.Create;
+    FXNewExprType[LId] := TList<TPair<Integer, TSemaXType>>.Create;
   end;
   try
-    ForEachIndex(ACount - 1, 'cross-type',      procedure(AIdx: Integer)
+    ForEachIndex(High(AIds), 'cross-type',
+      procedure(ASlot: Integer)
       begin
-        CrossType(AIdx);
-      end);
-    ForEachIndex(ACount - 1, 'cross-type-commit', procedure(AIdx: Integer)
+        CrossType(AIds[ASlot]);
+      end, LMidOf);
+    ForEachIndex(High(AIds), 'cross-type-commit',
+      procedure(ASlot: Integer)
       begin
-        CommitXNewExprType(AIdx);
-      end);
-    for LIdx := 0 to ACount - 1 do
-    begin
-      for var LPair in FXNewExt[LIdx] do
-        if LPair.Value.UnitId = EXT_TOMBSTONE_UNIT then
-          FModels[LIdx].ExtRefMap.Remove(LPair.Key)
-        else
-          FModels[LIdx].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
-      for var LPair in FXNewSymType[LIdx] do
-        FModels[LIdx].SymTypeX.AddOrSetValue(LPair.Key, LPair.Value);
-    end;
+        CommitXNewExprType(AIds[ASlot]);
+      end, LMidOf);
+    for LId in AIds do
+      MergeCrossTypeOverlay(LId, FXNewExt[LId], FXNewSymType[LId]);
     // Only now are the bindings final - see RunVisibilityPass. No-op unless
     // ReportVisibility asked for it.
     if FReportVisibility then
-      ForEachIndex(ACount - 1, 'visibility',        procedure(AIdx: Integer)
+      ForEachIndex(High(AIds), 'visibility',
+        procedure(ASlot: Integer)
         begin
-          RunVisibilityPass(AIdx);
-        end);
+          RunVisibilityPass(AIds[ASlot]);
+        end, LMidOf);
   finally
-    for LIdx := 0 to ACount - 1 do
+    for LId in AIds do
     begin
-      FXNewExt[LIdx].Free;
-      FXNewSymType[LIdx].Free;
-      FXNewExprType[LIdx].Free;
+      FXNewExt[LId].Free;
+      FXNewSymType[LId].Free;
+      FXNewExprType[LId].Free;
     end;
     SetLength(FXNewExt, 0);
     SetLength(FXNewSymType, 0);
@@ -20482,35 +20533,69 @@ end;
   a later round resolves is never reported. Depth here is nesting depth, so two
   rounds is already generous; the cap is a runaway guard. }
 procedure TPasSemaProject.RunDeclPass(ACount: Integer);
+begin
+  RunDeclOver(IdsUpTo(ACount));
+end;
+
+function TPasSemaProject.IdsUpTo(ACount: Integer): TArray<Integer>;
+var
+  LIdx: Integer;
+begin
+  SetLength(Result, ACount);
+  for LIdx := 0 to ACount - 1 do
+    Result[LIdx] := LIdx;
+end;
+
+function TPasSemaProject.CommitPending(const AIds: TArray<Integer>;
+  var APending: TArray<TArray<TPasInhPending>>; AClearRef: Boolean): Integer;
+var
+  LS, LP: Integer;
+  LM: TPasSemaModel;
+begin
+  Result := 0;
+  for LS := 0 to High(AIds) do
+  begin
+    LM := FModels[AIds[LS]];
+    for LP := 0 to High(APending[LS]) do
+    begin
+      if AClearRef then
+        LM.RefMap[APending[LS][LP].Node] := NIL_SYM;
+      LM.ExtRefMap.AddOrSetValue(APending[LS][LP].Node, APending[LS][LP].Ext);
+      if AClearRef and XValid(APending[LS][LP].X) then
+        LM.ExprTypeX.AddOrSetValue(APending[LS][LP].Node, APending[LS][LP].X);
+    end;
+    Inc(Result, Length(APending[LS]));
+    APending[LS] := nil;
+  end;
+end;
+
+procedure TPasSemaProject.RunDeclOver(const AIds: TArray<Integer>);
 const
   MAX_ROUNDS = 4;
 var
   LPending: TArray<TArray<TPasInhPending>>;
-  LIdx, LP, LRound, LNew: Integer;
+  LRound, LNew: Integer;
   LEmit: Boolean;
 begin
-  SetLength(LPending, ACount);
+  SetLength(LPending, Length(AIds));
   LRound := 0;
   LEmit := False;
   while True do
   begin
     Inc(LRound);
-    for LIdx := 0 to ACount - 1 do
-      LPending[LIdx] := nil;
 {$IFDEF PASTREE_MEMBERSTATS}
     FStatsPass := 'decl#' + IntToStr(LRound);   // per ROUND: bindings move
 {$ENDIF}
-    ForEachIndex(ACount - 1, 'declarations',      procedure(AIdx: Integer)
+    ForEachIndex(High(AIds), 'declarations',
+      procedure(ASlot: Integer)
       begin
-        CrossResolveDecl(AIdx, LPending[AIdx], LEmit);
+        CrossResolveDecl(AIds[ASlot], LPending[ASlot], LEmit);
+      end,
+      function(ASlot: Integer): Integer
+      begin
+        Result := AIds[ASlot];
       end);
-    LNew := 0;
-    for LIdx := 0 to ACount - 1 do
-      Inc(LNew, Length(LPending[LIdx]));
-    for LIdx := 0 to ACount - 1 do
-      for LP := 0 to High(LPending[LIdx]) do
-        FModels[LIdx].ExtRefMap.AddOrSetValue(LPending[LIdx][LP].Node,
-          LPending[LIdx][LP].Ext);
+    LNew := CommitPending(AIds, LPending, {AClearRef} False);
     if LEmit then
       Break;
     LEmit := (LNew = 0) or (LRound >= MAX_ROUNDS - 1);
@@ -20713,9 +20798,6 @@ end;
 // Both phases of the inherited-member pass over models 0..ACount-1: parallel
 // compute, then the sequential ExtRefMap commit.
 procedure TPasSemaProject.RunInheritedPass(ACount: Integer);
-var
-  LPending: TArray<TArray<TPasInhPending>>;
-  LIdx, LP: Integer;
 begin
 {$IFDEF PASTREE_MEMBERSTATS}
   FStatsPass := 'inherited';
@@ -20730,26 +20812,31 @@ begin
   // "helper map is built" precondition rather than rebuilding it.
   RunDeclPass(ACount);
   SizeCrossWork(ACount);   // slots must exist before workers write their own
-  SetLength(LPending, ACount);
+  RunInheritedOver(IdsUpTo(ACount));
+end;
+
+// The compute and commit of the inherited-member pass over a set: the
+// cross-work slots and the helper map must stand already.
+procedure TPasSemaProject.RunInheritedOver(const AIds: TArray<Integer>);
+var
+  LPending: TArray<TArray<TPasInhPending>>;
+begin
 {$IFDEF PASTREE_MEMBERSTATS}
-  FStatsPass := 'inherited';   // RunDeclPass above retagged it
+  FStatsPass := 'inherited';   // RunDeclPass retagged it
 {$ENDIF}
-  ForEachIndex(ACount - 1, 'inherited',    procedure(AIdx: Integer)
+  SetLength(LPending, Length(AIds));
+  ForEachIndex(High(AIds), 'inherited',
+    procedure(ASlot: Integer)
     begin
-      CrossResolveInherited(AIdx, LPending[AIdx]);
+      CrossResolveInherited(AIds[ASlot], LPending[ASlot]);
+    end,
+    function(ASlot: Integer): Integer
+    begin
+      Result := AIds[ASlot];
     end);
-  for LIdx := 0 to ACount - 1 do
-    for LP := 0 to High(LPending[LIdx]) do
-    begin
-      FModels[LIdx].RefMap[LPending[LIdx][LP].Node] := NIL_SYM;
-      FModels[LIdx].ExtRefMap.AddOrSetValue(LPending[LIdx][LP].Node,
-        LPending[LIdx][LP].Ext);
-      // Same as the with pass's commit: the frame-substituted member type,
-      // when the compute step had a frame at all.
-      if XValid(LPending[LIdx][LP].X) then
-        FModels[LIdx].ExprTypeX.AddOrSetValue(LPending[LIdx][LP].Node,
-          LPending[LIdx][LP].X);
-    end;
+  // The frame-substituted member type too, when the compute step had a
+  // frame at all - as the with pass's commit.
+  CommitPending(AIds, LPending, {AClearRef} True);
 end;
 
 // The deferred `with`-body pass: everything CrossResolve and
@@ -20999,18 +21086,23 @@ end;
   E2003 is emitted ONLY in the final round. Emitting earlier would report every
   name that a later round goes on to resolve. }
 procedure TPasSemaProject.RunWithPass(ACount: Integer);
+begin
+  SizeCrossWork(ACount);   // AnalyzeFile reaches this pass without the other
+  RunWithOver(IdsUpTo(ACount));
+end;
+
+procedure TPasSemaProject.RunWithOver(const AIds: TArray<Integer>);
 const
   MAX_ROUNDS = 8;
 var
   LPending: TArray<TArray<TPasInhPending>>;
   LUnres: TArray<TArray<Integer>>;
-  LIdx, LP, LNode, LRound, LNew: Integer;
+  LS, LP, LRound, LNew: Integer;
   LEmit: Boolean;
   LActive: TArray<Boolean>;
 begin
-  SetLength(LPending, ACount);
-  SetLength(LUnres, ACount);
-  SizeCrossWork(ACount);   // AnalyzeFile reaches this pass without the other
+  SetLength(LPending, Length(AIds));
+  SetLength(LUnres, Length(AIds));
   // Which models a round walks. A model's verdicts depend on its OWN
   // committed bindings only: the with-target types come from walking its own
   // tree, and what those bindings point to in other models are declarations,
@@ -21021,67 +21113,62 @@ begin
   // rounds 2-4 bound 891 / 18 / 0 names for ~470 ms of worker time each,
   // the same as round 1's 50k. Round 1 walks everything; from then on only
   // the models that moved; the cap's emitting round walks everything again
-  // because it emits inside the walk.
-  SetLength(LActive, ACount);
-  for LIdx := 0 to ACount - 1 do
-    LActive[LIdx] := True;
+  // because it emits inside the walk. The same holds for the module path's
+  // set, which until 0.138.1 re-walked every model every round.
+  SetLength(LActive, Length(AIds));
+  for LS := 0 to High(AIds) do
+    LActive[LS] := True;
   LRound := 0;
   LEmit := False;
   while True do
   begin
     Inc(LRound);
     if LEmit then
-      for LIdx := 0 to ACount - 1 do
-        LActive[LIdx] := True;
+      for LS := 0 to High(AIds) do
+        LActive[LS] := True;
     // An inactive model KEEPS its record: it is the stable one the converged
     // emit below reads.
-    for LIdx := 0 to ACount - 1 do
+    for LS := 0 to High(AIds) do
     begin
-      LPending[LIdx] := nil;
-      if LActive[LIdx] then
-        LUnres[LIdx] := nil;
+      LPending[LS] := nil;
+      if LActive[LS] then
+        LUnres[LS] := nil;
     end;
 {$IFDEF PASTREE_MEMBERSTATS}
     FStatsPass := 'with#' + IntToStr(LRound);   // per ROUND: bindings move
 {$ENDIF}
-    ForEachIndex(ACount - 1, 'with',      procedure(AIdx: Integer)
+    ForEachIndex(High(AIds), 'with',
+      procedure(ASlot: Integer)
       begin
-        if LActive[AIdx] then
-          CrossResolveWith(AIdx, LPending[AIdx], LEmit, LUnres[AIdx]);
+        if LActive[ASlot] then
+          CrossResolveWith(AIds[ASlot], LPending[ASlot], LEmit, LUnres[ASlot]);
+      end,
+      function(ASlot: Integer): Integer
+      begin
+        Result := AIds[ASlot];
       end);
-    for LIdx := 0 to ACount - 1 do
-      LActive[LIdx] := Length(LPending[LIdx]) > 0;
-    LNew := 0;
-    for LIdx := 0 to ACount - 1 do
-      Inc(LNew, Length(LPending[LIdx]));
-    for LIdx := 0 to ACount - 1 do
-      for LP := 0 to High(LPending[LIdx]) do
-      begin
-        LNode := LPending[LIdx][LP].Node;
-        // RefMap must be CLEARED, not just shadowed: every consumer checks it
-        // FIRST and only falls back to ExtRefMap (see CrossType's nkIdent), so
-        // an override that merely added an ExtRefMap entry would be ignored.
-        // Harmless for the gap-filling entries - those were NIL_SYM already.
-        FModels[LIdx].RefMap[LNode] := NIL_SYM;
-        FModels[LIdx].ExtRefMap.AddOrSetValue(LNode, LPending[LIdx][LP].Ext);
-        // The frame-substituted member type, when the compute step had one.
-        // Committed here so it EXISTS before CrossType runs; CrossType's
-        // persist loop leaves existing entries alone (see there).
-        if XValid(LPending[LIdx][LP].X) then
-          FModels[LIdx].ExprTypeX.AddOrSetValue(LNode, LPending[LIdx][LP].X);
-      end;
+    for LS := 0 to High(AIds) do
+      LActive[LS] := Length(LPending[LS]) > 0;
+    // RefMap must be CLEARED, not just shadowed: every consumer checks it
+    // FIRST and only falls back to ExtRefMap (see CrossType's nkIdent), so an
+    // override that merely added an ExtRefMap entry would be ignored. The
+    // frame-substituted member type is committed so it EXISTS before
+    // CrossType runs; CrossType's persist loop leaves existing entries alone.
+    LNew := CommitPending(AIds, LPending, {AClearRef} True);
     if LEmit then
       Break;   // the cap-fallback emitting round is always the last one
-    // Converged: the round that found nothing new saw exactly the final
+    // Converged - for the WHOLE set, not per model: one model's commits can
+    // bind a name another model could not resolve a moment ago, so emitting
+    // as soon as a single model goes quiet would report names the next round
+    // resolves. The round that found nothing new saw exactly the final
     // state, so the candidates it RECORDED as unresolved are the stable ones
     // - emit from the record instead of re-running a whole round to
-    // rediscover it. Per model in work-list order, the same order the old
-    // emit round produced.
+    // rediscover it. Per model in work-list order.
     if LNew = 0 then
     begin
-      for LIdx := 0 to ACount - 1 do
-        for LP := 0 to High(LUnres[LIdx]) do
-          EmitE2003(FModels[LIdx], LUnres[LIdx][LP], LIdx);
+      for LS := 0 to High(AIds) do
+        for LP := 0 to High(LUnres[LS]) do
+          EmitE2003(FModels[AIds[LS]], LUnres[LS][LP], AIds[LS]);
       Break;
     end;
     // Out of rounds with work still moving: one more round, old-style - it
@@ -21089,11 +21176,7 @@ begin
     if LRound >= MAX_ROUNDS then
       LEmit := True;
   end;
-  var LAll: TArray<Integer>;
-  SetLength(LAll, ACount);
-  for LIdx := 0 to ACount - 1 do
-    LAll[LIdx] := LIdx;
-  RecheckWithBodies(LAll);
+  RecheckWithBodies(AIds);
 end;
 
 { The with-body diagnostics the intra-unit typer WITHHELD (TPasSemaTyper.Diag
@@ -21232,23 +21315,10 @@ begin
     // because none of them drives AnalyzeFile. RunWithPass's own sizing call
     // carries the same "AnalyzeFile reaches this pass without the other" note.
     SizeCrossWork(FModels.Count);
-    var LPend: TArray<TPasInhPending>;
-    CrossResolveInherited(Result, LPend);
-    // The SAME commit RunInheritedPass performs, not just the ExtRefMap half:
-    // RefMap must be CLEARED (every consumer reads it first and only falls
-    // back to ExtRefMap, so a shadowing override that merely added an entry
-    // stayed ineffective), a bare Add also left the node in BOTH maps - the
-    // double-count Find References counts - and the frame-substituted member
-    // type has to be committed or generic member types are silently dropped.
-    for LIdx := 0 to High(LPend) do
-    begin
-      FModels[Result].RefMap[LPend[LIdx].Node] := NIL_SYM;
-      FModels[Result].ExtRefMap.AddOrSetValue(LPend[LIdx].Node,
-        LPend[LIdx].Ext);
-      if XValid(LPend[LIdx].X) then
-        FModels[Result].ExprTypeX.AddOrSetValue(LPend[LIdx].Node,
-          LPend[LIdx].X);
-    end;
+    // The requested unit only, through the drivers' own commit: a copy of it
+    // once lacked the RefMap clear (a node in BOTH maps, double-counted by
+    // Find References) and the frame-substituted member type.
+    RunInheritedOver([Result]);
     // CrossResolve DEFERS every with-body identifier to this pass rather than
     // binding it (see there), so without it those names are never bound and
     // never diagnosed - a hole in this driver only. Run over the whole loaded
@@ -22156,14 +22226,8 @@ end;
 
 procedure TPasSemaProject.RunModulePasses(const AIds: TArray<Integer>;
   AId: Integer; const AMap: TArray<Integer>);
-const
-  MAX_ROUNDS = 8;
 var
-  LPendOf: TArray<TArray<TPasInhPending>>;   // per SLOT, one round's compute
-  LUnresOf: TArray<TArray<Integer>>;   // per slot, the last round's record
-  LIdx, LRound, LSlot, LId, LNew: Integer;
-  LEmit: Boolean;
-  LM: TPasSemaModel;
+  LId: Integer;
   LSW: TStopwatch;
   LStages: string;
   LMidOf: TFunc<Integer, Integer>;
@@ -22177,34 +22241,6 @@ var
     LSW := TStopwatch.StartNew;
   end;
 
-  // The commit half of a two-phase stage: what every worker pended for its
-  // own model, written sequentially in slot order (the order the sequential
-  // loop this replaced used). Returns the number of entries committed - the
-  // fixpoint loops' "anything new" signal. AClearRef is the inherited/with
-  // shape (RefMap cleared, frame-substituted type stored); the decl pass
-  // writes ExtRefMap alone, exactly as RunDeclPass does.
-  function CommitPendings(AClearRef: Boolean): Integer;
-  var
-    LS, LP: Integer;
-    LMdl: TPasSemaModel;
-  begin
-    Result := 0;
-    for LS := 0 to High(AIds) do
-    begin
-      LMdl := FModels[AIds[LS]];
-      for LP := 0 to High(LPendOf[LS]) do
-      begin
-        if AClearRef then
-          LMdl.RefMap[LPendOf[LS][LP].Node] := NIL_SYM;
-        LMdl.ExtRefMap.AddOrSetValue(LPendOf[LS][LP].Node, LPendOf[LS][LP].Ext);
-        if AClearRef and XValid(LPendOf[LS][LP].X) then
-          LMdl.ExprTypeX.AddOrSetValue(LPendOf[LS][LP].Node, LPendOf[LS][LP].X);
-      end;
-      Inc(Result, Length(LPendOf[LS]));
-      LPendOf[LS] := nil;
-    end;
-  end;
-
 begin
   LStages := '';
   LSW := TStopwatch.StartNew;
@@ -22216,8 +22252,6 @@ begin
   // which made the module path SLOWER per model than a rebuild: 557 redone
   // models paid 2.4 s in the inherited stage alone where the rebuild's
   // 16-worker pass covers the whole 1260-model closure in ~1.2 s.
-  SetLength(LPendOf, Length(AIds));
-  SetLength(LUnresOf, Length(AIds));
   // Body index -> model, for ForEachIndex's internal-error report.
   LMidOf :=
     function(ASlot: Integer): Integer
@@ -22243,34 +22277,14 @@ begin
   // path's whole fixed cost (see UpdateHelperMap).
   UpdateHelperMap(AIds, AId, AMap);
   Lap('helpers');
-  // RunDeclPass narrowed to this SET: same fixpoint, same emit-on-the-last-
-  // round rule, but only these models' work lists are walked and only their
-  // ExtRefMaps are written. Every other model's heritage binding already
-  // stands, and the set is exactly the one whose view of the edited unit
-  // could have changed (see AffectedConsumers).
-  LRound := 0;
-  LEmit := False;
-  while True do
-  begin
-    Inc(LRound);
-    ForEachIndex(High(AIds), 'declarations',
-      procedure(ASlot: Integer)
-      begin
-        CrossResolveDecl(AIds[ASlot], LPendOf[ASlot], LEmit);
-      end, LMidOf);
-    LNew := CommitPendings({AClearRef} False);
-    if LEmit then
-      Break;
-    LEmit := (LNew = 0) or (LRound >= 3);
-  end;
+  // The drivers over this SET (see IdsUpTo): only these models' work lists
+  // are walked and only their maps are written. Every other model's
+  // bindings already stand, and the set is exactly the one whose view of the
+  // edited unit could have changed (see AffectedConsumers).
+  RunDeclOver(AIds);
   Lap('decl');
   SizeCrossWork(FModels.Count);
-  ForEachIndex(High(AIds), 'inherited',
-    procedure(ASlot: Integer)
-    begin
-      CrossResolveInherited(AIds[ASlot], LPendOf[ASlot]);
-    end, LMidOf);
-  CommitPendings({AClearRef} True);
+  RunInheritedOver(AIds);
   Lap('inherited');
   // Only these models' declared types are new; every other model's SymTypeX
   // stands (their text, and so their declarations, did not change).
@@ -22280,120 +22294,15 @@ begin
   for LId in AIds do
     BindTypesX(LId);
   Lap('bindx');
-  // RunWithPass, same narrowing (see the decl pass above).
-  LRound := 0;
-  LEmit := False;
-  while True do
-  begin
-    Inc(LRound);
-    for LSlot := 0 to High(AIds) do
-      LUnresOf[LSlot] := nil;
-    ForEachIndex(High(AIds), 'with',
-      procedure(ASlot: Integer)
-      begin
-        CrossResolveWith(AIds[ASlot], LPendOf[ASlot], LEmit, LUnresOf[ASlot]);
-      end, LMidOf);
-    LNew := CommitPendings({AClearRef} True);
-    if LEmit then
-      Break;
-    // Converged - for the WHOLE set, not per model: one model's commits can
-    // bind a name another model could not resolve a moment ago, so emitting
-    // as soon as a single model goes quiet would report names the next round
-    // resolves. Same rule as RunWithPass, same reason.
-    if LNew = 0 then
-    begin
-      for LSlot := 0 to High(AIds) do
-        for LIdx := 0 to High(LUnresOf[LSlot]) do
-          EmitE2003(FModels[AIds[LSlot]], LUnresOf[LSlot][LIdx], AIds[LSlot]);
-      Break;
-    end;
-    if LRound >= MAX_ROUNDS then
-      LEmit := True;
-  end;
-  RecheckWithBodies(AIds);
+  RunWithOver(AIds);
   Lap('with');
-  // RunCallChecksPass over the set: the deferred-write buffers are sized to
-  // the whole model table (CheckCalls indexes them by model id) and created
-  // for the set's slots only - a nil slot means "write straight through",
-  // which no model outside the set does here because none is visited.
-  SetLength(FCallNewExt, FModels.Count);
-  for LId in AIds do
-    FCallNewExt[LId] := TDictionary<Integer, TPasExtRef>.Create;
-  try
-    ForEachIndex(High(AIds), 'cross-resolve',
-      procedure(ASlot: Integer)
-      begin
-        CheckCalls(AIds[ASlot]);
-        CheckConstraints(AIds[ASlot]);
-        CheckAttributes(AIds[ASlot]);
-      end, LMidOf);
-    for LId in AIds do
-      for var LPair in FCallNewExt[LId] do
-        FModels[LId].ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
-  finally
-    for LId in AIds do
-      FCallNewExt[LId].Free;
-    SetLength(FCallNewExt, 0);
-  end;
+  RunCallChecksOver(AIds);
   Lap('calls');
-  // RunCrossTypePass over the set, same buffer discipline as the call checks:
-  // SymTypeX and ExtRefMap must not be rehashed under a sibling worker's read
-  // of the same model, so the workers fill FXNewExt/FXNewSymType and the
-  // merge (tombstones included) happens here, after the parallel phase.
-  SetLength(FXNewExt, FModels.Count);
-  SetLength(FXNewSymType, FModels.Count);
-  SetLength(FXNewExprType, FModels.Count);
-  for LId in AIds do
-  begin
-    FXNewExt[LId] := TDictionary<Integer, TPasExtRef>.Create;
-    FXNewSymType[LId] := TDictionary<Integer, TSemaXType>.Create;
-    FXNewExprType[LId] := TList<TPair<Integer, TSemaXType>>.Create;
-  end;
-  try
-    ForEachIndex(High(AIds), 'cross-type',
-      procedure(ASlot: Integer)
-      begin
-        CrossType(AIds[ASlot]);
-      end, LMidOf);
-    ForEachIndex(High(AIds), 'cross-type-commit',
-      procedure(ASlot: Integer)
-      begin
-        CommitXNewExprType(AIds[ASlot]);
-      end, LMidOf);
-    for LId in AIds do
-    begin
-      LM := FModels[LId];
-      for var LPair in FXNewExt[LId] do
-        if LPair.Value.UnitId = EXT_TOMBSTONE_UNIT then
-          LM.ExtRefMap.Remove(LPair.Key)
-        else
-          LM.ExtRefMap.AddOrSetValue(LPair.Key, LPair.Value);
-      for var LPair in FXNewSymType[LId] do
-        LM.SymTypeX.AddOrSetValue(LPair.Key, LPair.Value);
-    end;
-    // Only now are the bindings final - see RunVisibilityPass.
-    if FReportVisibility then
-      ForEachIndex(High(AIds), 'visibility',
-        procedure(ASlot: Integer)
-        begin
-          RunVisibilityPass(AIds[ASlot]);
-        end, LMidOf);
-  finally
-    for LId in AIds do
-    begin
-      FXNewExt[LId].Free;
-      FXNewSymType[LId].Free;
-      FXNewExprType[LId].Free;
-    end;
-    SetLength(FXNewExt, 0);
-    SetLength(FXNewSymType, 0);
-    SetLength(FXNewExprType, 0);
-  end;
+  RunCrossTypeOver(AIds);
   for LId in AIds do
     FModels[LId].TrimDiags;
   ReleaseCrossWork;
-  ReleaseUsesMemo;
-  Lap('xtype');
+  ReleaseUsesMemo;  Lap('xtype');
   FStageTimings := FStageTimings + 'mp=' + LStages + ';';
 end;
 
@@ -22828,50 +22737,10 @@ begin
       LM := FModels[AReach[LSlot]];
       LK := Default(TPasRenumberKeys);
       LNExt := 0; LNCall := 0; LNSym := 0; LNExpr := 0;
-      LHolds := False;
-      for var LPair in LM.ExtRefMap do
-        if LPair.Value.UnitId = AId then
-        begin
-          if SymChangedIn(AChanged, LPair.Value.Sym) then
-          begin
-            LHolds := True;
-            Break;
-          end;
-          PushKey(LK.ExtRef, LNExt, LPair.Key);
-        end;
-      if not LHolds then
-        for var LPair in LM.CallTargetX do
-          if LPair.Value.UnitId = AId then
-          begin
-            if SymChangedIn(AChanged, LPair.Value.Sym) then
-            begin
-              LHolds := True;
-              Break;
-            end;
-            PushKey(LK.CallTarget, LNCall, LPair.Key);
-          end;
-      if not LHolds then
-        for var LPair in LM.SymTypeX do
-        begin
-          if XTaintedIn(AId, AChanged, LInstChanged, LPair.Value) then
-          begin
-            LHolds := True;
-            Break;
-          end;
-          if LPair.Value.UnitId = AId then
-            PushKey(LK.SymType, LNSym, LPair.Key);
-        end;
-      if not LHolds then
-        for var LPair in LM.ExprTypeX do
-        begin
-          if XTaintedIn(AId, AChanged, LInstChanged, LPair.Value) then
-          begin
-            LHolds := True;
-            Break;
-          end;
-          if LPair.Value.UnitId = AId then
-            PushKey(LK.ExprType, LNExpr, LPair.Key);
-        end;
+      LHolds := ScanExt(LM.ExtRefMap, AId, AChanged, LK.ExtRef, LNExt) or
+        ScanExt(LM.CallTargetX, AId, AChanged, LK.CallTarget, LNCall) or
+        ScanX(LM.SymTypeX, AId, AChanged, LInstChanged, LK.SymType, LNSym) or
+        ScanX(LM.ExprTypeX, AId, AChanged, LInstChanged, LK.ExprType, LNExpr);
       if LHolds then
         LVerdict[LSlot] := vSelected
       else if AAdded.Count = 0 then
@@ -22956,45 +22825,77 @@ procedure TPasSemaProject.RenumberConsumer(AMid, AId: Integer;
   const AMap: TArray<Integer>; const AKeys: TPasRenumberKeys);
 var
   LM: TPasSemaModel;
-  LKey: Integer;
-  LExt: TPasExtRef;
-  LX: TSemaXType;
-
-  function Follow(ASym: Integer): Integer;
-  begin
-    if (ASym >= 0) and (ASym <= High(AMap)) and (AMap[ASym] <> NIL_SYM) then
-      Result := AMap[ASym]
-    else
-      Result := ASym;   // cannot happen for an untouched consumer; keep it
-  end;
-
 begin
   LM := FModels[AMid];
-  // Existing keys only, so Items[] is a value write - no rehash.
-  for LKey in AKeys.ExtRef do
+  RenumberExt(LM.ExtRefMap, AKeys.ExtRef, AMap);
+  RenumberExt(LM.CallTargetX, AKeys.CallTarget, AMap);
+  RenumberX(LM.SymTypeX, AKeys.SymType, AMap);
+  RenumberX(LM.ExprTypeX, AKeys.ExprType, AMap);
+end;
+
+class function TPasSemaProject.FollowSym(const ASymMap: TArray<Integer>;
+  ASym: Integer): Integer;
+begin
+  if (ASym >= 0) and (ASym <= High(ASymMap)) and (ASymMap[ASym] <> NIL_SYM) then
+    Result := ASymMap[ASym]
+  else
+    Result := ASym;   // cannot happen for an untouched consumer; keep it
+end;
+
+class procedure TPasSemaProject.RenumberExt(var AMap: TPasIntMap<TPasExtRef>;
+  const AKeys, ASymMap: TArray<Integer>);
+var
+  LKey: Integer;
+  LExt: TPasExtRef;
+begin
+  for LKey in AKeys do
   begin
-    LExt := LM.ExtRefMap[LKey];
-    LExt.Sym := Follow(LExt.Sym);
-    LM.ExtRefMap[LKey] := LExt;
+    LExt := AMap[LKey];
+    LExt.Sym := FollowSym(ASymMap, LExt.Sym);
+    AMap[LKey] := LExt;
   end;
-  for LKey in AKeys.CallTarget do
+end;
+
+class procedure TPasSemaProject.RenumberX(var AMap: TPasIntMap<TSemaXType>;
+  const AKeys, ASymMap: TArray<Integer>);
+var
+  LKey: Integer;
+  LX: TSemaXType;
+begin
+  for LKey in AKeys do
   begin
-    LExt := LM.CallTargetX[LKey];
-    LExt.Sym := Follow(LExt.Sym);
-    LM.CallTargetX[LKey] := LExt;
+    LX := AMap[LKey];
+    LX.Sym := FollowSym(ASymMap, LX.Sym);
+    AMap[LKey] := LX;
   end;
-  for LKey in AKeys.SymType do
+end;
+
+class function TPasSemaProject.ScanExt(const AMap: TPasIntMap<TPasExtRef>;
+  AId: Integer; const AChanged: TArray<Boolean>; var AKeys: TArray<Integer>;
+  var ACount: Integer): Boolean;
+begin
+  for var LPair in AMap do
+    if LPair.Value.UnitId = AId then
+    begin
+      if SymChangedIn(AChanged, LPair.Value.Sym) then
+        Exit(True);
+      PushKey(AKeys, ACount, LPair.Key);
+    end;
+  Result := False;
+end;
+
+class function TPasSemaProject.ScanX(const AMap: TPasIntMap<TSemaXType>;
+  AId: Integer; const AChanged, AInstChanged: TArray<Boolean>;
+  var AKeys: TArray<Integer>; var ACount: Integer): Boolean;
+begin
+  for var LPair in AMap do
   begin
-    LX := LM.SymTypeX[LKey];
-    LX.Sym := Follow(LX.Sym);
-    LM.SymTypeX[LKey] := LX;
+    if XTaintedIn(AId, AChanged, AInstChanged, LPair.Value) then
+      Exit(True);
+    if LPair.Value.UnitId = AId then
+      PushKey(AKeys, ACount, LPair.Key);
   end;
-  for LKey in AKeys.ExprType do
-  begin
-    LX := LM.ExprTypeX[LKey];
-    LX.Sym := Follow(LX.Sym);
-    LM.ExprTypeX[LKey] := LX;
-  end;
+  Result := False;
 end;
 
 class procedure TPasSemaProject.PushKey(var AArr: TArray<Integer>;
@@ -25093,76 +24994,68 @@ begin
   end;
 end;
 
-procedure TPasSemaProject.ReleaseTransientMaps(const AKeepFiles: TArray<string>);
+// Which models AKeepFiles names - the ones a release or a demotion leaves
+// alone (open documents) - indexed by model id.
+function TPasSemaProject.KeepSetOf(
+  const AKeepFiles: TArray<string>): TArray<Boolean>;
 var
-  LKeep: TDictionary<Integer, Boolean>;
   LIdx, LMid: Integer;
 begin
-  LKeep := TDictionary<Integer, Boolean>.Create;
-  try
-    for LIdx := 0 to High(AKeepFiles) do
-      if FByPath.TryGetValue(
-           LowerCase(TPath.GetFullPath(AKeepFiles[LIdx])), LMid) and
-         (LMid >= 0) then
-        LKeep.AddOrSetValue(LMid, True);
-    for LIdx := 0 to FModels.Count - 1 do
-      if not LKeep.ContainsKey(LIdx) then
-        FModels[LIdx].ReleaseTransientMaps;
-  finally
-    LKeep.Free;
-  end;
+  SetLength(Result, FModels.Count);
+  for LIdx := 0 to High(AKeepFiles) do
+    if FByPath.TryGetValue(
+         LowerCase(TPath.GetFullPath(AKeepFiles[LIdx])), LMid) and
+       (LMid >= 0) and (LMid < Length(Result)) then
+      Result[LMid] := True;
+end;
+
+// May AIdx's text be dropped? Not an oracle-built stream (not reproducible
+// from cold - see the field), and not a model short of msFullReady (a
+// cancelled or refused run): whatever finishes it reads the text.
+function TPasSemaProject.Demotable(AIdx: Integer): Boolean;
+begin
+  Result := (FModels[AIdx] <> nil) and not FModels[AIdx].OracleStream and
+    (AIdx < FStatus.Count) and (FStatus[AIdx] >= msFullReady);
+end;
+
+procedure TPasSemaProject.ReleaseTransientMaps(const AKeepFiles: TArray<string>);
+var
+  LKeep: TArray<Boolean>;
+  LIdx: Integer;
+begin
+  LKeep := KeepSetOf(AKeepFiles);
+  for LIdx := 0 to FModels.Count - 1 do
+    if not LKeep[LIdx] then
+      FModels[LIdx].ReleaseTransientMaps;
   FTransientReleased := True;
 end;
 
 procedure TPasSemaProject.DemoteClosedUnits(const AKeepFiles: TArray<string>);
 var
-  LKeep: TDictionary<Integer, Boolean>;
-  LIdx, LMid: Integer;
+  LKeep: TArray<Boolean>;
+  LIdx: Integer;
 begin
-  LKeep := TDictionary<Integer, Boolean>.Create;
-  try
-    for LIdx := 0 to High(AKeepFiles) do
-      if FByPath.TryGetValue(
-           LowerCase(TPath.GetFullPath(AKeepFiles[LIdx])), LMid) and
-         (LMid >= 0) then
-        LKeep.AddOrSetValue(LMid, True);
-    for LIdx := 0 to FModels.Count - 1 do
-      if not LKeep.ContainsKey(LIdx) then
-      begin
-        FModels[LIdx].ReleaseTransientMaps;
-        // An oracle-built stream is not reproducible from cold (see the
-        // field) - stage 1 applies, the text stays.
-        if not FModels[LIdx].OracleStream then
-          FModels[LIdx].DemoteText;
-      end;
-  finally
-    LKeep.Free;
-  end;
+  LKeep := KeepSetOf(AKeepFiles);
+  for LIdx := 0 to FModels.Count - 1 do
+    if not LKeep[LIdx] then
+    begin
+      FModels[LIdx].ReleaseTransientMaps;
+      // Stage 1 applies to every model, stage 2 where the text may go.
+      if Demotable(LIdx) then
+        FModels[LIdx].DemoteText;
+    end;
   FTransientReleased := True;
 end;
 
 procedure TPasSemaProject.DemoteText(const AKeepFiles: TArray<string>);
 var
-  LKeep: TDictionary<Integer, Boolean>;
-  LIdx, LMid: Integer;
+  LKeep: TArray<Boolean>;
+  LIdx: Integer;
 begin
-  LKeep := TDictionary<Integer, Boolean>.Create;
-  try
-    for LIdx := 0 to High(AKeepFiles) do
-      if FByPath.TryGetValue(
-           LowerCase(TPath.GetFullPath(AKeepFiles[LIdx])), LMid) and
-         (LMid >= 0) then
-        LKeep.AddOrSetValue(LMid, True);
-    for LIdx := 0 to FModels.Count - 1 do
-      // Not-yet-full models (a cancelled or refused run) keep their text:
-      // whatever finishes them reads it.
-      if not LKeep.ContainsKey(LIdx) and (FModels[LIdx] <> nil) and
-         not FModels[LIdx].OracleStream and (LIdx < FStatus.Count) and
-         (FStatus[LIdx] >= msFullReady) then
-        FModels[LIdx].DemoteText;
-  finally
-    LKeep.Free;
-  end;
+  LKeep := KeepSetOf(AKeepFiles);
+  for LIdx := 0 to FModels.Count - 1 do
+    if not LKeep[LIdx] and Demotable(LIdx) then
+      FModels[LIdx].DemoteText;
 end;
 
 // Rehydrates every demoted model among AIds, in parallel - distinct models,
@@ -25378,6 +25271,57 @@ begin
   Result := FLoadFailures;
 end;
 
+function TPasSemaProject.RunCrossPipeline(ALN: Integer;
+  const AStep: TFunc<string, Boolean>): Boolean;
+var
+  LIdx: Integer;
+begin
+  Result := False;
+  // Each pass writes ONLY its own model and reads the others' Phase-1 state
+  // (frozen once every unit is loaded) - safe to farm out.
+  PrepareDeclWork(ALN);
+  ForEachIndex(ALN - 1, 'resolve',
+    procedure(AIdx: Integer)
+    begin
+      CrossResolve(AIdx);
+    end);
+  if not AStep('xresolve') then
+    Exit;
+  // Needs every CrossResolve worker done first (it reads their ExtRefMaps).
+  RunInheritedPass(ALN);
+  if not AStep('inherited') then
+    Exit;
+  // Sequential by design; CrossType itself is not - see RunCrossTypePass.
+  // BindTypesX needs only declaration-site bindings, complete by now.
+  for LIdx := 0 to FModels.Count - 1 do
+  begin
+    if (LIdx and 63 = 0) and not AStep('') then
+      Exit;
+    BindTypesX(LIdx);
+  end;
+  if not AStep('bindx') then
+    Exit;
+  // Timed apart because it iterates to a fixpoint: its cost is the one that
+  // is not obvious from reading the code.
+  RunWithPass(ALN);
+  if not AStep('with') then
+    Exit;
+  RunCallChecksPass(ALN);
+  if not AStep('calls') then
+    Exit;
+  RunCrossTypePass(ALN);
+  Result := AStep('xtype');
+end;
+
+procedure TPasSemaProject.FinishCrossRun;
+begin
+  TrimAllDiags;
+  ReleaseCrossWork;
+  ReleaseUsesMemo;
+  FSM.ReleaseAnalysisCaches;
+  TrimPreprocessors;
+end;
+
 function TPasSemaProject.AnalyzeProject(const AMainFile: string): Integer;
 var
   LIdx, LN: Integer;
@@ -25425,48 +25369,22 @@ begin
     RunDeclaredPass(FModels.Count);
     InjectEncodingDiags(FModels.Count);
     InjectGuessedIfDiags(FModels.Count);
-    // Cross passes for EVERY loaded unit - same per-unit write discipline as
-    // AnalyzeDirectory (each writes only its own model, reads others' frozen
-    // Phase-1 state), so the same parallel farming is safe.
+    // Cross passes for EVERY loaded unit.
     LN := FModels.Count;
-    PrepareDeclWork(LN);
-    ForEachIndex(LN - 1, 'resolve',    procedure(AIdx: Integer)
+    RunCrossPipeline(LN,
+      function(AName: string): Boolean
       begin
-        CrossResolve(AIdx);
+        if AName <> '' then
+        begin
+          FStageTimings := FStageTimings +
+            Format('%s=%d;', [AName, LSW.ElapsedMilliseconds]);
+          LSW := TStopwatch.StartNew;
+        end;
+        Result := True;
       end);
-    Stage('xresolve');
-    // The inherited-member pass needs every CrossResolve worker done first
-    // (it reads their ExtRefMaps); parallel compute + sequential commit.
-    RunInheritedPass(LN);
-    Stage('inherited');
-    // Declared types next, sequential by design (see AnalyzeDirectory's
-    // Phase-3c comment) and BEFORE the with pass: that pass types its targets
-    // with the expression walk, which reads SymTypeX - and BindTypesX needs
-    // only declaration-site bindings, complete since the inherited pass.
-    for LIdx := 0 to FModels.Count - 1 do
-      BindTypesX(LIdx);
-    Stage('bindx');
-    // Then the with-body pass, which reads type nodes the inherited pass just
-    // COMMITTED (see CrossResolveWith) - order matters, not just grouping. Timed
-    // apart because it iterates to a fixpoint: its cost is the one that is not
-    // obvious from reading the code.
-    RunWithPass(LN);
-    Stage('with');
-    RunCallChecksPass(LN);
-    Stage('calls');
-    RunCrossTypePass(LN);
-    Stage('xtype');
     // Whole transitive closure went through the cross passes.
     MarkAllCrossReady;
-    TrimAllDiags;
-    ReleaseCrossWork;
-    ReleaseUsesMemo;
-    // Analysis is over: drop the raw-bytes repository (a full second copy of
-    // every closure file that nothing reads from here on - hundreds of MB on
-    // a real project) and the include-cache's own stream references.
-    FSM.ReleaseAnalysisCaches;
-    TrimPreprocessors;
-    FRunComplete := True;
+    FinishCrossRun;    FRunComplete := True;
   finally
     FinishDonor({AReport} True);
   end;
@@ -25530,49 +25448,23 @@ begin
     InjectEncodingDiags(LN);
     InjectGuessedIfDiags(LN);
     Stage('main+sys+resolve');
-    // Cross passes per unit write ONLY their own model and read the others'
-    // Phase-1 state (frozen once every unit is loaded) - safe to farm out.
-    PrepareDeclWork(LN);
-    ForEachIndex(LN - 1, 'resolve',    procedure(AIdx: Integer)
+    RunCrossPipeline(LN,
+      function(AName: string): Boolean
       begin
-        CrossResolve(AIdx);
+        if AName <> '' then
+        begin
+          FStageTimings := FStageTimings +
+            Format('%s=%d;', [AName, LSW.ElapsedMilliseconds]);
+          LSW := TStopwatch.StartNew;
+        end;
+        Result := True;
       end);
-    Stage('xresolve');
-    // The inherited-member pass needs every CrossResolve worker done first
-    // (it reads their ExtRefMaps); parallel compute + sequential commit.
-    RunInheritedPass(LN);
-    Stage('inherited');
-    // The BindTypesX loop stays sequential; CrossType itself does NOT - see
-    // RunCrossTypePass, which farms it out and defers the one shared write
-    // through a per-model overlay. (This comment used to claim the whole of
-    // cross typing was sequential "by design", and it was exactly the guard
-    // that should have caught the RepointCallee race.) It runs BEFORE the
-    // with pass, whose target typing is the expression walk and reads
-    // SymTypeX; it needs only declaration-site bindings itself.
-    for LIdx := 0 to FModels.Count - 1 do
-      BindTypesX(LIdx);
-    Stage('bindx');
-    // Then the with-body pass, which reads type nodes the inherited pass just
-    // COMMITTED (see CrossResolveWith) - order matters, not just grouping. Timed
-    // apart because it iterates to a fixpoint: its cost is the one that is not
-    // obvious from reading the code.
-    RunWithPass(LN);
-    Stage('with');
-    RunCallChecksPass(LN);
-    Stage('calls');
-    RunCrossTypePass(LN);
-    Stage('xtype');
     // Units [0..LN-1] (the directory's own) went through the cross passes; a
     // System unit pulled in from search paths after the LN snapshot stays
     // msFullReady, mirroring the E2003 scoping above.
     for LIdx := 0 to LN - 1 do
       SetModuleStatus(LIdx, msCrossReady);
-    TrimAllDiags;
-    ReleaseCrossWork;
-    ReleaseUsesMemo;
-    FSM.ReleaseAnalysisCaches;   // see AnalyzeProject
-    TrimPreprocessors;
-    FRunComplete := True;
+    FinishCrossRun;    FRunComplete := True;
   finally
     FinishDonor({AReport} True);
   end;
@@ -25606,23 +25498,6 @@ var
     Result := Assigned(ACancelled) and ACancelled();
   end;
 
-  procedure Recount;
-  var
-    LI: Integer;
-  begin
-    LProgress.Total := FModels.Count;
-    LProgress.IntfDone := 0;
-    LProgress.FullDone := 0;
-    for LI := 0 to FStatus.Count - 1 do
-    begin
-      if FStatus[LI] >= msIntfReady then
-        Inc(LProgress.IntfDone);
-      // A light model never reaches msFullReady before the finalizer, and
-      // is as done as it will get: counted, or the bar sticks short.
-      if (FStatus[LI] >= msFullReady) or IsLight(LI) then
-        Inc(LProgress.FullDone);
-    end;
-  end;
 
   procedure Report(const APhase: string);
   begin
@@ -25663,8 +25538,10 @@ begin
         begin
           if FStatus[LI] >= msIntfReady then
             Inc(LProgress.IntfDone);
+          // A light model never reaches msFullReady before the finalizer,
+          // and is as done as it will get: counted, or the bar sticks short.
           if (FStatus[LI] >= msFullReady) or IsLight(LI) then
-            Inc(LProgress.FullDone);   // see Recount
+            Inc(LProgress.FullDone);
         end;
         LProgress.Phase := APhase;
         if Assigned(AOnProgress) then
@@ -25777,74 +25654,42 @@ begin
     StageMark('declared');
     LN := FModels.Count;   // it may have loaded newly-imported units
     Report('cross:xresolve');
-    PrepareDeclWork(LN);
-    ForEachIndex(LN - 1, 'resolve',      procedure(AIdx: Integer)
+    // The step: the stage's timing, a cancel check (a cancel that landed
+    // inside the last pass must not report 'done' with a half-run pass
+    // behind it - the host would treat the project as good), the next
+    // phase's progress label.
+    if not RunCrossPipeline(LN,
+      function(AName: string): Boolean
       begin
-        CrossResolve(AIdx);
-      end);
-    if Cancelled then
-    begin
-      Report('cancelled');
+        if AName <> '' then
+        begin
+          FStageTimings := FStageTimings +
+            Format('%s=%d;', [AName, LSW.ElapsedMilliseconds]);
+          LSW := TStopwatch.StartNew;
+        end;
+        Result := not (Assigned(ACancelled) and ACancelled());
+        if not Result then
+          LProgress.Phase := 'cancelled'
+        else if AName = 'xresolve' then
+          LProgress.Phase := 'cross:inherited'
+        else if AName = 'inherited' then
+          LProgress.Phase := 'cross:bindx'
+        else if AName = 'with' then
+          LProgress.Phase := 'cross:calls'
+        else if AName = 'calls' then
+          LProgress.Phase := 'cross:xtype'
+        else
+          Exit;
+        if Assigned(AOnProgress) then
+          AOnProgress(LProgress);
+      end) then
       Exit;
-    end;
-    StageMark('xresolve');
-    Report('cross:inherited');
-    RunInheritedPass(LN);
-    StageMark('inherited');
-    // Declared types BEFORE the with pass, whose target typing is the
-    // expression walk and reads SymTypeX (needs only declaration-site
-    // bindings itself, complete since the inherited pass).
-    Report('cross:bindx');
-    for LIdx := 0 to FModels.Count - 1 do
-    begin
-      if (LIdx and 63 = 0) and Cancelled then
-      begin
-        Report('cancelled');
-        Exit;
-      end;
-      BindTypesX(LIdx);
-    end;
-    StageMark('bindx');
-    // Reads type nodes the inherited pass just COMMITTED - see
-    // CrossResolveWith. Kept inside the same reported step (it is the same
-    // "resolve what the parallel pass deferred" phase, just a later slice).
-    RunWithPass(LN);
-    if Cancelled then
-    begin
-      Report('cancelled');
-      Exit;
-    end;
-    StageMark('with');
-    Report('cross:calls');
-    RunCallChecksPass(LN);
-    if Cancelled then
-    begin
-      Report('cancelled');
-      Exit;
-    end;
-    StageMark('calls');
-    Report('cross:xtype');
-    RunCrossTypePass(LN);
-    StageMark('xtype');
-    // A cancel that landed inside the last pass must not report 'done' with
-    // a half-run pass behind it - the host would treat the project as good.
-    if Cancelled then
-    begin
-      Report('cancelled');
-      Exit;
-    end;
     MarkAllCrossReady;
-    TrimAllDiags;
-    ReleaseCrossWork;
-    ReleaseUsesMemo;
     // See AnalyzeProject. On a cancelled run the caches stay - the host
     // discards a cancelled project wholesale anyway.
-    FSM.ReleaseAnalysisCaches;
-    TrimPreprocessors;
-    StageMark('final');
+    FinishCrossRun;    StageMark('final');
     FRunComplete := True;
-    Recount;
-    Report('done');
+    LNotify('done');
 
     // TryGetValue writes Default(Integer) = 0 - System's id - on a miss, and
     // a root that does not exist never enters FByPath (audit B4-36).
