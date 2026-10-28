@@ -382,6 +382,9 @@ end;
 { TPrinter }
 
 type
+  // The child kinds HasResultChild looks past.
+  TNodeKinds = set of TPasNodeKind;
+
   TPrinter = record
     T: TPasTree;
     Own: TPasOwnership;
@@ -403,8 +406,13 @@ type
     procedure Head(ANode: Integer);
     procedure OwnRange(ANode: Integer; ACls: TPasPrintClass; AGlued: Boolean);
     procedure Losses(ANode, ALimit: Integer);
-    function NextLoss(ANode: Integer): Integer;
     procedure Child(ANode, AChild: Integer);
+    function Attrs(ANode, AChild: Integer): Integer;
+    procedure ChildrenFrom(ANode, AChild: Integer);
+    procedure Section(ANode: Integer; ADecl: TPasNodeKind);
+    function HasResultChild(ANode: Integer;
+      const ANot: TNodeKinds): Boolean;
+    function IsTrailingDefault(ASpec: Integer): Boolean;
     procedure Span(ANode: Integer);
     procedure ListFrom(AChild: Integer; const ASep: string; AParent: Integer);
     function ListUntil(AChild, AStop: Integer; const ASep: string;
@@ -530,22 +538,6 @@ begin
   LossPos[ANode] := LPos;
 end;
 
-// The visible index of ANode's next own loss token Losses has not read; -1
-// when none is left. Reads nothing.
-function TPrinter.NextLoss(ANode: Integer): Integer;
-var
-  LPos: Integer;
-begin
-  LPos := LossPos[ANode];
-  while LPos < Own.OwnStart[ANode + 1] do
-  begin
-    if IsLossRule(Own.Rule[Own.Own[LPos]]) then
-      Exit(Own.Own[LPos]);
-    Inc(LPos);
-  end;
-  Result := -1;
-end;
-
 // One child of ANode: the losses of ANode before it, then the child.
 procedure TPrinter.Child(ANode, AChild: Integer);
 begin
@@ -554,6 +546,74 @@ begin
   if not IsEmptyNode(T, AChild) then
     Losses(ANode, Left(AChild));
   Emit(AChild);
+end;
+
+// A declaration's leading attribute groups, from AChild on; the first child
+// after them.
+function TPrinter.Attrs(ANode, AChild: Integer): Integer;
+begin
+  Result := AChild;
+  while (Result <> NIL_NODE) and (Kind(Result) = nkAttrGroup) do
+  begin
+    Child(ANode, Result);
+    Result := Next(Result);
+  end;
+end;
+
+// AChild and every sibling after it, each through Child.
+procedure TPrinter.ChildrenFrom(ANode, AChild: Integer);
+begin
+  while AChild <> NIL_NODE do
+  begin
+    Child(ANode, AChild);
+    AChild := Next(AChild);
+  end;
+end;
+
+{ A `type` or `const` section's children after its head word (the caller's):
+  a `;` after each declaration of kind ADecl. A `var` section is not one -
+  its separator is Sep, since dcc64 37.0 rejects a class-nested `const` or
+  `type` declaration's `;` left out before `end` (E2029) and N1 lists only
+  nkVarSec. }
+procedure TPrinter.Section(ANode: Integer; ADecl: TPasNodeKind);
+var
+  LChild: Integer;
+begin
+  LChild := T.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    Child(ANode, LChild);
+    if Kind(LChild) = ADecl then
+      Kw(';', ANode);
+    LChild := Next(LChild);
+  end;
+end;
+
+// True when ANode has a child outside ANot - a routine type's or literal's
+// result type, which makes it a `function`.
+function TPrinter.HasResultChild(ANode: Integer;
+  const ANot: TNodeKinds): Boolean;
+var
+  LChild: Integer;
+begin
+  LChild := T.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if not (Kind(LChild) in ANot) then
+      Exit(True);
+    LChild := Next(LChild);
+  end;
+  Result := False;
+end;
+
+// A property specifier `default` with no value: always the trailing one, and
+// it owns its `;` (`read G default;` is E2029, dcc64 37.0). PropertyDecl
+// writes no separator before it, PropSpec writes the `;` after it.
+function TPrinter.IsTrailingDefault(ASpec: Integer): Boolean;
+begin
+  Result := (Kind(ASpec) = nkPropSpec) and
+    (T.Nodes[ASpec].FirstChild = NIL_NODE) and
+    T.NodeTextEquals(ASpec, 'default');
 end;
 
 procedure TPrinter.Span(ANode: Integer);
@@ -733,17 +793,8 @@ end;
 procedure TPrinter.AnonMethod(ANode: Integer);
 var
   LChild: Integer;
-  LFunction: Boolean;
 begin
-  LFunction := False;
-  LChild := T.Nodes[ANode].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    if not (Kind(LChild) in [nkParams, nkDirective, nkRoutineBody]) then
-      LFunction := True;
-    LChild := Next(LChild);
-  end;
-  if LFunction then
+  if HasResultChild(ANode, [nkParams, nkDirective, nkRoutineBody]) then
     Kw('function', ANode)
   else
     Kw('procedure', ANode);
@@ -876,11 +927,7 @@ var
   LChild: Integer;
 begin
   LChild := T.Nodes[ANode].FirstChild;
-  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
-  begin
-    Child(ANode, LChild);
-    LChild := Next(LChild);
-  end;
+  LChild := Attrs(ANode, LChild);
   Child(ANode, LChild);
   if LChild <> NIL_NODE then
     LChild := Next(LChild);
@@ -892,11 +939,7 @@ begin
   Kw('=', ANode);
   if T.Nodes[ANode].Aux = 1 then
     Kw('type', ANode);
-  while LChild <> NIL_NODE do
-  begin
-    Child(ANode, LChild);
-    LChild := Next(LChild);
-  end;
+  ChildrenFrom(ANode, LChild);
 end;
 
 // [attributes] Name [: Type] = value [hints].
@@ -905,11 +948,7 @@ var
   LChild, LAfter: Integer;
 begin
   LChild := T.Nodes[ANode].FirstChild;
-  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
-  begin
-    Child(ANode, LChild);
-    LChild := Next(LChild);
-  end;
+  LChild := Attrs(ANode, LChild);
   Child(ANode, LChild);
   if LChild <> NIL_NODE then
     LChild := Next(LChild);
@@ -924,11 +963,7 @@ begin
     end;
   end;
   Kw('=', ANode);
-  while LChild <> NIL_NODE do
-  begin
-    Child(ANode, LChild);
-    LChild := Next(LChild);
-  end;
+  ChildrenFrom(ANode, LChild);
 end;
 
 { The head word - but in a struct body, where the list owner prints it - and
@@ -958,11 +993,7 @@ var
   LFirst: Boolean;
 begin
   LChild := T.Nodes[ANode].FirstChild;
-  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
-  begin
-    Child(ANode, LChild);
-    LChild := Next(LChild);
-  end;
+  LChild := Attrs(ANode, LChild);
   LFirst := True;
   while (LChild <> NIL_NODE) and (nfName in T.Nodes[LChild].Flags) do
   begin
@@ -1043,7 +1074,6 @@ end;
 procedure TPrinter.ProcType(ANode: Integer);
 var
   LChild, LParent: Integer;
-  LFunction: Boolean;
 begin
   if T.Nodes[ANode].Aux = 2 then
   begin
@@ -1051,15 +1081,7 @@ begin
     Kw('reference', LParent);
     Kw('to', LParent);
   end;
-  LFunction := False;
-  LChild := T.Nodes[ANode].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    if not (Kind(LChild) in [nkParams, nkDirective]) then
-      LFunction := True;
-    LChild := Next(LChild);
-  end;
-  if LFunction then
+  if HasResultChild(ANode, [nkParams, nkDirective]) then
     Kw('function', ANode)
   else
     Kw('procedure', ANode);
@@ -1125,8 +1147,7 @@ begin
     Kw('abstract', ANode);
   if nfSealed in T.Nodes[ANode].Flags then
     Kw('sealed', ANode);
-  if ((LKind = nkClassType) and (T.Nodes[ANode].Aux = 1)) or
-     ((LKind = nkInterfaceType) and (T.Nodes[ANode].Aux and 2 <> 0)) then
+  if PasIsForwardStruct(T, ANode) then
     Exit;
   LChild := T.Nodes[ANode].FirstChild;
   // The leading type references: the ancestors; a helper's last one is its
@@ -1171,11 +1192,7 @@ begin
     Child(ANode, LChild);
     LChild := Next(LChild);
   end;
-  while LChild <> NIL_NODE do
-  begin
-    Child(ANode, LChild);
-    LChild := Next(LChild);
-  end;
+  ChildrenFrom(ANode, LChild);
 end;
 
 // A routine's or a method resolution's dotted name from AChild: segments
@@ -1402,14 +1419,6 @@ procedure TPrinter.PropertyDecl(ANode: Integer);
 var
   LChild: Integer;
   LClosed: Boolean;
-
-  function TrailingDefault(ASpec: Integer): Boolean;
-  begin
-    Result := (Kind(ASpec) = nkPropSpec) and
-      (T.Nodes[ASpec].FirstChild = NIL_NODE) and
-      SameText(T.Source.VisibleText(T.Nodes[ASpec].FirstToken), 'default');
-  end;
-
 begin
   Kw('property', ANode);
   LChild := T.Nodes[ANode].FirstChild;
@@ -1431,7 +1440,7 @@ begin
   LClosed := False;
   while LChild <> NIL_NODE do
   begin
-    if TrailingDefault(LChild) then
+    if IsTrailingDefault(LChild) then
     begin
       if not LClosed then
         Sep(ANode);
@@ -1453,8 +1462,7 @@ procedure TPrinter.PropSpec(ANode: Integer);
 begin
   Head(ANode);
   ListFrom(T.Nodes[ANode].FirstChild, ',', ANode);
-  if (T.Nodes[ANode].FirstChild = NIL_NODE) and
-     SameText(T.Source.VisibleText(T.Nodes[ANode].FirstToken), 'default') then
+  if IsTrailingDefault(ANode) then
     Kw(';', ANode);
 end;
 
@@ -1967,26 +1975,12 @@ begin
     nkTypeSec:
       begin
         Kw('type', ANode);
-        LChild := C0;
-        while LChild <> NIL_NODE do
-        begin
-          Child(ANode, LChild);
-          if Kind(LChild) = nkTypeDecl then
-            Kw(';', ANode);
-          LChild := Next(LChild);
-        end;
+        Section(ANode, nkTypeDecl);
       end;
     nkConstSec:
       begin
         Head(ANode);
-        LChild := C0;
-        while LChild <> NIL_NODE do
-        begin
-          Child(ANode, LChild);
-          if Kind(LChild) = nkConstDecl then
-            Kw(';', ANode);
-          LChild := Next(LChild);
-        end;
+        Section(ANode, nkConstDecl);
       end;
     nkVarSec:
       VarSec(ANode);
@@ -2503,10 +2497,7 @@ begin
     case ATree.Nodes[LNode].Kind of
       nkClassType, nkObjectType, nkInterfaceType:
         begin
-          if ((ATree.Nodes[LNode].Kind = nkClassType) and
-              (ATree.Nodes[LNode].Aux = 1)) or
-             ((ATree.Nodes[LNode].Kind = nkInterfaceType) and
-              (ATree.Nodes[LNode].Aux and 2 <> 0)) or
+          if PasIsForwardStruct(ATree, LNode) or
              (AOwn.OwnStart[LNode] = AOwn.OwnStart[LNode + 1]) then
             Continue;
           LHasEnd := OwnsTokenOf(LNode, tkEnd) >= 0;

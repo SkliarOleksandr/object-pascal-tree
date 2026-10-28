@@ -4,7 +4,9 @@ unit PasTree.Ast.Json;
 //
 // Schema (stable, machine-diffable), braces shown as [ ] to survive this
 // comment: node = [ kind, file (index into files), line, col (1-based,
-// first token), text (leaf/name-bearing nodes only), negated?, aux?,
+// first token), text (TPasTree.NodeDisplayText: a leaf's text, an
+// operator's spelling or a distinguishing head word; omitted when empty),
+// negated?, aux?,
 // children (omitted when empty) ]. The root object wraps the tree with
 // the file table: [ files: [...], ast: node ].
 
@@ -56,6 +58,7 @@ var
     LVis: TPasVisibleToken;
     LLine, LCol: Integer;
     LKind: TPasNodeKind;
+    LText: string;
   begin
     LKind := ATree.Nodes[AIndex].Kind;
     LSB.Append('{"kind":');
@@ -70,24 +73,14 @@ var
       LSB.AppendFormat(',"file":%d,"line":%d,"col":%d',
         [LVis.FileId, LLine, LCol]);
     end;
-    // Text for name/value-bearing leaves (matches TPasTree.Dump).
-    case LKind of
-      nkIdent, nkIntLit, nkRealLit, nkStrLit, nkCaretChar,
-      nkUnaryOp, nkBinaryOp:
-        begin
-          LSB.Append(',"text":');
-          // Bounds-checked like the position emission above: on a demoted
-          // model Visible is nil and this read was an AV.
-          if LKind in [nkUnaryOp, nkBinaryOp] then
-            if (ATree.Nodes[AIndex].Aux >= 0) and
-               (ATree.Nodes[AIndex].Aux <= High(ATree.Source.Visible)) then
-              JsonEscape(LowerCase(
-                ATree.Source.VisibleText(ATree.Nodes[AIndex].Aux)), LSB)
-            else
-              LSB.Append('""')
-          else
-            JsonEscape(ATree.NodeText(AIndex), LSB);
-        end;
+    // The text Dump prints beside the kind - one rule (NodeDisplayText), so
+    // `threadvar` / `var`, `read` / `write`, `virtual` / `override`,
+    // `procedure` / `constructor` serialize apart as they dump apart.
+    LText := ATree.NodeDisplayText(AIndex);
+    if LText <> '' then
+    begin
+      LSB.Append(',"text":');
+      JsonEscape(LText, LSB);
     end;
     // ANY node's negated mark, not just the text-bearing ones. On nkVisibility
     // it is what separates `strict private` from `private` - the S-expression

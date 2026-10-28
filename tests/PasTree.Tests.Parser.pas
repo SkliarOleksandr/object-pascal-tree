@@ -30,7 +30,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..145] of TPasCaseRow = (
+  STMT_CASES: array[0..146] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -303,6 +303,11 @@ const
      Expected: 'Block(ForStmt(Ident''I'' IntLit''1'' IntLit''10'' Assign(' +
        'Ident''Sum'' BinaryOp''+''(Ident''Sum'' Ident''I''))))';
      ExpectDiags: 0),
+    // Audit D1-48: `downto` is Aux 1, marked - `to` is not.
+    (Section: '5.5.1'; Name: 'for-downto';
+     Source: 'for I := 10 downto 1 do;';
+     Expected: 'Block(ForStmt#downto(Ident''I'' IntLit''10'' IntLit''1'' ' +
+       'EmptyStmt))'; ExpectDiags: 0),
     (Section: '5.5.1'; Name: 'inline counter';
      Source: 'for var J := 1 to 2 do;';
      Expected: 'Block(ForStmt(InlineVar(Ident''J''#name) IntLit''1'' ' +
@@ -871,7 +876,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..251] of TPasCaseRow = (
+  DECL_CASES: array[0..252] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1316,6 +1321,13 @@ const
      Expected: 'TypeSec(TypeDecl(Ident''TC'' ClassType(AttrGroup(' +
        'Attribute#weak(Ident''WeakAttribute'')) VarDecl(Ident''F''#name ' +
        'Ident''IInterface''))))';
+     ExpectDiags: 0),
+    // Audit D1-48: [Align(n)] is recognized (amaAlign) and the dump says so.
+    (Section: '19.3.3'; Name: '[Align(n)] on a field is marked';
+     Source: 'type TR = record [Align(8)] F: Integer; end;';
+     Expected: 'TypeSec(TypeDecl(Ident''TR'' RecordType(AttrGroup(' +
+       'Attribute#align(Ident''Align'' IntLit''8'')) VarDecl(Ident''F''#name ' +
+       'Ident''Integer''))))';
      ExpectDiags: 0),
 
     // ==== test-coverage plan step 3 batch 3 ====================

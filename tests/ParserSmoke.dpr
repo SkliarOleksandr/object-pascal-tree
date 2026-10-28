@@ -886,6 +886,47 @@ begin
               LDiags[0].Msg;
         end;
       end),
+    ChainCase('D1-47', 'the JSON tells head words apart as the dump does; ' +
+      'a package''s requires clause is marked',
+      function: TPasCheckResult
+      var
+        LA, LB, LDump: string;
+        LDiags: TArray<TPasParseDiag>;
+      begin
+        Result.Passed := False;
+        Result.Message := '';
+        try
+          LA := AstToJson(TPasParser.ParseFile(APP.ProcessText('j.pas', 'unit J;'#10'interface'#10'threadvar V: Integer;'#10 +
+            'resourcestring S = ''a'';'#10'type TC = class'#10 +
+            '  procedure P; virtual;'#10'  property X: Integer read FX;'#10 +
+            'end;'#10'implementation'#10'end.'#10), LDiags));
+          LB := AstToJson(TPasParser.ParseFile(APP.ProcessText('j.pas', 'unit J;'#10'interface'#10'var V: Integer;'#10 +
+            'const S = ''a'';'#10'type TC = class'#10 +
+            '  constructor P; override;'#10'  property X: Integer write FX;'#10 +
+            'end;'#10'implementation'#10'end.'#10), LDiags));
+          LDump := TPasParser.ParseFile(APP.ProcessText('k.dpk',
+            'package K;'#10'requires rtl;'#10'contains U;'#10'end.'#10),
+            LDiags).Dump(0);
+          Result.Passed := (Pos('"text":"threadvar"', LA) > 0) and
+            (Pos('"text":"var"', LB) > 0) and
+            (Pos('"text":"resourcestring"', LA) > 0) and
+            (Pos('"text":"const"', LB) > 0) and
+            (Pos('"text":"procedure"', LA) > 0) and
+            (Pos('"text":"constructor"', LB) > 0) and
+            (Pos('"text":"virtual"', LA) > 0) and
+            (Pos('"text":"override"', LB) > 0) and
+            (Pos('"text":"read"', LA) > 0) and
+            (Pos('"text":"write"', LB) > 0) and
+            (Pos('UsesClause#requires', LDump) > 0) and
+            (Pos('UsesClause(', LDump) > 0);
+          if not Result.Passed then
+            Result.Message := '  A: ' + LA + #10'  B: ' + LB + #10'  dump: ' +
+              LDump;
+        except
+          on E: Exception do
+            Result.Message := '  raised ' + E.ClassName + ': ' + E.Message;
+        end;
+      end),
     ChainCase('A1-01', 'a 50,000-term operator chain prints, dumps and ' +
       'serializes',
       function: TPasCheckResult

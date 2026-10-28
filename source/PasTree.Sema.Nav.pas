@@ -3775,13 +3775,11 @@ begin
       // the head word the root node kind gives (retained through demotion).
       LE := Default(TPasOutlineEntry);
       LE.Kind := okModule;
-      LE.Head := 'unit';
+      LE.Head := '';
       if Length(LM.Tree.Nodes) > 0 then
-        case LM.Tree.Nodes[0].Kind of
-          nkProgram: LE.Head := 'program';
-          nkLibrary: LE.Head := 'library';
-          nkPackage: LE.Head := 'package';
-        end;
+        LE.Head := PasModuleHeadWord(LM.Tree.Nodes[0].Kind);
+      if LE.Head = '' then
+        LE.Head := 'unit';
       LE.Name := LUnitName;
       LE.Node := 0;
       LE.FilePath := FProj.ModelFile(LMid);
@@ -3793,16 +3791,9 @@ begin
       // the declarations.
       for LSym := 0 to High(LM.Tree.Source.IncludeRefs) do
       begin
-        LE := Default(TPasOutlineEntry);
-        LE.Kind := okInclude;
-        LE.Head := 'include';
-        LE.Name := LM.Tree.Source.IncludeRefs[LSym].Arg;
-        if LM.Tree.Source.IncludeRefs[LSym].IncludedFileId < 0 then
-          LE.Detail := '(not found)';
-        LE.Node := LSym;
+        LE := PasIncludeEntry(LM.Tree.Source.IncludeRefs[LSym], LSym);
         LE.FilePath := FProj.ModelFile(LMid);
         LE.UnitId := LMid;
-        LE.Sym := -1;
         LE.UnitName := LUnitName;
         LList.Add(LE);
       end;

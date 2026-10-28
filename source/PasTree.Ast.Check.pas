@@ -1570,28 +1570,6 @@ var
     end;
   end;
 
-  // I5: the tokens of ANode's span that no child's span covers - its OWN
-  // tokens - get ANode as their owner. JudgeOwn walks them the same way.
-  procedure WalkOwn(ANode: Integer);
-  var
-    LKid, LCursor, LTok, LIdx: Integer;
-  begin
-    LCursor := LLo[ANode];
-    LKid := ATree.Nodes[ANode].FirstChild;
-    for LIdx := 1 to LKidCount[ANode] do
-    begin
-      if not LEmpty[LKid] then
-      begin
-        for LTok := LCursor to Min(LLo[LKid] - 1, LHi[ANode]) do
-          LOwner[LTok] := ANode;
-        if LHi[LKid] + 1 > LCursor then
-          LCursor := LHi[LKid] + 1;
-      end;
-      LKid := ATree.Nodes[LKid].NextSibling;
-    end;
-    for LTok := LCursor to LHi[ANode] do
-      LOwner[LTok] := ANode;
-  end;
 
   // csTypeRefReread: the reachable tree re-reads the orphan's tokens, from
   // the same first token through the operator after it.
@@ -1680,10 +1658,13 @@ var
     Result := APrimary;
   end;
 
-  // I5 for one node: every own token classified, counted and handed to
-  // AOwnProc; for a valid parse a token no rule covers, or a once / opt
-  // rule's count broken, is a violation.
-  procedure JudgeOwn(ANode: Integer);
+  // I5 for one node: the tokens of ANode's span that no child's span covers
+  // - its OWN tokens. Without AJudge each gets ANode as its owner; with it
+  // each is classified, counted and handed to AOwnProc, and for a valid
+  // parse a token no rule covers, or a once / opt rule's count broken, is a
+  // violation. One walk, so the owner map and the judged tokens cannot
+  // disagree on which tokens are own (audit D1-50).
+  procedure OwnTokens(ANode: Integer; AJudge: Boolean);
   const
     MAX_HITS = 16;
     SAYS: array[TPasOwnMult] of string = ('', 'once', 'at most once');
@@ -1733,7 +1714,15 @@ var
       end;
     end;
 
-    // Cold, as Report: its strings are this frame's, not JudgeOwn's.
+    procedure Visit(ATok: Integer);
+    begin
+      if AJudge then
+        One(ATok)
+      else
+        LOwner[ATok] := ANode;
+    end;
+
+    // Cold, as Report: its strings are this frame's, not OwnTokens'.
     procedure ReportMult(ARule, ACount: Integer);
     begin
       AReport.Add(ccOwn, ANode, Site(ANode), Format(
@@ -1751,15 +1740,15 @@ var
       if not LEmpty[LKid] then
       begin
         for LTok := LCursor to Min(LLo[LKid] - 1, LHi[ANode]) do
-          One(LTok);
+          Visit(LTok);
         if LHi[LKid] + 1 > LCursor then
           LCursor := LHi[LKid] + 1;
       end;
       LKid := ATree.Nodes[LKid].NextSibling;
     end;
     for LTok := LCursor to LHi[ANode] do
-      One(LTok);
-    if not AValid then
+      Visit(LTok);
+    if not AJudge or not AValid then
       Exit;
     for LRule in GOwnMult[Kind(ANode)] do
     begin
@@ -2368,10 +2357,10 @@ begin
           'the root ends at token %d of %d', [LHi[0], LLastVis]));
   end;
 
-  // I5: the owners, which the orphan shapes below also read.
+  // I5: the owners, which the orphan shapes below read (ReReadCovers).
   for LPos := 0 to LOrphanStart - 1 do
     if not LEmpty[LOrder[LPos]] then
-      WalkOwn(LOrder[LPos]);
+      OwnTokens(LOrder[LPos], False);
 
   // I3: what the unreachable subtrees are.
   LPos := LOrphanStart;
@@ -2387,15 +2376,17 @@ begin
     Inc(LPos, LSize);
   end;
 
-  // I5, judged: every own token against the own-token table - after the
-  // orphans, whose shapes two of its rules read.
+  // I5, judged: every own token against the own-token table. Nothing here
+  // reads the orphans' shapes or the owner map; it runs after them so the
+  // report keeps its order (orphan violations first), which decides what
+  // AMaxKept keeps.
   if AValid and (GOwnErrors <> '') then
     AReport.Add(ccOwn, NIL_NODE, -1, 'the own-token table is invalid: ' +
       GOwnErrors.Split([sLineBreak])[0]);
   if AValid or Assigned(AOwnProc) then
     for LPos := 0 to LOrphanStart - 1 do
       if not LEmpty[LOrder[LPos]] then
-        JudgeOwn(LOrder[LPos]);
+        OwnTokens(LOrder[LPos], True);
 
   // I6 and I8 over every walked node.
   for LPos := 0 to LOrderCount - 1 do

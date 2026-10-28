@@ -39,6 +39,11 @@ const
   // [Align(n)] - dcc-recognized field alignment (the RTL uses it in
   // System.Classes and System.Threading); System declares AlignAttribute.
   amaAlign = 5;
+  // Each recognized attribute's name, lower case, `Attribute` suffix
+  // stripped: what PasAttrMagicAux matches and the marker Dump prints. One
+  // table, so an attribute added here reaches both (audit D1-48).
+  AMA_NAMES: array[amaRef..amaAlign] of string =
+    ('ref', 'volatile', 'weak', 'unsafe', 'align');
 
   // The operator and operand sets of the expression grammar (4.2.1, B.9),
   // as the parser reads them; the tree checker reads the same constants
@@ -310,6 +315,11 @@ type
       copies of this walk existed (navigator, LSP, demo) - see the
       completion plan sec. 8A. }
     function NodeSpanText(AIndex: Integer): string;
+    { NodeSpanText with where the text starts: AStart0 is the 0-based offset
+      of its first character in file AFileId's source (-1 and '' when there
+      is no span). For a caller that maps the text back to tokens. }
+    function NodeSpanRaw(AIndex: Integer; out AStart0, AFileId: Integer):
+      string;
     { The declaration a node belongs to: its OUTERMOST declaration-shaped
       ancestor (nkRoutine, nkTypeDecl, nkConstDecl, nkVarDecl, ...), the climb
       stopping at containers - so a class member's root is the member, not the
@@ -426,6 +436,15 @@ type
     function Dump(AIndex: Integer): string;
     // One node of Dump without its children: Kind'text'#flags.
     function DumpHead(AIndex: Integer): string;
+    { The text a node prints beside its kind, '' for none: a leaf's literal
+      text (an identifier, a literal, a caret character), an operator's
+      spelling, or the lower-cased head word of a node it alone tells apart
+      - `threadvar` / `var`, `resourcestring` / `const`, a property
+      specifier, `initialization` / a legacy `begin`, a directive, a
+      childless constraint, `procedure` / `function` / `constructor` /
+      `destructor` / `operator`. Dump's 'text' and AstToJson's "text" both
+      read it, so a kind added here reaches both (audit D1-47). }
+    function NodeDisplayText(AIndex: Integer): string;
   end;
 
   { Arena builder used by the parser. }
@@ -463,6 +482,12 @@ type
     not a TPasTree method: the parser calls it before any node/tree exists
     yet (ParseAttrGroups, right after reading the identifier). }
   function PasAttrMagicAux(const ANameLower: string): Integer;
+
+  { True when ANode is a forward declaration of a struct type - `class;`
+    (nkClassType Aux 1) or `interface;` / `dispinterface;` (nkInterfaceType
+    Aux bit 2): the head word alone, no body. The printer, its T3 pass and
+    Dump read the Aux convention through this one test (audit D1-52). }
+  function PasIsForwardStruct(const ATree: TPasTree; ANode: Integer): Boolean;
 
   { The two forms of an nkAttribute (19.3.2, F32): a NAME - the first child
     an nkIdent, nkMember or nkTypeArgs, the arguments after it - or ONE
@@ -534,20 +559,25 @@ uses
   System.SysUtils,
   System.TypInfo;
 
-function PasAttrMagicAux(const ANameLower: string): Integer;
+function PasIsForwardStruct(const ATree: TPasTree; ANode: Integer): Boolean;
 begin
-  if (ANameLower = 'ref') or (ANameLower = 'refattribute') then
-    Result := amaRef
-  else if (ANameLower = 'volatile') or (ANameLower = 'volatileattribute') then
-    Result := amaVolatile
-  else if (ANameLower = 'weak') or (ANameLower = 'weakattribute') then
-    Result := amaWeak
-  else if (ANameLower = 'unsafe') or (ANameLower = 'unsafeattribute') then
-    Result := amaUnsafe
-  else if (ANameLower = 'align') or (ANameLower = 'alignattribute') then
-    Result := amaAlign
+  case ATree.Nodes[ANode].Kind of
+    nkClassType: Result := ATree.Nodes[ANode].Aux = 1;
+    nkInterfaceType: Result := ATree.Nodes[ANode].Aux and 2 <> 0;
   else
-    Result := amaNone;
+    Result := False;
+  end;
+end;
+
+function PasAttrMagicAux(const ANameLower: string): Integer;
+var
+  LAma: Integer;
+begin
+  for LAma := Low(AMA_NAMES) to High(AMA_NAMES) do
+    if (ANameLower = AMA_NAMES[LAma]) or
+       (ANameLower = AMA_NAMES[LAma] + 'attribute') then
+      Exit(LAma);
+  Result := amaNone;
 end;
 
 function PasAttrIsName(const ATree: TPasTree; AAttr: Integer): Boolean;
@@ -913,10 +943,20 @@ end;
 
 function TPasTree.NodeSpanText(AIndex: Integer): string;
 var
+  LStart0, LFileId: Integer;
+begin
+  Result := NodeSpanRaw(AIndex, LStart0, LFileId);
+end;
+
+function TPasTree.NodeSpanRaw(AIndex: Integer; out AStart0, AFileId: Integer):
+  string;
+var
   LFirst, LLast: Integer;
   LFrom, LTo: TPasVisibleToken;
 begin
   Result := '';
+  AStart0 := -1;
+  AFileId := -1;
   if (AIndex < 0) or (AIndex > High(Nodes)) then
     Exit;
   LFirst := NodeLeftmostVis(AIndex);
@@ -927,9 +967,12 @@ begin
   LTo := Source.Visible[LLast];
   if LFrom.FileId <> LTo.FileId then
     Exit;
+  AFileId := LFrom.FileId;
   with Source.Files[LFrom.FileId] do
-    Result := Copy(Source, Tokens[LFrom.TokenIndex].Start + 1,
-      Tokens[LTo.TokenIndex].EndPos - Tokens[LFrom.TokenIndex].Start);
+  begin
+    AStart0 := Tokens[LFrom.TokenIndex].Start;
+    Result := Copy(Source, AStart0 + 1, Tokens[LTo.TokenIndex].EndPos - AStart0);
+  end;
 end;
 
 function TPasTree.DeclRootOf(AIndex: Integer): Integer;
@@ -1214,38 +1257,60 @@ begin
   end;
 end;
 
+function TPasTree.NodeDisplayText(AIndex: Integer): string;
+begin
+  Result := '';
+  case Nodes[AIndex].Kind of
+    nkIdent, nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
+      Result := NodeText(AIndex);
+    nkUnaryOp, nkBinaryOp:
+      // The upper bound matters as much as the lower one: on a DEMOTED model
+      // Visible is nil, so any Aux at all indexes a nil array.
+      if (Nodes[AIndex].Aux >= 0) and
+         (Nodes[AIndex].Aux <= High(Source.Visible)) then
+        Result := LowerCase(Source.VisibleText(Nodes[AIndex].Aux));
+    // Nodes whose HEAD WORD is the whole distinction: `threadvar` from `var`,
+    // `resourcestring` from `const`, which directive, which property
+    // specifier. All of them are one token at FirstToken, and without it a
+    // declaration dump cannot tell those pairs apart.
+    nkVarSec:
+      // A `class var` run has no head word of its own (the struct-body parser
+      // has already eaten both keywords, so FirstToken is the first NAME);
+      // Aux marks it instead (Dump's #class).
+      if Nodes[AIndex].Aux <> 1 then
+        Result := LowerCase(NodeText(AIndex));
+    // nkInitSec: `initialization` or a unit's legacy `begin` (F30).
+    // nkRoutine: procedure / function / constructor / destructor / operator;
+    // whether `class` preceded it is Aux (that keyword is not in the node's
+    // own token span - the struct-body parser eats it).
+    nkConstSec, nkPropSpec, nkInitSec, nkDirective, nkRoutine:
+      Result := LowerCase(NodeText(AIndex));
+    // 16.4.1: a `class`/`record`/`constructor` constraint is a bare
+    // keyword with no child of its own (ParseGenericParamsOpt just
+    // Nexts past it); a SPECIFIC-type constraint (`T: IInterface`) adopts
+    // the type ref as a child instead, so printing the head word there
+    // too would just repeat the child's own Ident text.
+    nkConstraint:
+      if Nodes[AIndex].FirstChild = NIL_NODE then
+        Result := LowerCase(NodeText(AIndex));
+  end;
+end;
+
 function TPasTree.DumpHead(AIndex: Integer): string;
 var
   LText: string;
 begin
   Result := KindName(Nodes[AIndex].Kind);
+  LText := NodeDisplayText(AIndex);
+  if LText <> '' then
+    Result := Result + '''' + LText + '''';
   case Nodes[AIndex].Kind of
-    nkIdent, nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
-      Result := Result + '''' + NodeText(AIndex) + '''';
     nkUnaryOp, nkBinaryOp:
-      // The upper bound matters as much as the lower one: on a DEMOTED model
-      // Visible is nil, so any Aux at all indexes a nil array (the position
-      // emission a few lines up already guards both ends).
-      if (Nodes[AIndex].Aux >= 0) and
-         (Nodes[AIndex].Aux <= High(Source.Visible)) then
-      begin
-        LText := Source.VisibleText(Nodes[AIndex].Aux);
-        Result := Result + '''' + LowerCase(LText) + '''';
-        if nfNegated in Nodes[AIndex].Flags then
-          Result := Result + '!';
-      end;
-    // Nodes whose HEAD WORD is the whole distinction: `threadvar` from `var`,
-    // `resourcestring` from `const`, which visibility, which directive, which
-    // property specifier. All of them are one token at FirstToken, and without
-    // it a declaration dump cannot tell those pairs apart.
+      if (LText <> '') and (nfNegated in Nodes[AIndex].Flags) then
+        Result := Result + '!';
     nkVarSec:
-      // A `class var` run has no head word of its own (the struct-body parser
-      // has already eaten both keywords, so FirstToken is the first NAME);
-      // Aux marks it instead.
       if Nodes[AIndex].Aux = 1 then
-        Result := Result + '#class'
-      else
-        Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
+        Result := Result + '#class';
     nkVisibility:
       begin
         // The LEVEL is in Aux, not at FirstToken: `strict private` starts on
@@ -1264,23 +1329,9 @@ begin
         if nfNegated in Nodes[AIndex].Flags then
           Result := Result + '#strict';
       end;
-    // nkInitSec: `initialization` or a unit's legacy `begin` (F30).
-    nkConstSec, nkPropSpec, nkInitSec:
-      Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
     nkDirective:
-      begin
-        Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
-        if Nodes[AIndex].Aux = 1 then
-          Result := Result + '#semi';
-      end;
-    // 16.4.1: a `class`/`record`/`constructor` constraint is a bare
-    // keyword with no child of its own (ParseGenericParamsOpt just
-    // Nexts past it); a SPECIFIC-type constraint (`T: IInterface`) adopts
-    // the type ref as a child instead, so printing the head word there
-    // too would just repeat the child's own Ident text.
-    nkConstraint:
-      if Nodes[AIndex].FirstChild = NIL_NODE then
-        Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#semi';
     // Nodes whose distinction is a flag in Aux (see the kind comments): a
     // marker reads better in an expected string than a number would.
     nkTypeDecl:
@@ -1290,11 +1341,11 @@ begin
       begin
         if Nodes[AIndex].Aux and 1 <> 0 then
           Result := Result + '#disp';
-        if Nodes[AIndex].Aux and 2 <> 0 then
+        if PasIsForwardStruct(Self, AIndex) then
           Result := Result + '#forward';
       end;
     nkClassType:
-      if Nodes[AIndex].Aux = 1 then
+      if PasIsForwardStruct(Self, AIndex) then
         Result := Result + '#forward';
     nkClassOf:
       if Nodes[AIndex].Aux = 1 then
@@ -1310,15 +1361,11 @@ begin
         1: Result := Result + '#ofobject';
         2: Result := Result + '#reference';
       end;
-    // A routine needs BOTH: the head word says procedure/function/constructor/
-    // destructor/operator, Aux says whether `class` preceded it (that keyword
-    // is not in the node's own token span - the struct-body parser eats it).
+    // A routine needs BOTH: the head word (NodeDisplayText) and whether
+    // `class` preceded it.
     nkRoutine:
-      begin
-        Result := Result + '''' + LowerCase(NodeText(AIndex)) + '''';
-        if Nodes[AIndex].Aux = 1 then
-          Result := Result + '#class';
-      end;
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#class';
     nkPropertyDecl:
       if Nodes[AIndex].Aux = 1 then
         Result := Result + '#class';
@@ -1331,12 +1378,17 @@ begin
     // 19.3.3: which compiler-recognized attribute this is, if any -- see
     // the ama* constants and PasAttrMagicAux.
     nkAttribute:
-      case Nodes[AIndex].Aux of
-        amaRef: Result := Result + '#ref';
-        amaVolatile: Result := Result + '#volatile';
-        amaWeak: Result := Result + '#weak';
-        amaUnsafe: Result := Result + '#unsafe';
-      end;
+      if (Nodes[AIndex].Aux >= Low(AMA_NAMES)) and
+         (Nodes[AIndex].Aux <= High(AMA_NAMES)) then
+        Result := Result + '#' + AMA_NAMES[Nodes[AIndex].Aux];
+    // `downto` (17.2.4), a package's `requires` clause (2.4.1): Aux 1 on a
+    // node whose own tokens a golden dump does not otherwise show.
+    nkForStmt:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#downto';
+    nkUsesClause:
+      if Nodes[AIndex].Aux = 1 then
+        Result := Result + '#requires';
   end;
   // Printed on whatever node carries it, not only on an nkIdent: a flag
   // where it does not belong must show in the dump, not hide.

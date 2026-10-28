@@ -120,6 +120,20 @@ type
 { The module's outline, in source order. Empty for a tree with no nodes. }
 function PasModuleOutline(const ATree: TPasTree): TArray<TPasOutlineEntry>;
 
+{ The head word of a module root of kind AKind - 'unit', 'program',
+  'library', 'package' - and '' for any other kind. The module outline's
+  header row and the project outline's (TPasNavigator.ProjectOutline) both
+  take it from here (audit D1-55). }
+function PasModuleHeadWord(AKind: TPasNodeKind): string;
+
+{ The position-free fields of include directive AIdx's row (ARef): kind,
+  head word, the argument as its name, '(not found)' for an include that did
+  not load, AIdx as its Node, no unit or symbol. The caller adds the file,
+  line and column - or, the project outline, leaves them to be found on
+  demand. }
+function PasIncludeEntry(const ARef: TPasIncludeRef;
+  AIdx: Integer): TPasOutlineEntry;
+
 { The identifier runs of AText from AFrom (1-based) on, as spans - for a
   detail whose every identifier IS a type name (a resolved type's text:
   `TList<TItem>`, `TArray<string>`). }
@@ -142,6 +156,7 @@ type
     function Kind(ANode: Integer): TPasNodeKind; inline;
     function FirstChild(ANode: Integer): Integer; inline;
     function NextSib(ANode: Integer): Integer; inline;
+    function SkipAttrs(AChild: Integer): Integer;
     // Part of a declared name (nfName): a name of a var or parameter list,
     // a segment of a routine's name - never its type.
     function IsName(ANode: Integer): Boolean; inline;
@@ -174,17 +189,25 @@ type
 
 // Whitespace runs (a declaration wrapped over lines) become one space, and
 // anything past DETAIL_MAX is cut - the detail column is a hint, not the
-// declaration.
-function Collapse(const AText: string): string;
+// declaration. With AMapped, AMap[I] is where raw character I (1-based)
+// landed in the result, 0 for one folded away; AKept is how many characters
+// of the collapsed text survive the cut.
+function CollapseMapped(const AText: string; AMapped: Boolean;
+  var AMap: TArray<Integer>; out AKept: Integer): string;
 var
   LIdx: Integer;
   LInSpace: Boolean;
   LBuf: TStringBuilder;
 begin
+  if AMapped then
+    SetLength(AMap, Length(AText) + 1);
   LBuf := TStringBuilder.Create(Length(AText));
   try
     LInSpace := False;
     for LIdx := 1 to Length(AText) do
+    begin
+      if AMapped then
+        AMap[LIdx] := 0;
       if AText[LIdx] <= ' ' then
       begin
         if not LInSpace and (LBuf.Length > 0) then
@@ -194,14 +217,56 @@ begin
       else
       begin
         LBuf.Append(AText[LIdx]);
+        if AMapped then
+          AMap[LIdx] := LBuf.Length;
         LInSpace := False;
       end;
+    end;
     Result := LBuf.ToString.TrimRight;
   finally
     LBuf.Free;
   end;
+  AKept := Length(Result);
   if Length(Result) > DETAIL_MAX then
-    Result := Copy(Result, 1, DETAIL_MAX - 3) + '...';
+  begin
+    AKept := DETAIL_MAX - 3;
+    Result := Copy(Result, 1, AKept) + '...';
+  end;
+end;
+
+function Collapse(const AText: string): string;
+var
+  LMap: TArray<Integer>;
+  LKept: Integer;
+begin
+  Result := CollapseMapped(AText, False, LMap, LKept);
+end;
+
+function PasModuleHeadWord(AKind: TPasNodeKind): string;
+begin
+  case AKind of
+    nkUnit: Result := 'unit';
+    nkProgram: Result := 'program';
+    nkLibrary: Result := 'library';
+    nkPackage: Result := 'package';
+  else
+    Result := '';
+  end;
+end;
+
+function PasIncludeEntry(const ARef: TPasIncludeRef;
+  AIdx: Integer): TPasOutlineEntry;
+begin
+  Result := Default(TPasOutlineEntry);
+  Result.Kind := okInclude;
+  Result.Head := 'include';
+  Result.Name := ARef.Arg;
+  if ARef.IncludedFileId < 0 then
+    Result.Detail := '(not found)';
+  Result.Section := osNone;
+  Result.Node := AIdx;
+  Result.UnitId := -1;
+  Result.Sym := -1;
 end;
 
 function PasModuleOutline(const ATree: TPasTree): TArray<TPasOutlineEntry>;
@@ -266,6 +331,14 @@ begin
   LPrev := FTree.NodeLeftmostVis(ANode) - 1;
   if (LPrev >= 0) and (LPrev <= High(FTree.Source.Visible)) then
     Result := FTree.Source.VisibleToken(LPrev).Kind;
+end;
+
+// AChild, or the first sibling after it that is not an attribute group.
+function TOutlineWalker.SkipAttrs(AChild: Integer): Integer;
+begin
+  Result := AChild;
+  while (Result <> NIL_NODE) and (Kind(Result) = nkAttrGroup) do
+    Result := NextSib(Result);
 end;
 
 function TOutlineWalker.SpanText(ANode: Integer): string;
@@ -385,9 +458,9 @@ begin
   end;
 end;
 
-{ SpanText with its type names located: the same collapse as Collapse, done
-  character by character here so every kept character knows where it landed,
-  then each marked identifier's token is mapped through. Spans are 1-based
+{ SpanText with its type names located: CollapseMapped, so every kept
+  character knows where it landed, then each marked identifier's token is
+  mapped through. Spans are 1-based
   into the FINAL detail, ABase characters of prefix included (`: `, `= `,
   or the parameter list a result type follows), and a token the DETAIL_MAX
   cut removed or split is dropped. The two texts are identical by
@@ -395,12 +468,10 @@ end;
 function TOutlineWalker.TypedSpanText(ANode: Integer; ARootIsType: Boolean;
   ABase: Integer; var ATypes: TArray<TPasTextSpan>): string;
 var
-  LFirst, LLast, LStart0, LIdx, LKept, LRel, LVis, LTokIdx: Integer;
-  LFrom, LTo, LV: TPasVisibleToken;
+  LStart0, LFileId, LIdx, LKept, LRel, LVis, LTokIdx: Integer;
+  LV: TPasVisibleToken;
   LRaw: string;
   LMap: TArray<Integer>;   // raw 1-based index -> collapsed 1-based, 0 = gone
-  LBuf: TStringBuilder;
-  LInSpace: Boolean;
   LIdents: TArray<Integer>;
   LSpan: TPasTextSpan;
   LTok: TPasToken;
@@ -408,61 +479,21 @@ begin
   Result := '';
   if ANode = NIL_NODE then
     Exit;
-  LFirst := FTree.NodeLeftmostVis(ANode);
-  LLast := FTree.Nodes[ANode].LastToken;
-  if (LFirst < 0) or (LLast < LFirst) or
-     (LLast > High(FTree.Source.Visible)) then
+  LRaw := FTree.NodeSpanRaw(ANode, LStart0, LFileId);
+  if LFileId < 0 then
     Exit;
-  LFrom := FTree.Source.Visible[LFirst];
-  LTo := FTree.Source.Visible[LLast];
-  if LFrom.FileId <> LTo.FileId then
-    Exit;
-  with FTree.Source.Files[LFrom.FileId] do
-  begin
-    LStart0 := Tokens[LFrom.TokenIndex].Start;
-    LRaw := Copy(Source, LStart0 + 1, Tokens[LTo.TokenIndex].EndPos - LStart0);
-  end;
-
-  SetLength(LMap, Length(LRaw) + 1);
-  LBuf := TStringBuilder.Create(Length(LRaw));
-  try
-    LInSpace := False;
-    for LIdx := 1 to Length(LRaw) do
-    begin
-      LMap[LIdx] := 0;
-      if LRaw[LIdx] <= ' ' then
-      begin
-        if not LInSpace and (LBuf.Length > 0) then
-          LBuf.Append(' ');
-        LInSpace := True;
-      end
-      else
-      begin
-        LBuf.Append(LRaw[LIdx]);
-        LMap[LIdx] := LBuf.Length;
-        LInSpace := False;
-      end;
-    end;
-    Result := LBuf.ToString.TrimRight;
-  finally
-    LBuf.Free;
-  end;
-  LKept := Length(Result);
-  if Length(Result) > DETAIL_MAX then
-  begin
-    LKept := DETAIL_MAX - 3;
-    Result := Copy(Result, 1, LKept) + '...';
-  end;
+  Result := CollapseMapped(LRaw, True, LMap, LKept);
 
   LIdents := nil;
   MarkTypes(ANode, ARootIsType, LIdents);
   for LIdx := 0 to High(LIdents) do
   begin
     LVis := FTree.Nodes[LIdents[LIdx]].FirstToken;
-    if (LVis < LFirst) or (LVis > LLast) then
+    if (LVis < FTree.NodeLeftmostVis(ANode)) or
+       (LVis > FTree.Nodes[ANode].LastToken) then
       Continue;
     LV := FTree.Source.Visible[LVis];
-    if LV.FileId <> LFrom.FileId then
+    if LV.FileId <> LFileId then
       Continue;
     LTokIdx := LV.TokenIndex;
     LTok := FTree.Source.Files[LV.FileId].Tokens[LTokIdx];
@@ -587,16 +618,7 @@ begin
        (LRefs[LIdx].FileId > High(FTree.Source.Files)) then
       Continue;
     LTS := FTree.Source.Files[LRefs[LIdx].FileId];
-    LEntry := Default(TPasOutlineEntry);
-    LEntry.Kind := okInclude;
-    LEntry.Head := 'include';
-    LEntry.Name := LRefs[LIdx].Arg;
-    if LRefs[LIdx].IncludedFileId < 0 then
-      LEntry.Detail := '(not found)';
-    LEntry.Section := osNone;
-    LEntry.Node := LIdx;
-    LEntry.UnitId := -1;
-    LEntry.Sym := -1;
+    LEntry := PasIncludeEntry(LRefs[LIdx], LIdx);
     LEntry.FilePath := FTree.Source.FileNames[LRefs[LIdx].FileId];
     LTS.OffsetToLineCol(LRefs[LIdx].Start, LEntry.Line, LEntry.Col);
     // Refs come in processing order, so the insertion point only moves on.
@@ -620,19 +642,12 @@ var
   LHead: string;
 begin
   LRoot := 0;
-  case Kind(LRoot) of
-    nkUnit: LHead := 'unit';
-    nkProgram: LHead := 'program';
-    nkLibrary: LHead := 'library';
-    nkPackage: LHead := 'package';
-  else
+  LHead := PasModuleHeadWord(Kind(LRoot));
+  if LHead = '' then
     Exit;   // not a module root (a statement/declaration test parse)
-  end;
   // The header: name = the qualified-name child (nkIdent or an nkMember
   // chain), which is the first child that is not an attribute.
-  LName := FirstChild(LRoot);
-  while (LName <> NIL_NODE) and (Kind(LName) = nkAttrGroup) do
-    LName := NextSib(LName);
+  LName := SkipAttrs(FirstChild(LRoot));
   if (LName <> NIL_NODE) and (Kind(LName) in [nkIdent, nkMember]) then
     Emit(okModule, LHead, '', SpanText(LName), '', False, LRoot, LName)
   else
@@ -787,9 +802,7 @@ var
   LDetail: string;
   LTypes: TArray<TPasTextSpan>;
 begin
-  LChild := FirstChild(ANode);
-  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
-    LChild := NextSib(LChild);
+  LChild := SkipAttrs(FirstChild(ANode));
   if (LChild <> NIL_NODE) and (Kind(LChild) = nkIdent) and
      (TokenKindAfter(LChild) = tkColon) then
   begin
@@ -831,9 +844,7 @@ var
 begin
   LTypes := nil;
   // [attrs] name [generic params] TypeExpr
-  LChild := FirstChild(ANode);
-  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
-    LChild := NextSib(LChild);
+  LChild := SkipAttrs(FirstChild(ANode));
   if (LChild = NIL_NODE) or (Kind(LChild) <> nkIdent) then
     Exit;
   LName := LChild;
@@ -896,9 +907,7 @@ var
   LIdx: Integer;
   LTypes: TArray<TPasTextSpan>;
 begin
-  LChild := FirstChild(ANode);
-  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
-    LChild := NextSib(LChild);
+  LChild := SkipAttrs(FirstChild(ANode));
   LNames := nil;
   LType := NIL_NODE;
   while (LChild <> NIL_NODE) and IsName(LChild) do
@@ -930,9 +939,7 @@ var
   LDetail: string;
   LTypes: TArray<TPasTextSpan>;
 begin
-  LName := FirstChild(ANode);
-  while (LName <> NIL_NODE) and (Kind(LName) = nkAttrGroup) do
-    LName := NextSib(LName);
+  LName := SkipAttrs(FirstChild(ANode));
   if (LName = NIL_NODE) or (Kind(LName) <> nkIdent) then
     Exit;
   LNext := NextSib(LName);
@@ -1057,9 +1064,7 @@ begin
   LHead := 'property';
   if FTree.Nodes[ANode].Aux = 1 then
     LHead := 'class property';
-  LChild := FirstChild(ANode);
-  while (LChild <> NIL_NODE) and (Kind(LChild) = nkAttrGroup) do
-    LChild := NextSib(LChild);
+  LChild := SkipAttrs(FirstChild(ANode));
   if (LChild = NIL_NODE) or (Kind(LChild) <> nkIdent) then
     Exit;
   LName := LChild;
