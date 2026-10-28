@@ -740,6 +740,9 @@ type
     procedure NoteLoadFailure(const AFull, AClass, AMsg: string);
     function LoadFailureOf(const AFull: string): string;
     function LoadFile(const APath: string): Integer;
+    { LoadFile of a full path and its key (LowerCase), as
+      TPasSourceManager.ResolveUnit answers them. }
+    function LoadKeyed(const AFull, AKey: string): Integer;
     procedure LoadFilesParallel(const APaths: TArray<string>);
     // Continuous closure loader - see the implementation. Returns False when
     // the run was cancelled part-way (committed models stay published).
@@ -3437,11 +3440,19 @@ end;
 
 function TPasSemaProject.LoadFile(const APath: string): Integer;
 var
+  LFull: string;
+begin
+  LFull := TPath.GetFullPath(APath);
+  Result := LoadKeyed(LFull, LowerCase(LFull));
+end;
+
+function TPasSemaProject.LoadKeyed(const AFull, AKey: string): Integer;
+var
   LFull, LKey: string;
   LModel: TPasSemaModel;
 begin
-  LFull := TPath.GetFullPath(APath);
-  LKey := LowerCase(LFull);
+  LFull := AFull;
+  LKey := AKey;
   if FByPath.TryGetValue(LKey, Result) then
     Exit;   // includes the -1 negative-cache sentinel for known-bad files
   // A never-saved unit is a buffer with no file - see SourceExists.
@@ -6316,7 +6327,7 @@ end;
 procedure TPasSemaProject.RelinkNotLoaded;
 var
   LM: TPasSemaModel;
-  LPath: string;
+  LPath, LKey: string;
   LMid, LU, LUid: Integer;
 begin
   for LMid := 0 to FModels.Count - 1 do
@@ -6327,8 +6338,8 @@ begin
     for LU := 0 to High(LM.UsesList) do
       if (LM.UsesList[LU].UnitId = UNIT_NOT_LOADED) and
          FSM.ResolveUnit(LM.UsesList[LU].NameFull, LM.UsesList[LU].InPath,
-           FFiles[LMid], LPath) and
-         FByPath.TryGetValue(LowerCase(TPath.GetFullPath(LPath)), LUid) and
+           FFiles[LMid], LPath, LKey) and
+         FByPath.TryGetValue(LKey, LUid) and
          (LUid >= 0) then
       begin
         LM.UsesList[LU].UnitId := LUid;
@@ -6509,7 +6520,7 @@ var
   LDone: TArray<TPasSemaModel>;
   LIdx, LU, LLoaded, LStartCount: Integer;
   LPaths: TArray<string>;
-  LPath: string;
+  LPath, LKey: string;
   LIter, LSiteOff: Integer;
   LNext: TArray<Integer>;
   LSymLogs: TArray<TArray<TPasOwnSymAnswer>>;
@@ -6597,7 +6608,7 @@ begin
         for LU := 0 to High(FModels[LCand[LIdx]].UsesList) do
           if FSM.ResolveUnit(FModels[LCand[LIdx]].UsesList[LU].NameFull,
                FModels[LCand[LIdx]].UsesList[LU].InPath, FFiles[LCand[LIdx]],
-               LPath) and not FByPath.ContainsKey(LowerCase(LPath)) and
+               LPath, LKey) and not FByPath.ContainsKey(LKey) and
              FollowsUse(FModels[LCand[LIdx]], LU, LPath) then
             LPaths := LPaths + [LPath];
     LLoaded := FModels.Count;
@@ -7278,15 +7289,13 @@ var
   LHaveItem, LHaveRes: Boolean;
   LStatus: TPasModuleStatus;
 
-  procedure EnqueueLoad(const APath: string);
+  // A full path and its key, as ResolveUnit answers them, through the
+  // dedup gate LoadFilesParallel runs per batch.
+  procedure EnqueueKeyed(const LFull, LKey: string);
   var
-    LFull, LKey: string;
     LDummy: Integer;
     LNew: TPasLoadItem;
   begin
-    // Same normalize/dedup gate LoadFilesParallel ran per batch.
-    LFull := TPath.GetFullPath(APath);
-    LKey := LowerCase(LFull);
     if FByPath.TryGetValue(LKey, LDummy) or LSeen.ContainsKey(LKey) then
       Exit;
     if not FSM.SourceExists(LFull) then
@@ -7304,6 +7313,15 @@ var
       TMonitor.Exit(LQueue);
     end;
     LWorkEvt.SetEvent;
+  end;
+
+  // A seed, as the host gave it.
+  procedure EnqueueLoad(const APath: string);
+  var
+    LFull: string;
+  begin
+    LFull := TPath.GetFullPath(APath);
+    EnqueueKeyed(LFull, LowerCase(LFull));
   end;
 
   procedure EnqueueUpgrade(AMid: Integer);
@@ -7327,13 +7345,13 @@ var
   procedure DiscoverFrom(AMid: Integer);
   var
     LU: Integer;
-    LPath: string;
+    LPath, LKey: string;
   begin
     for LU := 0 to High(FModels[AMid].UsesList) do
       if FSM.ResolveUnit(FModels[AMid].UsesList[LU].NameFull,
-        FModels[AMid].UsesList[LU].InPath, FFiles[AMid], LPath) and
+        FModels[AMid].UsesList[LU].InPath, FFiles[AMid], LPath, LKey) and
          FollowsUse(FModels[AMid], LU, LPath) then
-        EnqueueLoad(LPath);
+        EnqueueKeyed(LPath, LKey);
   end;
 
 begin
@@ -7607,7 +7625,7 @@ end;
 procedure TPasSemaProject.ResolveUses(AId: Integer);
 var
   LModel: TPasSemaModel;
-  LPath: string;
+  LPath, LKey: string;
   LUid, LIdx: Integer;
 begin
   LModel := FModels[AId];
@@ -7623,15 +7641,15 @@ begin
   begin
     LPath := '';
     if FSM.ResolveUnit(LModel.UsesList[LIdx].NameFull,
-      LModel.UsesList[LIdx].InPath, FFiles[AId], LPath) then
+      LModel.UsesList[LIdx].InPath, FFiles[AId], LPath, LKey) then
     begin
       // A light unit's implementation import that is light too and not
       // loaded stays so: resolved, on purpose not loaded.
       if not FollowsUse(LModel, LIdx, LPath) and
-         not FByPath.ContainsKey(LowerCase(TPath.GetFullPath(LPath))) then
+         not FByPath.ContainsKey(LKey) then
         LUid := UNIT_NOT_LOADED
       else
-        LUid := LoadFile(LPath);
+        LUid := LoadKeyed(LPath, LKey);
     end
     else
       // No file on any path - but the unit may ALREADY be loaded under this
@@ -21881,14 +21899,12 @@ begin
       // Unresolvable: the full path reports F1027 and carries on, and so does
       // ours - ResolveUses re-emits it on the new model. Not a newcomer.
       if not FSM.ResolveUnit(AModel.UsesList[LIdx].NameFull,
-        AModel.UsesList[LIdx].InPath, AFromFile, LPath) then
+        AModel.UsesList[LIdx].InPath, AFromFile, LPath, LKey) then
         Continue;
       // A light model's implementation import stays not loaded (the load
       // engine's rule): no import of it. A full model follows every entry.
       if not FollowsUse(AModel, LIdx, LPath) then
         Continue;
-      LPath := TPath.GetFullPath(LPath);
-      LKey := LowerCase(LPath);
       // Loaded, or tried and known bad: either way ResolveUses answers it as
       // a rebuild would. Until 0.53.0 the known-bad case refused too
       // (new-dependency), so every edit of a unit importing a file that
@@ -21967,11 +21983,9 @@ begin
       for LIdx := 0 to High(LWave) do
         for LU := 0 to High(LRes[LIdx].UsesList) do
           if FSM.ResolveUnit(LRes[LIdx].UsesList[LU].NameFull,
-               LRes[LIdx].UsesList[LU].InPath, LWave[LIdx], LPath) and
+               LRes[LIdx].UsesList[LU].InPath, LWave[LIdx], LPath, LKey) and
              FollowsUse(LRes[LIdx], LU, LPath) then
           begin
-            LPath := TPath.GetFullPath(LPath);
-            LKey := LowerCase(LPath);
             if not FByPath.ContainsKey(LKey) and not LSeen.ContainsKey(LKey) and
                FSM.SourceExists(LPath) then
             begin
@@ -22011,12 +22025,12 @@ var
   procedure AddEntryNames(AModel: TPasSemaModel; const AFrom: string);
   var
     LI: Integer;
-    LP: string;
+    LP, LK: string;
   begin
     for LI := 0 to High(AModel.UsesList) do
       if FSM.ResolveUnit(AModel.UsesList[LI].NameFull,
-           AModel.UsesList[LI].InPath, AFrom, LP) and
-         LNewPaths.ContainsKey(LowerCase(TPath.GetFullPath(LP))) then
+           AModel.UsesList[LI].InPath, AFrom, LP, LK) and
+         LNewPaths.ContainsKey(LK) then
         LNames.AddOrSetValue(PasFoldName(AModel.UsesList[LI].NameFull), True);
   end;
 
@@ -23152,7 +23166,7 @@ begin
   LEntry.UsedPaths := nil;
   for LName in LEntry.UsedNames do
     if FSM.ResolveUnit(LName, '', APath, LFull) and FSM.SourceExists(LFull) then
-      LEntry.UsedPaths := LEntry.UsedPaths + [TPath.GetFullPath(LFull)];
+      LEntry.UsedPaths := LEntry.UsedPaths + [LFull];
   LEntry.UsedResolved := True;
   FWordIdx[AKey] := LEntry;
 end;
@@ -23171,7 +23185,7 @@ begin
   Result := '';
   if FSM.ResolveUnit(LUse.NameFull, LUse.InPath, FFiles[AMid], LFull) and
      FSM.SourceExists(LFull) then
-    Result := TPath.GetFullPath(LFull);
+    Result := LFull;
   FNotLoadedPath.Add(LKey, Result);
 end;
 
@@ -24525,7 +24539,7 @@ var
   var
     LOldPaths: TDictionary<string, string>;
     LSeen: TDictionary<string, Boolean>;
-    LName, LOldPath, LPinned, LNewFile: string;
+    LName, LOldPath, LPinned, LPinnedKey, LNewFile: string;
     LUse: TPasUsesRef;
   begin
     Result := '';
@@ -24545,9 +24559,10 @@ var
         end
         else if (LUse.InPath <> '') and
                 FSM.ResolveInPath(LUse.InPath, LFull, LNewFile) and
-                FSM.ResolveUnit(LUse.NameFull, '', LFull, LPinned) and
-                not SameText(TPath.GetFullPath(LPinned), LNewFile) and
-                FByPath.ContainsKey(LowerCase(TPath.GetFullPath(LPinned))) then
+                FSM.ResolveUnit(LUse.NameFull, '', LFull, LPinned,
+                  LPinnedKey) and
+                not SameText(LPinned, LNewFile) and
+                FByPath.ContainsKey(LPinnedKey) then
           Exit(LUse.NameFull);
       end;
       for LUse in LOld.UsesList do
@@ -25392,9 +25407,8 @@ end;
 
 procedure TPasSemaProject.AnalyzeDirectory(const ARoot: string);
 var
-  LFile, LExt: string;
   LPaths: TArray<string>;
-  LN, LIdx, LPathCount: Integer;
+  LN, LIdx: Integer;
   LSW: TStopwatch;
 
   procedure Stage(const AName: string);
@@ -25409,22 +25423,8 @@ begin
   FStageTimings := '';
   LSW := TStopwatch.StartNew;
   try   // donor lifetime - see AnalyzeFile
-    FSM.BuildUnitIndex(ARoot);
-    LPaths := nil;
-    LPathCount := 0;
-    for LFile in TDirectory.GetFiles(ARoot, '*.*',
-      TSearchOption.soAllDirectories) do
-    begin
-      LExt := LowerCase(TPath.GetExtension(LFile));
-      if (LExt = '.pas') or (LExt = '.dpr') then
-      begin
-        if LPathCount = Length(LPaths) then
-          SetLength(LPaths, LPathCount * 2 + 16);
-        LPaths[LPathCount] := LFile;
-        Inc(LPathCount);
-      end;
-    end;
-    SetLength(LPaths, LPathCount);
+    // The unit index's own listing is the run's roots: one walk.
+    LPaths := FSM.BuildUnitIndex(ARoot);
     Stage('scan');
     // The directory's files are the run's roots - none of them is light.
     FLightRoots := LPaths;

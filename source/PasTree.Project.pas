@@ -124,22 +124,21 @@ function TPasProject.ParseDirectory(
   const ARoot: string): TArray<TPasFileResult>;
 var
   LAll, LFiles: TArray<string>;
-  LFile, LExt: string;
+  LFile: string;
   LCount: Integer;
 begin
-  FSourceManager.BuildIncludeIndex(ARoot);
-  LAll := TDirectory.GetFiles(ARoot, '*.*', TSearchOption.soAllDirectories);
+  // One walk for the sources and the include index.
+  LAll := TPasSourceManager.ListFiles(ARoot, True,
+    ['.pas', '.dpr', '.dpk', '.inc']);
+  FSourceManager.BuildIncludeIndex(LAll);
   SetLength(LFiles, Length(LAll));
   LCount := 0;
   for LFile in LAll do
-  begin
-    LExt := LowerCase(TPath.GetExtension(LFile));
-    if (LExt = '.pas') or (LExt = '.dpr') or (LExt = '.dpk') then
+    if not HasExt(LFile, '.inc') then
     begin
       LFiles[LCount] := LFile;
       Inc(LCount);
     end;
-  end;
   SetLength(LFiles, LCount);
   Result := ParseFiles(LFiles);
 end;

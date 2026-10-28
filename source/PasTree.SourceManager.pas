@@ -44,7 +44,8 @@ type
     TUnitMemo = record
       DirNames: TArray<string>;   // '<candidate>.pas', lower-cased
       Found: Boolean;
-      Path: string;
+      Path: string;      // full: every listing behind it is of a full path
+      PathKey: string;   // LowerCase(Path), the project's key for the file
       // Every candidate spelling probed, lower-cased, in probe order (alias
       // or as spelled, each unit scope prefix, the leaf), and the index of
       // the one whose file was found (-1: found by the unit index or a .dcu,
@@ -410,7 +411,11 @@ type
     { Indexes every *.inc under ARoot by basename as a last-resort include
       resolver (corpus runs without real project search paths). The first
       occurrence of an ambiguous name wins. }
-    procedure BuildIncludeIndex(const ARoot: string);
+    procedure BuildIncludeIndex(const ARoot: string); overload;
+    { The same index from the *.inc files of a listing the caller took
+      anyway (TPasProject.ParseDirectory: one walk for its sources and its
+      includes). }
+    procedure BuildIncludeIndex(const AFiles: TArray<string>); overload;
     { Resolves an include argument (possibly quoted) as dcc does: beside
       AUnitFile - the unit (or program) being compiled, whichever file names
       the include - then the project directory, then the search paths; then,
@@ -430,8 +435,16 @@ type
       the include index. For the tests. }
     property IncludeIndexRefreshes: Integer read FIncIndexRefreshes;
     { Indexes every *.pas/*.dpr under ARoot by basename, for unit-name
-      resolution when there are no real search paths (project-dir fallback). }
-    procedure BuildUnitIndex(const ARoot: string);
+      resolution when there are no real search paths (project-dir fallback).
+      Returns the files it listed, full paths in listing order - the
+      directory driver's roots, so it does not walk the tree again. }
+    function BuildUnitIndex(const ARoot: string): TArray<string>;
+    { The files under ARoot (below it too when ARecursive) whose extension is
+      one of AExts ('.pas', lower case, with the dot; none = every file), as
+      TDirectory lists them. Raises as TDirectory.GetFiles does - a caller
+      that tolerates an unreadable directory catches. }
+    class function ListFiles(const ARoot: string; ARecursive: Boolean;
+      const AExts: array of string): TArray<string>; static;
     { Resolves a unit name (e.g. 'System.SysUtils') to a file, in this
       order: a unit the project located (a pin: the program's in-path, the
       host's PinUnit) under the name as written; the explicit `in` path;
@@ -440,7 +453,13 @@ type
       search paths, the referring directory as a tolerance past dcc; the
       unit index; a .dcu. See BuildUnitMemo and spec 1.2.2. }
     function ResolveUnit(const AUnitName, AInPath, AFromFile: string;
-      out AResolved: string): Boolean;
+      out AResolved: string): Boolean; overload;
+    { The same answer - a full path, the search paths and index roots being
+      made full before they are listed - and its key, LowerCase(AResolved),
+      the one TPasSemaProject's path maps use: memoized with the unit's
+      resolution, so a caller does not canonicalize every answer again. }
+    function ResolveUnit(const AUnitName, AInPath, AFromFile: string;
+      out AResolved, AKey: string): Boolean; overload;
     { Every unit NAME a `uses` can reach by its file - the project
       directory's *.pas, then the search paths' (first one wins on a
       duplicate basename), each with its original spelling and no
@@ -488,6 +507,10 @@ type
   1.3.3). The name an F1026 for it quotes. }
 function PasIncludeFileName(const AArg: string): string;
 
+{ True when AName ends in AExt ('.pas': lower case, with the dot), the case
+  of AName's ASCII letters aside. }
+function HasExt(const AName, AExt: string): Boolean;
+
 implementation
 
 uses
@@ -525,12 +548,74 @@ begin
   Result := True;
 end;
 
+function PathTextUsable(const APath: string): Boolean; forward;
+
+// AFiles into ADict by folded file name, the first file of a name winning -
+// the rule of every index here (audit D2-36).
+procedure IndexByBaseName(const AFiles: TArray<string>;
+  ADict: TDictionary<string, string>);
+var
+  LFile: string;
+begin
+  for LFile in AFiles do
+    ADict.TryAdd(PasFoldName(TPath.GetFileName(LFile)), LFile);
+end;
+
 { TPasSourceManager }
 
+class function TPasSourceManager.ListFiles(const ARoot: string;
+  ARecursive: Boolean; const AExts: array of string): TArray<string>;
+var
+  LExts: TArray<string>;
+  LOption: TSearchOption;
+begin
+  // A copy: an open array cannot be captured by the predicate.
+  SetLength(LExts, Length(AExts));
+  for var LIdx := 0 to High(AExts) do
+    LExts[LIdx] := AExts[LIdx];
+  if ARecursive then
+    LOption := TSearchOption.soAllDirectories
+  else
+    LOption := TSearchOption.soTopDirectoryOnly;
+  // The predicate sees the name before TDirectory builds the full path, and
+  // HasExt tests it without the string GetExtension allocates.
+  Result := TDirectory.GetFiles(ARoot, LOption,
+    function(const APath: string; const ASearchRec: TSearchRec): Boolean
+    var
+      LExt: string;
+    begin
+      if LExts = nil then
+        Exit(True);
+      for LExt in LExts do
+        if HasExt(ASearchRec.Name, LExt) then
+          Exit(True);
+      Result := False;
+    end);
+end;
+
+// APath made full, or as given when it cannot be ('', a path GetFullPath
+// rejects): a listing of a full directory holds full paths.
+function FullPathOrSelf(const APath: string): string;
+begin
+  Result := APath;
+  if PathTextUsable(APath) then
+    try
+      Result := TPath.GetFullPath(APath);
+    except
+      Result := APath;
+    end;
+end;
+
 constructor TPasSourceManager.Create(const ASearchPaths: TArray<string>);
+var
+  LIdx: Integer;
 begin
   inherited Create;
-  FSearchPaths := ASearchPaths;
+  // Full before anything lists them, so every answer ResolveUnit gives from
+  // a listing is full (audit D2-35).
+  SetLength(FSearchPaths, Length(ASearchPaths));
+  for LIdx := 0 to High(ASearchPaths) do
+    FSearchPaths[LIdx] := FullPathOrSelf(ASearchPaths[LIdx]);
   FRecoveredLock := TObject.Create;
   FIncludeLock := TObject.Create;
   FDcuLock := TObject.Create;
@@ -585,8 +670,6 @@ end;
   SEPARATING the I/O phase from the CPU phase, not from any particular
   queue depth. }
 
-function PathTextUsable(const APath: string): Boolean; forward;
-
 // A directory's last-write time, 0 when there is none to read (no such
 // directory, '', access denied): what BeginRun compares to tell a listing
 // that moved.
@@ -611,7 +694,7 @@ begin
   Result := nil;
   try
     if TDirectory.Exists(ADir) then
-      Result := TDirectory.GetFiles(ADir);
+      Result := TPasSourceManager.ListFiles(ADir, False, []);
   except
     Result := nil;   // unreadable: nothing found there, as DirIndex says
   end;
@@ -623,7 +706,7 @@ end;
 function TPasSourceManager.DirIndex(const ADir: string):
   TDictionary<string, string>;
 var
-  LKey, LFile: string;
+  LKey: string;
   LChecked: Integer;
   LStamp: TDateTime;
 begin
@@ -671,8 +754,7 @@ begin
   // anyway, and a leak per such directory was the alternative.
   try
     if (ADir <> '') and TDirectory.Exists(ADir) then
-      for LFile in TDirectory.GetFiles(ADir, '*.pas') do
-        Result.TryAdd(PasFoldName(TPath.GetFileName(LFile)), LFile);
+      IndexByBaseName(ListFiles(ADir, False, ['.pas']), Result);
   except
     Result.Clear;
   end;
@@ -1018,23 +1100,13 @@ begin
   Inc(FIncludeEpoch);
 end;
 
-procedure TPasSourceManager.BuildUnitIndex(const ARoot: string);
-var
-  LFile, LKey, LExt: string;
+function TPasSourceManager.BuildUnitIndex(const ARoot: string): TArray<string>;
 begin
   FreeAndNil(FUnitIndex);
   ForgetUnitResolution;
   FUnitIndex := TDictionary<string, string>.Create;
-  for LFile in TDirectory.GetFiles(ARoot, '*.*', TSearchOption.soAllDirectories) do
-  begin
-    LExt := PasFoldName(TPath.GetExtension(LFile));
-    if (LExt = '.pas') or (LExt = '.dpr') then
-    begin
-      LKey := PasFoldName(TPath.GetFileName(LFile));
-      if not FUnitIndex.ContainsKey(LKey) then
-        FUnitIndex.Add(LKey, LFile);
-    end;
-  end;
+  Result := ListFiles(FullPathOrSelf(ARoot), True, ['.pas', '.dpr']);
+  IndexByBaseName(Result, FUnitIndex);
 end;
 
 procedure TPasSourceManager.PrepareIndexes;
@@ -1325,7 +1397,7 @@ end;
 
 class function TPasSourceManager.IsDcuPath(const APath: string): Boolean;
 begin
-  Result := SameText(TPath.GetExtension(APath), '.dcu');
+  Result := HasExt(APath, '.dcu');
 end;
 
 function TPasSourceManager.DcuFailure(const APath: string): string;
@@ -1622,6 +1694,13 @@ var
       LMemo.DirNames := LMemo.DirNames + [LFile];
   end;
 
+  // AMemo with its path's key, the project's (LowerCase of the full path).
+  function KeyedMemo(const AMemo: TUnitMemo): TUnitMemo;
+  begin
+    Result := AMemo;
+    Result.PathKey := LowerCase(AMemo.Path);
+  end;
+
 begin
   EnsureSearchIndex;
   LMemo := Default(TUnitMemo);
@@ -1641,7 +1720,7 @@ begin
   // 3. As spelled: <dotted>.pas on the search paths, then - beyond what dcc
   // accepts - relative to the referring file. See Probe for the order.
   if Probe(LName) then
-    Exit(LMemo);
+    Exit(KeyedMemo(LMemo));
 
   // 4. Unit-scope namespaces (dcc -NS), IN ORDER, applied to the name AS
   // SPELLED - dotted or not. `uses Generics.Collections` with -NS System
@@ -1656,12 +1735,12 @@ begin
   // file (Vcl.Forms) can never be captured by a prefix.
   for LNs in FNamespaces do
     if (LNs <> '') and Probe(PasFoldName(LNs) + '.' + LName) then
-      Exit(LMemo);
+      Exit(KeyedMemo(LMemo));
 
   // 5. Leaf-name tolerance for a dotted name (System.SysUtils -> SysUtils.pas
   // - pre-namespace-era file layouts).
   if (LDot > 0) and Probe(LLeaf) then
-    Exit(LMemo);
+    Exit(KeyedMemo(LMemo));
 
   // 6. Unit index (basename fallback).
   if FUnitIndex <> nil then
@@ -1670,7 +1749,7 @@ begin
     begin
       LMemo.Found := True;
       LMemo.Path := LCand;
-      Exit(LMemo);
+      Exit(KeyedMemo(LMemo));
     end;
 
   // 7. No source anywhere: a compiled unit on the search paths, as spelled
@@ -1686,11 +1765,19 @@ begin
       end;
   if not LMemo.Found then
     LMemo.Path := '';
-  Result := LMemo;
+  Result := KeyedMemo(LMemo);
 end;
 
 function TPasSourceManager.ResolveUnit(const AUnitName, AInPath, AFromFile: string;
   out AResolved: string): Boolean;
+var
+  LKey: string;
+begin
+  Result := ResolveUnit(AUnitName, AInPath, AFromFile, AResolved, LKey);
+end;
+
+function TPasSourceManager.ResolveUnit(const AUnitName, AInPath, AFromFile: string;
+  out AResolved, AKey: string): Boolean;
 var
   LKey, LFile: string;
   LMemo: TUnitMemo;
@@ -1705,7 +1792,10 @@ begin
   // places rather than resolving it twice, and the program's word wins. See
   // PinnedFile for a pin to a missing file.
   if PinnedFile(LKey, AResolved) then
+  begin
+    AKey := LowerCase(AResolved);   // a pin is full (PinUnit)
     Exit(True);
+  end;
 
   // 1. Explicit `in 'path'`. Whatever it resolves to is pinned for the whole
   // project: the next importer of this unit gets THIS file, through every
@@ -1713,6 +1803,7 @@ begin
   if ResolveInPath(AInPath, AFromFile, AResolved) then
   begin
     PinInPath(AUnitName, AResolved);
+    AKey := LowerCase(AResolved);   // full (ResolveInPath)
     Exit(True);
   end;
 
@@ -1760,22 +1851,39 @@ begin
     for var LIdx := 0 to LLast do
       if (LMemo.Candidates[LIdx] <> LKey) and
          PinnedFile(LMemo.Candidates[LIdx], AResolved) then
+      begin
+        AKey := LowerCase(AResolved);
         Exit(True);
+      end;
   end;
   if LMemo.DirNames <> nil then
   begin
     LFrom := FromDirIndex(AFromFile);
     for LFile in LMemo.DirNames do
       if LFrom.TryGetValue(LFile, AResolved) then
+      begin
+        // The referring file's directory, full when the referring file is
+        // - every TPasSemaProject caller's is; a host's may not be.
+        AResolved := FullPathOrSelf(AResolved);
+        AKey := LowerCase(AResolved);
         Exit(True);
+      end;
   end;
   AResolved := LMemo.Path;
+  AKey := LMemo.PathKey;
   Result := LMemo.Found;
 end;
 
 procedure TPasSourceManager.BuildIncludeIndex(const ARoot: string);
+begin
+  BuildIncludeIndex(ListFiles(FullPathOrSelf(ARoot), True, ['.inc']));
+end;
+
+procedure TPasSourceManager.BuildIncludeIndex(const AFiles: TArray<string>);
 var
-  LFile, LKey: string;
+  LFiles: TArray<string>;
+  LCount: Integer;
+  LFile: string;
 begin
   FreeAndNil(FIncludeIndex);
   TMonitor.Enter(FIncludeLock);
@@ -1785,13 +1893,18 @@ begin
     TMonitor.Exit(FIncludeLock);
   end;
   FIncludeIndex := TDictionary<string, string>.Create;
-  for LFile in TDirectory.GetFiles(ARoot, '*.inc',
-    TSearchOption.soAllDirectories) do
-  begin
-    LKey := PasFoldName(TPath.GetFileName(LFile));
-    if not FIncludeIndex.ContainsKey(LKey) then
-      FIncludeIndex.Add(LKey, LFile);
-  end;
+  // Full, as every index value here (a no-op for the root overload's
+  // listing; a caller's listing may be of a relative root).
+  SetLength(LFiles, Length(AFiles));
+  LCount := 0;
+  for LFile in AFiles do
+    if HasExt(LFile, '.inc') then
+    begin
+      LFiles[LCount] := FullPathOrSelf(LFile);
+      Inc(LCount);
+    end;
+  SetLength(LFiles, LCount);
+  IndexByBaseName(LFiles, FIncludeIndex);
 end;
 
 { Bytes -> string, tolerantly. A BOM is honored; a file without one is UTF-8 if

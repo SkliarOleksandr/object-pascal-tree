@@ -16446,6 +16446,37 @@ begin
     finally
       LSM6.Free;
     end;
+
+    // Audit D2-35 / D2-36: a RELATIVE search path is made full before it is
+    // listed, so the answer is full and its key is the project's
+    // (LowerCase); one listing helper filters by extension, and the unit
+    // index hands back the files it listed.
+    var LOldDir := GetCurrentDir;
+    SetCurrentDir(LDir);
+    var LSM7 := TPasSourceManager.Create(['lib']);
+    try
+      var LKey7: string;
+      Ok('full answer: a relative search path answers a full path and its key',
+        LSM7.ResolveUnit('Ns.UMemo', '', '', LRes, LKey7) and
+        (LRes = TPath.Combine(LDir, 'lib\Ns.UMemo.pas')) and
+        (LKey7 = LowerCase(LRes)));
+      Ok('full answer: the one-result overload answers the same path',
+        LSM7.ResolveUnit('ns.umemo', '', '', LRes) and
+        (LRes = TPath.Combine(LDir, 'lib\Ns.UMemo.pas')));
+      TFile.WriteAllText(TPath.Combine(LDir, 'lib\Ns.UMemo.pasx'), '');
+      var LListed := TPasSourceManager.ListFiles(TPath.Combine(LDir, 'lib'),
+        False, ['.pas']);
+      Ok('ListFiles: the extension filter is exact (.pasx is not .pas)',
+        (Length(LListed) = 1) and
+        SameText(TPath.GetFileName(LListed[0]), 'Ns.UMemo.pas'));
+      var LUnits := LSM7.BuildUnitIndex('a');
+      Ok('BuildUnitIndex: the files it indexed, full',
+        (Length(LUnits) = 1) and
+        (LUnits[0] = TPath.Combine(LDir, 'a\UMemo.pas')));
+    finally
+      LSM7.Free;
+      SetCurrentDir(LOldDir);
+    end;
   finally
     LSM.Free;
     if TDirectory.Exists(LDir) then
