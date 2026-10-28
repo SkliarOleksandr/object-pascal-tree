@@ -413,6 +413,9 @@ type
       below the start. True descends from AKid; False closes its branch. }
     TOvVisit = reference to function(const AParent, AKid: TPasExtRef;
       ADepth: Integer): Boolean;
+    { Which step of IdentityOfNode answered: the declaration the node names,
+      an implementation header's routine, or the node's ordinary binding. }
+    TNavIdentity = (niDecl, niImplHeader, niBinding);
     TNavCache = class
       // The model this cache was built from. A navigator does not survive a
       // swap of models (see Create: an address can be reused by the next
@@ -531,8 +534,10 @@ type
     // dependency on the resolver's symbol table, so a redeclaration or an
     // unusual overload shape can never break navigation, only miss it).
     function VisAt(AMid, ALine, ACol: Integer): Integer;
+    { The position of visible token AVisIdx - or, ANextLine, column 1 of
+      the line below it (an empty routine body's entry point). }
     function TargetFromVis(AMid, AVisIdx: Integer; const AName: string;
-      out ATarget: TPasNavTarget): Boolean;
+      out ATarget: TPasNavTarget; ANextLine: Boolean = False): Boolean;
     function RTIsStructKind(AKind: TPasNodeKind): Boolean;
     function RTFindChildKind(LM: TPasSemaModel; ANode: Integer;
       AKind: TPasNodeKind): Integer;
@@ -558,6 +563,13 @@ type
     function ImplQualifierNodes(AMid, ASym: Integer): TArray<Integer>;
     function UnitQualifierNodes(AMi, ATargetMid: Integer): TArray<Integer>;
     function ImplHeaderSym(AMid, ANode: Integer; out ASym: Integer): Boolean;
+    { The identity of identifier node ANode, in SymbolAt's order: the
+      declaration it names (AIsDecl), an implementation header's routine,
+      the ordinary binding (AStep says which). SymbolOfIdentNode and
+      SemanticTokens both answer through it, so highlighting cannot drift
+      from navigation. }
+    function IdentityOfNode(AMid, ANode: Integer; out ATMid, ASym: Integer;
+      out AStep: TNavIdentity): Boolean;
     function SymbolOfIdentNode(AMid, ANode: Integer;
       out ATMid, ASym: Integer; out AName: string): Boolean;
     function UnitNameHit(LM: TPasSemaModel; ANode: Integer;
@@ -2163,14 +2175,11 @@ begin
     SymbolOfIdentNode(AMid, LIdent.Node, ATMid, ASym, AName);
 end;
 
-// SymbolAt's resolution of an identifier node, wherever the node's token is.
-function TPasNavigator.SymbolOfIdentNode(AMid, ANode: Integer;
-  out ATMid, ASym: Integer; out AName: string): Boolean;
-var
-  LCache: TNavCache;
-  LFbMid, LFbSym: Integer;
+function TPasNavigator.IdentityOfNode(AMid, ANode: Integer;
+  out ATMid, ASym: Integer; out AStep: TNavIdentity): Boolean;
 begin
-  Result := False;
+  ATMid := AMid;
+  AStep := niDecl;
   // The DECLARATION site itself - a type's own name, a field, a routine
   // header (interface OR implementation; each overload's own DeclNode is
   // distinct and reliable, unlike the ordinary REFERENCE binding those
@@ -2182,24 +2191,35 @@ begin
   // skUnitRef is excluded: a `uses` name's DeclNode is its LEAF segment
   // (CollectUsesItem), but that symbol means nothing outside the referring
   // unit - UnitAt/FindUnitReferences is the right tool for it, not this.
-  LCache := CacheOf(AMid);
-  if LCache.DeclSymOfNode.TryGetValue(ANode, ASym) and
+  if CacheOf(AMid).DeclSymOfNode.TryGetValue(ANode, ASym) and
      (FProj.Model(AMid).Symbols[ASym].Kind <> skUnitRef) then
-  begin
-    ATMid := AMid;
-    AName := FProj.Model(AMid).Symbols[ASym].Name;
     Exit(True);
-  end;
   // A qualified implementation HEADER, whose own name binds to nothing at
   // all - see ImplHeaderSym for why, and why it is answered structurally.
+  AStep := niImplHeader;
   if ImplHeaderSym(AMid, ANode, ASym) then
+    Exit(True);
+  AStep := niBinding;
+  Result := ResolveSymbolAt(AMid, ANode, ATMid, ASym);
+end;
+
+// SymbolAt's resolution of an identifier node, wherever the node's token is:
+// IdentityOfNode, minus a `uses` item's binding, with a declaration-less
+// symbol redirected to its real declaration.
+function TPasNavigator.SymbolOfIdentNode(AMid, ANode: Integer;
+  out ATMid, ASym: Integer; out AName: string): Boolean;
+var
+  LFbMid, LFbSym: Integer;
+  LStep: TNavIdentity;
+begin
+  Result := False;
+  if not IdentityOfNode(AMid, ANode, ATMid, ASym, LStep) then
+    Exit;
+  if LStep <> niBinding then
   begin
-    ATMid := AMid;
     AName := FProj.Model(AMid).Symbols[ASym].Name;
     Exit(True);
   end;
-  if not ResolveSymbolAt(AMid, ANode, ATMid, ASym) then
-    Exit;
   // The same leaf is bound in RefMap to its skUnitRef too (UnitAt reads
   // that binding): declined here as well, or every `uses` item answered with
   // a local symbol whose references are none and whose rename rewrote that
@@ -2268,21 +2288,20 @@ end;
 // One pass over the main file's raw tokens rather than over the tree: the
 // cache's VisOfRaw/NodeOfVis already answer "which nkIdent node is this
 // token", and walking tokens gives the ascending order a host merges against
-// its own token stream without a sort. The per-token resolution order is
-// SymbolAt's (declaration name, implementation header, ordinary binding),
-// minus its ResolveRealDecl fallback for a builtin's real declaration - the
-// KIND is the same either way, and the position is not asked for.
+// its own token stream without a sort. The per-token identity is SymbolAt's
+// (IdentityOfNode), minus SymbolOfIdentNode's ResolveRealDecl fallback for a
+// builtin's real declaration - the KIND is the same either way, and the
+// position is not asked for.
 function TPasNavigator.SemanticTokens(AMid: Integer): TArray<TPasSemanticToken>;
 var
   LCache: TNavCache;
-  LM: TPasSemaModel;
   LRaw, LVis, LNode, LTMid, LSym, LCount: Integer;
+  LStep: TNavIdentity;
 begin
   Result := nil;
   if (AMid < 0) or (AMid >= FProj.ModelCount) then
     Exit;
   LCache := CacheOf(AMid);   // hydrates a demoted model first
-  LM := FProj.Model(AMid);
   LCount := 0;
   SetLength(Result, Length(LCache.VisOfRaw));  // at most one row per token
   for LRaw := 0 to High(LCache.VisOfRaw) do
@@ -2290,17 +2309,9 @@ begin
     LVis := LCache.VisOfRaw[LRaw];
     if (LVis < 0) or not LCache.NodeOfVis.TryGetValue(LVis, LNode) then
       Continue;   // $IFDEF'd out, or not an identifier node
-    Result[LCount].IsDecl := False;
-    if LCache.DeclSymOfNode.TryGetValue(LNode, LSym) and
-       (LM.Symbols[LSym].Kind <> skUnitRef) then
-    begin
-      LTMid := AMid;
-      Result[LCount].IsDecl := True;
-    end
-    else if ImplHeaderSym(AMid, LNode, LSym) then
-      LTMid := AMid
-    else if not ResolveSymbolAt(AMid, LNode, LTMid, LSym) then
+    if not IdentityOfNode(AMid, LNode, LTMid, LSym, LStep) then
       Continue;
+    Result[LCount].IsDecl := LStep = niDecl;
     Result[LCount].RawToken := LRaw;
     Result[LCount].Kind := FProj.Model(LTMid).Symbols[LSym].Kind;
     Inc(LCount);
@@ -5727,7 +5738,7 @@ end;
 // - NOT an nkMember, whose FirstToken is the dot; callers here never pass
 // one of those) - so no leftmost-descendant walk is needed.
 function TPasNavigator.TargetFromVis(AMid, AVisIdx: Integer;
-  const AName: string; out ATarget: TPasNavTarget): Boolean;
+  const AName: string; out ATarget: TPasNavTarget; ANextLine: Boolean): Boolean;
 var
   LM: TPasSemaModel;
   LVis: TPasVisibleToken;
@@ -5745,6 +5756,11 @@ begin
   ATarget.FilePath := LM.Tree.Source.FileNames[LVis.FileId];
   LTS.OffsetToLineCol(LTS.Tokens[LVis.TokenIndex].Start, ATarget.Line,
     ATarget.Col);
+  if ANextLine then
+  begin
+    Inc(ATarget.Line);
+    ATarget.Col := 1;
+  end;
   ATarget.Name := AName;
   Result := True;
 end;
@@ -6348,10 +6364,7 @@ end;
 function TPasNavigator.RoutineBodyEntry(AMid: Integer; LM: TPasSemaModel;
   AImplNode: Integer; out ATarget: TPasNavTarget): Boolean;
 var
-  LBody, LBlockOrAsm, LFirstStmt, LOpenVis: Integer;
-  LVis: TPasVisibleToken;
-  LTS: TPasTokenStream;
-  LOpenLine, LOpenCol: Integer;
+  LBody, LBlockOrAsm, LFirstStmt: Integer;
 begin
   Result := False;
   LBody := RTFindChildKind(LM, AImplNode, nkRoutineBody);
@@ -6370,18 +6383,9 @@ begin
   if LFirstStmt <> NIL_NODE then
     Exit(TargetFromVis(AMid, LM.Tree.Nodes[LFirstStmt].FirstToken, '',
       ATarget));
-  LOpenVis := LM.Tree.Nodes[LBlockOrAsm].FirstToken;   // 'begin' or 'asm'
-  if (LOpenVis < 0) or (LOpenVis > High(LM.Tree.Source.Visible)) then
-    Exit;
-  LVis := LM.Tree.Source.Visible[LOpenVis];
-  LTS := LM.Tree.Source.Files[LVis.FileId];
-  LTS.OffsetToLineCol(LTS.Tokens[LVis.TokenIndex].Start, LOpenLine, LOpenCol);
-  ATarget.UnitId := AMid;
-  ATarget.FilePath := LM.Tree.Source.FileNames[LVis.FileId];
-  ATarget.Line := LOpenLine + 1;
-  ATarget.Col := 1;
-  ATarget.Name := '';
-  Result := True;
+  // The line below the 'begin' or 'asm'.
+  Result := TargetFromVis(AMid, LM.Tree.Nodes[LBlockOrAsm].FirstToken, '',
+    ATarget, {ANextLine} True);
 end;
 
 function TPasNavigator.GotoImplementation(AMid, ALine, ACol: Integer;
@@ -8089,6 +8093,24 @@ end;
   TARGET MODEL, which is exactly what FindUnitReferences already keys on
   (its own comment says why). What this adds is the header itself, whole
   dotted spans instead of first segments, and the file-name obligation. }
+// The edit replacing a reference hit's name with ANewText: its position,
+// the old text under the highlight, the snippet as found (audit D1-30).
+function EditFromHit(const AHit: TPasRefHit; const ANewText: string;
+  AIsDecl: Boolean): TPasRenameEdit;
+begin
+  Result := Default(TPasRenameEdit);   // FormKind fskNone: a Pascal edit
+  Result.FilePath := AHit.FilePath;
+  Result.Line := AHit.Line;
+  Result.Col := AHit.Col;
+  Result.Len := AHit.HiTo - AHit.HiFrom;
+  Result.OldText := Copy(AHit.Snippet, AHit.HiFrom + 1, Result.Len);
+  Result.NewText := ANewText;
+  Result.IsDecl := AIsDecl;
+  Result.Snippet := AHit.Snippet;
+  Result.HiFrom := AHit.HiFrom;
+  Result.HiTo := AHit.HiTo;
+end;
+
 function TPasNavigator.PlanUnitRename(ATargetMid: Integer;
   const ANewName: string; out AEdits: TArray<TPasRenameEdit>;
   out ARequiredFileName: string; out AError: string): Boolean;
@@ -8115,21 +8137,13 @@ var
   procedure AddHit(const AHitRec: TPasRefHit; const AText: string;
     AIsDecl: Boolean);
   begin
-    LEdit := Default(TPasRenameEdit);
-    LEdit.FilePath := AHitRec.FilePath;
-    LEdit.Line := AHitRec.Line;
-    LEdit.Col := AHitRec.Col;
-    LEdit.Len := AHitRec.HiTo - AHitRec.HiFrom;
-    LEdit.OldText := Copy(AHitRec.Snippet, AHitRec.HiFrom + 1, LEdit.Len);
-    LEdit.NewText := AText;
-    LEdit.IsDecl := AIsDecl;
+    LEdit := EditFromHit(AHitRec, AText, AIsDecl);
     // The preview is built here rather than by the shared per-line pass
     // PlanRename uses: two `uses` items on one line can be replaced by
     // DIFFERENT texts (a full name here, a bare leaf there), which that
     // pass's single new-name assumption cannot express.
     LEdit.Snippet := Copy(AHitRec.Snippet, 1, AHitRec.HiFrom) + AText +
       Copy(AHitRec.Snippet, AHitRec.HiTo + 1, MaxInt);
-    LEdit.HiFrom := AHitRec.HiFrom;
     LEdit.HiTo := AHitRec.HiFrom + Length(AText);
     LList.Add(LEdit);
   end;
@@ -9026,62 +9040,22 @@ var
   var
     LHits: TArray<TPasRefHit>;
     LHit: TPasRefHit;
-    LEdit: TPasRenameEdit;
     LI: Integer;
   begin
-    LEdit := Default(TPasRenameEdit);   // FormKind fskNone: Pascal edits
-    LEdit.NewText := ANewText;
     if DeclHit(AMid, ASymbol, {out} LHit) then
-    begin
-      LEdit.FilePath := LHit.FilePath;
-      LEdit.Line := LHit.Line;
-      LEdit.Col := LHit.Col;
-      LEdit.Len := LHit.HiTo - LHit.HiFrom;
-      LEdit.OldText := Copy(LHit.Snippet, LHit.HiFrom + 1, LEdit.Len);
-      LEdit.IsDecl := AMarkDecl;
-      LEdit.Snippet := LHit.Snippet;
-      LEdit.HiFrom := LHit.HiFrom;
-      LEdit.HiTo := LHit.HiTo;
-      AList.Add(LEdit);
-    end;
+      AList.Add(EditFromHit(LHit, ANewText, AMarkDecl));
     LHits := FindReferences(AMid, ASymbol, True);
     for LI := 0 to High(LHits) do
-    begin
       // `L[I]` writes no name: nothing to rename there.
-      if LHits[LI].Implicit then
-        Continue;
-      LEdit.FilePath := LHits[LI].FilePath;
-      LEdit.Line := LHits[LI].Line;
-      LEdit.Col := LHits[LI].Col;
-      LEdit.Len := LHits[LI].HiTo - LHits[LI].HiFrom;
-      LEdit.OldText := Copy(LHits[LI].Snippet, LHits[LI].HiFrom + 1,
-        LEdit.Len);
-      LEdit.IsDecl := False;
-      LEdit.Snippet := LHits[LI].Snippet;
-      LEdit.HiFrom := LHits[LI].HiFrom;
-      LEdit.HiTo := LHits[LI].HiTo;
-      AList.Add(LEdit);
-    end;
+      if not LHits[LI].Implicit then
+        AList.Add(EditFromHit(LHits[LI], ANewText, False));
   end;
 
   procedure AddHitEdit(AList: TList<TPasRenameEdit>; const AHit: TPasRefHit;
     const ANewText: string);
-  var
-    LEdit: TPasRenameEdit;
   begin
-    if AHit.Implicit then
-      Exit;
-    LEdit := Default(TPasRenameEdit);
-    LEdit.NewText := ANewText;
-    LEdit.FilePath := AHit.FilePath;
-    LEdit.Line := AHit.Line;
-    LEdit.Col := AHit.Col;
-    LEdit.Len := AHit.HiTo - AHit.HiFrom;
-    LEdit.OldText := Copy(AHit.Snippet, AHit.HiFrom + 1, LEdit.Len);
-    LEdit.Snippet := AHit.Snippet;
-    LEdit.HiFrom := AHit.HiFrom;
-    LEdit.HiTo := AHit.HiTo;
-    AList.Add(LEdit);
+    if not AHit.Implicit then
+      AList.Add(EditFromHit(AHit, ANewText, False));
   end;
 
   // The family's declarations, implementation headers and uses - the uses
