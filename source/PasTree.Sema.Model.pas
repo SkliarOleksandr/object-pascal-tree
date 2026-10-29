@@ -607,6 +607,13 @@ type
       which the navigation-time probe and Go To on a bare `inherited` still
       ask after a release. Empty until a release. }
     RoutineStructSyms: TPasIntMap<Integer>;
+    { A procedural type written INLINE in a declaration's type slot (`var F:
+      function: TCls`, a record field, an array's element) -> the unnamed
+      skType symbol the resolver declares for it, so the type is a (unit,
+      symbol) pair like a named one (ResolveTypeExpr, TypeDefNodeOf). Filled
+      in Phase 1 and never released: unlike a struct, a procedural type owns
+      no member scope to snapshot from. }
+    AnonTypeSyms: TPasIntMap<Integer>;
     Demoted: Boolean;
     { True when this model's FINAL token stream came from the declared-pass
       re-preprocess (the per-unit $IF oracle) rather than the plain seeded

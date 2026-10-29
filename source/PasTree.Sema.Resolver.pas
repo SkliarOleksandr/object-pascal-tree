@@ -2890,6 +2890,15 @@ begin
         // nor read as undeclared identifiers (`TNotifyEvent = procedure(
         // Sender: TObject)...` must not E2003 on Sender). Everything else
         // (param types, result type) resolves normally.
+        // Written inline in a declaration's type slot (`var F: function:
+        // TCls`), it gets an unnamed type symbol as an anonymous struct does
+        // (DeclareAnonStruct): dcc calls `F.B` and `F().B` exactly as through
+        // a named `TG = function: TCls` (6.6.1), and the call is typed through
+        // the type's symbol (audit B3-38).
+        if (FTree.Nodes[ANode].Parent = NIL_NODE) or
+           (KindOf(FTree.Nodes[ANode].Parent) <> nkTypeDecl) then
+          FModel.AnonTypeSyms.AddOrSetValue(ANode,
+            DeclareAnonStruct(AScope, ANode));
         var LSig := FModel.AddScope(sckRoutine, AScope, ANode);
         FNodeScope[ANode] := LSig;
         LChild := FirstChild(ANode);

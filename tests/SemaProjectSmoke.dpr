@@ -8776,6 +8776,48 @@ begin
   end;
 end;
 
+// B3-38: a procedural type written inline - a variable, a record field, an
+// array's element, an inline var - is called by its name and through `()`
+// as a named one is (6.6.1, dcc64 37.0, local/probe-park/b338 IP.dpr): the
+// member after the call is the result's, so a wrong one is E2003.
+procedure TestInlineProcType;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_inlproc');
+  TFile.WriteAllText(TPath.Combine(LDir, 'IpP.dpr'),
+    'program IpP;'#10'type'#10 +
+    '  TCls = class B: Integer; end;'#10 +
+    '  TR = record F: function: TCls; end;'#10 +
+    'var'#10 +
+    '  F: function: TCls;'#10 +
+    '  R: TR;'#10 +
+    '  A: array[0..1] of function: TCls;'#10 +
+    '  M: function(X: Integer = 0): TCls;'#10 +
+    '  N: function(X: Integer): TCls;'#10 +
+    '  I: Integer;'#10 +
+    'begin'#10 +
+    '  I := F().B + F.B + R.F().B + R.F.B + A[0]().B + M.B + N(1).B;'#10 +
+    '  var L: function: TCls := nil;'#10 +
+    '  I := L.B;'#10 +
+    '  I := F().N1 + F.N2 + R.F.N3 + A[0]().N4 + M.N5 + N(1).N6 + L.N7;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'IpP.dpr'));
+    Ok('inlproc: a member after a call through an inline procedural type' +
+      ' binds, a wrong one is E2003 - seven of them',
+      DiagCount(ModelByName('ipp'), 'E2003') = 7);
+    Ok('inlproc: B through F, R.F, A[0], M, N and L binds TCls.B',
+      CrossRefCountInUnit(ModelByName('ipp'), 'B', 'B', 'ipp') = 8);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // E3-01, E3-03, B3-49: `[X]` means `XAttribute` wherever that is found - a
 // used unit, System - and the bare `X` only when it is found nowhere
 // (19.3.2, dcc64 37.0); a unit-qualified `[U.X]` the same in U.
@@ -16524,6 +16566,7 @@ begin
   TestDeclAfterUnit;
   TestSystemQualifiedUnit;
   TestSystemOverloadJoins;
+  TestInlineProcType;
   TestAttributeSuffixFirst;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;

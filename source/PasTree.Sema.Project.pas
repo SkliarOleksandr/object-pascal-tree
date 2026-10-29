@@ -9402,8 +9402,9 @@ begin
     Exit;
   // An ANONYMOUS struct's symbol has the struct node ITSELF as its declaration
   // - there is no name node and no nkTypeDecl above it (see DeclareAnonStruct).
+  // So does an inline procedural type's (audit B3-38).
   if LM.Tree.Nodes[LName].Kind in [nkRecordType, nkClassType, nkInterfaceType,
-     nkObjectType, nkHelperType] then
+     nkObjectType, nkHelperType, nkProcType] then
     Exit(LName);
   LParent := LM.Tree.Nodes[LName].Parent;
   if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkTypeDecl) then
@@ -10662,6 +10663,12 @@ begin
     // overloaded call over it took the first declaration).
     nkStringType:
       Result := BuiltinX(AId, 'shortstring');
+    // A procedural type written inline (`var F: function: TCls`): the unnamed
+    // symbol the resolver declared for it (AnonTypeSyms; audit B3-38), so
+    // ProcResultX calls through it as through a named one.
+    nkProcType:
+      if LM.AnonTypeSyms.TryGetValue(ANode, LSym) then
+        Result := XPlain(AId, LSym);
 
     nkTypeArgs:
       begin
