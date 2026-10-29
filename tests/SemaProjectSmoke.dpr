@@ -12670,6 +12670,10 @@ begin
       DiagCount(ModelByName('vthost'), 'E2361') = 1);
     Ok('vistail: ...and the one refused is the outer reading the nested one',
       DiagHasText(ModelByName('vthost'), 'E2361', 'FIn'));
+    // E3-46: dcc names the declaring type with the type around it.
+    Ok('vistail: the message names TOuter.TInner.FIn, as dcc does',
+      DiagHasText(ModelByName('vthost'), 'E2361',
+        'Cannot access private symbol TOuter.TInner.FIn'));
     Ok('vistail: a class constructor is never the meaning of a name',
       DiagCount(ModelByName('vtuse'), 'E2361') = 0);
   finally

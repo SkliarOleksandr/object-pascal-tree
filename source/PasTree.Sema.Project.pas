@@ -16333,7 +16333,10 @@ end;
   invariant every other caller already assumed held: one node, one map.
 
 { 11 sec. 11.2.1, enforcement half: a QUALIFIED access to a private member, reported
-  as dcc does - `E2361 Cannot access private symbol TType.Member`.
+  as dcc does - `E2361 Cannot access private symbol TType.Member`, a nested
+  type named with every type around it (`TOuter.TInner.FIn`). A generic's
+  instance is the one spelling that differs: dcc writes the unit in braces
+  and qualified arguments, `TG<System.Integer>.FG`, and this `TG.FG`.
 
   OFF unless ReportVisibility says otherwise. This is the only check here that
   can reject code the corpora ACCEPT, so it ships as a switch.
@@ -16608,6 +16611,30 @@ end;
 
 procedure TPasSemaProject.CheckVisibility(AId, ANameNode, AMemMid,
   AMemSym: Integer);
+
+  // The declaring type as dcc names it in E2361: every enclosing type too,
+  // `TOuter.TInner.TDeep` (dcc64 37.0, local/probe-m-b/e346). Symbol -> its
+  // scope -> that scope's StructSym, outward, as StructEncloses walks.
+  // A generic's instance is not spelled: dcc writes `{U}TG<System.Integer>`,
+  // this `TG`.
+  function OwnerPath(AMem: TPasSemaModel; AOwner: Integer): string;
+  var
+    LCur, LScope: Integer;
+  begin
+    Result := AMem.Symbols[AOwner].Name;
+    LCur := AOwner;
+    for var LDepth := 1 to 16 do
+    begin
+      LScope := AMem.Symbols[LCur].Scope;
+      if LScope = NIL_SCOPE then
+        Exit;
+      LCur := AMem.Scopes[LScope].StructSym;
+      if LCur = NIL_SYM then
+        Exit;
+      Result := AMem.Symbols[LCur].Name + '.' + Result;
+    end;
+  end;
+
 var
   LMemM, LM: TPasSemaModel;
   LVis: TSemaVisibility;
@@ -16665,7 +16692,7 @@ begin
   if LM.HasDiagAt(ANameNode) then
     Exit;   // one report per site, like every other pass here
   EmitAt(LM, ANameNode, 'E2361', Format(SE2361_CannotAccessPrivate,
-    [LMemM.Symbols[LOwner].Name + '.' + LMemM.Symbols[AMemSym].Name]));
+    [OwnerPath(LMemM, LOwner) + '.' + LMemM.Symbols[AMemSym].Name]));
 end;
 
 function TPasSemaProject.StructSymOfNode(AModel: TPasSemaModel;
