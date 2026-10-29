@@ -18,7 +18,7 @@ The spec keeps exactly one PasTree-facing convention, and it earns its place:
 the `*AST:*` hints, which name the node kind a construct lowers to. Those are
 a vocabulary contract, and `tools/KindsCheck` mechanically cross-checks them.
 
-**Status: as of v0.64.1 (2026-09-28).** A gap is either listed here or it is
+**Status: as of v0.144.3 (2026-10-29).** A gap is either listed here or it is
 not a known gap. When you close one, delete the entry in the same commit.
 
 Not listed here, deliberately: bugs (those are fixed, not documented) and
@@ -205,19 +205,15 @@ of less work, not a gap in following the language; its consequences are in
   counter are typed from the initializer at the PROJECT level (CrossType);
   the intra-unit typer still has no ExprType for them. The inference refuses
   rather than guesses: a designator naming a routine that still requires
-  arguments (dcc's E2035), a call WITH an argument list whose overload
-  selection tied between different result types (a paren-less call of two
-  overloads tied on defaulted parameters - dcc's E2251 - is typed by the
-  first), a bare type name (a class reference with no named
-  `class of` type), `nil`, and a set constructor (an anonymous type) all
-  leave the declaration untyped.
-- a CONSTRUCTOR call does not type the declaration either: `var L :=
-  TFoo.Create` leaves L untyped and every member behind it goes dark, while
-  `var L := MakeFoo` (a parameterless function) types and resolves. Unlike
-  the refusals above this one is not a decision - a constructor's result is
-  its class, and nothing about the shape is ambiguous - so it is a gap, and
-  a common idiom's worth of one. Measured 2026-09-07 through pastree-lsp:
-  neither a type-of query on L nor a member access behind it answers.
+  arguments (dcc's E2035), a call whose overload selection tied between
+  different result types, with or without parentheses, a bare type name (a
+  class reference with no named `class of` type), `nil`, and a set
+  constructor (an anonymous type) all leave the declaration untyped.
+- an anonymous method literal has no type as a value: `var F := function:
+  TA begin ... end;` leaves F untyped, so `F()` and every member behind it
+  go unbound (dcc: E2003 on `F().Nope`), and an immediately invoked literal
+  (`(function: TA ... end)()`) types as nothing. Unlike the refusals above
+  this is a gap, not a decision; both idioms are rare.
 - A literal initializer gets dcc's exact type (LiteralTypeX, probed on both
   compilers): Integer/Cardinal/Int64/UInt64 by magnitude with the sign
   folded, Char for a one-unit string literal, Currency for an exponent-free
@@ -327,8 +323,7 @@ of less work, not a gap in following the language; its consequences are in
 - an untyped `for var E in C` element is typed from the collection at the
   project level only (arrays incl. `TArray<T>`, strings, sets, and a
   class/record/interface's `GetEnumerator` result's `Current` property); the
-  intra-unit typer still has no ExprType for it, and a `GetEnumerator`
-  supplied by a helper on a non-struct type is not chased.
+  intra-unit typer still has no ExprType for it.
 
 ### 5.7 The `with` statement
 - the target is typed by the project's expression walk (the same one the
@@ -454,12 +449,21 @@ of less work, not a gap in following the language; its consequences are in
   covers only private/strict-private on QUALIFIED access; protected (E2362)
   and the descendant bare-name case are not enforced, and ordinary name
   lookup never filters by visibility.
+- E2361 names a nested type's member with every type around it
+  (`TOuter.TInner.FIn`), as dcc does, but a member of a generic instance by
+  its generic's bare name: `TG.FG` where dcc writes the instance with its
+  unit and qualified arguments (`{P}TG<System.Integer>.FG`). The check has
+  the member, not the receiver's instance.
 
 ## 12-inheritance-polymorphism.md
 
 ### 12.1.2 `inherited`
-- a general `inherited X` expression is not typed
-  intra-unit; only with-target usage is modeled.
+- intra-unit, the name after `inherited` binds as an ordinary name - to the
+  class's own member when the class redeclares it - and the expression is
+  untyped; only a `with` target is modelled there. The project pass
+  re-points the name to the ancestor's member and types it, so what reads
+  the unit's own bindings alone (the completion overlay, a unit analyzed
+  without the project passes) sees the class's member.
 - a bare `inherited` in a `message` method is looked up by the method's
   name; dcc dispatches it by the message id (the ancestor's handler of that
   id, whatever its name, else DefaultHandler), so Go To on it and its typing
@@ -552,16 +556,28 @@ of less work, not a gap in following the language; its consequences are in
   `V.` too.
 
 ### 16.5.1 Inference for generic methods & inline vars
-- inference handles only the direct shape (the
-  parameter's declared type IS the type parameter); structural matching
-  (`TArray<T>` against `TArray<Integer>`) is not implemented.
+- inference handles only the direct shape (the parameter's declared type IS
+  the type parameter). dcc also infers through an open-array parameter -
+  `const A: array of T` from a `TArray<TItem>` variable or an open-array
+  constructor `[It]` - and PasTree leaves such a call typed as the open T:
+  `TU.FirstO(Arr).Site` is a false E2003 under -members, and in a `with`
+  body without it. A `TArray<T>` or `TList<T>` parameter does not infer in
+  dcc either (E2010).
 
 ## 17-anonymous-methods.md
 
 ### 17.2.1 Inline `procedure`/`function` literals
-- no contextual signature inference for anonymous method
-  literals; `Result` is typed only when the result type is written
-  explicitly.
+- a literal fits a `reference to` parameter by its parameter count,
+  procedure / function kind and parameter types (overload scoring,
+  ParamTypesFit); its result type is not compared.
+- a literal has no type as a value (3.1.3): a `var F :=` initializer or an
+  immediately invoked literal.
+
+### 17.3.1 Variable capture
+- the capture set is not computed: no model fact says which enclosing
+  locals and Self a literal references, so dcc's E2555 (capturing a `var` /
+  `out` parameter) and the loop-counter capture warning are not reported.
+  The captured names themselves resolve.
 
 ## 19-rtti-attributes.md
 
@@ -591,10 +607,19 @@ of less work, not a gap in following the language; its consequences are in
 ## 20-memory-management.md
 
 ### 20.3.1 The managed-type set
-- the managed-type test ignores generic instantiation
-  frames (a record instantiated with a managed argument reads as unmanaged
-  when the field's declared type is the open parameter) and does not follow
-  `= type X` distinct aliases.
+- the managed-type test (`IsManagedTypeX`, a public query with no consumer
+  in the library yet) ignores generic instantiation frames (a record
+  instantiated with a managed argument reads as unmanaged when the field's
+  declared type is the open parameter) and disagrees with dcc on these rows:
+  - read as managed, unmanaged for dcc: a sized short string (`string[20]`)
+    and every record or array built on it, a distinct alias of ShortString
+    (`= type ShortString`), a record whose only managed field is a `class
+    var`, an `[unsafe]` interface or string field;
+  - read as unmanaged, managed for dcc: an alias of an instantiation
+    (`TArray<Integer>`, `TStringDynArray`) and a record field typed through
+    one, an old-style `object` with a managed field, a record that declares
+    only `class operator Assign`, a field of an inline anonymous type
+    (`Inner: record S: string end`, `A: array of Integer`).
 
 ## B-lexical-grammar.md
 
@@ -626,6 +651,9 @@ of less work, not a gap in following the language; its consequences are in
 - `^{`, `^(` and `^//` are not caret chars either: `{`, `(*` and `//` keep
   opening comments and directives, because real code glues a directive to a
   pointer-type caret (`{$IFNDEF CLR}^{$ENDIF}TBitmap` in the VCL).
+- `^&` is not a caret char, so that a pointer type to an escaped name
+  (`^&Type`) lexes; dcc takes it in an operand as chr 102 (`C := ^&;`
+  compiles), PasTree reports "control character expected" there.
 - `^Mx` is diagnosed as one node over `^Mx` ("takes exactly one character")
   rather than split into `^M` and a stray `x` as dcc does.
 
