@@ -30,7 +30,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..146] of TPasCaseRow = (
+  STMT_CASES: array[0..147] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -823,6 +823,12 @@ const
      Source: 'const C: T = V;';
      Expected: 'Block(InlineConst#init(Ident''C''#name Ident''T'' ' +
        'Ident''V''))'; ExpectDiags: 0),
+    // A fused `>=` after the type's arguments: their `>` and the const's `=`
+    // (audit B2-46).
+    (Section: '16.3.1'; Name: 'fused ">=" in a typed inline const';
+     Source: 'const K: TArr<Integer>= nil;';
+     Expected: 'Block(InlineConst#init(Ident''K''#name TypeArgs(' +
+       'Ident''TArr'' Ident''Integer'') NilLit))'; ExpectDiags: 0),
     // Invalid (dcc: E2029) and taken without a diagnostic, as the author
     // types it: the names still say what they are - read by position, Y
     // would be the initializer of `var X := Y`.
@@ -876,7 +882,7 @@ const
      ExpectDiags: 0)
   );
 
-  DECL_CASES: array[0..252] of TPasCaseRow = (
+  DECL_CASES: array[0..255] of TPasCaseRow = (
     // ---- 3.1 variables ----
     // 3.1.4: the `absolute` expression is an ALIAS, and it lands in the same
     // child slot an initializer would -- only the mark separates them.
@@ -1849,6 +1855,24 @@ const
      Expected: 'TypeSec(TypeDecl(Ident''TGenericsCast'' GenericParams(' +
        'GenericParam(Ident''T'' Ident''TT'')) ' +
        'ClassType(Ident''TObject'')))'; ExpectDiags: 0),
+    // The same fused `>=` after a declaration's type arguments: the `>` is
+    // theirs, the `=` the typed constant's, the variable's or the default
+    // value's (dcc64 37.0 compiles all three). The checker read it as no
+    // rule's token and the printer split it only for an operator or a type
+    // declaration (audit B2-46).
+    (Section: '16.3.1'; Name: 'fused ">=" before a typed constant''s value';
+     Source: 'const C: TArr<Integer>= nil;';
+     Expected: 'ConstSec''const''(ConstDecl(Ident''C'' TypeArgs(' +
+       'Ident''TArr'' Ident''Integer'') NilLit))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'fused ">=" before a variable''s initializer';
+     Source: 'var V: TArr<Integer>= nil;';
+     Expected: 'VarSec''var''(VarDecl(Ident''V''#name TypeArgs(' +
+       'Ident''TArr'' Ident''Integer'') NilLit))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'fused ">=" before a default parameter value';
+     Source: 'procedure P(A: TArr<Integer>= nil);';
+     Expected: 'Routine''procedure''(Ident''P''#name Params(Param(' +
+       'Ident''A''#name TypeArgs(Ident''TArr'' Ident''Integer'') NilLit)))';
+     ExpectDiags: 0),
 
     // ==== test-coverage plan step 3 batch 4 ====================
 
@@ -3578,6 +3602,87 @@ function BuildCustomCases(GPP: TPasPreprocessor; GSM: TPasSourceManager):
       end;
   end;
 
+  { The tree checker on three corruptions of a valid tree. A cut child list
+    (the root's first child its own NextSibling) leaves two subtrees
+    unadopted: the cycle, each top naming a Parent that does not list it and
+    the two orphans are the report - their descendants, each on its own
+    parent's list, are not (audit B1-34: one false I3 line per node). A
+    declaration's or a statement's FirstToken one token late is an I2
+    violation: the span widened to the children hid it (audit B1-35). }
+  function CheckerCorruptionCase: TPasCustomCase;
+  begin
+    Result.Section := '';
+    Result.Name := 'tree checker: cut child list, late FirstToken';
+    Result.Run :=
+      function: TPasCheckResult
+      const
+        SRC = 'unit U;'#13#10'interface'#13#10'var A, B: Integer;'#13#10 +
+          'implementation'#13#10'procedure P;'#13#10'begin'#13#10 +
+          '  A := B + 1;'#13#10'end;'#13#10'end.'#13#10;
+      var
+        LPre: TPasPreprocessed;
+        LDiags: TArray<TPasParseDiag>;
+        LTree, LBad: TPasTree;
+        LReport, LCut: TPasCheckReport;
+        LIdx, LFirst, LVarContain, LAssignContain: Integer;
+
+        function Corrupt: TPasTree;
+        begin
+          Result := LTree;
+          Result.Nodes := Copy(LTree.Nodes);
+        end;
+
+        function Contains(AKind: TPasNodeKind; ALateBy: Integer): Integer;
+        var
+          LNode: Integer;
+        begin
+          LBad := Corrupt;
+          for LNode := 0 to High(LBad.Nodes) do
+            if LBad.Nodes[LNode].Kind = AKind then
+            begin
+              Inc(LBad.Nodes[LNode].FirstToken, ALateBy);
+              Break;
+            end;
+          LReport.Init;
+          CheckTree(LBad, True, LReport);
+          Result := LReport.Counts[ccContain];
+        end;
+
+      begin
+        LPre := GPP.ProcessText('u.pas', SRC);
+        LTree := TPasParser.ParseFile(LPre, LDiags);
+        LReport.Init;
+        CheckTree(LTree, True, LReport);
+        Result.Passed := (Length(LDiags) = 0) and (LReport.Total = 0);
+        LBad := Corrupt;
+        LFirst := LBad.Nodes[0].FirstChild;
+        LBad.Nodes[LFirst].NextSibling := LFirst;
+        LCut.Init;
+        CheckTree(LBad, True, LCut);
+        // `var A, B: Integer`: FirstToken on the colon; `A := B + 1`: on `:=`.
+        LVarContain := Contains(nkVarDecl, 3);
+        LAssignContain := Contains(nkAssign, 1);
+        Result.Passed := Result.Passed and (LCut.Counts[ccLink] = 3) and
+          (LCut.Counts[ccOrphan] = 2) and (LCut.OrphanCount = 2) and
+          (LVarContain = 2) and (LAssignContain = 1);
+        if Result.Passed then
+          Result.Message := ''
+        else
+        begin
+          Result.Message := Format('  valid: %d violation(s) (0); cut list: ' +
+            'I3.link %d (3), I3.orphan %d (2), orphans %d (2); late ' +
+            'FirstToken: VarDecl I2.contain %d (2: A, B), Assign %d (1)',
+            [LReport.Total, LCut.Counts[ccLink], LCut.Counts[ccOrphan],
+            LCut.OrphanCount, LVarContain, LAssignContain]) + sLineBreak;
+          for LIdx := 0 to LCut.Kept - 1 do
+            Result.Message := Result.Message + '    ' +
+              LCut.Violations[LIdx].Msg + sLineBreak;
+        end;
+        ApplyVerdict(Result, SRC, GCustomTreeVerdict, LPre, LTree, False,
+          Length(LDiags) = 0);
+      end;
+  end;
+
   { 5.7: the tree's with helpers (TPasTree.WithBody, EnclosingWith,
     LastChild - audit D1-21), over the layout docs/tree-contract.md fixes: an
     nkWithStmt's targets, then its body as the last child. A name in the body
@@ -4367,7 +4472,8 @@ begin
       '', 3)];
   AddMultilineIndentCases(Result);
   Result := Result + [OutParamAuxCase, PackageHeadTokensCase,
-    PackageStrayTextCase, FusedGreaterEqualCase, WithBodyCase];
+    PackageStrayTextCase, FusedGreaterEqualCase, WithBodyCase,
+    CheckerCorruptionCase];
 end;
 
 

@@ -150,7 +150,14 @@ same program, and T3 counts the losses per finding.
 
 ## 5. Span quirks
 
-- nkMember's FirstToken is its dot; its left edge is `NodeLeftmostVis`.
+- nkMember's FirstToken is its dot; its left edge is `NodeLeftmostVis`. The
+  same holds for every kind whose FirstToken stands after its first child -
+  the operator, bracket or postfix that follows its left operand: nkBinaryOp,
+  nkCall, nkIndex, nkDeref, nkTypeArgs, nkRange, nkSubrange, nkFormattedArg
+  and nkNamedArg. Only these, and a declaration's leading attribute groups
+  (`[Weak] FRef: TObject`, `[A] TFoo = class`: the FirstToken is the name),
+  stand before a node's FirstToken; any other child that does is an I2
+  violation.
 - `class` before a member routine, property or `class var` is the enclosing
   type's token - or, before a class method's implementation, the section's
   or program's; the member has Aux 1. The `var` of a struct body's var

@@ -34,9 +34,8 @@ unit PasTree.Printer;
     of its directives and its body, a property's specifiers;
   - keywords in lower case;
   - a `>=` the lexer fused from type arguments' or generic parameters'
-    closing `>` and an `=` (`V.AsType<T>=5`, `TFoo<T>= class`) as the two
-    tokens it stands for;
-  - a unit's `begin ... end.` as `initialization ... end.`;
+    closing `>` and an `=` (`V.AsType<T>=5`, `TFoo<T>= class`,
+    `V: TArr<Integer>= nil`) as the two tokens it stands for;
   - `class(TBase);` as `class(TBase) end;`;
   - a procedural type's directives after its `of object`, behind a `;` when
     a calling convention, far or near starts them (`procedure; stdcall`,
@@ -125,10 +124,12 @@ const
       'them is one, the one before end / else / until / ) is optional, a ' +
       'routine''s directive may stand before its header''s `;` or after it, ' +
       'and the canonical ones are derived from the children',
-    'N2 fused >=: the `>=` an nkBinaryOp names when type arguments on its ' +
-      'left ended in it (`V.AsType<T>=5`), and the one an nkTypeDecl owns ' +
-      'after generic parameters (`TFoo<T>= class`), are the `>` closing them ' +
-      'and the `=`: the lexer fused two tokens the grammar reads apart',
+    'N2 fused >=: a `>=` right after type arguments or generic parameters ' +
+      'that own no `>` - an nkBinaryOp''s (`V.AsType<T>=5`), an ' +
+      'nkTypeDecl''s (`TFoo<T>= class`), a typed constant''s, a ' +
+      'variable''s, a parameter''s or an inline constant''s (`V: ' +
+      'TArr<Integer>= nil`) - is the `>` closing them and the owner''s `=`: ' +
+      'the lexer fused two tokens the grammar reads apart',
     'N3 keyword case: a regenerated keyword, directive word or punctuation ' +
       'matches its token case-insensitively (dcc reads them so), and a ' +
       'regenerated `[` / `]` the legacy `(.` / `.)` (spec B.7); leaves and ' +
@@ -2328,6 +2329,7 @@ var
   LO: TArray<TOrigTok>;
   LOAt: TArray<Integer>;    // visible index -> its first entry in LO, -1
   LSkip: TArray<Boolean>;   // N8, N10: a token read elsewhere
+  LFused: TArray<Boolean>;  // N2: PasFusedGreaterEquals
   LMoveBefore: TArray<Integer>;  // N10: the `of` read before this token
   LEndAfter: TArray<Boolean>;    // N9: a virtual `end` after this token
   LOCount, LPCount, LIdx, LVis, LFirst, LLast, LI, LJ, LK: Integer;
@@ -2425,8 +2427,8 @@ var
         OrigIs(AOrig, AItem.Text, False)
     else
       // N3; and the token must be the printing node's own - but the `>`
-      // half of a fused `>=`, which the operator or the type declaration
-      // owns (N2).
+      // half of a fused `>=`, which the operator or the declaration owns
+      // (N2).
       Result := (OrigIs(AOrig, AItem.Text, True) or
                  ((AItem.Text = '[') and OrigIs(AOrig, '(.', False)) or
                  ((AItem.Text = ']') and OrigIs(AOrig, '.)', False))) and
@@ -2485,6 +2487,7 @@ begin
   LLast := ATree.Nodes[ARoot].LastToken;
   SetLength(LOAt, Length(ATree.Source.Visible));
   SetLength(LSkip, Length(ATree.Source.Visible));
+  LFused := PasFusedGreaterEquals(ATree);
   SetLength(LMoveBefore, Length(ATree.Source.Visible));
   SetLength(LEndAfter, Length(ATree.Source.Visible));
   for LIdx := 0 to High(LOAt) do
@@ -2548,10 +2551,7 @@ begin
     else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind in LIST_KINDS) and
        (LTok = tkSemicolon) then
       Inc(AResult.Normalized)                                        // N1
-    else if (LOwner >= 0) and (LTok = tkGreaterEqual) and
-       (((ATree.Nodes[LOwner].Aux = LVis) and
-         IsFusedGreaterEqual(ATree, LOwner)) or
-        (ATree.Nodes[LOwner].Kind = nkTypeDecl)) then
+    else if (LOwner >= 0) and (LTok = tkGreaterEqual) and LFused[LVis] then
     begin
       Inc(AResult.Normalized);                                       // N2
       AddO(LVis, '>', 1);

@@ -11,7 +11,11 @@ unit PasTree.Ast.Check;
   notices. This unit states what a tree is and checks it, over any tree:
 
   - I1 span sanity: token, node and link indices in range; a span is a span.
-  - I2 children ordered and disjoint, each inside its parent's span.
+  - I2 children ordered and disjoint, each inside its parent's span. A span
+    starts at FirstToken, but for the kinds whose FirstToken stands after
+    their first child (LEFT_OPERAND_KINDS: an operator, a postfix, a member
+    access) and for a declaration's leading attribute groups, which may
+    stand before its name (tree-contract.md sec. 5).
   - I3 links consistent (Parent / FirstChild / NextSibling), every node
     reachable from the root - except the unreachable shapes the parser builds
     ON PURPOSE, which are recognised and COUNTED (TPasCheckShape), never
@@ -251,6 +255,17 @@ function IsEmptyNode(const ATree: TPasTree; ANode: Integer): Boolean;
   both ask it. }
 function IsFusedGreaterEqual(const ATree: TPasTree; ANode: Integer): Boolean;
 
+{ Per visible token: is it a `>=` fused from the `>` closing type arguments
+  or generic parameters and the `=` after them, whoever owns it - an
+  operator, a type declaration, or a typed constant's, a variable's, a
+  parameter's or an inline constant's `=` before its value (`V:
+  TArr<Integer>= nil`)? Read from the tree: the token right after an
+  nkTypeArgs or nkGenericParams that owns no `>` - its last child ends where
+  it does. The checker reads such a token as the owner's `=` (I5, I6), the
+  printer as `>` and `=` (N2). Safe on a corrupt tree, as above (audit
+  B2-46). }
+function PasFusedGreaterEquals(const ATree: TPasTree): TArray<Boolean>;
+
 { One line per kept violation, 'file(line,col): class: message'; '' when the
   report holds none. }
 function CheckReportText(const ATree: TPasTree;
@@ -340,7 +355,7 @@ const
     method is an nkDirective child, and the initializer after a procedural
     type's directives is its declaration's. A new finding of the kind is
     filed here as a `loss:F<n>` row, until the tree holds it. }
-  OWN_RULE_TEXT: array[0..230] of string = (
+  OWN_RULE_TEXT: array[0..229] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -449,7 +464,8 @@ const
     'InlineVar | := | opt | derived | before the initializer (Aux 1)',
     'InlineConst | const | head once | derived | the kind',
     'InlineConst | : | opt | derived | two children after the name: the type',
-    'InlineConst | = | once | derived | the kind: before the value (Aux 1)',
+    'InlineConst | = | once | derived | the kind: before the value (Aux 1); ' +
+      'a fused >= after type arguments is their > and this =',
 
     // ---- compilation units ----
     'Unit | unit | head once | derived | the kind',
@@ -502,10 +518,8 @@ const
     'LabelSec | label | head once | derived | the kind',
     'LabelSec | , | - | derived | between the labels',
     'LabelSec | ; | once | derived | the kind',
-    'TypeDecl | = | opt | derived | the kind; a fused >= stands for it after ' +
-      'generic parameters',
-    'TypeDecl | >= | opt | insig | a fused >=: the > closing the generic ' +
-      'parameters and the = (normalization list)',
+    'TypeDecl | = | opt | derived | the kind; a fused >= after generic ' +
+      'parameters is their > and this = (normalization list)',
     'TypeDecl | type | opt | derived | Aux 1: a distinct alias, `= type X`',
     'TypeDecl | reference | opt | derived | the ProcType child''s Aux 2; ' +
       'outside its span',
@@ -516,10 +530,12 @@ const
       'span (F3)',
     'ConstDecl | : | opt | derived | two children after the name: the type ' +
       'and the value',
-    'ConstDecl | = | once | derived | the kind',
+    'ConstDecl | = | once | derived | the kind; a fused >= after type ' +
+      'arguments is their > and this =',
     'VarDecl | , | - | derived | between the names (nfName)',
     'VarDecl | : | once | derived | the kind: after the names',
-    'VarDecl | = | opt | derived | before the initializer',
+    'VarDecl | = | opt | derived | before the initializer; a fused >= ' +
+      'after type arguments is their > and this =',
     'VarDecl | absolute | opt | derived | Aux 1',
     'Aggregate | ( | head once | derived | the kind',
     'Aggregate | ) | once | derived | the kind',
@@ -611,7 +627,8 @@ const
     'Params | ; | - | derived | between the parameters',
     'Param | , | - | derived | between the names (nfName)',
     'Param | : | opt | derived | before the type: a child after the names',
-    'Param | = | opt | derived | before the default value',
+    'Param | = | opt | derived | before the default value; a fused >= ' +
+      'after type arguments is their > and this =',
     'Param | const var out | opt | derived | nfVar, nfConst, nfOut: the mode ' +
       'word, at the left edge or right after a leading attribute group (F18)',
     'Directive | @routine | head once | contract | the directive word',
@@ -1188,6 +1205,36 @@ begin
   end;
 end;
 
+function PasFusedGreaterEquals(const ATree: TPasTree): TArray<Boolean>;
+var
+  LCount, LNode, LKid, LLast, LGuard, LAfter: Integer;
+begin
+  SetLength(Result, Length(ATree.Source.Visible));
+  LCount := Length(ATree.Nodes);
+  for LNode := 0 to LCount - 1 do
+  begin
+    if not (ATree.Nodes[LNode].Kind in [nkTypeArgs, nkGenericParams]) then
+      Continue;
+    LAfter := ATree.Nodes[LNode].LastToken + 1;
+    if (LAfter < 1) or (LAfter > High(Result)) or
+       (ATree.Nodes[LNode].LastToken < ATree.Nodes[LNode].FirstToken) or
+       (ATree.Source.VisibleToken(LAfter).Kind <> tkGreaterEqual) then
+      Continue;
+    LLast := NIL_NODE;
+    LKid := ATree.Nodes[LNode].FirstChild;
+    LGuard := 0;
+    while (LKid >= 0) and (LKid < LCount) and (LGuard < LCount) do
+    begin
+      LLast := LKid;
+      LKid := ATree.Nodes[LKid].NextSibling;
+      Inc(LGuard);
+    end;
+    if (LLast <> NIL_NODE) and
+       (ATree.Nodes[LLast].LastToken = ATree.Nodes[LNode].LastToken) then
+      Result[LAfter] := True;
+  end;
+end;
+
 function CheckReportText(const ATree: TPasTree;
   const AReport: TPasCheckReport): string;
 var
@@ -1244,10 +1291,19 @@ const
   ST_NONE = 0;       // reached from no root
   ST_TREE = 1;       // reachable from the root
   ST_ORPHAN = 2;     // in an unreachable subtree
+  // The kinds whose FirstToken is an interior token - the operator, the
+  // bracket or the dot after their first child (tree-contract.md sec. 5):
+  // their span starts where that child does.
+  LEFT_OPERAND_KINDS = [nkMember, nkBinaryOp, nkCall, nkIndex, nkDeref,
+    nkTypeArgs, nkRange, nkSubrange, nkFormattedArg, nkNamedArg];
 var
   LCount, LLastVis, LBefore, LOrderCount, LOrphanStart: Integer;
   LState: TArray<Byte>;
   LBadTok, LEmpty: TArray<Boolean>;
+  LIsTop: TArray<Boolean>;  // the top of an unreachable subtree (WalkOrphans)
+  // Per visible token: a fused `>=` after type arguments or generic
+  // parameters, read as its owner's `=` (PasFusedGreaterEquals).
+  LFusedGE: TArray<Boolean>;
   LLo, LHi, LOrder, LOwner, LStack: TArray<Integer>;
   // The children Walk accepted, per node: every later pass follows a child
   // list this far and no further, so a list that loops ends where Walk
@@ -1274,6 +1330,15 @@ var
     if (AVis < 0) or (AVis > LLastVis) then
       Exit(tkUnknown);
     Result := ATree.Source.VisibleToken(AVis).Kind;
+  end;
+
+  // TokKind, but a fused `>=` after type arguments is the `=` it ends in:
+  // the `>` is theirs, outside the owner's reading.
+  function ReadKind(AVis: Integer): TPasTokenKind;
+  begin
+    Result := TokKind(AVis);
+    if (Result = tkGreaterEqual) and LFusedGE[AVis] then
+      Result := tkEqual;
   end;
 
   // 'line:col' of a visible token, for the second position in a message.
@@ -1397,6 +1462,62 @@ var
     end;
   end;
 
+  // I3 after the root's walk: every unreachable subtree from its own top,
+  // marked in LIsTop. A top is a node whose Parent is out of range - the
+  // parser's orphans have none - or whose Parent's child list, as far as it
+  // can be followed, does not hold it: that names a Parent which does not
+  // list it, the one violation such a subtree is. Its descendants, each on
+  // its own parent's list, are no tops and not reported again (audit
+  // B1-34). What a top's walk does not reach - a ring of nodes listing one
+  // another, none listed from outside - is walked from its lowest index.
+  procedure WalkOrphans;
+  var
+    LNode, LKid, LSteps: Integer;
+    LHeld: TArray<Boolean>;   // on the child list of its unreached Parent
+
+    procedure Top(ANode: Integer; ALinked: Boolean);
+    begin
+      if ALinked then
+        AReport.Add(ccLink, ANode, Site(ANode), Format(
+          '%s node %d names Parent %d, whose child list does not hold it',
+          [KName(ANode), ANode, ATree.Nodes[ANode].Parent]));
+      LIsTop[ANode] := True;
+      Walk(ANode, ST_ORPHAN);
+    end;
+
+  begin
+    for LNode := 1 to LCount - 1 do
+      if (LState[LNode] = ST_NONE) and not LinkOk(ATree.Nodes[LNode].Parent) then
+        Top(LNode, False);
+    if LOrderCount = LCount then
+      Exit;
+    SetLength(LHeld, LCount);
+    for LNode := 1 to LCount - 1 do
+      if LState[LNode] = ST_NONE then
+      begin
+        LKid := ATree.Nodes[LNode].FirstChild;
+        LSteps := 0;
+        while LinkOk(LKid) and (LSteps < LCount) do
+        begin
+          if ATree.Nodes[LKid].Parent = LNode then
+          begin
+            if LHeld[LKid] then
+              Break;   // the list loops
+            LHeld[LKid] := True;
+          end;
+          LKid := ATree.Nodes[LKid].NextSibling;
+          Inc(LSteps);
+        end;
+      end;
+    for LNode := 1 to LCount - 1 do
+      if (LState[LNode] = ST_NONE) and not LHeld[LNode] then
+        Top(LNode, True);
+    // Its walk reports the ring, where it comes back round.
+    for LNode := 1 to LCount - 1 do
+      if LState[LNode] = ST_NONE then
+        Top(LNode, False);
+  end;
+
   // Invalid code only: which of ANode's childless one-token children are
   // placeholders standing BEFORE their token (see the unit comment). One is
   // read that way when the token reading does not fit: ANode is empty, or the
@@ -1450,8 +1571,8 @@ var
   // are computed first: LOrder is walked backwards).
   procedure ComputeSpan(ANode: Integer);
   var
-    LFirst, LLast, LMin, LKid, LIdx: Integer;
-    LHasFull: Boolean;
+    LFirst, LLast, LMin, LLeadMin, LKid, LIdx: Integer;
+    LHasFull, LLead: Boolean;
   begin
     LFirst := ATree.Nodes[ANode].FirstToken;
     LLast := ATree.Nodes[ANode].LastToken;
@@ -1466,14 +1587,20 @@ var
     if not AValid then
       SettlePlaceholders(ANode);
     LMin := MaxInt;
+    LLeadMin := MaxInt;
+    LLead := True;
     LHasFull := False;
     LKid := ATree.Nodes[ANode].FirstChild;
     for LIdx := 1 to LKidCount[ANode] do
     begin
+      if Kind(LKid) <> nkAttrGroup then
+        LLead := False;
       if not LEmpty[LKid] then
       begin
         LHasFull := True;
         LMin := Min(LMin, LLo[LKid]);
+        if LLead then
+          LLeadMin := Min(LLeadMin, LLo[LKid]);
       end;
       LKid := ATree.Nodes[LKid].NextSibling;
     end;
@@ -1505,7 +1632,14 @@ var
     else
     begin
       LEmpty[ANode] := False;
-      LLo[ANode] := Min(LFirst, LMin);
+      // Only a kind whose FirstToken stands after its left operand, and the
+      // attribute groups leading a declaration whose FirstToken is its name
+      // (`[Weak] FRef: TObject`), reach left of FirstToken; any other child
+      // starting first is an I2 violation (audit B1-35).
+      if Kind(ANode) in LEFT_OPERAND_KINDS then
+        LLo[ANode] := Min(LFirst, LMin)
+      else
+        LLo[ANode] := Min(LFirst, LLeadMin);
       LHi[ANode] := LLast;
     end;
   end;
@@ -1548,6 +1682,11 @@ var
         end
         else if not LEmpty[ANode] then
         begin
+          if LLo[LKid] < LLo[ANode] then
+            Report(ccContain, LKid, LLo[LKid],
+              '{n} (child {d}) {a}..{a} starts before its parent {n} {a}..{a}',
+              [LKid, LIdx, LLo[LKid], LHi[LKid], ANode, LLo[ANode],
+              LHi[ANode]]);
           if LHi[LKid] > LHi[ANode] then
             Report(ccContain, LKid, LLo[LKid],
               '{n} (child {d}) {a}..{a} ends after its parent {n} {a}..{a}',
@@ -1643,6 +1782,8 @@ var
     LRule: Integer;
   begin
     ACell := OwnTokenCell(ATree.Source, ATok);
+    if LFusedGE[ATok] then
+      ACell := Ord(tkEqual);
     APrimary := -1;
     if (ATok = LAfterEnd) and (ANode = 0) and
        (GOwnGlobal[wcAfterEnd] >= 0) then
@@ -2187,7 +2328,7 @@ var
       Say('has no name marked');
       Exit;
     end;
-    LAfter := TokKind(LSegEnd + 1);
+    LAfter := ReadKind(LSegEnd + 1);
     if LAfter = LListSep then
       Say(Format('has %s after its last marked name: a name is not marked',
         [TokName(LSegEnd + 1)]));
@@ -2206,14 +2347,14 @@ var
           // `var X, Y;` with neither a type nor an initializer as it is.
           LHasInit := ATree.Nodes[ANode].Aux = 1;
           if LHasInit and ((LLastTail = NIL_NODE) or LEmpty[LLastTail] or
-             not (TokKind(LLo[LLastTail] - 1) in [tkAssign, tkEqual])) then
+             not (ReadKind(LLo[LLastTail] - 1) in [tkAssign, tkEqual])) then
             Say('has Aux 1, but its last child is no initializer')
           else if LTail - Ord(LHasInit) > 1 then
             Say(Format('has %d children after its names', [LTail]))
           else if LTail - Ord(LHasInit) = 1 then
             Due(tkColon, 'the type')
           else if LHasInit then
-            Due(TokKind(LLo[LLastTail] - 1), 'the initializer')
+            Due(ReadKind(LLo[LLastTail] - 1), 'the initializer')
           else if (LAfter = tkColon) or ((LAfter in [tkAssign, tkEqual]) and
              not (LinkOk(ATree.Nodes[ANode].Parent) and
              (Kind(ATree.Nodes[ANode].Parent) = nkForStmt))) then
@@ -2273,6 +2414,7 @@ begin
   SetLength(LState, LCount);
   SetLength(LBadTok, LCount);
   SetLength(LEmpty, LCount);
+  SetLength(LIsTop, LCount);
   SetLength(LLo, LCount);
   SetLength(LHi, LCount);
   SetLength(LOrder, LCount);
@@ -2282,6 +2424,7 @@ begin
   for LPos := 0 to LLastVis do
     LOwner[LPos] := NIL_NODE;
   LAfterEnd := -1;
+  LFusedGE := PasFusedGreaterEquals(ATree);
 
   // I1, indices. A node whose tokens are out of range stays out of every
   // span test below; an out-of-range link ends the list it is on.
@@ -2310,21 +2453,13 @@ begin
   end;
 
   // I3: reachability from the root (node 0), then every unreachable subtree
-  // from its own top. What neither walk reaches names a Parent whose list
-  // does not hold it.
+  // from its own top.
   LOrderCount := 0;
   if ATree.Nodes[0].Parent <> NIL_NODE then
     AReport.Add(ccLink, 0, Site(0), 'the root has a Parent');
   Walk(0, ST_TREE);
   LOrphanStart := LOrderCount;
-  for LNode := 1 to LCount - 1 do
-    if (LState[LNode] = ST_NONE) and not LinkOk(ATree.Nodes[LNode].Parent) then
-      Walk(LNode, ST_ORPHAN);
-  for LNode := 1 to LCount - 1 do
-    if LState[LNode] = ST_NONE then
-      AReport.Add(ccLink, LNode, Site(LNode), Format(
-        '%s node %d names Parent %d, whose child list does not hold it',
-        [KName(LNode), LNode, ATree.Nodes[LNode].Parent]));
+  WalkOrphans;
 
   // I1 spans, bottom-up: descendants come after their ancestors in LOrder.
   // A placeholder is settled by its parent, before anybody reads its span
@@ -2369,8 +2504,7 @@ begin
     LNode := LOrder[LPos];
     // The subtree's nodes follow its top in LOrder, up to the next top.
     LSize := 1;
-    while (LPos + LSize < LOrderCount) and
-          LinkOk(ATree.Nodes[LOrder[LPos + LSize]].Parent) do
+    while (LPos + LSize < LOrderCount) and not LIsTop[LOrder[LPos + LSize]] do
       Inc(LSize);
     ClassifyOrphan(LNode, LSize);
     Inc(LPos, LSize);
