@@ -3719,35 +3719,24 @@ begin
 end;
 
 { E2081 in a rechecked with body: a write to an enclosing for loop's counter
-  (`:=`, Inc / Dec), judged on the committed binding. The resolver's
+  (PasCounterWrites - the resolver's shapes), judged on the committed
+  binding. The resolver's
   CheckForCounters leaves these nodes to the recheck - Phase 1 bound `Tag` in
   `for Tag := ... do with C do Tag := 7` to the counter where the target's
   inherited member is meant (audit B4-13). }
 procedure TPasSemaTyper.CheckCountersIn;
-var
-  LIdx, LTarget, LSym, LUp, LFrom, LFirst, LBody, LCounter: Integer;
-begin
-  for LIdx := 0 to High(T.Nodes) do
+
+  // One written name: E2081 when an enclosing loop's body holds it and that
+  // loop's counter is the name's symbol.
+  procedure Judge(ATarget: Integer);
+  var
+    LSym, LUp, LFrom, LFirst, LBody, LCounter: Integer;
   begin
-    if not FSweepOnly[LIdx] then
-      Continue;
-    LTarget := NIL_NODE;
-    case Kind(LIdx) of
-      nkAssign:
-        LTarget := Child(LIdx);
-      nkCall:
-        if (Child(LIdx) <> NIL_NODE) and (Kind(Child(LIdx)) = nkIdent) and
-           (T.NodeTextEquals(Child(LIdx), 'Inc') or
-            T.NodeTextEquals(Child(LIdx), 'Dec')) then
-          LTarget := Sib(Child(LIdx));
-    end;
-    if (LTarget = NIL_NODE) or (Kind(LTarget) <> nkIdent) then
-      Continue;
-    LSym := M.RefMap[LTarget];
+    LSym := M.RefMap[ATarget];
     if LSym = NIL_SYM then
-      Continue;
-    LFrom := LTarget;
-    LUp := T.Nodes[LTarget].Parent;
+      Exit;
+    LFrom := ATarget;
+    LUp := T.Nodes[ATarget].Parent;
     while LUp <> NIL_NODE do
     begin
       if Kind(LUp) in [nkForStmt, nkForInStmt] then
@@ -3765,7 +3754,7 @@ begin
         if (LFrom = LBody) and (LCounter = LSym) then
         begin
           Diag('E2081', Format(SE2081_AssignToForLoopVar,
-            [M.Symbols[LSym].Name]), LTarget);
+            [M.Symbols[LSym].Name]), ATarget);
           Break;
         end;
       end;
@@ -3773,6 +3762,14 @@ begin
       LUp := T.Nodes[LUp].Parent;
     end;
   end;
+
+var
+  LIdx, LTarget: Integer;
+begin
+  for LIdx := 0 to High(T.Nodes) do
+    if FSweepOnly[LIdx] then
+      for LTarget in PasCounterWrites(T, LIdx) do
+        Judge(LTarget);
 end;
 
 // The builtin-symbol cache and the type categories - what both Run and

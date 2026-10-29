@@ -3167,6 +3167,42 @@ begin
   Ok('e2081: reported once from inside a nested loop', DiagCount('E2081') = 1);
   GModel.Free;
 
+  // E3-15: the other writes dcc reports - `System.`-qualified Inc / Dec, a
+  // nested `for` or `for ... in` on the counter, Read / ReadLn (any
+  // argument), Val's value; not a var / out argument, FillChar or Val's code
+  // (dcc's W1015), not `@I` (dcc64 37.0, local/probe-m-b/e315).
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'procedure VP(var X: Integer); begin end;'#10 +
+    'procedure OP(out X: Integer); begin X := 0; end;'#10 +
+    'procedure P;'#10 +
+    'var I, C: Integer; A: array of Integer; S: string; Q: ^Integer;'#10 +
+    'begin'#10 +
+    '  for I := 0 to 9 do System.Inc(I);'#10 +                 // 9
+    '  for I := 0 to 9 do System.Dec(I, 2);'#10 +              // 10
+    '  for I := 0 to 9 do for I := 0 to 3 do ;'#10 +           // 11
+    '  for I := 0 to 9 do for I in A do ;'#10 +                // 12
+    '  for I := 0 to 9 do ReadLn(I);'#10 +                     // 13
+    '  for I := 0 to 9 do ReadLn(C, I);'#10 +                  // 14
+    '  for I := 0 to 9 do Read(i);'#10 +                       // 15
+    '  for I := 0 to 9 do Val(S, I, C);'#10 +                  // 16
+    '  for C := 0 to 9 do Val(S, I, C);'#10 +                  // Val's code
+    '  for I := 0 to 9 do VP(I);'#10 +                         // var
+    '  for I := 0 to 9 do OP(I);'#10 +                         // out
+    '  for I := 0 to 9 do FillChar(I, 4, 0);'#10 +             // untyped var
+    '  for I := 0 to 9 do Q := @I;'#10 +                       // address
+    '  for I := 0 to 9 do ReadLn(C);'#10 +                     // another name
+    '  for var K := 0 to 9 do for K := 0 to 1 do ;'#10 +       // 23
+    'end;'#10 +
+    'end.'#10);
+  var LCounterLines := '';
+  for var LD in GModel.Diags do
+    if LD.Code = 'E2081' then
+      LCounterLines := LCounterLines + IntToStr(LD.Line) + ' ';
+  Ok('e2081: System.Inc / Dec, nested for and for-in, Read / ReadLn, Val',
+    LCounterLines = '9 10 11 12 13 14 15 16 23 ');
+  GModel.Free;
+
   // ---- E2145: a bare `raise` needs a handler (18.3.1) ----
   // The five shapes dcc rejects. Counted, not located, because the whole
   // fixture is one line.

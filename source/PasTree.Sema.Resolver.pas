@@ -4630,9 +4630,13 @@ begin
 end;
 
 { 5.5.1: the counter of a `for` loop is read-only in the body - dcc reports
-  `E2081 Assignment to FOR-Loop variable 'X'`. Three shapes, all dcc-verified
-  and all reported: a direct `I := ...`, a var-param mutation (`Inc(I)`,
-  `Dec(I)`), and the same two against an inline `for var K` counter.
+  `E2081 Assignment to FOR-Loop variable 'X'`. The writes are
+  PasCounterWrites' (all dcc64 37.0-probed, local/probe-m-b/e315): `I := ...`,
+  `Inc(I)` / `Dec(I)`, `Read(I)` / `ReadLn(F, I)`, `Val(S, I, C)`, a nested
+  `for I` or `for I in`, the intrinsics bare or `System.`-qualified - against
+  a counter named in the header or an inline `for var K`. Passing the counter
+  to a var, out or untyped var parameter is only dcc's warning W1015, not
+  reported here.
 
   Runs after ResolveNode because it works on BINDINGS, not names: the point is
   that the assignment target is the same SYMBOL the header declared or named,
@@ -4690,38 +4694,19 @@ var
   // Walks a loop BODY looking for writes to ACounter.
   procedure Scan(ANode, ACounter: Integer; const AName: string);
   var
-    LChild, LTarget, LCallee, LArg: Integer;
+    LChild, LTarget: Integer;
   begin
     if ANode = NIL_NODE then
       Exit;
+    // The intrinsics (Inc, Dec, Read, ReadLn, Val) are matched by NAME
+    // rather than by symbol: they have no declaration to point at, and a
+    // user routine that shadows one would not be an intrinsic call at all -
+    // but it would also have to take a var parameter to matter, which is a
+    // precision this check does not claim.
+    for LTarget in PasCounterWrites(FTree, ANode) do
+      if FModel.RefMap[LTarget] = ACounter then
+        Flag(LTarget, AName);
     case KindOf(ANode) of
-      nkAssign:
-        begin
-          LTarget := FirstChild(ANode);
-          if (LTarget <> NIL_NODE) and (KindOf(LTarget) = nkIdent) and
-             (FModel.RefMap[LTarget] = ACounter) then
-            Flag(LTarget, AName);
-        end;
-      nkCall:
-        begin
-          // Inc/Dec take their first argument by reference (4.11), so they
-          // mutate the counter exactly as an assignment does. Matched by NAME
-          // rather than by symbol: both are compiler intrinsics with no
-          // declaration to point at, and a user routine that shadows either
-          // name would not be an intrinsic call at all - but it would also
-          // have to take a var parameter to matter, which is a precision this
-          // check does not claim.
-          LCallee := FirstChild(ANode);
-          if (LCallee <> NIL_NODE) and (KindOf(LCallee) = nkIdent) and
-             (FTree.NodeTextEquals(LCallee, 'Inc') or
-              FTree.NodeTextEquals(LCallee, 'Dec')) then
-          begin
-            LArg := NextSib(LCallee);
-            if (LArg <> NIL_NODE) and (KindOf(LArg) = nkIdent) and
-               (FModel.RefMap[LArg] = ACounter) then
-              Flag(LArg, AName);
-          end;
-        end;
       nkBinaryOp:
         begin
           // An operator chain in a loop (TPasTree.ChainFirst, audit A1-01).

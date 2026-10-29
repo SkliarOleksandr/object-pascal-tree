@@ -1303,8 +1303,11 @@ Still open, roughly in the order we're tackling it:
     suites and both flat corpora were green. Still not reported: a record guard
     with no Boolean conversion, which is the exemption above;
   - ~~assigning to a `for` counter inside the body~~ - **done 2026-07-31**
-    (`E2081`, all three shapes dcc reports: a direct assignment, `Inc`/`Dec`,
-    and an inline `for var` counter). Zero new diagnostics across ~12 000
+    (`E2081`: a direct assignment, `Inc`/`Dec` bare or `System.`-qualified,
+    a nested `for` or `for ... in` on the counter, `Read`/`ReadLn`, `Val`'s
+    value - the last four since 0.144.0 - against a named or an inline
+    `for var` counter; a var-parameter pass is only dcc's W1015 and is not
+    reported). Zero new diagnostics across ~12 000
     corpus units, which is the bar every remaining entry here has to clear;
   - ~~bare `raise` outside an exception handler~~ - **done 2026-08-05**
     (`E2145`). The context turned out to be purely lexical and decided by the

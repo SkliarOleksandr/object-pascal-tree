@@ -553,6 +553,16 @@ type
   function PasParamNameCount(const ATree: TPasTree;
     AParams: Integer): Integer;
 
+  { The bare names (nkIdent) ANode itself writes, as a for loop's counter
+    sees a write - dcc's E2081 (5.5.1): an assignment's target; the first
+    argument of `Inc` / `Dec`; every argument of `Read` / `ReadLn`; the
+    second of `Val`; the counter of a `for` or `for ... in` (not a `for var`
+    declaration). An intrinsic is matched by name, bare or `System.`. A
+    var, out or untyped var argument is not one - dcc warns there, W1015.
+    Empty for anything else; the caller walks the children. }
+  function PasCounterWrites(const ATree: TPasTree;
+    ANode: Integer): TArray<Integer>;
+
 implementation
 
 uses
@@ -673,6 +683,79 @@ begin
      ((ATree.Nodes[LParent].Kind = nkGuid) and
       (ATree.Nodes[ANode].Kind in [nkIdent, nkMember]))) and
     (ATree.Nodes[LParent].FirstChild = ANode);
+end;
+
+function PasCounterWrites(const ATree: TPasTree;
+  ANode: Integer): TArray<Integer>;
+
+  function IsIdent(ANode: Integer): Boolean;
+  begin
+    Result := (ANode <> NIL_NODE) and (ATree.Nodes[ANode].Kind = nkIdent);
+  end;
+
+  // The intrinsic a callee names - its bare name, or `System.Name` -
+  // as the node of that name; NIL_NODE for any other callee.
+  function IntrinsicName(ACallee: Integer): Integer;
+  var
+    LHead: Integer;
+  begin
+    Result := NIL_NODE;
+    if IsIdent(ACallee) then
+      Exit(ACallee);
+    if (ACallee = NIL_NODE) or (ATree.Nodes[ACallee].Kind <> nkMember) then
+      Exit;
+    LHead := ATree.Nodes[ACallee].FirstChild;
+    if IsIdent(LHead) and ATree.NodeTextEquals(LHead, 'System') and
+       IsIdent(ATree.Nodes[LHead].NextSibling) and
+       (ATree.Nodes[ATree.Nodes[LHead].NextSibling].NextSibling = NIL_NODE) then
+      Result := ATree.Nodes[LHead].NextSibling;
+  end;
+
+var
+  LFirst, LName, LArg, LPos: Integer;
+begin
+  Result := nil;
+  LFirst := ATree.Nodes[ANode].FirstChild;
+  case ATree.Nodes[ANode].Kind of
+    nkAssign, nkForStmt, nkForInStmt:
+      if IsIdent(LFirst) then
+        Result := [LFirst];
+    nkCall:
+      begin
+        LName := IntrinsicName(LFirst);
+        if LName = NIL_NODE then
+          Exit;
+        LArg := ATree.Nodes[LFirst].NextSibling;
+        if ATree.NodeTextEquals(LName, 'Inc') or
+           ATree.NodeTextEquals(LName, 'Dec') then
+        begin
+          if IsIdent(LArg) then
+            Result := [LArg];
+        end
+        else if ATree.NodeTextEquals(LName, 'Val') then
+        begin
+          if LArg <> NIL_NODE then
+            LArg := ATree.Nodes[LArg].NextSibling;
+          if IsIdent(LArg) then
+            Result := [LArg];
+        end
+        else if ATree.NodeTextEquals(LName, 'Read') or
+                ATree.NodeTextEquals(LName, 'ReadLn') then
+        begin
+          LPos := 0;
+          while LArg <> NIL_NODE do
+          begin
+            if IsIdent(LArg) then
+            begin
+              SetLength(Result, LPos + 1);
+              Result[LPos] := LArg;
+              Inc(LPos);
+            end;
+            LArg := ATree.Nodes[LArg].NextSibling;
+          end;
+        end;
+      end;
+  end;
 end;
 
 function PasParamNameCount(const ATree: TPasTree;
