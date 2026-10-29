@@ -13612,6 +13612,45 @@ var
           ParamTypesFit(ALit, LCanon, LDef);
     end;
 
+    // `Self` in a `class` method - in a nested routine or an anonymous
+    // method inside one too - is the class REFERENCE, not an instance
+    // (15.1.1; audit B3-30): the outermost routine around it says `class`.
+    // GetX types it as the struct (or, in a class helper, the extended
+    // class), which is the reference's target. A static class method has
+    // no Self, so one that compiles is never static.
+    // Does the nkTypeArgs ANode follow a ROUTINE (`Pick<TFoo>`, a generic
+    // method's paren-less call) rather than a generic type?
+    function HeadIsRoutine(ANode: Integer): Boolean;
+    var
+      LHead, LMid, LSym: Integer;
+    begin
+      LHead := LM.Tree.Nodes[ANode].FirstChild;
+      if (LHead <> NIL_NODE) and (LM.Tree.Nodes[LHead].Kind = nkMember) then
+        LHead := LM.Tree.LastChild(LHead);
+      Result := (LHead <> NIL_NODE) and TargetSym(LHead, LMid, LSym) and
+        (FModels[LMid].Symbols[LSym].Kind = skRoutine);
+    end;
+
+    function IsClassMethodSelf(ANode: Integer): Boolean;
+    var
+      LUp, LOuter: Integer;
+    begin
+      Result := False;
+      if (LM.Tree.Nodes[ANode].Kind <> nkIdent) or
+         not LM.Tree.NodeTextEquals(ANode, 'Self') or
+         (LM.RefMap[ANode] <> NIL_SYM) or LM.ExtRefMap.ContainsKey(ANode) then
+        Exit;
+      LOuter := NIL_NODE;
+      LUp := LM.Tree.Nodes[ANode].Parent;
+      while LUp <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LUp].Kind = nkRoutine then
+          LOuter := LUp;
+        LUp := LM.Tree.Nodes[LUp].Parent;
+      end;
+      Result := (LOuter <> NIL_NODE) and (LM.Tree.Nodes[LOuter].Aux = 1);
+    end;
+
   begin
     // Present arguments and the trailing-comma slot, and the one arity rule
     // (CallArgCount, ArityFits - 6.2.5): the slot is not an argument, so
@@ -13650,11 +13689,17 @@ var
       // A TYPE NAME is a class reference in a value position (15.2.1), not
       // an instance: `Reg(TFoo)` takes `Reg(C: TFooClass)` over `Reg(O:
       // TFoo)` in either order (local/probe-b34 P1; audit E3-25 - GetX types
-      // it as the instance, which scored the instance overload exact).
-      else if (LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
-              XValid(LArgX) and XValid(LParX) and
+      // it as the instance, which scored the instance overload exact). So is
+      // `Self` in a class method (IsClassMethodSelf; audit B3-30), and so is
+      // a generic type name, `SubscribeToMessage(TMessage<TNotification>,
+      // ...)` (System.Notification) - unless its head is a generic ROUTINE,
+      // whose paren-less call is a value.
+      else if XValid(LArgX) and XValid(LParX) and
               (XCatOf(CanonTypeX(LArgX)) = tcClass) and
-              IsTypeDesignator(LCore) then
+              ((LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+               (IsTypeDesignator(LCore) or IsClassMethodSelf(LCore)) or
+               (LM.Tree.Nodes[LCore].Kind = nkTypeArgs) and
+               not HeadIsRoutine(LCore)) then
       begin
         var LCanonPar := CanonTypeX(LParX);
         case XCatOf(LCanonPar) of
@@ -13786,6 +13831,14 @@ var
           // TSeekOrigin) over Seek(Longint; Word), local/probe-b31 O3); an
           // ordinal for an array.
           else if ArgCatRejects(LParCat, XCatOf(LCanonArg)) then
+            Exit(-1)
+          // An instance where a class reference is wanted: `RegC(Self)` in
+          // an instance method takes RegC(O: TObject) over RegC(C: TClass)
+          // in either order (15.1.1, local/probe-park/b330 SP.dpr; audit
+          // B3-30). A type name and a class method's Self, which are class
+          // references, took the branch above; the unit typer's scorer has
+          // no such branch, so the rule is this pass's alone.
+          else if (LParCat = tcClassOf) and (XCatOf(LCanonArg) = tcClass) then
             Exit(-1)
           else if XAssignableX(LParX, LArgX) then
             Inc(Result, 1);

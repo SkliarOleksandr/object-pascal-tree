@@ -8818,6 +8818,73 @@ begin
   end;
 end;
 
+// B3-30: `Self` in a class method - a nested routine and an anonymous method
+// in one included, a class helper's class method too - is a class reference
+// for overload choice, and an instance is no class reference (15.1.1, dcc64
+// 37.0, local/probe-park/b330 SP.dpr, SP2.dpr), in either declaration order.
+procedure TestClassMethodSelf;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_clsself');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10'  TClass = class of TObject;'#10 +
+    '  TProc = reference to procedure;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CsP.dpr'),
+    'program CsP;'#10'type'#10 +
+    '  TRA = record XA: Integer; end;'#10 +
+    '  TRB = record XB: Integer; end;'#10 +
+    '  TFoo = class'#10 +
+    '    class function Make: Integer;'#10 +
+    '    function Inst: Integer;'#10 +
+    '  end;'#10 +
+    '  TFooClass = class of TFoo;'#10 +
+    '  TMine<T> = class end;'#10 +
+    '  TT = class end;'#10 +
+    '  TH = class helper for TT'#10 +
+    '    class function HC: Integer;'#10 +
+    '  end;'#10 +
+    'function Reg(C: TFooClass): TRA; overload; begin end;'#10 +
+    'function Reg(O: TFoo): TRB; overload; begin end;'#10 +
+    'function RegC(C: TClass): TRA; overload; begin end;'#10 +
+    'function RegC(O: TObject): TRB; overload; begin end;'#10 +
+    'function RegD(O: TObject): TRB; overload; begin end;'#10 +
+    'function RegD(C: TClass): TRA; overload; begin end;'#10 +
+    'class function TFoo.Make: Integer;'#10 +
+    '  function Nested: Integer;'#10 +
+    '  begin Result := Reg(Self).XA; end;'#10 +
+    'var P: TProc; X: Integer;'#10 +
+    'begin'#10 +
+    '  P := procedure begin X := RegD(Self).XA; end;'#10 +
+    '  Result := Reg(Self).XA + RegC(Self).XA + RegD(Self).XA + Nested;'#10 +
+    'end;'#10 +
+    'function TFoo.Inst: Integer;'#10 +
+    'begin'#10 +
+    '  Result := Reg(Self).XB + RegC(Self).XB + RegD(Self).XB;'#10 +
+    'end;'#10 +
+    'function UseMine: Integer;'#10 +
+    'begin Result := RegC(TMine<Integer>).XA + RegD(TMine<Integer>).XA; end;'#10 +
+    'class function TH.HC: Integer;'#10 +
+    'begin'#10 +
+    '  Result := RegC(Self).XA + RegD(Self).XA;'#10 +
+    'end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CsP.dpr'));
+    Ok('clsself: a class method''s Self picks the class-reference overload,' +
+      ' an instance method''s the instance one - no E2003',
+      DiagCount(ModelByName('csp'), 'E2003') = 0);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // E3-01, E3-03, B3-49: `[X]` means `XAttribute` wherever that is found - a
 // used unit, System - and the bare `X` only when it is found nowhere
 // (19.3.2, dcc64 37.0); a unit-qualified `[U.X]` the same in U.
@@ -16567,6 +16634,7 @@ begin
   TestSystemQualifiedUnit;
   TestSystemOverloadJoins;
   TestInlineProcType;
+  TestClassMethodSelf;
   TestAttributeSuffixFirst;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;
