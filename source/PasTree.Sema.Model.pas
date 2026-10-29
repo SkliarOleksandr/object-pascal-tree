@@ -51,6 +51,10 @@ type
     // note). No resolver code path produces or consumes it.
     skKeyword);
 
+  // sfClassMember: the symbol is declared in a struct's member scope (a
+  // class, record, object, interface or helper) - a method, field, property,
+  // nested type or member constant, `class` or not. Set by NewSymbol from the
+  // scope's kind; a host tells a method from a plain routine by it.
   // sfGeneric: a TYPE declared with parameters (`TFoo<T>`). Set once at collect
   // time because the alternative - deriving it at lookup - sits on the hottest
   // path there is: a bare type reference must prefer the arity-0 declaration
@@ -1854,7 +1858,13 @@ begin
   Symbols[Result].Scope := AScope;
   Symbols[Result].TypeSym := NIL_SYM;
   Symbols[Result].TypeNode := NIL_NODE;
-  Symbols[Result].Flags := [];
+  // sfClassMember: declared in a struct's member scope - the one place every
+  // symbol is made, so no collector can miss it.
+  if (AScope >= 0) and (AScope < Scopes.Count) and
+     (Scopes[AScope].Kind = sckStruct) then
+    Symbols[Result].Flags := [sfClassMember]
+  else
+    Symbols[Result].Flags := [];
   Symbols[Result].Visibility := svDefault;
   Symbols[Result].NextOverload := NIL_SYM;
   Symbols[Result].MemberScope := NIL_SCOPE;

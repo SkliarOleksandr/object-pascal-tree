@@ -53,8 +53,9 @@ type
 
   // One message-window row. mkStatus rows (Opened project, Done: N units...)
   // are always shown; mkError rows (semantic findings) are gated by
-  // chkShowErrors, mkSyntax rows (the lexer's and the parser's - dcc's
-  // "expected but found" family, see IsSyntaxDiagCode) by chkShowSyntax. Two
+  // chkShowErrors, mkSyntax rows (dcc's "expected but found" family, the
+  // lexer's and the parser's and a trailing comma's - see IsSyntaxDiagCode)
+  // by chkShowSyntax. Two
   // gates because the two families are read differently: a syntax row is a
   // fact dcc would agree with, a semantic row on an error-tolerant analysis
   // may be our own gap, and one wants to look at each without the other.

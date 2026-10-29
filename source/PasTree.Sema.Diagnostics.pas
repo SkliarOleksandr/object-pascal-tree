@@ -5,10 +5,10 @@ unit PasTree.Sema.Diagnostics;
 
   Codes and message wording mirror Delphi's compiler (and the DelphiAST
   reference, AST.Delphi.Errors.pas) so downstream tooling can match dcc output.
-  Most of the catalog is emitted today - E2003, E2004, E2081, F1027, E2010,
-  E2515, E2361, E2001, E2012, E2015, E2028, E2032, E2034, E2035, E2145,
-  E2193, plus the preprocessor's own PPINT/PPENC. The rest are declared for
-  the phases that follow.
+  The constants below are the catalog; which pass emits a code is found by
+  its constant's references, not kept in a list here - one such list went
+  stale (E2029, E2511, E2512 and the lexer's codes were emitted and missing).
+  LexDiagText holds the lexer's codes, which have no constant.
 }
 
 interface
@@ -135,11 +135,14 @@ function DiagSeverityLabel(const ACode: string): string;
 procedure LexDiagText(const ADiag: TPasDiagnostic; const AStream: TPasTokenStream;
   AStartLine: Integer; out ACode, AMsg: string);
 
-{ True for a diagnostic that the lexer or the parser raised - a SYNTAX
-  finding, dcc's "expected but found" family - as opposed to one the semantic
-  passes raised over a well-formed tree. Hosts filter on it: the demo has one
-  checkbox for each family. The test is by code, so TSemaDiag keeps its shape
-  for the consumers that already read it (pastree-lsp). }
+{ True for a code of dcc's SYNTAX family - "expected but found" and the
+  lexer's - WHOEVER raised it, as dcc files them: the lexer and the parser
+  raise these, and so do the semantic arity checks for a trailing comma
+  (`F(1,)` is E2029 "Expression expected but ')' found" in dcc too). It does
+  not tell a parser row from a semantic one; nothing asks that today. Hosts
+  filter on it: the demo has one checkbox for each family. The test is by
+  code, so TSemaDiag keeps its shape for the consumers that already read it
+  (pastree-lsp). }
 function IsSyntaxDiagCode(const ACode: string): Boolean;
 
 implementation

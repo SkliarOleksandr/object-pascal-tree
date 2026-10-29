@@ -21,9 +21,14 @@ preprocessor + parser - not regex approximations.
     nkVisibility / nkPropSpec node spans). The same words as plain
     identifiers stay identifier-colored. Requires a successful parse;
     falls back to the flat 59-word `DIRECTIVE_WORDS` list otherwise. Every
-    directive the parser takes is a node - a procedural type's (`procedure
-    stdcall`, `function: T; cdecl`), one before a routine header's `;` and
-    one before an anonymous method's body included (0.60.0).
+    routine directive the parser takes is a node - a procedural type's
+    (`procedure stdcall`, `function: T; cdecl`), one before a routine
+    header's `;` and one before an anonymous method's body included
+    (0.60.0). Some words have no node of their own and are coloured from
+    where the tree puts them: a parameter's `out` (nfOut), an exception
+    handler's `on` (nkExceptOn's first token), `raise ... at` (the token
+    after nkRaiseStmt's first child) and a package's `package`, `requires`
+    and `contains`.
 
 1.3 **Inactive-code greying** - tokens inside `$IFDEF`'d-out regions
     (`TPasPreprocessed.Skipped`) render `clGrayText`, checked before any

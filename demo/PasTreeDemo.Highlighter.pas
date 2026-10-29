@@ -696,8 +696,34 @@ procedure TPasTreeSynHighlighter.BuildWeakKeywordSpans(const ATree: TPasTree;
       MarkVisibleRange(LCursor, ATree.Nodes[ANode].LastToken);
   end;
 
+  // Marks AVis when it is the word AWord - a guard against a node whose shape
+  // an unfinished buffer has bent.
+  procedure MarkWord(AVis: Integer; const AWord: string);
+  begin
+    if (AVis >= 0) and (AVis <= High(APreprocessed.Visible)) and
+       SameText(ATree.Source.VisibleText(AVis), AWord) then
+      MarkVisibleRange(AVis, AVis);
+  end;
+
+  // A parameter's `out` stands at its left edge, or right after the leading
+  // attribute groups that start there (`[A] out X`) - the rule the tree
+  // checker holds nfOut to.
+  function OutToken(AParam: Integer): Integer;
+  var
+    LKid: Integer;
+  begin
+    Result := ATree.Nodes[AParam].FirstToken;
+    LKid := ATree.Nodes[AParam].FirstChild;
+    while (LKid <> NIL_NODE) and (ATree.Nodes[LKid].Kind = nkAttrGroup) and
+          (ATree.Nodes[LKid].FirstToken = Result) do
+    begin
+      Result := ATree.Nodes[LKid].LastToken + 1;
+      LKid := ATree.Nodes[LKid].NextSibling;
+    end;
+  end;
+
 var
-  LIdx: Integer;
+  LIdx, LFirst: Integer;
 begin
   for LIdx := 0 to High(ATree.Nodes) do
     case ATree.Nodes[LIdx].Kind of
@@ -706,11 +732,24 @@ begin
       nkParam:
         // A parameter's `out`, which is a directive word and not a reserved one
         // - `var`/`const` are lexer keywords and colour themselves, `out` does
-        // not, and nothing in the node's SPAN distinguishes it from the
-        // parameter name that follows. So the parser records its token index
-        // and this marks exactly that token.
-        if ATree.Nodes[LIdx].Aux >= 0 then
-          MarkVisibleRange(ATree.Nodes[LIdx].Aux, ATree.Nodes[LIdx].Aux);
+        // not, and only the parser can tell it from a parameter NAMED `out`.
+        // It says so with nfOut (F18); the word stands where OutToken looks.
+        if nfOut in ATree.Nodes[LIdx].Flags then
+          MarkWord(OutToken(LIdx), 'out');
+      nkExceptOn:
+        // `on` and `at` are directive words the parser takes by position
+        // without a node of their own: `on` is an exception handler's first
+        // token...
+        MarkWord(ATree.Nodes[LIdx].FirstToken, 'on');
+      nkRaiseStmt:
+        // ...and `at` the token after a raise's exception expression, when an
+        // address follows it (two children).
+        begin
+          LFirst := ATree.Nodes[LIdx].FirstChild;
+          if (LFirst <> NIL_NODE) and
+             (ATree.Nodes[LFirst].NextSibling <> NIL_NODE) then
+            MarkWord(ATree.Nodes[LFirst].LastToken + 1, 'at');
+        end;
       nkPackage:
         // A `.dpk`'s three head words are directives too (B.4.2), not reserved
         // ones, so the lexer hands them over as identifiers and they were the

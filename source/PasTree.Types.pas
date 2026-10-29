@@ -176,11 +176,13 @@ const
     where the grammar actually looks for a specific word. This array is a
     vocabulary reference for consumers that want the complete word list (a
     syntax highlighter, autocomplete, ...) - it is NOT wired into any single
-    grammar check. Not every word here is yet recognised by name at its
-    grammatical position in TPasParser (e.g. package-level contains/requires,
-    resident, exception-directive on/at) - that reflects unimplemented
-    grammar, not a lexical gap; see ROUTINE_DIRECTIVE_WORDS/VISIBILITY_WORDS
-    below for the narrower, grammar-scoped subsets the parser actually uses. }
+    grammar check. TPasParser recognises a word by name only at its own
+    grammatical position, and not every word there leaves a node of its own:
+    `on` is an nkExceptOn's first token, `at` the token after a raise's
+    expression, `out` a parameter's nfOut, `resident` an export's
+    nfResident, `requires` / `contains` the first token of a package's uses
+    clause. See ROUTINE_DIRECTIVE_WORDS / VISIBILITY_WORDS below for the
+    narrower, grammar-scoped subsets the parser actually uses. }
   DIRECTIVE_WORDS: array[0..58] of string = (
     'absolute', 'abstract', 'assembler', 'at', 'automated', 'cdecl',
     'contains', 'default', 'delayed', 'dependency', 'deprecated', 'dispid',

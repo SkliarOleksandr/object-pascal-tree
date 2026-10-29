@@ -1830,6 +1830,46 @@ begin
   GModel.Free;
 end;
 
+// sfClassMember marks what a struct's member scope declares (B2-17): a host
+// tells a method from a plain routine by it.
+procedure TestClassMemberFlag;
+
+  function Member(const ANameLower: string; AKind: TSemaSymbolKind): Boolean;
+  begin
+    Result := False;
+    for var LIdx := 0 to GModel.SymCount - 1 do
+      if (GModel.Symbols[LIdx].NameLower = ANameLower) and
+         (GModel.Symbols[LIdx].Kind = AKind) then
+        Exit(sfClassMember in GModel.Symbols[LIdx].Flags);
+  end;
+
+begin
+  Analyze('unit U; interface'#10 +
+    'type TC = class F: Integer; procedure M; class function CF: Integer; ' +
+    'property P: Integer read F; end;'#10 +
+    '  TR = record RF: Byte; procedure RM; end;'#10 +
+    'procedure G;'#10 +
+    'implementation'#10 +
+    'procedure TC.M; procedure Nested; begin end; var L: Integer; ' +
+    'begin L := 0; end;'#10 +
+    'class function TC.CF: Integer; begin Result := 0; end;'#10 +
+    'procedure TR.RM; begin end;'#10 +
+    'procedure G; begin end;'#10 +
+    'end.'#10);
+  Ok('classmember: a method', Member('m', skRoutine));
+  Ok('classmember: a class function', Member('cf', skRoutine));
+  Ok('classmember: a field', Member('f', skField));
+  Ok('classmember: a property', Member('p', skProperty));
+  Ok('classmember: a record method', Member('rm', skRoutine));
+  Ok('classmember: a record field', Member('rf', skField));
+  Ok('classmember: not a unit routine', not Member('g', skRoutine));
+  Ok('classmember: not a routine nested in a method',
+    not Member('nested', skRoutine));
+  Ok('classmember: not a method''s local', not Member('l', skVar));
+  Ok('classmember: not the type itself', not Member('tc', skType));
+  GModel.Free;
+end;
+
 procedure TestModuleBodyNames;
 
   procedure Expect(const AName, ASource: string; ACount: Integer);
@@ -2670,6 +2710,7 @@ begin
   TestInterfaceNames;
   // 8g. directives are nodes: the initializer after them resolves
   TestProcDirectives;
+  TestClassMemberFlag;
   // 8h. a parameter list's names are not its parameters
   TestParamNamedLikeType;
 

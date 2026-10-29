@@ -1052,7 +1052,7 @@ var
       sckUnit:
         Result := UM.Symbols[AExt.Sym].Kind in [skVar, skRoutine];
       // A class method, class var or class property: by the type's name.
-      // (No symbol flag says `class` - sfClassMember is never set.)
+      // (No symbol flag says `class` - sfClassMember is any struct member.)
       sckStruct:
         Result := (UM.Symbols[AExt.Sym].Kind in [skVar, skField, skRoutine,
           skProperty]) and
