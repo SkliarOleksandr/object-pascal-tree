@@ -96,9 +96,10 @@ type
       After IsDone, ModuleOutcome says what the project is now, and the host
       branches on it alone:
         moAccepted    - keep it; recreate the navigator over it.
-        moRefused     - untouched (interface change, and every other case
-                        AnalyzeModuleOnly lists; an exception before its
-                        commit point too, LastError then says which): keep
+        moRefused     - untouched (every case AnalyzeModuleOnly lists - an
+                        interface change only past its consumer-redo limits;
+                        an exception before its commit point too, LastError
+                        then says which): keep
                         it live and start an ordinary session over it,
                         passing it as the parse donor.
         moMustDiscard - a failure PAST the commit point left it half-updated

@@ -2412,8 +2412,8 @@ end;
   the actual overload rather than any same-named routine.
 
   No separate CallTargetX scan is needed: every successful SelectCallTarget
-  is immediately followed by RepointCallee (PasTree.Sema.Project.pas, the
-  nkCall branch of CrossType), which writes that SAME (unit, symbol) pair
+  is immediately followed by a re-point of the callee (Repoint and BindNode,
+  PasTree.Sema.Project.pas, CrossType), which writes that SAME (unit, symbol) pair
   into RefMap/ExtRefMap at the callee node - so by the time analysis has
   finished, the ordinary scan below is already overload-precise for calls,
   for free.

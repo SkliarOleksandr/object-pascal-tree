@@ -1909,7 +1909,7 @@ end;
   - a subrange with two LITERAL bounds (`OrdLiteral`, so no folded constants);
     bounds that fit neither Integer nor Cardinal make it 64-bit, so E2001.
   - an enum whose element values are literals or implicit, tracked in order so
-    that `(a = 250, b, c, d, e, f)` is caught as well as an explicit 256. One
+    that `(a = 250, b, c, d, e, f, g)` is caught as well as an explicit 256. One
     non-literal explicit value abandons the whole enum.
 
   A named base type is followed one definition at a time (`TNeg = -5..5;
@@ -2593,7 +2593,7 @@ end;
 { The INTERFACE-section counterpart of an implementation-section routine head,
   or NIL_SYM.
 
-  6.4: overloads declared in the IMPLEMENTATION section join the interface
+  6.3.1: overloads declared in the IMPLEMENTATION section join the interface
   section's set for the same unit. They are separate SYMBOLS in separate scopes,
   deliberately -- chaining them would export an implementation-only overload to
   every importer -- so each consumer that reasons over "all the overloads" has
@@ -2666,7 +2666,7 @@ begin
       end;
     end;
     LCand := M.Symbols[LCand].NextOverload;
-    // 6.4: the interface section's overloads of the same name are part of the
+    // 6.3.1: the interface section's overloads of the same name are part of the
     // set, and they are a separate chain in a separate scope - see
     // InterfaceCounterpart.
     if LCand = NIL_SYM then

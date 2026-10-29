@@ -885,10 +885,11 @@ begin
 end;
 
 // Project model id of a unit named AName (as written in a uses clause or as
-// a qualifier). Exact dotted-name match first, then the namespace-prefixed
-// form (`Generics.Collections` -> System.Generics.Collections.pas) - good
-// enough for names the project has ALREADY loaded, which is the only kind a
-// bridge can answer anyway.
+// a qualifier), in three steps: the unit's own name, then the resolved uses
+// list by the spelling it was imported under, then an exact file-basename
+// index. No namespace-prefix or suffix step - see the comment above the
+// index for the false match one caused. Only names the project has ALREADY
+// loaded, which is the only kind a bridge can answer anyway.
 function TPasCompletion.BridgeUnitMid(const AName: string): Integer;
 var
   LIdx: Integer;

@@ -167,7 +167,9 @@ Enums keep the whole-declaration comparison - a value added in the middle
 moves the ordinals after it. The one consumer that can depend on a record's
 LAYOUT without naming a field is a `$IF` that asks the oracle for `SizeOf`;
 such a consumer's stream cannot be re-decided by a redo that keeps its tree,
-so any oracle-built stream in the reach is a refusal (`consumer-oracle`),
+so an oracle-built stream in the reach refuses (`consumer-oracle`) when the
+edit touches a name its oracle was asked (0.16.5; before that, any such
+stream refused),
 which also covers a constant's value folded the same way. `SelectConsumers`
 then keeps, out of the reach, only:
 
@@ -261,7 +263,7 @@ from a slow analyzer.
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
 | `too-many-consumers(N>L)` | the SELECTED redo set N exceeds `ModuleRedoLimit` (only when a host set one; the default is no ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
 | `consumer-demoted` | a text-demoted consumer to redo or to scan could not be rehydrated - its file changed under it (see the memory dial) |
-| `consumer-oracle(<unit>)` | a consumer in the reach has an oracle-built token stream: its `$IF`s may have folded this unit's constants or record sizes, and only a re-preprocess can re-decide them |
+| `consumer-oracle(<unit>)` | a consumer in the reach has an oracle-built token stream and the edit touches a name its oracle was asked: its `$IF`s may have folded this unit's constants or record sizes, and only a re-preprocess can re-decide them |
 | `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
 | `in-path-changed(<unit>)` | an `in` clause of the edited unit changed or dropped its path, or a new one names another file than the unit's pin: the pin is the project's, every importer of the unit resolves through it, and only a rebuild re-reads every `in` clause |
 | `apptype-changed` | the edited unit is the main program and its last `{$APPTYPE}` before `uses` now decides CONSOLE the other way for every unit - a re-preprocess of the closure |

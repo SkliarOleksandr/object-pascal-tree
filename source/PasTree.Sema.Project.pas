@@ -16,8 +16,8 @@ unit PasTree.Sema.Project;
   intra-unit typer could not - Var.Field across units, member access through
   ancestor chains and type aliases, constructor calls, and generic-parameter
   substitution (TList<Integer>.First -> Integer). This pass records types and
-  member references only; it emits NO diagnostics (typing for navigation and
-  dumps, never a new error source).
+  member references; its one diagnostic is E2003 for a member it cannot
+  find, and only under ReportUnresolvedMembers (opt-in, `-members`).
 }
 
 interface
@@ -579,8 +579,10 @@ type
     // property of the referring unit, not of the type (15.3.3, dcc-verified
     // as ordinary last-uses-wins).
     //
-    // Both are built SEQUENTIALLY by BuildHelperMap and read-only afterwards,
-    // so the parallel inherited/with workers need NO lock. An earlier
+    // Both are built by BuildHelperMap - in parallel, each model's slot
+    // written by its own worker ('helpers-collect', 'helpers-publish') - and
+    // read-only afterwards, so the parallel inherited/with workers need NO
+    // lock. An earlier
     // revision instead memoized on demand behind a critical section, keyed by
     // built-up strings: that cost 16% of total analysis time on a 665-unit
     // corpus, all of it hot-path allocation and lock traffic (the scan itself
@@ -915,13 +917,15 @@ type
       helper attaches by TYPE, so no name test can find who it now affects,
       and the caller falls back to the whole reach.
 
-      A CLASS or INTERFACE type is compared with its members masked out
-      (SpanTokensEqualMasked): each member is a symbol of its own and gets its
-      own verdict, so adding a method to a hub class no longer marks the class
-      changed for its hundreds of holders - the new member's NAME goes to
-      AAdded instead, and only the models mentioning it are redone. Records,
-      objects and enums keep the whole-declaration comparison: their layout
-      and ordinals are what a consumer may have folded. }
+      A CLASS, INTERFACE, RECORD or OBJECT type is compared with its members
+      masked out (SpanTokensEqualMasked, IsMemberOwner): each member is a
+      symbol of its own and gets its own verdict, so adding a method to a hub
+      class no longer marks the class changed for its hundreds of holders -
+      the new member's NAME goes to AAdded instead, and only the models
+      mentioning it are redone. Records joined in 0.16.1; a consumer that
+      folded a record's layout is covered by the consumer-oracle refusal.
+      Only enums keep the whole-declaration comparison: their ordinals are
+      what a consumer may have folded. }
     procedure DiffInterface(AOld, ANew: TPasSemaModel; AOldSymN, ANewSymN: Integer;
       const AMap: TArray<Integer>; out AChanged: TArray<Boolean>;
       AAdded: TDictionary<string, Byte>; out AHelpers, AAnyChange: Boolean;
@@ -1523,16 +1527,18 @@ type
       write FReportVisibility;
     { Ceiling on the blast radius AnalyzeModuleOnly will take on: an interface
       change re-runs Phase 1 and the cross passes for every model that could
-      see it, and past some size a plain rebuild is simply cheaper. Default
-      128; 0 or less means NO ceiling (take any radius), which is a
-      measurement setting more than a production one.
+      see it, and past some size a plain rebuild could be cheaper. Default 0
+      (since 0.16.2): 0 or less means NO ceiling, take any radius; a positive
+      value refuses a larger one.
 
-      MEASURED on a 3676-unit closure: a radius of 28 costs 1.8-2.1 s against
-      a 29 s rebuild - roughly 300 ms fixed plus ~57 ms per model - so the
-      break-even sits near 500 models. 128 keeps the worst case around 7 s,
-      still several times cheaper than rebuilding, without letting one edit
-      quietly turn into a closure-sized job. The first cut of this was 24,
-      which refused a 28-model radius that was 15x cheaper than its fallback. }
+      MEASURED with the name-level selection (0.16.2, client closure): 184
+      selected models redo in 3.7 s, 557 in 5.9 s, the whole reach of 1260 in
+      7.2 s, against a 28-29 s rebuild every time - so no ceiling paid. The
+      history: before the selection, a radius of 28 cost 1.8-2.1 s against a
+      29 s rebuild (about 300 ms fixed plus 57 ms per model), and the default
+      was 128 (24 before that, which refused a 28-model radius 15x cheaper
+      than its fallback); 128 turned the larger radii above into the rebuild
+      it was meant to avoid. Kept for a host that has measured otherwise. }
     property ModuleRedoLimit: Integer read FModuleRedoLimit
       write FModuleRedoLimit;
     { True once a pass failed AFTER a commit point, leaving this project in a
@@ -2061,13 +2067,14 @@ type
       out ALine, ACol: Integer): Boolean;
     { A module's current pipeline status (msQueued if AId is out of range). }
     function ModuleStatus(AId: Integer): TPasModuleStatus;
-    { Non-blocking snapshot fetch for UI/consumers: returns the model at AId
-      only if it has reached at least AMinStatus, else False (AModel := nil).
-      The UI must NEVER block waiting for analysis - it calls this and, on
-      False, disables the action / no-ops the hover. In the synchronous
-      drivers every model is msCrossReady by the time anyone can call this, so
-      it always succeeds; the gate matters once analysis runs in the
-      background. }
+    { The model at AId if it has reached at least AMinStatus, else False
+      (AModel := nil). NOT a concurrent read: nothing here is locked, and a
+      build appends to the model list and replaces (frees) a model in place,
+      so call this, like ModuleStatus, only on a project no thread is
+      analyzing - TPasAsyncSession never hands out one that is. After a
+      synchronous driver not every model is msCrossReady: AnalyzeFile leaves
+      the main unit's direct uses msFullReady, and AnalyzeDirectory the
+      models it did not list (System, SysInit, any loaded later). }
     function TryGetSnapshot(AId: Integer; AMinStatus: TPasModuleStatus;
       out AModel: TPasSemaModel): Boolean;
     function InstanceCount: Integer;
@@ -2092,7 +2099,8 @@ type
       True = the fast path ran and the project is consistent. FALSE = REFUSED,
       and the project is UNCHANGED (nothing was swapped): the caller must fall
       back to a full rebuild. Refusals are deliberately generous - an unknown
-      or not-yet-full path, a demoted model, a parse failure, a stream with
+      or not-yet-full path, a demoted model whose text cannot be rehydrated
+      (EnsureHydrated), a parse failure, a stream with
       unanswered $IF questions (those are re-decided against the whole
       generation by RunDeclaredPass, not reproducible per module), and the
       rest of the list in docs/incremental-analysis.md. A wrong fast path is
@@ -2289,11 +2297,12 @@ type
       Single-owner like every other call on a finished project. }
     procedure DemoteText(const AKeepFiles: TArray<string>);
     { Rehydrates a demoted model's text layer by re-preprocessing its file
-      with the SAME oracle the analysis used (DeclaredQueryFor/SymbolQueryFor
-      - a declared-pass candidate got its final stream from exactly these,
-      and a non-candidate's stream is oracle-invariant by the candidate
-      criterion). True when the model is usable (was never demoted, or the
-      re-preprocess reproduced the identical stream). Single-consumer: call
+      with the SEED query (SeedDeclaredQuery), the one the load pass that
+      produced the stream used: only a first-pass stream is ever demoted (an
+      oracle-reprocessed one is not - see OracleStream), and the full
+      per-unit oracle would answer what that pass GUESSED, flip branches and
+      fail the identity check. True when the model is usable (was never
+      demoted, or the re-preprocess reproduced the identical stream). Single-consumer: call
       from the host's nav/completion thread only, like every other read of a
       finished project. }
     function EnsureHydrated(AMid: Integer): Boolean;
@@ -2368,8 +2377,8 @@ uses
 const
   { Overlay tombstone: "this node's committed ExtRefMap entry must go away".
 
-    RepointCallee's same-model branch used to call ExtRefMap.Remove directly.
-    That runs inside the PARALLEL cross-type pass, and Remove relocates entries
+    CrossType's same-model binding (BindNode) once called ExtRefMap.Remove
+    directly. That runs inside the PARALLEL cross-type pass, and Remove relocates entries
     within a collision cluster while sibling workers read the same dictionary
     through ResolveTypeExpr - the exact writer-vs-reader hazard the overlay was
     built to remove for the cross-model half. So the removal is deferred too:
@@ -9127,7 +9136,7 @@ begin
             [sckUnit, sckImplementation]) then
     begin
       Consider(AId, LLocalHead);
-      // 6.4: an IMPLEMENTATION-section overload joins the interface section's
+      // 6.3.1: an IMPLEMENTATION-section overload joins the interface section's
       // set for the same unit, but the two are separate symbols in separate
       // scopes - deliberately, since chaining them would export an
       // implementation-only overload to every importer. So a call written
@@ -13132,8 +13141,11 @@ var
     the overlay (the merge removes a stale committed ExtRefMap entry), a
     cross-model one into the overlay with RefMap cleared (every consumer
     reads RefMap first, and Find References counts a node bound in BOTH maps
-    twice). Through the mode-switched accessors, so a probe's binding stays
-    inside the probe. }
+    twice). The tombstone case is real: a bare call to an INHERITED member
+    (`Seek(0, soEnd)` in TMemoryStream.SetSize) is first bound by name by
+    CrossResolveInherited, straight into ExtRefMap even for a same-unit hit,
+    and then re-pointed here to the overload-precise target. Through the
+    mode-switched accessors, so a probe's binding stays inside the probe. }
   procedure BindNode(N, AMid, ASym: Integer);
   var
     LExt: TPasExtRef;
@@ -16250,9 +16262,6 @@ begin
   end;
 end;
 
-// The struct type symbol of the METHOD implementation enclosing ANode, via
-// the scope chain (a local proc inside a method climbs to the method's
-// scope); NIL_SYM when ANode isn't inside any method body.
 { The head (the interface name) of the method resolution clause whose
   interface-method segment ANode is - `GetX` in `function IFoo.GetX =
   DoGetX;` - else NIL_NODE. The segments are flat siblings: the head, maybe
@@ -16309,57 +16318,6 @@ begin
     Result := NIL_NODE;
 end;
 
-{ Points a callee NAME node at ASym - the node RefMap/ExtRefMap are keyed by,
-  which for `A.Create` is the trailing segment and for a bare `Foo` the ident
-  itself. AId's own model is written directly; another model's binding goes into
-  the caller's deferred dictionary, because the cross pass runs one worker per
-  model and only the owner may touch a model's ExtRefMap during it.
-
-  The same-model branch also REMOVES any ExtRefMap entry already sitting at
-  LName - needed because a bare call to an INHERITED member (`Seek(0, soEnd)`
-  in TMemoryStream.SetSize, System.Classes.pas) is bound TWICE, by two passes
-  that run in a fixed order and neither knows about the other's node: first
-  CrossResolveInherited's FindMemberX, which matches by NAME only (no argument
-  types) and commits straight to ExtRefMap even for a same-unit hit (its own
-  commit clears RefMap first, so nothing is wrong on ITS side); then, only if
-  the callee is a routine, CrossType's OWN overload-precise SelectCallTarget
-  runs on the SAME node and calls RepointCallee - which used to write RefMap
-  and stop, leaving the FIRST pass's ExtRefMap entry standing right beside it.
-  With one overload the two passes agree, so both maps end up holding the
-  identical (unit, symbol) - invisible to every consumer that reads "RefMap,
-  falling back to ExtRefMap" (a single answer either way), but a project-wide
-  scan that reads BOTH maps as independent evidence (Find References) counted
-  the one real reference twice. Removing the stale entry restores the
-  invariant every other caller already assumed held: one node, one map.
-
-{ 11 sec. 11.2.1, enforcement half: a QUALIFIED access to a private member, reported
-  as dcc does - `E2361 Cannot access private symbol TType.Member`, a nested
-  type named with every type around it (`TOuter.TInner.FIn`). A generic's
-  instance is the one spelling that differs: dcc writes the unit in braces
-  and qualified arguments, `TG<System.Integer>.FG`, and this `TG.FG`.
-
-  OFF unless ReportVisibility says otherwise. This is the only check here that
-  can reject code the corpora ACCEPT, so it ships as a switch.
-
-  The rules, dcc32 37.0-probed rather than assumed:
-
-  - `private` is visible to the whole DECLARING UNIT, not just the type - the
-    "friend" rule. So it is an error only across units, which is why the test is
-    a unit-id comparison and not a struct one.
-  - `strict private` is visible only inside the declaring type, in its own unit
-    too: `A.FStrict` from a sibling class one line below is already an error.
-  - `protected` gets its own code (`E2362`) and needs an ancestry walk to answer,
-    so it is deliberately NOT enforced here; the README names it.
-  - A BARE name in a descendant is a different diagnostic entirely - dcc says
-    `E2003 Undeclared identifier`, because an inaccessible member is not in scope
-    rather than in scope and refused. Also named, also not done here: this
-    routine sees qualified accesses only.
-
-  Two things must keep working and are the reason the walk is written this way
-  rather than as "the member's struct must be the accessing struct": a nested
-  enum's VALUES are reachable from outside a private type (2 sec. 2.2.4), and a
-  strict private nested helper still activates (15 sec. 15.4). Neither is a member
-  ACCESS, so neither reaches here. }
 { Visibility over one model's finished bindings.
 
   A separate pass, and AFTER the cross-type one on purpose: a member's binding is
@@ -16609,6 +16567,34 @@ begin
   end;
 end;
 
+{ 11 sec. 11.2.1, enforcement half: a QUALIFIED access to a private member, reported
+  as dcc does - `E2361 Cannot access private symbol TType.Member`, a nested
+  type named with every type around it (`TOuter.TInner.FIn`). A generic's
+  instance is the one spelling that differs: dcc writes the unit in braces
+  and qualified arguments, `TG<System.Integer>.FG`, and this `TG.FG`.
+
+  OFF unless ReportVisibility says otherwise. This is the only check here that
+  can reject code the corpora ACCEPT, so it ships as a switch.
+
+  The rules, dcc32 37.0-probed rather than assumed:
+
+  - `private` is visible to the whole DECLARING UNIT, not just the type - the
+    "friend" rule. So it is an error only across units, which is why the test is
+    a unit-id comparison and not a struct one.
+  - `strict private` is visible only inside the declaring type, in its own unit
+    too: `A.FStrict` from a sibling class one line below is already an error.
+  - `protected` gets its own code (`E2362`) and needs an ancestry walk to answer,
+    so it is deliberately NOT enforced here; the README names it.
+  - A BARE name in a descendant is a different diagnostic entirely - dcc says
+    `E2003 Undeclared identifier`, because an inaccessible member is not in scope
+    rather than in scope and refused. Also named, also not done here: this
+    routine sees qualified accesses only.
+
+  Two things must keep working and are the reason the walk is written this way
+  rather than as "the member's struct must be the accessing struct": a nested
+  enum's VALUES are reachable from outside a private type (2 sec. 2.2.4), and a
+  strict private nested helper still activates (15 sec. 15.4). Neither is a member
+  ACCESS, so neither reaches here. }
 procedure TPasSemaProject.CheckVisibility(AId, ANameNode, AMemMid,
   AMemSym: Integer);
 
@@ -16695,6 +16681,9 @@ begin
     [OwnerPath(LMemM, LOwner) + '.' + LMemM.Symbols[AMemSym].Name]));
 end;
 
+// The struct type symbol of the METHOD implementation enclosing ANode, via
+// the scope chain (a local proc inside a method climbs to the method's
+// scope); NIL_SYM when ANode isn't inside any method body.
 function TPasSemaProject.StructSymOfNode(AModel: TPasSemaModel;
   ANode: Integer): Integer;
 var
@@ -16965,45 +16954,6 @@ begin
   end;
 end;
 
-{ `with` over a CROSS-UNIT target type (ch.05 sec. 5.7)
-
-  PasTree.Sema.Resolver.ResolveWithStmts already opens a with-target's member
-  scope - but only when the target's type is resolvable INTRA-unit, because it
-  works by joining the type's MemberScope, and a scope index only means
-  anything inside its own model. In real code the target's type usually comes
-  from another unit (`with LTZ.StandardDate do` where LTZ: TTimeZoneInformation
-  from Winapi.Windows - System.DateUtils.pas:2612), and the whole body then
-  stayed unresolved and got a false E2003 per member.
-
-  Cross-unit member references cannot use scope joining at all; the project
-  records them in ExtRefMap instead, exactly as the inherited-member pass
-  does. So this mirrors that pass: CrossResolve DEFERS an unresolved ident
-  sitting in a with body (InsideWithBody), and CrossResolveInherited - which
-  already runs late enough for every model's ExtRefMap to be frozen -
-  resolves it here. }
-
-// The cross-model TYPE of a with-target expression, deliberately computed
-// WITHOUT the Phase-3c tables: SymTypeX/ExprTypeX are filled by BindTypesX/
-// CrossType, which run AFTER the pass that has to decide E2003, so this walks
-// RefMap/ExtRefMap and declared type NODES directly (ResolveTypeExpr does the
-// same and is likewise table-free).
-{ The type a cross-model POINTER type points at: PVarData = ^TVarData ->
-  TVarData, chasing through however many alias links sit in between. The
-  cross-model twin of TPasSemaResolver.PointeeTypeSym, depth-capped for the
-  same reason. XNil when AX is not a pointer type. }
-{ The RESULT type of a PARAMETERLESS function/procedural type, closed over AX's
-  own instantiation - XNil for anything else.
-
-  "Parameterless" is the whole rule: `ValueFunc.GetValue` is only a member of
-  the result because writing the name of a parameterless function reference
-  CALLS it (6 sec. 6.6.1). One that takes parameters cannot be called that way, and
-  a `procedure` type has no result to take a member from, so both answer XNil
-  and the member walk ends where it did before.
-
-  The frame is why the substitution is here rather than at the call site:
-  `TFunc<TResult> = reference to function: TResult` declares its result as a
-  type PARAMETER, so `TFunc<IValue>` only yields IValue once AX's own
-  instantiation is applied. }
 { Does every parameter in AParams carry a default value, so that the routine
   can be called with no arguments at all? A parameter's names carry nfName
   and are followed by its type, then its default: a default is a SECOND child
@@ -17039,6 +16989,19 @@ begin
   Result := True;
 end;
 
+{ The RESULT type of a PARAMETERLESS function/procedural type, closed over AX's
+  own instantiation - XNil for anything else.
+
+  "Parameterless" is the whole rule: `ValueFunc.GetValue` is only a member of
+  the result because writing the name of a parameterless function reference
+  CALLS it (6 sec. 6.6.1). One that takes parameters cannot be called that way, and
+  a `procedure` type has no result to take a member from, so both answer XNil
+  and the member walk ends where it did before.
+
+  The frame is why the substitution is here rather than at the call site:
+  `TFunc<TResult> = reference to function: TResult` declares its result as a
+  type PARAMETER, so `TFunc<IValue>` only yields IValue once AX's own
+  instantiation is applied. }
 function TPasSemaProject.ProcResultX(const AX: TSemaXType;
   ACalled: Boolean): TSemaXType;
 var
@@ -17092,6 +17055,10 @@ begin
   end;
 end;
 
+{ The type a cross-model POINTER type points at: PVarData = ^TVarData ->
+  TVarData, chasing through however many alias links sit in between. The
+  cross-model twin of TPasSemaResolver.PointeeTypeSym, depth-capped for the
+  same reason. XNil when AX is not a pointer type. }
 function TPasSemaProject.PointeeX(const AX: TSemaXType): TSemaXType;
 var
   LCur: TSemaXType;
@@ -17279,27 +17246,10 @@ begin
   end;
 end;
 
-{ The ELEMENT type of an indexable designator, or XNil when it is not an array
-  (the caller reads that as "leave the type alone" - see the nkIndex branch).
-  Cross-model twin of TPasSemaResolver.ElementTypeOf, and it needs the same two
-  sources: the base's own declared type NODE may BE an inline array, which no
-  symbol lookup can reach, so that is tried before the named type it resolves
-  to. Alias links chased in both, depth-capped like PointeeX. }
-{ True when ASym is a DEFAULT ARRAY property (13.1.4) - `property Items[Index:
-  Integer]: T read GetItem; default;`.
-
-  Two different specifiers spell `default` and both land as an nkPropSpec whose
-  first token is that word: this one, and the default-VALUE of an ordinary
-  property (`property Align: TAlign read FAlign default alLeft;`). They are told
-  apart by the index parameters - a value-default property has none, and only an
-  ARRAY property can be the default one. }
-{ One step up the inheritance chain: AX's ancestor, or XNil at the root.
-
-  Chases a type alias transparently, and takes the heritage clause's FIRST type
-  reference as the ancestor - the same convention CollectStruct and XDescendsFrom
-  use. Extracted because three callers now climb (XDescendsFrom's own compare
-  loop aside): the default-array-property search and the property-redeclaration
-  type search below, and it is exactly the kind of step that should exist once. }
+{ One heritage hop of the type ASym (ADef its definition, in model AMid):
+  hhNext with the ancestor in ANext - the heritage clause's first type, or
+  the implicit root - hhNone at the root, hhBroken when the clause names a
+  type that does not resolve. AncestorOfX's step. }
 function TPasSemaProject.HeritageHopX(AMid, ASym, ADef: Integer;
   out ANext: TSemaXType): TPasHeritageHop;
 var
@@ -17349,6 +17299,13 @@ begin
   Result := hhNext;
 end;
 
+{ One step up the inheritance chain: AX's ancestor, or XNil at the root.
+
+  Chases a type alias transparently, and takes the heritage clause's FIRST type
+  reference as the ancestor - the same convention CollectStruct and XDescendsFrom
+  use. Extracted because three callers now climb (XDescendsFrom's own compare
+  loop aside): the default-array-property search and the property-redeclaration
+  type search below, and it is exactly the kind of step that should exist once. }
 function TPasSemaProject.AncestorOfX(const AX: TSemaXType): TSemaXType;
 var
   LM: TPasSemaModel;
@@ -17867,6 +17824,14 @@ begin
   Result := PasParamNameCount(LM.Tree, LChild);
 end;
 
+{ True when ASym is a DEFAULT ARRAY property (13.1.4) - `property Items[Index:
+  Integer]: T read GetItem; default;`.
+
+  Two different specifiers spell `default` and both land as an nkPropSpec whose
+  first token is that word: this one, and the default-VALUE of an ordinary
+  property (`property Align: TAlign read FAlign default alLeft;`). They are told
+  apart by the index parameters - a value-default property has none, and only an
+  ARRAY property can be the default one. }
 // Stamped by Phase 1 (TPasSemaResolver.StampRetainedFlags): the specifier
 // TEXT is gone on a demoted declaring model, and this runs per element access.
 function TPasSemaProject.IsDefaultArrayProp(AMid, ASym: Integer): Boolean;
@@ -17875,9 +17840,6 @@ begin
     (sfDefaultArrayProp in FModels[AMid].Symbols[ASym].Flags);
 end;
 
-// Does this routine declare a parameter list? Its DeclNode is the NAME node
-// and the nkParams sits beside it under the nkRoutine, same shape as a
-// property's specifiers.
 { Does writing the routine's bare name FAIL to call it - does it require at
   least one argument? A routine with no parameters and one whose parameters
   all carry defaults are both called by their name (6.6.1; dcc-probed:
@@ -17918,6 +17880,9 @@ begin
      not LVariadic);
 end;
 
+// Does this routine declare a parameter list? Its DeclNode is the NAME node
+// and the nkParams sits beside it under the nkRoutine, same shape as a
+// property's specifiers.
 function TPasSemaProject.RoutineHasParams(AMid, ASym: Integer): Boolean;
 var
   LM: TPasSemaModel;
@@ -18055,6 +18020,12 @@ begin
   end;
 end;
 
+{ The ELEMENT type of an indexable designator, or XNil when it is not an array
+  (the caller reads that as "leave the type alone" - see the nkIndex branch).
+  Cross-model twin of TPasSemaResolver.ElementTypeOf, and it needs the same two
+  sources: the base's own declared type NODE may BE an inline array, which no
+  symbol lookup can reach, so that is tried before the named type it resolves
+  to. Alias links chased in both, depth-capped like PointeeX. }
 function TPasSemaProject.ElementX(AId, ABaseNode: Integer;
   AProbe: TPasXProbe): TSemaXType;
 
@@ -20228,19 +20199,7 @@ begin
   end;
 end;
 
-// Companion to CrossResolve for idents inside METHOD bodies, deferred there
-// because the inherited-member walk (FindMemberX) reads other models'
-// ExtRefMap - those must be FROZEN (every parallel CrossResolve worker done)
-// before this runs. Resolution order matches dcc: inherited members first,
-// then used units, then the implicit System unit; E2003 after all three miss.
-//
-// Runs in TWO PHASES (see RunInheritedPass): this COMPUTE step is safe to
-// farm out one-worker-per-unit because every worker only READS ExtRefMaps
-// (its own included) and writes its results to APending / its OWN Diags -
-// the ExtRefMap writes are committed sequentially afterwards. The split is
-// exact: the entries this pass produces are method-BODY nodes, which are
-// never heritage/alias/type nodes, so no worker's FindMemberX result can
-// depend on another worker's pending (uncommitted) entries.
+// Grows the per-model cross-work slots to ACount before workers fill them.
 procedure TPasSemaProject.SizeCrossWork(ACount: Integer);
 begin
   // Never shrinks within a run: BuildHelperMap resets the whole thing between
@@ -20653,6 +20612,19 @@ begin
   end;
 end;
 
+// Companion to CrossResolve for idents inside METHOD bodies, deferred there
+// because the inherited-member walk (FindMemberX) reads other models'
+// ExtRefMap - those must be FROZEN (every parallel CrossResolve worker done)
+// before this runs. Resolution order matches dcc: inherited members first,
+// then used units, then the implicit System unit; E2003 after all three miss.
+//
+// Runs in TWO PHASES (see RunInheritedOver): this COMPUTE step is safe to
+// farm out one-worker-per-unit because every worker only READS ExtRefMaps
+// (its own included) and writes its results to APending / its OWN Diags -
+// the ExtRefMap writes are committed sequentially afterwards. The split is
+// exact: the entries this pass produces are method-BODY nodes, which are
+// never heritage/alias/type nodes, so no worker's FindMemberX result can
+// depend on another worker's pending (uncommitted) entries.
 procedure TPasSemaProject.CrossResolveInherited(AId: Integer;
   var APending: TArray<TPasInhPending>);
 var
@@ -20889,6 +20861,23 @@ begin
   // frame at all - as the with pass's commit.
   CommitPending(AIds, LPending, {AClearRef} True);
 end;
+
+{ `with` over a CROSS-UNIT target type (ch.05 sec. 5.7)
+
+  PasTree.Sema.Resolver.ResolveWithStmts already opens a with-target's member
+  scope - but only when the target's type is resolvable INTRA-unit, because it
+  works by joining the type's MemberScope, and a scope index only means
+  anything inside its own model. In real code the target's type usually comes
+  from another unit (`with LTZ.StandardDate do` where LTZ: TTimeZoneInformation
+  from Winapi.Windows - System.DateUtils.pas:2612), and the whole body then
+  stayed unresolved and got a false E2003 per member.
+
+  Cross-unit member references cannot use scope joining at all; the project
+  records them in ExtRefMap instead, exactly as the inherited-member pass
+  does. So CrossResolve DEFERS an unresolved ident sitting in a with body
+  (InsideWithBody, InsideLaterWithTarget), and CrossResolveWith below -
+  after the inherited pass has committed - resolves it, typing the target
+  with WithTargetTypeX (CrossType in probe mode). }
 
 // The deferred `with`-body pass: everything CrossResolve and
 // CrossResolveInherited both stepped over (see FindInEnclosingWith). Must run
@@ -21322,6 +21311,7 @@ var
   LPath: string;
 begin
   EnterFullRun('AnalyzeFile');
+  FStageTimings := '';   // StageTimings: empty for AnalyzeFile, not the last run's
   DefaultProjectDirFrom(AMainFile);
   FLightRoots := [AMainFile];
   SnapLightExempt(FLightRoots);
@@ -21358,10 +21348,11 @@ begin
     // Heritage first, for the same reason the parallel drivers do it - the
     // inherited walk below reads what it binds (see CrossResolveDecl).
     RunDeclPass(FModels.Count);
-    // The ONE direct CrossResolveInherited caller - every other driver goes
-    // through RunInheritedPass, which sizes the cross-work arrays before
-    // farming out. Without this, EnsureCrossWork read FWorkBuilt[Result] off a
-    // NIL array: an AV on every AnalyzeFile run with real search paths, found
+    // RunInheritedOver does not size the cross-work arrays - RunInheritedPass
+    // and RunModulePasses size them before calling it, and so must this
+    // driver, which calls it directly. Without this, EnsureCrossWork read
+    // FWorkBuilt[Result] off a NIL array: an AV on every AnalyzeFile run with
+    // real search paths, found
     // by the Prefetch-race stress repro (2026-08-22), invisible to the suites
     // because none of them drives AnalyzeFile. RunWithPass's own sizing call
     // carries the same "AnalyzeFile reaches this pass without the other" note.

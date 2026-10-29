@@ -308,8 +308,11 @@ usable.
 - **Snapshot swap, not mutation.** A module's tree/model is an immutable
   snapshot; the interface->full upgrade parses a *new* tree - reusing the
   interface wave's own lexed/preprocessed token stream, not re-lexing - and
-  atomically swaps it in. A reader always sees a complete snapshot, old or
-  new, never a half-built one.
+  replaces the old model with it, freeing the old one. The replacement is
+  not synchronized: nothing may read a project while a thread is analyzing
+  it (`TryGetSnapshot` and `ModuleStatus` included). A host gets a complete
+  project from `TPasAsyncSession` below, which hands one over only when
+  its build is done.
 - **`TPasAsyncSession`** runs the whole pipeline on a background thread with
   double-buffered ownership: the host polls a lock-guarded progress snapshot
   (`phase done/total`, with total growing as the closure is discovered) and,
