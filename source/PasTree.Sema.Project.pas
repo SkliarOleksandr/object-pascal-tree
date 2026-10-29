@@ -8945,7 +8945,7 @@ var
   LNode, LCallee, LArg, LArgCount, LLocalHead, LUid, LS, LIdx: Integer;
   LMinReq, LMaxTot, LStruct: Integer;
   LAnyFit, LAnyVariadic, LHaveAny, LSkip, LTrailing: Boolean;
-  LNoUses, LAnyOverload: Boolean;
+  LNoUses, LNoSystem, LAnyOverload: Boolean;
   LName: string;
   LExt: TPasExtRef;
   // The uses-sweep result depends only on the callee NAME (the uses list is
@@ -9071,6 +9071,10 @@ begin
   // `overload` - that one may merge with System's routines (6.3.1), and is
   // measured here, against them.
   LNoUses := Length(LModel.UsesList) = 0;
+  // A set that says `overload` searches on into System (6.3.1), so without a
+  // System model it is never the whole set: a uses-less program's own
+  // `Pos(A: Integer); overload;` leaves System's `Pos('a', 'abc')` callable.
+  LNoSystem := EnsureSystemUnit < 0;
 
   LSweeps := nil;
   LNamePool.Clear;   // a local record: FCount is not initialized
@@ -9159,6 +9163,8 @@ begin
       end;
       if LSweep.Skip then
         LSkip := True
+      else if LNoSystem and (LAnyOverload or LSweep.Overload) then
+        LSkip := True   // System's overloads unknown (see LNoSystem)
       else
         for LIdx := 0 to High(LSweep.Arities) do
         begin

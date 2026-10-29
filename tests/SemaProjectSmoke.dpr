@@ -8751,6 +8751,29 @@ begin
     if TDirectory.Exists(LDir) then
       TDirectory.Delete(LDir, True);
   end;
+  // B4-22: no System on the search path - a set that says `overload` may
+  // still merge with System's (dcc reports neither call), so it is not
+  // measured; a plain routine is.
+  LDir := FreshDir('pastree_sema_sysov_none');
+  TFile.WriteAllText(TPath.Combine(LDir, 'OvD.dpr'),
+    'program OvD;'#10 +
+    'function Pos(A: Integer): Integer; overload; begin Result := A; end;'#10 +
+    'function UpCase(A, B: Integer): Integer; overload;' +
+    ' begin Result := A; end;'#10 +
+    'function Lone(A, B: Integer): Integer; begin Result := 0; end;'#10 +
+    'var I: Integer; C: Char;'#10'begin'#10 +
+    '  I := Pos(''a'', ''abc'');'#10 +
+    '  C := UpCase(''x'');'#10 +
+    '  I := Lone(1);'#10'end.'#10);
+  try
+    Ok('sysov: no System - an overload set is not measured (no E2034)',
+      Run('OvD', 'E2034') = 0);
+    Ok('sysov: no System - only the plain routine is E2035',
+      Run('OvD', 'E2035') = 1);
+  finally
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
 end;
 
 // E3-01, E3-03, B3-49: `[X]` means `XAttribute` wherever that is found - a
