@@ -8818,6 +8818,75 @@ begin
   end;
 end;
 
+// B3-35: a type nested in a generic ancestor, used as another instantiation's
+// argument (`FKeys: TArray<TElement>`), keeps the ancestor's frame through a
+// bare name in a descendant's method - same unit and another (16.x, dcc64
+// 37.0, local/probe-park/b335 GA.dpr, GB.dpr, GC.dpr).
+procedure TestNestedTypeArgFrame;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_nestarg');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class procedure Free; end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'procedure TObject.Free; begin end;'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NaU.pas'),
+    'unit NaU;'#10'interface'#10'type'#10 +
+    '  TPair<K, V> = record Key: K; Value: V; end;'#10 +
+    '  TLoader<F> = class'#10 +
+    '  protected type'#10 +
+    '    TCache = TPair<string, TArray<F>>;'#10 +
+    '    TElement = record Val: F; end;'#10 +
+    '  protected'#10 +
+    '    FCache: TArray<TCache>;'#10 +
+    '    FKeys: TArray<TElement>;'#10 +
+    '  end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NaP.dpr'),
+    'program NaP;'#10'uses NaU;'#10'type'#10 +
+    '  TRec = record Fld: Integer; end;'#10 +
+    '  TRecLoader = class(TLoader<TRec>)'#10 +
+    '    procedure Use;'#10 +
+    '  end;'#10 +
+    '  TObjCache<K; V: class> = class(TLoader<V>)'#10 +
+    '    procedure Use2;'#10 +
+    '  end;'#10 +
+    '  TOwnLoader<F> = class'#10 +
+    '  protected type'#10 +
+    '    TElement = record Val: F; end;'#10 +
+    '  protected'#10 +
+    '    FKeys: TArray<TElement>;'#10 +
+    '  end;'#10 +
+    '  TOwnRec = class(TOwnLoader<TRec>)'#10 +
+    '    procedure Use3;'#10 +
+    '  end;'#10 +
+    'procedure TRecLoader.Use;'#10'var I: Integer;'#10'begin'#10 +
+    '  I := FCache[0].Value[0].Fld + FKeys[0].Val.Fld;'#10 +
+    '  I := FKeys[0].Val.Nope1;'#10'end;'#10 +
+    'procedure TObjCache<K, V>.Use2;'#10'begin'#10 +
+    '  FKeys[0].Val.Free;'#10'end;'#10 +
+    'procedure TOwnRec.Use3;'#10'var I: Integer;'#10'begin'#10 +
+    '  I := FKeys[0].Val.Fld;'#10 +
+    '  var E := FKeys[0];'#10 +
+    '  I := E.Val.Fld;'#10 +
+    '  I := E.Val.Nope2;'#10'end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'NaP.dpr'));
+    Ok('nestarg: a nested type argument keeps the ancestor''s frame - only' +
+      ' the two wrong members are E2003',
+      DiagCount(ModelByName('nap'), 'E2003') = 2);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // B3-30: `Self` in a class method - a nested routine and an anonymous method
 // in one included, a class helper's class method too - is a class reference
 // for overload choice, and an instance is no class reference (15.1.1, dcc64
@@ -16635,6 +16704,7 @@ begin
   TestSystemOverloadJoins;
   TestInlineProcType;
   TestClassMethodSelf;
+  TestNestedTypeArgFrame;
   TestAttributeSuffixFirst;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;

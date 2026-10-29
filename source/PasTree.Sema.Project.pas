@@ -1352,7 +1352,10 @@ type
     function NestedInGenericX(const AX: TSemaXType): Boolean;
     // Does AX mention an OPEN generic parameter - itself, or through any
     // argument of its instantiation (`TdxEnumeratedMap<TValue>` read off a
-    // member declared in a generic ancestor)?
+    // member declared in a generic ancestor)? An argument that is a FRAMELESS
+    // type nested in a generic counts too (`TArray<TElement>`, TElement
+    // declared in the generic ancestor): it is written in that generic's
+    // open parameters (audit B3-35).
     function OpenX(const AX: TSemaXType; ADepth: Integer = 0): Boolean;
     function PreferNonGeneric(AId, AMid, ASym,
       ANameNode: Integer): TSemaXType;
@@ -10569,7 +10572,8 @@ begin
   if AX.Inst = NIL_INST then
     Exit;
   for LArg in InstanceRead(AX.Inst).Args do
-    if OpenX(LArg, ADepth + 1) then
+    if OpenX(LArg, ADepth + 1) or
+       ((LArg.Inst = NIL_INST) and NestedInGenericX(LArg)) then
       Exit(True);
 end;
 
