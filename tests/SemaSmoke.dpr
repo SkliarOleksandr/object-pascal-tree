@@ -3230,6 +3230,50 @@ begin
     DiagCount('E2145') = 1);
   GModel.Free;
 
+  // B4-18 / E1-29: inside a handler, a routine nested in an anonymous method
+  // has no context, and neither has the body of a literal that declares one
+  // nor a literal inside it; a literal with only var / const / type sections
+  // keeps it, and a try ... except gives it back (dcc64 37.0, four E2145s:
+  // A, B, I, K).
+  Analyze(
+    'unit u;'#10'interface'#10'implementation'#10 +
+    'type TP = reference to procedure;'#10'var G: TP;'#10 +
+    'procedure A; begin try except G := procedure'#10 +
+    '  procedure N; begin raise; end; begin N; end; end; end;'#10 +
+    'procedure B; begin try except G := procedure'#10 +
+    '  procedure N; begin end; begin N; raise; end; end; end;'#10 +
+    'procedure C; begin try except G := procedure'#10 +
+    '  var V: Integer; begin V := 0; raise; end; end; end;'#10 +
+    'procedure D; begin try except G := procedure begin raise; end; end;' +
+    ' end;'#10 +
+    'procedure E; begin try except G := procedure'#10 +
+    '  const K = 1; type TT = Integer; begin raise; end; end; end;'#10 +
+    'procedure F; begin try except G := procedure'#10 +
+    '  procedure N; begin try except raise; end; end; begin N; end; end;' +
+    ' end;'#10 +
+    'procedure H; begin try except G := procedure'#10 +
+    '  procedure N; begin end; begin try N; except raise; end; end; end;' +
+    ' end;'#10 +
+    'procedure I; begin try except G := procedure'#10 +
+    '  procedure N; begin end;'#10 +
+    '  begin G := procedure begin raise; end; end; end; end;'#10 +
+    'procedure J; begin try except G := procedure begin'#10 +
+    '  G := procedure procedure N; begin end; begin N; end;'#10 +
+    '  raise; end; end; end;'#10 +
+    'procedure K; begin try except G := procedure'#10 +
+    '  function N: Integer; begin Result := 0; end;'#10 +
+    '  begin if N = 0 then raise; end; end; end;'#10 +
+    'end.'#10);
+  Ok('e2145: a literal declaring a routine - four reports (A, B, I, K)',
+    DiagCount('E2145') = 4);
+  var LLines := '';
+  for var LD in GModel.Diags do
+    if LD.Code = 'E2145' then
+      LLines := LLines + IntToStr(LD.Line) + ' ';
+  Ok('e2145: the literal shapes on lines 7 (A), 9 (B), 21 (I), 27 (K)',
+    LLines = '7 9 21 27 ');
+  GModel.Free;
+
   // `raise E` is never this diagnostic, wherever it sits.
   Analyze(
     'unit u;'#10'interface'#10'implementation'#10 +

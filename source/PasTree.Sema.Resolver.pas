@@ -4827,19 +4827,48 @@ end;
     try try except raise end finally end   legal
 
   So a `finally` or a `try` body RESETS the context that an enclosing handler
-  established. An anonymous method body does NOT - `raise` inside a
-  `procedure begin ... end` written in a handler is accepted, which makes the
-  boundary the try-statement part and nothing else. A named nested routine
-  needs no rule of its own: its body is never lexically inside a statement, so
-  the climb from a raise in it meets no try statement and rejects, exactly as
-  dcc does.
+  established. A plain anonymous method body does NOT - `raise` inside a
+  `procedure begin ... end` written in a handler is accepted, and so is one in
+  a literal with var, const or type sections. Two more boundaries end the
+  climb with no handler (dcc64 37.0, local/probe-m-b/b418):
+    - a named routine: a routine nested in an anonymous method's declarations
+      is lexically inside the handler, and its `raise` is still E2145;
+    - an anonymous method that DECLARES a routine: its whole body loses the
+      context - its own `raise`, and one in a literal written inside it - while
+      a plain literal around it keeps its own.
+  A `try ... except` inside either gives the context back, as anywhere.
 
-  All eight shapes above plus the `on ... do` and `else` branches are pinned in
-  SemaSmoke, and the probe's output matches dcc line for line.
+  All eight shapes above plus the `on ... do` and `else` branches and the
+  literal shapes are pinned in SemaSmoke.
 
   Structural, like CheckForCounters, but unlike it needs no bindings at all -
   it runs on the tree alone. }
 procedure TPasSemaResolver.CheckBareRaises;
+
+  // An anonymous method whose declarations (its nkRoutineBody's children
+  // before the block) hold a routine.
+  function DeclaresRoutine(AAnon: Integer): Boolean;
+  var
+    LBody, LDecl: Integer;
+  begin
+    LBody := FTree.Nodes[AAnon].FirstChild;
+    while LBody <> NIL_NODE do
+    begin
+      if FTree.Nodes[LBody].Kind = nkRoutineBody then
+      begin
+        LDecl := FTree.Nodes[LBody].FirstChild;
+        while LDecl <> NIL_NODE do
+        begin
+          if FTree.Nodes[LDecl].Kind = nkRoutine then
+            Exit(True);
+          LDecl := FTree.Nodes[LDecl].NextSibling;
+        end;
+      end;
+      LBody := FTree.Nodes[LBody].NextSibling;
+    end;
+    Result := False;
+  end;
+
 var
   LHits: TArray<Integer>;
   LCount, LIdx, LCur, LParent, LFileId, LLine, LCol: Integer;
@@ -4868,6 +4897,11 @@ begin
           (FTree.Nodes[LCur].Kind = nkExceptPart);
         Break;
       end;
+      // The two boundaries besides a try part - see the header.
+      if (FTree.Nodes[LParent].Kind = nkRoutine) or
+         ((FTree.Nodes[LParent].Kind = nkAnonMethod) and
+          DeclaresRoutine(LParent)) then
+        Break;
       LCur := LParent;
       LParent := FTree.Nodes[LCur].Parent;
     end;
