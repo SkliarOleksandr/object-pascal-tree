@@ -8887,6 +8887,44 @@ begin
   end;
 end;
 
+// E3-39: an anonymous method literal is a value of its own procedural type -
+// an inline var initialized with one is called by `F()` and the paren-less
+// `F`, and the member after it is the result's (17.2.1, dcc64 37.0,
+// local/probe-park/e339 AL.dpr).
+procedure TestAnonLiteralType;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_anonlit');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AlP.dpr'),
+    'program AlP;'#10'type'#10 +
+    '  TA = class OnlyA: Integer; end;'#10 +
+    'procedure Run;'#10'var X: Integer;'#10'begin'#10 +
+    '  var F := function: TA begin Result := nil; end;'#10 +
+    '  X := F().OnlyA + F.OnlyA;'#10 +
+    '  X := F().Nope1;'#10 +
+    '  X := F.Nope2;'#10 +
+    'end;'#10 +
+    'begin'#10'  Run;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AlP.dpr'));
+    Ok('anonlit: only the two wrong members after F are E2003',
+      DiagCount(ModelByName('alp'), 'E2003') = 2);
+    Ok('anonlit: OnlyA binds through F() and F',
+      CrossRefCountInUnit(ModelByName('alp'), 'OnlyA', 'OnlyA', 'alp') = 2);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // E3-31: a generic method's T is inferred through an open-array parameter -
 // from an array variable's element and from an open array constructor's
 // (16.5.1, dcc64 37.0, local/probe-park/e331 OA.dpr).
@@ -16899,6 +16937,7 @@ begin
   TestAmbiguousGenericArgs;
   TestNestedTypeArgFrame;
   TestOpenArrayInference;
+  TestAnonLiteralType;
   TestAttributeSuffixFirst;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;

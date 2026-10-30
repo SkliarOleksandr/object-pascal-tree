@@ -209,11 +209,6 @@ of less work, not a gap in following the language; its consequences are in
   different result types, with or without parentheses, a bare type name (a
   class reference with no named `class of` type), `nil`, and a set
   constructor (an anonymous type) all leave the declaration untyped.
-- an anonymous method literal has no type as a value: `var F := function:
-  TA begin ... end;` leaves F untyped, so `F()` and every member behind it
-  go unbound (dcc: E2003 on `F().Nope`), and an immediately invoked literal
-  (`(function: TA ... end)()`) types as nothing. Unlike the refusals above
-  this is a gap, not a decision; both idioms are rare.
 - A literal initializer gets dcc's exact type (LiteralTypeX, probed on both
   compilers): Integer/Cardinal/Int64/UInt64 by magnitude with the sign
   folded, Char for a one-unit string literal, Currency for an exponent-free
@@ -568,8 +563,6 @@ of less work, not a gap in following the language; its consequences are in
 - a literal fits a `reference to` parameter by its parameter count,
   procedure / function kind and parameter types (overload scoring,
   ParamTypesFit); its result type is not compared.
-- a literal has no type as a value (3.1.3): a `var F :=` initializer or an
-  immediately invoked literal.
 
 ### 17.3.1 Variable capture
 - the capture set is not computed: no model fact says which enclosing

@@ -9607,9 +9607,10 @@ begin
     Exit;
   // An ANONYMOUS struct's symbol has the struct node ITSELF as its declaration
   // - there is no name node and no nkTypeDecl above it (see DeclareAnonStruct).
-  // So does an inline procedural type's (audit B3-38).
+  // So does an inline procedural type's (audit B3-38) and an anonymous method
+  // literal's (E3-39).
   if LM.Tree.Nodes[LName].Kind in [nkRecordType, nkClassType, nkInterfaceType,
-     nkObjectType, nkHelperType, nkProcType] then
+     nkObjectType, nkHelperType, nkProcType, nkAnonMethod] then
     Exit(LName);
   LParent := LM.Tree.Nodes[LName].Parent;
   if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkTypeDecl) then
@@ -12159,7 +12160,7 @@ begin
         // looking, so a member lookup on a pointer type behaves like one on
         // what it points at.
         LNext := PointeeX(LCur);
-      nkProcType:
+      nkProcType, nkAnonMethod:   // a literal's own type too (E3-39)
         // A PARAMETERLESS FUNCTION reference in a value position is CALLED,
         // and `.Member` then applies to its RESULT: `ValueFunc.GetValue` where
         // `ValueFunc: TFunc<IValue>` means `ValueFunc().GetValue`
@@ -12360,7 +12361,7 @@ begin
         end;
       nkPointerType:
         LNext := PointeeX(LCur);       // implicit deref: P.Field
-      nkProcType:
+      nkProcType, nkAnonMethod:
         LNext := ProcResultX(LCur);    // paramless func ref is called
       nkClassOf:
         LNext := ResolveTypeExpr(LCur.UnitId,
@@ -14027,6 +14028,11 @@ var
       Result := 0;
       LArg := AArg;
       LArgX := AArgX;
+      // A literal's own unnamed type (E3-39) scores nothing: LiteralFits and
+      // ArgShapeRejects below decide its fit, as before it had one.
+      if (LArg <> NIL_NODE) and
+         (LM.Tree.Nodes[PeelParens(LM.Tree, LArg)].Kind = nkAnonMethod) then
+        LArgX := XNil;
       LParX := AParX;
       LCore := NIL_NODE;
       // Each side canonicalized once per argument: the tests below asked for
@@ -15590,6 +15596,16 @@ var
       nkParen:
         if LM.Tree.Nodes[N].FirstChild <> NIL_NODE then
           SetXAt(N, GetX(LM.Tree.Nodes[N].FirstChild));
+
+      // An anonymous method literal is a value of its own unnamed procedural
+      // type (AnonTypeSyms): an inline `var F := function: TA ...` takes it,
+      // and `F()` / `F.B` call through it with ProcResultX (audit E3-39).
+      nkAnonMethod:
+        begin
+          var LAnonSym: Integer;
+          if LM.AnonTypeSyms.TryGetValue(N, LAnonSym) then
+            SetXAt(N, XPlain(AId, LAnonSym));
+        end;
 
       nkTypeArgs:
         if TypeArgsCallX(N, LBX) then
@@ -17581,11 +17597,13 @@ begin
     case LM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
         LCur := AliasStepX(LCur, LDef);   // alias link
-      nkProcType:
+      // An anonymous method literal has the same head, then its body
+      // (audit E3-39): the body ends it as a directive does.
+      nkProcType, nkAnonMethod:
         begin
           LChild := LM.Tree.Nodes[LDef].FirstChild;
           if (LChild = NIL_NODE) or
-             (LM.Tree.Nodes[LChild].Kind = nkDirective) then
+             (LM.Tree.Nodes[LChild].Kind in [nkDirective, nkRoutineBody]) then
             Exit;   // `procedure [stdcall]`: neither parameters nor a result
           // Takes parameters - but a parameter with a DEFAULT still lets the
           // name be written bare, and dcc calls it then:
@@ -17603,7 +17621,7 @@ begin
             // Skip the list; the result type is the next child.
             LChild := LM.Tree.Nodes[LChild].NextSibling;
             if (LChild = NIL_NODE) or
-               (LM.Tree.Nodes[LChild].Kind = nkDirective) then
+               (LM.Tree.Nodes[LChild].Kind in [nkDirective, nkRoutineBody]) then
               Exit;   // a `procedure(...)` type: no result to take a member of
           end;
           Exit(SubstX(ResolveTypeExpr(LCur.UnitId, LChild), LCur.Inst, 0));

@@ -2789,6 +2789,12 @@ begin
         // must NOT bind to (and type-check against) the ENCLOSING function's
         // Result. Params arrive in the same nkParams shape as a routine's -
         // declare them the same way.
+        // The literal is a VALUE of a procedural type that has no name: it
+        // gets an unnamed type symbol, as an inline procedural type does
+        // (AnonTypeSyms), so `var F := function: TA begin ... end` types F
+        // and `F().B` calls through it (audit E3-39).
+        FModel.AnonTypeSyms.AddOrSetValue(ANode,
+          DeclareAnonStruct(AScope, ANode));
         var LAnon := FModel.AddScope(sckRoutine, AScope, ANode);
         FNodeScope[ANode] := LAnon;
         LChild := FirstChild(ANode);
