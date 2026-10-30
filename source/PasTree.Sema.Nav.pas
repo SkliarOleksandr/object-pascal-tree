@@ -391,6 +391,25 @@ type
       Kind: TPasDefineRefKind;
     end;
     TPasNameTest = reference to function(const AName: string): Boolean;
+    { The whole-closure binding scan, as a cursor: every bound node of every
+      model, RefMap's (the model's own symbols) then ExtRefMap's (another
+      model's), each as (model id, model, node, the symbol's model id,
+      symbol). The one copy of the loop the closure-wide queries share -
+      FindCreations, FindDestructions (audit D1-26); a record and not a
+      visitor, so a query keeps its nested helpers, which an anonymous
+      method could not call. A demoted model is visited as it is: hydrating
+      one is the caller's decision, per hit. }
+    TPasBindingCursor = record
+    private
+      FProj: TPasSemaProject;
+      FMi, FNode, FCount: Integer;
+      FInExt: Boolean;
+      FExt: TPasIntMap<TPasExtRef>.TEnumerator;
+    public
+      Model: TPasSemaModel;
+      procedure Init(AProj: TPasSemaProject);
+      function Next(out AMid, ANode, AUid, ASym: Integer): Boolean;
+    end;
     { One heritage edge, reversed: the class/`object`/interface whose
       heritage reaches the type this edge is filed under. IsFirst marks the
       ANCESTOR edge - the written first entry or the implicit TObject /
@@ -1602,6 +1621,74 @@ begin
   RoutinePeer.Free;
   DeclSymOfNode.Free;
   inherited;
+end;
+
+{ TPasNavigator.TPasBindingCursor }
+
+procedure TPasNavigator.TPasBindingCursor.Init(AProj: TPasSemaProject);
+begin
+  FProj := AProj;
+  FCount := AProj.ModelCount;
+  FMi := -1;
+  FNode := -1;
+  FInExt := True;   // so the first Next opens model 0
+  Model := nil;
+end;
+
+function TPasNavigator.TPasBindingCursor.Next(out AMid, ANode, AUid,
+  ASym: Integer): Boolean;
+var
+  LPair: TPair<Integer, TPasExtRef>;
+begin
+  while True do
+  begin
+    if not FInExt then
+    begin
+      // RefMap: the model's own symbols.
+      while FNode < High(Model.RefMap) do
+      begin
+        Inc(FNode);
+        if Model.RefMap[FNode] <> NIL_SYM then
+        begin
+          AMid := FMi;
+          ANode := FNode;
+          AUid := FMi;
+          ASym := Model.RefMap[FNode];
+          Exit(True);
+        end;
+      end;
+      FInExt := True;
+      FExt := Model.ExtRefMap.GetEnumerator;
+    end
+    else if Model <> nil then
+    begin
+      // ExtRefMap: another model's, a row out of range never visited.
+      while FExt.MoveNext do
+      begin
+        LPair := FExt.Current;
+        if (Cardinal(LPair.Value.UnitId) < Cardinal(FCount)) and
+           (LPair.Value.Sym >= 0) and
+           (LPair.Value.Sym < FProj.Model(LPair.Value.UnitId).SymCount) then
+        begin
+          AMid := FMi;
+          ANode := LPair.Key;
+          AUid := LPair.Value.UnitId;
+          ASym := LPair.Value.Sym;
+          Exit(True);
+        end;
+      end;
+      Model := nil;
+    end;
+    if Model = nil then
+    begin
+      Inc(FMi);
+      if FMi >= FCount then
+        Exit(False);
+      Model := FProj.Model(FMi);
+      FNode := -1;
+      FInExt := False;
+    end;
+  end;
 end;
 
 { TPasNavigator }
@@ -5380,9 +5467,9 @@ end;
 function TPasNavigator.FindCreations(ATMid, ASym: Integer): TArray<TPasRefHit>;
 var
   LHits: TList<TPasRefHit>;
-  LMi, LNode, LBase, LName, LUid, LSym: Integer;
+  LMi, LNode, LBase, LName, LUid, LSym, LBMid, LBSym: Integer;
   LM: TPasSemaModel;
-  LPair: TPair<Integer, TPasExtRef>;
+  LCur: TPasBindingCursor;
   LHit: TPasRefHit;
 
   // ANode is bound to the class. Is it the QUALIFIER of a member access whose
@@ -5444,25 +5531,18 @@ begin
     Exit;
   LHits := TList<TPasRefHit>.Create;
   try
-    for LMi := 0 to FProj.ModelCount - 1 do
+    // Every node bound to the class - or to a type alias of it, which is why
+    // every model's RefMap is read and not only the declaring one's (the
+    // alias may be declared anywhere) - ExtRefMap everywhere; hydration only
+    // for a model that holds a row.
+    LCur.Init(FProj);
+    while LCur.Next(LMi, LNode, LBMid, LBSym) do
     begin
-      LM := FProj.Model(LMi);
-      // Same scan shape as CollectReferencesOfAll: every node bound to the
-      // class - or to a type alias of it, which is why every model's RefMap
-      // is read and not only the declaring one's (the alias may be declared
-      // anywhere) - ExtRefMap everywhere; hydration only for a model that
-      // holds a row.
-      for LNode := 0 to High(LM.RefMap) do
-        if (LM.RefMap[LNode] <> NIL_SYM) and IsMemberBase(LNode) and
-           BoundToClass(LMi, LM.RefMap[LNode]) and MemberIsCtor and
-           FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
-          LHits.Add(LHit);
-      for LPair in LM.ExtRefMap do
-        if IsMemberBase(LPair.Key) and
-           BoundToClass(LPair.Value.UnitId, LPair.Value.Sym) and
-           MemberIsCtor and FProj.EnsureHydrated(LMi) and
-           HitFromNode(LM, LPair.Key, LHit) then
-          LHits.Add(LHit);
+      LM := LCur.Model;
+      if IsMemberBase(LNode) and BoundToClass(LBMid, LBSym) and
+         MemberIsCtor and FProj.EnsureHydrated(LMi) and
+         HitFromNode(LM, LNode, LHit) then
+        LHits.Add(LHit);
     end;
     Result := LHits.ToArray;
   finally
@@ -5475,9 +5555,9 @@ function TPasNavigator.FindDestructions(ATMid,
   ASym: Integer): TArray<TPasRefHit>;
 var
   LHits: TList<TPasRefHit>;
-  LMi, LNode, LUid, LSym, LTarget, LParent: Integer;
+  LMi, LNode, LUid, LSym, LTarget, LParent, LLastMi: Integer;
   LM: TPasSemaModel;
-  LPair: TPair<Integer, TPasExtRef>;
+  LCur: TPasBindingCursor;
   LHit: TPasRefHit;
   LNameLower: string;
   LProbe: TPasXProbe;
@@ -5604,30 +5684,21 @@ begin
   LHits := TList<TPasRefHit>.Create;
   LProbe := nil;
   try
-    for LMi := 0 to FProj.ModelCount - 1 do
+    // Every bound routine name, whichever map holds it - the release
+    // routines live in System/SysUtils, so almost always ExtRefMap; RefMap
+    // covers a project declaring its own FreeAndNil.
+    LLastMi := -1;
+    LCur.Init(FProj);
+    while LCur.Next(LMi, LNode, LUid, LSym) do
     begin
-      LM := FProj.Model(LMi);
-      FreeAndNil(LProbe);   // a probe types one model's nodes
-      // Every bound routine name in the model, whichever map holds it - the
-      // release routines live in System/SysUtils, so almost always ExtRefMap;
-      // RefMap covers a project declaring its own FreeAndNil.
-      for LNode := 0 to High(LM.RefMap) do
-        if LM.RefMap[LNode] <> NIL_SYM then
-        begin
-          LUid := LMi;
-          LSym := LM.RefMap[LNode];
-          if LM.Symbols[LSym].Kind = skRoutine then
-            Consider(LNode);
-        end;
-      for LPair in LM.ExtRefMap do
+      LM := LCur.Model;
+      if LMi <> LLastMi then
       begin
-        LUid := LPair.Value.UnitId;
-        LSym := LPair.Value.Sym;
-        if (LUid >= 0) and (LUid < FProj.ModelCount) and (LSym >= 0) and
-           (LSym < FProj.Model(LUid).SymCount) and
-           (FProj.Model(LUid).Symbols[LSym].Kind = skRoutine) then
-          Consider(LPair.Key);
+        FreeAndNil(LProbe);   // a probe types one model's nodes
+        LLastMi := LMi;
       end;
+      if FProj.Model(LUid).Symbols[LSym].Kind = skRoutine then
+        Consider(LNode);
     end;
     Result := LHits.ToArray;
   finally
