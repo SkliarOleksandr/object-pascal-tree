@@ -231,7 +231,7 @@ end;
 var
   GArg, GTarget: string;
   GIdx: Integer;
-  GDump, GTrace, GSrc, GParse, GVerbose: Boolean;
+  GDump, GTrace, GParse, GVerbose: Boolean;
   GUnit: TPasDcuUnit;
   GFiles: TArray<string>;
   GFile, GSource, GMsg: string;
@@ -241,12 +241,18 @@ var
 
 begin
   try
+    // Set here, not left to the globals' zero: the anonymous method below
+    // makes dcc treat the main block's variables as locals (W1036).
+    GDump := False;
+    GTrace := False;
+    GParse := False;
+    GVerbose := False;
     for GIdx := 1 to ParamCount do
     begin
       GArg := ParamStr(GIdx);
       if SameText(GArg, '-dump') then GDump := True
       else if SameText(GArg, '-trace') then GTrace := True
-      else if SameText(GArg, '-src') then GSrc := True
+      else if SameText(GArg, '-src') then   // the default: the source text
       else if SameText(GArg, '-parse') then GParse := True
       else if SameText(GArg, '-v') then GVerbose := True
       else GTarget := GArg;

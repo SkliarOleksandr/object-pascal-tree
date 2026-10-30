@@ -321,9 +321,10 @@ type
     of the array - the census measured 162 MB held for 128 MB of symbols,
     529 for 484 MB of tree nodes, 488 for 463 MB of tokens (2026-09). Exact
     allocates the exact array and moves the elements over bitwise (managed
-    fields change owner, no refcount traffic; the old slots are zeroed so
-    releasing the old array finalizes nothing). For arrays nothing points
-    into. }
+    fields change owner, no refcount traffic). For arrays nothing points
+    into. A managed T's slots at ACount and above must be empty - never
+    written, or reset to Default - because the old block is freed without
+    finalizing them. }
   TPasArrayTrim = record
     class procedure Exact<T>(var A: TArray<T>; ACount: Integer); static;
   end;
@@ -724,15 +725,39 @@ end;
 { TPasArrayTrim }
 
 class procedure TPasArrayTrim.Exact<T>(var A: TArray<T>; ACount: Integer);
+const
+  // System's TDynArrayRec ahead of the elements: RefCnt and Length, padded
+  // to 16 bytes on 64-bit.
+  CDynHeader = 2 * SizeOf(NativeInt);
 var
   LExact: TArray<T>;
+  LOld, LNew: PByte;
 begin
   if Length(A) = ACount then
     Exit;
+  // A managed T moves into a raw block of exact size and the old block is
+  // freed raw. Through SetLength and a release, the new block was
+  // zero-filled first, and the old one zeroed and then finalized element by
+  // element - every symbol and scope arena, once per model (perf audit
+  // 2026-10, C2). Needs A unshared (RefCnt 1), and its slots from ACount on
+  // empty (see the type's header).
+  if IsManagedType(T) and (ACount > 0) and
+     (PInteger(PByte(Pointer(A)) - SizeOf(NativeInt) - SizeOf(Integer))^ = 1)
+  then
+  begin
+    LOld := PByte(Pointer(A)) - CDynHeader;
+    GetMem(LNew, CDynHeader + NativeInt(ACount) * SizeOf(T));
+    Move(LOld^, LNew^, CDynHeader + NativeInt(ACount) * SizeOf(T));
+    PNativeInt(LNew + CDynHeader - SizeOf(NativeInt))^ := ACount;
+    PPointer(@A)^ := LNew + CDynHeader;
+    FreeMem(LOld);
+    Exit;
+  end;
   // An unmanaged T is copied by Copy: a fresh block and a Move, where
   // SetLength below zero-fills the block first - the tokens and nodes of
   // every file, ~1.3 GB of writes per 3750-unit closure (perf audit 2026-10,
-  // C16). A managed T keeps the move below, which costs no refcounting.
+  // C16). A shared or emptied managed T keeps the move below, which costs no
+  // refcounting.
   if not IsManagedType(T) then
   begin
     A := Copy(A, 0, ACount);

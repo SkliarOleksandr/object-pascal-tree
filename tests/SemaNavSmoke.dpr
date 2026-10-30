@@ -3764,7 +3764,6 @@ begin
         GNav.GotoBareInherited(LMidRel, 35, 3, {out} LTarget) and
         (LTarget.Line = 8) and (LTarget.Col = 15));
 
-      LOk := True;
       try
         LOk := (GNav.ModelIdOf('') = -1) and (GNav.ModelIdOf('a|b') = -1) and
           (GProj.ModelIdOf('') = -1) and (GProj.ModelIdOf('a|b') = -1);
@@ -5131,8 +5130,11 @@ begin
       // Read-only is the other file-level refusal - and it is enough for it
       // to hit ONE of the files the plan would rewrite (here NavB, which
       // only USES TThing; the declaration in NavA stays writable).
+      // faReadOnly is Windows-only (W1002); so are these suites.
+      {$WARN SYMBOL_PLATFORM OFF}
       TFile.SetAttributes(TPath.Combine(LDir, 'NavB.pas'),
         [TFileAttribute.faReadOnly]);
+      {$WARN SYMBOL_PLATFORM DEFAULT}
       try
         Ok('RenameBlockReason: a read-only file -> blocked',
           GNav.RenameBlockReason(TPath.Combine(LDir, 'NavB.pas'))

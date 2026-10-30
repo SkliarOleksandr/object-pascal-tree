@@ -3079,7 +3079,10 @@ begin
   Result := False;
   LM := FModels[AMid];
   // One key for every used unit: the string Resolve rehashed the name per
-  // unit (audit C1-18).
+  // unit (audit C1-18). The seed join is skipped: a seeded symbol has no
+  // DeclNode, so it is rejected below anyway, and the seed is each
+  // interface's FIRST join (TPasSemaResolver.Run), so skipping it hides
+  // nothing another join would have answered.
   var LKey := SemaKey(ANameLower);
   for LIdx := High(LM.UsesList) downto 0 do   // last uses wins, like resolution
   begin
@@ -3089,7 +3092,7 @@ begin
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope = NIL_SCOPE then
       Continue;
-    LS := LUsed.Resolve(LUsed.InterfaceScope, LKey);
+    LS := LUsed.ResolveSkipSeed(LUsed.InterfaceScope, LKey);
     if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
     begin
       ARMid := LUid;
@@ -3104,7 +3107,7 @@ begin
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope <> NIL_SCOPE then
     begin
-      LS := LUsed.Resolve(LUsed.InterfaceScope, LKey);
+      LS := LUsed.ResolveSkipSeed(LUsed.InterfaceScope, LKey);
       if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
       begin
         ARMid := LUid;
@@ -3120,7 +3123,7 @@ begin
     LUsed := FModels[LUid];
     if LUsed.InterfaceScope <> NIL_SCOPE then
     begin
-      LS := LUsed.Resolve(LUsed.InterfaceScope, LKey);
+      LS := LUsed.ResolveSkipSeed(LUsed.InterfaceScope, LKey);
       if (LS <> NIL_SYM) and (LUsed.Symbols[LS].DeclNode <> NIL_NODE) then
       begin
         ARMid := LUid;
@@ -4121,7 +4124,7 @@ end;
 function TPasSemaProject.VisibleQualified(AId: Integer; const AName: string;
   out AMid, ASym: Integer): Boolean;
 var
-  LDot, LUid, LScope, LIdx: Integer;
+  LDot, LUid, LScope: Integer;
   LUnit, LMember: string;
   LTMid, LTSym: Integer;
 begin
@@ -7920,6 +7923,10 @@ var
 begin
   LModel := FModels[AId];
   var LKey := SemaKey(ANameLower);   // once, not per used unit (C1-18)
+  // A name the seed does not have is never answered by a used unit's seed
+  // join: skip that lookup per unit (ResolveSkipSeed).
+  var LSeeded := (LModel.SystemScope = NIL_SCOPE) or
+    (LModel.FindLocalDeep(LModel.SystemScope, LKey, 0) <> NIL_SYM);
   for LIdx := High(LModel.UsesList) downto 0 do
   begin
     LUid := LModel.UsesList[LIdx].UnitId;
@@ -7930,7 +7937,10 @@ begin
       Continue;
     // Resolve (not FindLocal) so interface-visible enum values and other
     // joined-scope names are importable too.
-    LSym := LUsed.Resolve(LUsed.InterfaceScope, LKey);
+    if LSeeded then
+      LSym := LUsed.Resolve(LUsed.InterfaceScope, LKey)
+    else
+      LSym := LUsed.ResolveSkipSeed(LUsed.InterfaceScope, LKey);
     if LSym <> NIL_SYM then
     begin
       AUnit := LUid;
@@ -13750,10 +13760,11 @@ var
 
   function ScoreCandidate(ACall, AMid, ACand, ACtx: Integer): Integer;
   var
-    LParams: TArray<Integer>;
-    LReq, LTot, LIdx, LArg, LArgs, LCore: Integer;
+    LPM: TPasSemaModel;
+    LPList: TSemaSymList;
+    LReq, LTot, LPos, LPCount, LArg, LArgs, LCore: Integer;
     LVariadic, LTrailing: Boolean;
-    LArgX, LParX: TSemaXType;
+    LArgX, LParX, LCanonParX, LCanonArgX: TSemaXType;
 
     // The parameter count of a signature node - an nkAnonMethod literal or
     // an nkProcType - and whether it is a function, read off the scope the
@@ -13960,14 +13971,34 @@ var
        LTrailing)) then
       Exit(-1);
     Result := 0;
-    LParams := XParamSyms(AMid, ACand);
+    // The parameters straight off the candidate's param scope, in XParamSyms'
+    // order and filter: an array per candidate, with its free, was 1.1% of a
+    // client build's CPU (perf audit 2026-10, C11).
+    LPM := FModels[AMid];
+    LPList := Default(TSemaSymList);
+    LPCount := 0;
+    if LPM.Symbols[ACand].MemberScope <> NIL_SCOPE then
+    begin
+      LPList := LPM.Scopes[LPM.Symbols[ACand].MemberScope].Symbols;
+      LPCount := LPList.Count;
+    end;
+    LPos := 0;
+    while (LPos < LPCount) and (LPM.Symbols[LPList[LPos]].Kind <> skParam) do
+      Inc(LPos);
     LArg := LM.Tree.Nodes[LM.Tree.Nodes[ACall].FirstChild].NextSibling;
-    LIdx := 0;
-    while (LArg <> NIL_NODE) and (LIdx <= High(LParams)) and
+    while (LArg <> NIL_NODE) and (LPos < LPCount) and
           (LM.Tree.Nodes[LArg].Kind <> nkMissing) do
     begin
       LArgX := GetX(LArg);
-      LParX := SubstX(DeclTypeX(AMid, LParams[LIdx]), ACtx, 0);
+      LParX := SubstX(DeclTypeX(AMid, LPList[LPos]), ACtx, 0);
+      // Each side canonicalized once per argument: the tests below asked for
+      // the same CanonTypeX up to four times (C11).
+      LCanonParX := LParX;
+      if XValid(LParX) then
+        LCanonParX := CanonTypeX(LParX);
+      LCanonArgX := LArgX;
+      if XValid(LArgX) and XValid(LParX) then
+        LCanonArgX := CanonTypeX(LArgX);
       // The literal tests below look through parentheses: `(procedure begin
       // ... end)` is how a multi-line anonymous argument is often written,
       // and the client group's own instance of the TProc case was exactly that.
@@ -13982,7 +14013,12 @@ var
       begin
         var LCMid, LCSym: Integer;
         if TargetSym(LCore, LCMid, LCSym) and IsConstructorSym(LCMid, LCSym) then
+        begin
           LArgX := CtorResultX(GetX(LM.Tree.Nodes[LCore].FirstChild));
+          LCanonArgX := LArgX;
+          if XValid(LArgX) and XValid(LParX) then
+            LCanonArgX := CanonTypeX(LArgX);
+        end;
       end
       // A TYPE NAME is a class reference in a value position (15.2.1), not
       // an instance: `Reg(TFoo)` takes `Reg(C: TFooClass)` over `Reg(O:
@@ -13993,21 +14029,21 @@ var
       // ...)` (System.Notification) - unless its head is a generic ROUTINE,
       // whose paren-less call is a value.
       else if XValid(LArgX) and XValid(LParX) and
-              (XCatOf(CanonTypeX(LArgX)) = tcClass) and
+              (XCatOf(LCanonArgX) = tcClass) and
               ((LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
                (IsTypeDesignator(LCore) or IsClassMethodSelf(LCore)) or
                (LM.Tree.Nodes[LCore].Kind = nkTypeArgs) and
                not HeadIsRoutine(LCore)) then
       begin
-        var LCanonPar := CanonTypeX(LParX);
+        var LCanonPar := LCanonParX;
         case XCatOf(LCanonPar) of
           tcClassOf:
             begin
               var LTarget := CanonTypeX(ClassRefTargetX(LCanonPar));
-              if XValid(LTarget) and XSameType(LTarget, CanonTypeX(LArgX)) then
+              if XValid(LTarget) and XSameType(LTarget, LCanonArgX) then
                 Inc(Result, 2)
               else if XValid(LTarget) and
-                      XDescendsFrom(CanonTypeX(LArgX), LTarget) then
+                      XDescendsFrom(LCanonArgX, LTarget) then
                 Inc(Result, 1)
               else if XValid(LTarget) and
                       (FModels[LTarget.UnitId].Symbols[LTarget.Sym].Kind <>
@@ -14020,7 +14056,10 @@ var
             Exit(-1);
         end;
         LArg := LM.Tree.Nodes[LArg].NextSibling;
-        Inc(LIdx);
+        Inc(LPos);
+        while (LPos < LPCount) and
+              (LPM.Symbols[LPList[LPos]].Kind <> skParam) do
+          Inc(LPos);
         Continue;
       end;
       // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
@@ -14044,7 +14083,7 @@ var
       // to - a string, a scalar, a class (IsBracketToScalar). ArgShapeRejects
       // is the rule the unit's ScoreArgs applies too.
       if XValid(LParX) and ArgShapeRejects(LM.Tree.Nodes[LCore].Kind,
-           IsProcedureDesignator(LCore), XCatOf(CanonTypeX(LParX)),
+           IsProcedureDesignator(LCore), XCatOf(LCanonParX),
            FModels[LParX.UnitId].Symbols[LParX.Sym].Kind = skGenericParam) then
         Exit(-1);
       // The same literal against a procedural parameter it cannot be passed
@@ -14067,10 +14106,10 @@ var
         // string one next (the literal's own type here), an AnsiChar one
         // least - 'a' takes F(WideChar) over F(AnsiChar) and F(string) over
         // F(AnsiChar), either order (local/probe-b31 O2, probe-b32 P1).
-        if (XCatOf(CanonTypeX(LParX)) = tcChar) and
+        if (XCatOf(LCanonParX) = tcChar) and
            IsCharLiteralExpr(LM.Tree, LCore) then
         begin
-          var LCharX := CanonTypeX(LParX);
+          var LCharX := LCanonParX;
           if PasBuiltinIsChar(FModels[LCharX.UnitId], LCharX.Sym,
              FPlatform) then
             Inc(Result, 3)
@@ -14091,8 +14130,8 @@ var
           // diagnostic until something reads a member off it (`.ToRectF` in
           // a suite's ruler unit). Canonicalized only after the cheap test has
           // already failed.
-          var LCanonPar := CanonTypeX(LParX);
-          var LCanonArg := CanonTypeX(LArgX);
+          var LCanonPar := LCanonParX;
+          var LCanonArg := LCanonArgX;
           var LParCat: TSemaTypeCat := tcUnknown;
           if not XSameType(LCanonPar, LCanonArg) then
             LParCat := ParCatOf(LParX, LCanonPar);
@@ -14143,7 +14182,10 @@ var
             Inc(Result, 1);
         end;
       LArg := LM.Tree.Nodes[LArg].NextSibling;
-      Inc(LIdx);
+      Inc(LPos);
+      while (LPos < LPCount) and
+            (LPM.Symbols[LPList[LPos]].Kind <> skParam) do
+        Inc(LPos);
     end;
   end;
 
@@ -14185,7 +14227,11 @@ var
     ACtx: Integer; out ABestMid, ABestSym, ABestCtx: Integer;
     out AAmbiguous: Boolean): Boolean;
   var
-    LSeen: TArray<TPasExtRef>;   // count-tracked (LSeenCount), capacity slack
+    // The candidates scored so far: the first 16 on the stack, the rest in
+    // LSeen - a heap array per call was most of this routine's allocations
+    // (perf audit 2026-10, C11).
+    LSeenFix: array[0..15] of TPasExtRef;
+    LSeen: TArray<TPasExtRef>;   // past LSeenFix, capacity slack
     LSeenCount: Integer;
     LBestScore: Integer;
     LTypeQualified: Boolean;
@@ -14256,18 +14302,29 @@ var
         end;
         LDup := False;
         for LIdx := 0 to LSeenCount - 1 do
-          if (LSeen[LIdx].UnitId = AMid) and (LSeen[LIdx].Sym = LCand) then
+        begin
+          if LIdx < Length(LSeenFix) then
+            LRef := LSeenFix[LIdx]
+          else
+            LRef := LSeen[LIdx - Length(LSeenFix)];
+          if (LRef.UnitId = AMid) and (LRef.Sym = LCand) then
           begin
             LDup := True;
             Break;
           end;
+        end;
         if not LDup then
         begin
           LRef.UnitId := AMid;
           LRef.Sym := LCand;
-          if LSeenCount = Length(LSeen) then
-            SetLength(LSeen, LSeenCount * 2 + 8);
-          LSeen[LSeenCount] := LRef;
+          if LSeenCount < Length(LSeenFix) then
+            LSeenFix[LSeenCount] := LRef
+          else
+          begin
+            if LSeenCount - Length(LSeenFix) = Length(LSeen) then
+              SetLength(LSeen, Length(LSeen) * 2 + 8);
+            LSeen[LSeenCount - Length(LSeenFix)] := LRef;
+          end;
           Inc(LSeenCount);
           if LTypeQualified and not CallableOnType(AMid, LCand) then
             LScore := -1   // an instance method, reached through the TYPE
@@ -16147,8 +16204,22 @@ begin
       begin
         CommitXNewExprType(AIds[ASlot]);
       end, LMidOf);
-    for LId in AIds do
-      MergeCrossTypeOverlay(LId, FXNewExt[LId], FXNewSymType[LId]);
+    // A merge writes its own model's maps only, from its own buffers, and
+    // nothing else runs now: in parallel, freeing the buffers as it goes. On
+    // the main thread it was ~80 ms of a 3750-unit build at one busy thread
+    // (perf audit 2026-10, S6). A cancelled run skips some; the finally below
+    // frees what is left.
+    ForEachIndex(High(AIds), 'cross-type-merge',
+      procedure(ASlot: Integer)
+      var
+        LMid: Integer;
+      begin
+        LMid := AIds[ASlot];
+        MergeCrossTypeOverlay(LMid, FXNewExt[LMid], FXNewSymType[LMid]);
+        FreeAndNil(FXNewExt[LMid]);
+        FreeAndNil(FXNewSymType[LMid]);
+        FreeAndNil(FXNewExprType[LMid]);
+      end, LMidOf);
     // Only now are the bindings final - see RunVisibilityPass. No-op unless
     // ReportVisibility asked for it.
     if FReportVisibility then
@@ -20602,12 +20673,36 @@ end;
 procedure TPasSemaProject.EnsureCrossWork(AId: Integer);
 var
   LM: TPasSemaModel;
-  LNode, LBase, LInhN, LWithN: Integer;
+  LNode, LBase, LInhN, LWithN, LChild, LNext: Integer;
   LInh, LWith: TArray<Integer>;
   LInhNames, LWithNames: TArray<string>;
+  LInWith: TBytes;
   LName: string;
   LPool: TSemaNamePool;
   LKey: TSemaKey;
+
+  // Sets LInWith over ARoot's subtree.
+  procedure MarkSubtree(ARoot: Integer);
+  var
+    LCur: Integer;
+  begin
+    LCur := ARoot;
+    repeat
+      LInWith[LCur] := 1;
+      if LM.Tree.Nodes[LCur].FirstChild <> NIL_NODE then
+        LCur := LM.Tree.Nodes[LCur].FirstChild
+      else
+      begin
+        while (LCur <> ARoot) and
+              (LM.Tree.Nodes[LCur].NextSibling = NIL_NODE) do
+          LCur := LM.Tree.Nodes[LCur].Parent;
+        if LCur = ARoot then
+          Exit;
+        LCur := LM.Tree.Nodes[LCur].NextSibling;
+      end;
+    until False;
+  end;
+
 begin
   // Fail LOUDLY, naming the contract, instead of the AV an unsized read
   // produces (range checks are off in release; a nil-array index read
@@ -20624,14 +20719,33 @@ begin
   LPool.Clear;   // a local record: FCount is not initialized
   try
   LM := FModels[AId];
-  // High(RefMap) is the node count; both lists are far smaller, but sizing to
-  // it once beats growing them incrementally.
-  SetLength(LInh, Length(LM.RefMap));
-  SetLength(LWith, Length(LM.RefMap));
-  SetLength(LInhNames, Length(LM.RefMap));
-  SetLength(LWithNames, Length(LM.RefMap));
+  // The lists grow by doubling: sizing all four to the node count, two of
+  // them string arrays, zero-filled a large block each on a big unit and
+  // finalized the cut tail - more than the scan itself (perf audit 2026-10,
+  // C10).
   LInhN := 0;
   LWithN := 0;
+  // One byte per node, set where InsideWithBody or InsideLaterWithTarget
+  // holds: in a with's body or in a target other than its first. Marked down
+  // from each with statement instead of a walk to the root per identifier;
+  // nil when the model has no with.
+  LInWith := nil;
+  for LNode := 0 to High(LM.Tree.Nodes) do
+    if LM.Tree.Nodes[LNode].Kind = nkWithStmt then
+    begin
+      if LInWith = nil then
+        SetLength(LInWith, Length(LM.Tree.Nodes));
+      LChild := LM.Tree.Nodes[LNode].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        LNext := LM.Tree.Nodes[LChild].NextSibling;
+        // The body is the last child, the targets the ones before it.
+        if (LChild <> LM.Tree.Nodes[LNode].FirstChild) or
+           (LNext = NIL_NODE) then
+          MarkSubtree(LChild);
+        LChild := LNext;
+      end;
+    end;
   for LNode := 0 to High(LM.RefMap) do
   begin
     if LM.Tree.Nodes[LNode].Kind <> nkIdent then
@@ -20646,7 +20760,7 @@ begin
     // A goto's target is a label, never a with member (5.6.4; audit B4-17).
     if (LBase <> NIL_NODE) and (LM.Tree.Nodes[LBase].Kind = nkGotoStmt) then
       Continue;
-    if InsideWithBody(LM, LNode) or InsideLaterWithTarget(LM, LNode) then
+    if (LInWith <> nil) and (LInWith[LNode] <> 0) then
     begin
       // NOT filtered on bound-ness: the with pass revisits an already-bound
       // name when its with target went unopened, to OVERRIDE a wrong guess.
@@ -20664,7 +20778,12 @@ begin
       // verdicts, a false E2010 on every one. A miss costs one member lookup
       // per mention per round; a hit is the only correct answer.
       LKey := PasNodeKey(LM.Tree, LNode);
-      LName := LPool.InternSlice(LKey.Text, LKey.Len, True);
+      LName := LPool.InternKey(LKey);
+      if LWithN = Length(LWith) then
+      begin
+        SetLength(LWith, 2 * LWithN + 64);
+        SetLength(LWithNames, Length(LWith));
+      end;
       LWith[LWithN] := LNode;
       LWithNames[LWithN] := LName;
       Inc(LWithN);
@@ -20695,7 +20814,12 @@ begin
       LKey := PasNodeKey(LM.Tree, LNode);
       if SemaKeyEquals('result', LKey) or SemaKeyEquals('self', LKey) then
         Continue;
-      LName := LPool.InternSlice(LKey.Text, LKey.Len, True);
+      LName := LPool.InternKey(LKey);
+      if LInhN = Length(LInh) then
+      begin
+        SetLength(LInh, 2 * LInhN + 64);
+        SetLength(LInhNames, Length(LInh));
+      end;
       LInh[LInhN] := LNode;
       LInhNames[LInhN] := LName;
       Inc(LInhN);
@@ -25710,12 +25834,68 @@ begin
   Result := AStep('xtype');
 end;
 
+{ The releases ran on the driver alone at 0.7 busy threads, ~50 ms of a
+  3750-unit build (perf audit 2026-10, S10): the per-model work lists and
+  uses memos now go on the pool, one model per grab, beside one task for the
+  source manager's other caches. Not through ForEachIndex: a cancelled run skips
+  its bodies, and a release must never be skipped. }
 procedure TPasSemaProject.FinishCrossRun;
+var
+  LHi, LNext, LIdx: Integer;
+  LTasks: TArray<ITask>;
+  LDcu: TArray<TObject>;
 begin
   TrimAllDiags;
+  if not FSingleThreaded and (TTask.CurrentTask = nil) then
+  begin
+    // The .dcu units the printer shared go on the pool too: freeing them one
+    // by one was most of the source manager's release.
+    LDcu := FSM.DetachDcuUnits;
+    LHi := Max(Max(Max(High(FUsesMemo), High(FArityMemo)),
+      Max(High(FInhWork), High(FWithWork))), High(LDcu));
+    LNext := -1;
+    SetLength(LTasks, Min(Max(2, TThreadPool.Default.MaxWorkerThreads),
+      LHi + 2));
+    LTasks[0] := TTask.Run(
+      procedure
+      begin
+        FSM.ReleaseAnalysisCaches;
+      end);
+    for LIdx := 1 to High(LTasks) do
+      LTasks[LIdx] := TTask.Run(
+        procedure
+        var
+          LMine: Integer;
+        begin
+          LMine := AtomicIncrement(LNext);
+          while LMine <= LHi do
+          begin
+            // Each slot is one model's: no two workers write the same one,
+            // and nothing resizes the arrays until the wait below.
+            if LMine <= High(FUsesMemo) then
+              FreeAndNil(FUsesMemo[LMine]);
+            if LMine <= High(FArityMemo) then
+              FreeAndNil(FArityMemo[LMine]);
+            if LMine <= High(FInhWork) then
+              FInhWork[LMine] := nil;
+            if LMine <= High(FWithWork) then
+              FWithWork[LMine] := nil;
+            if LMine <= High(FInhWorkNames) then
+              FInhWorkNames[LMine] := nil;
+            if LMine <= High(FWithWorkNames) then
+              FWithWorkNames[LMine] := nil;
+            if LMine <= High(LDcu) then
+              FreeAndNil(LDcu[LMine]);
+            LMine := AtomicIncrement(LNext);
+          end;
+        end);
+    TTask.WaitForAll(LTasks);
+  end
+  else
+    FSM.ReleaseAnalysisCaches;
+  // What is left of these is the outer arrays.
   ReleaseCrossWork;
   ReleaseUsesMemo;
-  FSM.ReleaseAnalysisCaches;
   TrimPreprocessors;
 end;
 

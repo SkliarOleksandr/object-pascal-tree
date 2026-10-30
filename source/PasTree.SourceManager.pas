@@ -408,6 +408,10 @@ type
       as long as a model still uses them). A later analysis on the same
       manager just re-Prefetches and re-lexes - correctness is unaffected. }
     procedure ReleaseAnalysisCaches;
+    { Hands over the shared .dcu units (and the retired ones) and forgets
+      them, for a caller that frees them in parallel - the serial free was
+      most of ReleaseAnalysisCaches. Only when no print can still run. }
+    function DetachDcuUnits: TArray<TObject>;
     { Indexes every *.inc under ARoot by basename as a last-resort include
       resolver (corpus runs without real project search paths). The first
       occurrence of an ambiguous name wins. }
@@ -1476,6 +1480,42 @@ begin
     end;
     FDcuUnits.AddOrSetValue(LKey, TPair<string, TObject>.Create(LStamp, LUnit));
     Result := LUnit;
+  finally
+    TMonitor.Exit(FDcuLock);
+  end;
+end;
+
+function TPasSourceManager.DetachDcuUnits: TArray<TObject>;
+var
+  LCount: Integer;
+begin
+  Result := nil;
+  TMonitor.Enter(FDcuLock);
+  try
+    LCount := 0;
+    if FDcuUnits <> nil then
+      Inc(LCount, FDcuUnits.Count);
+    if FDcuRetired <> nil then
+      Inc(LCount, FDcuRetired.Count);
+    SetLength(Result, LCount);
+    LCount := 0;
+    if FDcuUnits <> nil then
+      for var LHit in FDcuUnits.Values do
+      begin
+        Result[LCount] := LHit.Value;
+        Inc(LCount);
+      end;
+    if FDcuRetired <> nil then
+    begin
+      FDcuRetired.OwnsObjects := False;
+      for var LObj in FDcuRetired do
+      begin
+        Result[LCount] := LObj;
+        Inc(LCount);
+      end;
+    end;
+    FreeAndNil(FDcuUnits);
+    FreeAndNil(FDcuRetired);
   finally
     TMonitor.Exit(FDcuLock);
   end;

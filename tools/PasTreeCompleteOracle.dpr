@@ -230,8 +230,8 @@ begin
       LTS.OffsetToLineCol(LTS.Tokens[LRaw].Start, LLine, LCol);
 
       Inc(GSampled);
-      // The dataflow through try/except is beyond W1036's sight - the
-      // pre-init trades an unfixable warning for a pedantic H2077.
+      // A miss unless the loop below finds the name - set before the try,
+      // since the dataflow through try/except is beyond W1036's sight.
       LHit := False;
       // Caret one character INTO the identifier: a one-letter prefix, the
       // ordinary mid-typing shape.
@@ -240,11 +240,9 @@ begin
       begin
         Inc(GNoAnswer);
         LCtx := ccNone;
-        LHit := False;
       end
       else
       begin
-        LHit := False;
         for var LItIdx := 0 to High(LItems) do
           if SameText(LItems[LItIdx].Name, LTName) then
           begin

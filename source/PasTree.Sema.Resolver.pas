@@ -1920,6 +1920,17 @@ begin
     end;
   end;
 
+  // Room for a name per child up front - section markers count too, which
+  // only rounds up (TSemaNames.Reserve; perf audit 2026-10, C5).
+  var LCount := 0;
+  LChild := FirstChild(ANode);
+  while LChild <> NIL_NODE do
+  begin
+    Inc(LCount);
+    LChild := NextSib(LChild);
+  end;
+  FModel.ReserveNames(LMembers, LCount);
+
   LChild := FirstChild(ANode);
   // Members before any section marker keep svDefault rather than a guess: the
   // real default is `published` under {$M+} (a TPersistent descendant) and
@@ -2067,6 +2078,15 @@ begin
   FNodeScope[ANode] := LEnum;
   if ATypeSym <> NIL_SYM then
     FModel.Symbols[ATypeSym].MemberScope := LEnum;
+  // A value per child (perf audit 2026-10, C5).
+  var LCount := 0;
+  LChild := FirstChild(ANode);
+  while LChild <> NIL_NODE do
+  begin
+    Inc(LCount);
+    LChild := NextSib(LChild);
+  end;
+  FModel.ReserveNames(LEnum, LCount);
   // {$SCOPEDENUMS ON} (2.2.4): values do NOT inject into the enclosing scope
   // - qualified access (TEnum.Value) via the member scope above is the ONLY
   // way in. The state is positional (read at this enum's own declaration

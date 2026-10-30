@@ -4137,7 +4137,7 @@ begin
     Exit;
   LTab := TSourceTab(AEditor.Parent);
   LBC := AEditor.DisplayToBufferPos(AEditor.PixelsToRowColumn(X, Y));
-  if (LBC.Line < 1) or (LBC.Line > AEditor.Lines.Count) then
+  if (LBC.Line < 1) or (LBC.Line > AEditor.Lines.CountNative) then
     Exit;
   LLine := AEditor.Lines[LBC.Line - 1];
   if not TryIncludeArgSpan(LLine, LBC.Char, {out} LFrom, {out} LTo) then
@@ -6732,7 +6732,7 @@ begin
   if LProjectName = '' then
     LProjectName := TPath.GetFileName(FMainSource);
   if ShowGoTo(Self, LEntries, LTab.FilePath, LTab.Editor.CaretY,
-       LTab.Editor.Lines.Count, LProjectName,
+       Integer(LTab.Editor.Lines.CountNative), LProjectName,
        // The project tab's list, asked for on the first switch to it: the
        // declarations of every file in the project tree that has a model
        // (library units reached through the search path are not project

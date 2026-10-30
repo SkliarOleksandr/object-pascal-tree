@@ -230,6 +230,9 @@ type
       const ASyms: TArray<TSemaSymbol>);
     // Declaration order only, no name binding.
     procedure AddOrder(ASym: Integer);
+    // Room for about ACount names before the first bind, up to the linear
+    // capacity; a no-op once anything is bound.
+    procedure Reserve(ACount: Integer);
     procedure MakeUnique;
     property Count: Integer read FCount;
   end;
@@ -344,11 +347,15 @@ type
     FSlots: TArray<TSemaPoolSlot>;
     FCount: Integer;
     procedure Grow;
+    function InternHashed(AText: PChar; ALen: Integer; AFold: Boolean;
+      AHash: Cardinal): string;
   public
     function Intern(const AText: string): string;
     // Intern of the ALen chars at AText - folded (PasFoldChar) when AFold -
     // without building the string unless the pool does not have it yet.
     function InternSlice(AText: PChar; ALen: Integer; AFold: Boolean): string;
+    // InternSlice of a key's chars by the hash the key already carries.
+    function InternKey(const AKey: TSemaKey): string;
     procedure Clear;
   end;
 
@@ -713,6 +720,8 @@ type
     // the overload/duplicate branches of DeclareSym. Honours copy-on-write on
     // a shared-container scope, same as BindName.
     procedure AddToOrder(AScope, ASym: Integer);
+    // TSemaNames.Reserve on a fresh scope that expects about ACount names.
+    procedure ReserveNames(AScope, ACount: Integer);
     { Bulk-adopts a seed TEMPLATE: copies ASyms into Symbols[0..N-1] (string
       fields share their heap data by refcount - no per-name allocation) and
       re-stamps each record's Scope to AScope. ONLY valid on an empty symbol
@@ -778,6 +787,10 @@ type
     function Resolve(AScope: Integer; const ANameLower: string): Integer;
       overload;
     function Resolve(AScope: Integer; const AKey: TSemaKey): Integer; overload;
+    { Resolve without AScope's own join of SystemScope, the seeded names - for
+      a used unit's interface, where a caller knows the seed cannot answer.
+      See the implementation. }
+    function ResolveSkipSeed(AScope: Integer; const AKey: TSemaKey): Integer;
     { Resolve honouring block-scope POSITION - see the implementation. Only a
       reference lookup passes a real AAtToken; everything else passes -1. }
     function ResolveAt(AScope: Integer; const ANameLower: string;
@@ -1313,6 +1326,27 @@ begin
   AppendOrder(ASym);
 end;
 
+procedure TSemaNames.Reserve(ACount: Integer);
+var
+  LIdx, LCap: Integer;
+begin
+  // Linear capacities grow 1, 3, 5, 7, CLinearNames (see AddOrSet): a struct
+  // or enum scope binding seven names reallocated four times - 1.7 M
+  // allocations per client analysis (perf audit 2026-10, C5). The table that
+  // follows CLinearNames sizes itself.
+  if (FSlots <> nil) or (ACount < 2) then
+    Exit;
+  LCap := ACount;
+  if LCap >= CLinearNames then
+    LCap := CLinearNames
+  else if not Odd(LCap) then
+    Inc(LCap);   // 2k+1 slots sit in the block 2k take (AddOrSet)
+  SetLength(FSlots, LCap);
+  // Empty slots, as AddOrSet's spare: Rehash reads the whole array.
+  for LIdx := 0 to LCap - 1 do
+    FSlots[LIdx].S := NIL_SYM;
+end;
+
 procedure TSemaNames.MakeUnique;
 begin
   FSlots := Copy(FSlots);
@@ -1371,25 +1405,38 @@ end;
 
 function TSemaNamePool.InternSlice(AText: PChar; ALen: Integer;
   AFold: Boolean): string;
+begin
+  if ALen = 0 then
+    Exit('');
+  // Slots hold exact spellings hashed with PasNameHash, so a folded slice
+  // hashes folded and compares folded - SemaKeyEquals' Raw mode - and an
+  // exact one hashes and compares as is.
+  if AFold then
+    Result := InternHashed(AText, ALen, True, FoldedSliceHash(AText, ALen))
+  else
+    Result := InternHashed(AText, ALen, False, RawSliceHash(AText, ALen));
+end;
+
+function TSemaNamePool.InternKey(const AKey: TSemaKey): string;
+begin
+  if AKey.Len = 0 then
+    Exit('');
+  Result := InternHashed(AKey.Text, AKey.Len, AKey.Raw, AKey.Hash);
+end;
+
+function TSemaNamePool.InternHashed(AText: PChar; ALen: Integer;
+  AFold: Boolean; AHash: Cardinal): string;
 var
   LHash: Cardinal;
   LIdx, LMask: Integer;
   LKey: TSemaKey;
 begin
-  if ALen = 0 then
-    Exit('');
   if (FCount + 1) * 4 > Length(FSlots) * 3 then
     Grow;
-  // Slots hold exact spellings hashed with PasNameHash, so a folded slice
-  // hashes folded and compares folded - SemaKeyEquals' Raw mode - and an
-  // exact one hashes and compares as is.
   LKey.Text := AText;
   LKey.Len := ALen;
   LKey.Raw := AFold;
-  if AFold then
-    LHash := FoldedSliceHash(AText, ALen)
-  else
-    LHash := RawSliceHash(AText, ALen);
+  LHash := AHash;
   LMask := High(FSlots);
   LIdx := Integer(LHash and Cardinal(LMask));
   while FSlots[LIdx].P <> nil do
@@ -1860,7 +1907,7 @@ begin
   ImplementationScope := NIL_SCOPE;
   SystemScope := NIL_SCOPE;
   AllUsesResolved := False;
-  SetLength(Symbols, 64);
+  // Symbols stays empty: AdoptSeededSymbols sizes it, GrowSyms otherwise.
   FSymCount := 0;
   SetLength(RefMap, Length(ATree.Nodes));
   SetLength(ExprType, Length(ATree.Nodes));
@@ -2024,8 +2071,9 @@ begin
     Exit(AddSymbol(AScope, AKind, LName, ADeclNode, LKeyText));
   end;
   Result := NewSymbol(AScope, AKind, ADeclNode);
-  Symbols[Result].NameLower := FNamePool.InternSlice(AKey.Text, AKey.Len,
-    True);
+  // By the key's own hash: a token key is folded and hashed folded, the
+  // InternSlice(.., True) it stands for.
+  Symbols[Result].NameLower := FNamePool.InternKey(AKey);
   if LIsKey then
     Symbols[Result].Name := Symbols[Result].NameLower
   else
@@ -2057,6 +2105,12 @@ begin
   Scopes[AScope].Names.AddOrSet(AHash, ASym, Symbols);
 end;
 
+procedure TPasSemaModel.ReserveNames(AScope, ACount: Integer);
+begin
+  if not Scopes[AScope].SharedContainers then
+    Scopes[AScope].Names.Reserve(ACount);
+end;
+
 procedure TPasSemaModel.AddToOrder(AScope, ASym: Integer);
 begin
   Scopes[AScope].EnsureOwnedContainers;
@@ -2070,8 +2124,12 @@ var
 begin
   if FSymCount <> 0 then
     Exit(False);
+  // The seeds plus room for the unit's own declarations, one per 8 nodes
+  // and then some: the arena was 64 at Create and grew by doubling right
+  // after - reallocations that moved 48-byte records, 0.75% of a client
+  // build's CPU (perf audit 2026-10, C2). Phase 1 trims it exact.
   if Length(Symbols) < Length(ASyms) then
-    SetLength(Symbols, Length(ASyms) + 64);
+    SetLength(Symbols, Length(ASyms) + Length(Tree.Nodes) div 8 + 64);
   for LIdx := 0 to High(ASyms) do
   begin
     Symbols[LIdx] := ASyms[LIdx];
@@ -2249,6 +2307,44 @@ end;
 function TPasSemaModel.Resolve(AScope: Integer; const AKey: TSemaKey): Integer;
 begin
   Result := ResolveAt(AScope, AKey, -1);
+end;
+
+{ The walk through a used unit's interface pays a second lookup per unit in
+  the seed scope that interface joins (`uses System` is implicit), although a
+  caller often knows it cannot help: the name is not a seeded one at all, or
+  a seeded symbol is rejected anyway (ResolveRealDecl wants a declaration).
+  Every model's seed is the same per platform, so one lookup in the caller's
+  own seed decides for all of its used units (perf audit 2026-10, C12).
+
+  Only AScope's own join is skipped: its parents and its other joins are
+  walked as Resolve walks them. }
+function TPasSemaModel.ResolveSkipSeed(AScope: Integer;
+  const AKey: TSemaKey): Integer;
+var
+  LScope: PSemaScope;
+  LIdx: Integer;
+begin
+  LScope := Scopes[AScope];
+  for LIdx := High(LScope.Shadowing) downto 0 do
+  begin
+    Result := FindLocalDeep(LScope.Shadowing[LIdx], AKey, 1);
+    if Result <> NIL_SYM then
+      Exit;
+  end;
+  Result := FindLocal(AScope, AKey);
+  if Result <> NIL_SYM then
+    Exit;
+  for LIdx := High(LScope.Additional) downto 0 do
+    if LScope.Additional[LIdx] <> SystemScope then
+    begin
+      Result := FindLocalDeep(LScope.Additional[LIdx], AKey, 1);
+      if Result <> NIL_SYM then
+        Exit;
+    end;
+  if LScope.Parent <> NIL_SCOPE then
+    Result := ResolveAt(LScope.Parent, AKey, -1)
+  else
+    Result := NIL_SYM;
 end;
 
 { FindLocalDeep restricted to one side of the generic split - the same-name chain
