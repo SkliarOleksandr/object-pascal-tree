@@ -752,35 +752,18 @@ begin
   Result := PasSameName(Left, Right);
 end;
 
-{ WRAPAROUND IS THE ALGORITHM, so the overflow check is turned off HERE rather
-  than left to whoever compiles this unit. FNV-1a multiplies by 16777619 and
-  keeps the low 32 bits; under $Q+ every one of those multiplications raises
-  EIntOverflow instead. The same applies to the two sibling hashes, in
-  PasTree.Sema.Model (SourceFingerprint) and PasTree.Sema.Project
-  (TSemaInstanceComparer.GetHashCode).
-
-  NOT THEORETICAL, and the reason it is spelled out three times rather than
-  assumed: this library is compiled by whatever project links it, and RAD
-  Studio's stock Debug configuration turns integer overflow checking ON. On
-  2026-09-02 that produced an EAccessViolation with no visible cause in an LSP
-  server built from the IDE, while the same sources built by the reference
-  script were fine - the raise landed inside TPasSemaProject.Create, and the
-  destructor of the half-built object then faulted on top of it and hid the
-  real exception entirely. A library must not depend on its host's switches. }
-{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
+{ FNV-1a through PasFnv1a (PasTree.Types), whose header holds the overflow
+  story: the wraparound is the algorithm, and a host's Debug build with
+  overflow checks on turned an unguarded copy into an EAccessViolation in an
+  LSP server (2026-09-02). The one hash still written out with its own guard
+  is TSemaInstanceComparer.GetHashCode in PasTree.Sema.Project, which mixes
+  record fields rather than a run of characters. }
 function TDefinesNameComparer.GetHashCode(const Value: string): Integer;
-var
-  LIdx: Integer;
-  LHash: Cardinal;
 begin
   // FNV-1a over PasFoldChar-folded UTF-16 code units: dcc folds a
   // conditional symbol as an identifier (local/probe-b65 D, DF1-DF5).
-  LHash := 2166136261;
-  for LIdx := 1 to Length(Value) do
-    LHash := (LHash xor Ord(PasFoldChar(Value[LIdx]))) * 16777619;
-  Result := Integer(LHash);
+  Result := Integer(PasFnv1a(PChar(Value), Length(Value), True));
 end;
-{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 { Directive text helpers ---------------------------------------------------- }
 
@@ -972,18 +955,10 @@ end;
 
 { TPasSpellingPool ----------------------------------------------------------- }
 
-// $Q-: the FNV wraparound IS the algorithm, and the checked test build
-// compiles with $Q+ (as PasNameHash in PasTree.Sema.Model).
-{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
 function SpellingHash(AText: PChar; ALen: Integer): Cardinal;
-var
-  LIdx: Integer;
 begin
-  Result := 2166136261;
-  for LIdx := 0 to ALen - 1 do
-    Result := (Result xor Cardinal(Ord(AText[LIdx]))) * 16777619;
+  Result := PasFnv1a(AText, ALen, False);
 end;
-{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 procedure TPasSpellingPool.Grow;
 var

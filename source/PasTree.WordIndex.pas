@@ -108,16 +108,10 @@ uses
   System.Generics.Defaults,
   PasTree.Types;
 
-{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
 function HashSlice(AText: PChar; ALen: Integer): Cardinal;
-var
-  LIdx: Integer;
 begin
-  Result := 2166136261;
-  for LIdx := 0 to ALen - 1 do
-    Result := (Result xor Cardinal(Ord(PasFoldChar(AText[LIdx])))) * 16777619;
+  Result := PasFnv1a(AText, ALen, True);
 end;
-{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 function PasWordHash(const AName: string): Cardinal;
 var

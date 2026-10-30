@@ -263,6 +263,13 @@ var
   1925 pairs, all title-case digraphs and Greek or letterlike symbol
   variants; spec 1.3.1). }
 function PasFoldChar(ACh: Char): Char; inline;
+{ FNV-1a (32-bit) over the ALen UTF-16 code units at AText, each through
+  PasFoldChar first when AFold - THE hash of every name key, spelling and
+  fingerprint (PasNameHash, FoldedSliceHash, RawSliceHash, SourceFingerprint,
+  the preprocessor's define comparer and spelling pool, the word index), so
+  they agree bit for bit and the one overflow guard below covers all of them
+  (audit D1-11). }
+function PasFnv1a(AText: PChar; ALen: Integer; AFold: Boolean): Cardinal;
 { True when PasFoldChar changes ACh. }
 function PasNeedsFold(ACh: Char): Boolean; inline;
 { AName with every character through PasFoldChar - AName itself, no
@@ -467,6 +474,29 @@ begin
   else
     Result := GPasFoldHi[Ord(ACh) - $80];
 end;
+
+{ WRAPAROUND IS THE ALGORITHM, so the overflow check is turned off HERE rather
+  than left to whoever compiles this unit: FNV-1a multiplies by 16777619 and
+  keeps the low 32 bits, and under $Q+ every multiplication raises
+  EIntOverflow. Not theoretical - RAD Studio's stock Debug configuration
+  turns overflow checking on, and on 2026-09-02 that surfaced as an
+  EAccessViolation in an LSP server built from the IDE. A library must not
+  depend on its host's switches. Two loops rather than a test per character:
+  the folded one is the resolver's per-name hash. }
+{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
+function PasFnv1a(AText: PChar; ALen: Integer; AFold: Boolean): Cardinal;
+var
+  LIdx: Integer;
+begin
+  Result := 2166136261;
+  if AFold then
+    for LIdx := 0 to ALen - 1 do
+      Result := (Result xor Cardinal(Ord(PasFoldChar(AText[LIdx])))) * 16777619
+  else
+    for LIdx := 0 to ALen - 1 do
+      Result := (Result xor Cardinal(Ord(AText[LIdx]))) * 16777619;
+end;
+{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 function PasNeedsFold(ACh: Char): Boolean;
 begin

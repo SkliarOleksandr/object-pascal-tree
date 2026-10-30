@@ -1073,38 +1073,24 @@ const
   // over <= 8 hashes is one cache line.
   CLinearNames = 8;
 
-// $Q- for the same reason as SourceFingerprint below: the wraparound IS the
-// algorithm, and the checked test build compiles with $Q+.
-{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
+// The three name hashes are PasFnv1a (PasTree.Types - the one copy of the
+// algorithm and of its overflow guard, audit D1-11).
 function PasNameHash(const AKey: string): Cardinal;
-var
-  LIdx: Integer;
 begin
-  Result := 2166136261;
-  for LIdx := 1 to Length(AKey) do
-    Result := (Result xor Cardinal(Ord(AKey[LIdx]))) * 16777619;
+  Result := PasFnv1a(PChar(AKey), Length(AKey), False);
 end;
 
 // PasNameHash of the folded slice - the same value PasNameHash gives the
 // string PasNameKey would build from it.
 function FoldedSliceHash(AText: PChar; ALen: Integer): Cardinal;
-var
-  LIdx: Integer;
 begin
-  Result := 2166136261;
-  for LIdx := 0 to ALen - 1 do
-    Result := (Result xor Cardinal(Ord(PasFoldChar(AText[LIdx])))) * 16777619;
+  Result := PasFnv1a(AText, ALen, True);
 end;
 
 function RawSliceHash(AText: PChar; ALen: Integer): Cardinal;
-var
-  LIdx: Integer;
 begin
-  Result := 2166136261;
-  for LIdx := 0 to ALen - 1 do
-    Result := (Result xor Cardinal(Ord(AText[LIdx]))) * 16777619;
+  Result := PasFnv1a(AText, ALen, False);
 end;
-{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 function SemaKey(const AKey: string): TSemaKey;
 begin
@@ -3148,22 +3134,12 @@ end;
   (one pass, no allocation) and enough to reject the same-length edits the
   size fingerprint alone lets through - see DemotedFileHashes.
 
-  $Q- because the wraparound IS the algorithm and the host's switches are
-  not ours to inherit - the full story is on TDefinesNameComparer.GetHashCode
-  in PasTree.Preprocessor. }
-{$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
+  It is PasNameHash - FNV-1a through PasFnv1a, whose header holds the
+  overflow-guard story (audit D1-11). }
 function SourceFingerprint(const AText: string): Cardinal;
-var
-  LIdx: Integer;
 begin
-  Result := 2166136261;
-  for LIdx := 1 to Length(AText) do
-  begin
-    Result := Result xor Cardinal(Ord(AText[LIdx]));
-    Result := Result * 16777619;
-  end;
+  Result := PasNameHash(AText);
 end;
-{$IFDEF PT_RESTORE_Q}{$OVERFLOWCHECKS ON}{$UNDEF PT_RESTORE_Q}{$ENDIF}
 
 // Every named routine scope on the way out from a declaration NamedDeclRoot
 // accepts - the scopes ScopeOwner reads a name from - with that name, while

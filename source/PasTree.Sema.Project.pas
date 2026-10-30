@@ -2509,8 +2509,9 @@ begin
 end;
 
 { $Q- because the wraparound IS the algorithm and the host's switches are not
-  ours to inherit - the full story is on TDefinesNameComparer.GetHashCode in
-  PasTree.Preprocessor. }
+  ours to inherit - the full story is on PasFnv1a in PasTree.Types. These two
+  comparers mix record fields, not a run of characters, so they keep their
+  own FNV steps. }
 {$IFOPT Q+}{$DEFINE PT_RESTORE_Q}{$OVERFLOWCHECKS OFF}{$ENDIF}
 function TSemaInstanceComparer.GetHashCode(const Value: TSemaInstance): Integer;
 var
