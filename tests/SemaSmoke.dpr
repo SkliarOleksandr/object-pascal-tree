@@ -1424,6 +1424,41 @@ end;
 // pair (4.2.1, dcc64 37.0, local/probe-park/e321 O1-O12): a string with a
 // number or Boolean is E2010 naming the string first, any other pair E2008
 // under `+` and E2015 under the rest.
+// E3-16: an anonymous method cannot capture a by-reference parameter or a
+// nested routine of the routine around it (17.3.1, dcc64 37.0,
+// local/probe-park/e316 C1-C11) - E2555 once per symbol; value and plain
+// const parameters, locals, and what the literal declares itself are fine.
+procedure TestCaptureE2555;
+begin
+  Analyze(
+    'program P;'#10 +
+    'type TProc = reference to procedure;'#10 +
+    'procedure Q(var V: Integer; out O: Integer; const U;'#10 +
+    '  const [ref] C: Integer; const A: array of Integer; X: Integer;'#10 +
+    '  const K: Integer);'#10 +
+    'var L: Integer; F: TProc;'#10 +
+    '  procedure Nest; begin V := 1; end;'#10 +
+    'begin'#10 +
+    '  F := procedure begin V := 1; V := 2; end;'#10 +       // 9: V
+    '  F := procedure begin O := 1; end;'#10 +               // 10: O
+    '  F := procedure begin L := Integer(U); end;'#10 +      // 11: U
+    '  F := procedure begin L := C; end;'#10 +               // 12: C
+    '  F := procedure begin L := A[0]; end;'#10 +            // 13: A
+    '  F := procedure begin X := L + K; end;'#10 +           // 14: fine
+    '  F := procedure begin Nest; end;'#10 +                 // 15: Nest
+    '  F := procedure var W: Integer;'#10 +
+    '    procedure Inner(var Z: Integer); begin Z := 1; end;'#10 +
+    '    begin Inner(W); end;'#10 +                          // 16-18: fine
+    '  F := procedure(var R: Integer) begin R := 1; end;'#10 + // 19: fine
+    'end;'#10 +
+    'begin'#10'end.'#10);
+  Ok('capture: six symbols, each once', DiagCount('E2555') = 6);
+  Ok('capture: dcc''s text', DiagHasText('E2555',
+    'Cannot capture symbol ''V''') and DiagHasText('E2555',
+    'Cannot capture symbol ''Nest'''));
+  Ok('capture: in source order', DiagsInSourceOrder('E2555'));
+end;
+
 procedure TestOperatorMismatchCodes;
 begin
   Analyze(
@@ -4307,6 +4342,7 @@ begin
   TestLazyBlockScopes;
   TestScopeList;
   TestOperatorMismatchCodes;
+  TestCaptureE2555;
 
   // Phase 1 pools spellings per unit: one heap string per distinct text, a
   // lower-case name shares its key, and the arena is cut to exact length.

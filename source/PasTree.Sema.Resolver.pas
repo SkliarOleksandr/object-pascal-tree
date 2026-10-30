@@ -233,6 +233,7 @@ type
     procedure ResolveWithStmts;
     procedure CheckForCounters;
     procedure CheckBareRaises;
+    procedure CheckCaptures;
     procedure CheckSlicePositions;
     function ReachesRoot(ANode: Integer): Boolean;
     procedure AppendHit(var AHits: TArray<Integer>; var ACount: Integer;
@@ -4977,6 +4978,145 @@ begin
   end;
 end;
 
+{ 17 sec. 17.3.1: an anonymous method cannot capture a parameter passed by
+  reference - `var`, `out`, an untyped `const`, `const [ref]`, an open array
+  of any mode - nor a routine nested in the routine around it: its frame may
+  outlive the call. dcc reports `E2555 Cannot capture symbol 'X'` (dcc64
+  37.0, local/probe-park/e316 C1-C11, V.dpr); a value or plain `const`
+  parameter and a local are captured. A name is captured when the climb from
+  it meets an nkAnonMethod before the routine (or literal) that declares the
+  symbol - a literal nested in a literal included, and a routine declared
+  INSIDE the literal is its own. dcc stops at the first; each symbol is
+  reported once, at its first capture. A flat scan, skipped outright in a
+  unit with no literal (audit E3-16). }
+procedure TPasSemaResolver.CheckCaptures;
+
+  // The routine or literal node whose parameter or nested routine ASym is;
+  // NIL_NODE when ASym is neither a by-reference parameter nor a nested
+  // routine.
+  function CaptureOwner(ASym: Integer): Integer;
+  var
+    LDecl, LParam, LChild, LType: Integer;
+    LByRef: Boolean;
+  begin
+    Result := NIL_NODE;
+    LDecl := FModel.Symbols[ASym].DeclNode;
+    if LDecl = NIL_NODE then
+      Exit;
+    case FModel.Symbols[ASym].Kind of
+      skParam:
+        begin
+          LParam := FTree.Nodes[LDecl].Parent;
+          if (LParam = NIL_NODE) or (KindOf(LParam) <> nkParam) then
+            Exit;
+          LByRef := FTree.Nodes[LParam].Flags * [nfVar, nfOut] <> [];
+          LType := NIL_NODE;
+          LChild := FirstChild(LParam);
+          while LChild <> NIL_NODE do
+          begin
+            case KindOf(LChild) of
+              nkAttrGroup:
+                begin
+                  var LAttr := FirstChild(LChild);
+                  while LAttr <> NIL_NODE do
+                  begin
+                    if (KindOf(LAttr) = nkAttribute) and
+                       (FTree.Nodes[LAttr].Aux = amaRef) then
+                      LByRef := True;   // `const [ref] C`
+                    LAttr := NextSib(LAttr);
+                  end;
+                end;
+              nkIdent:
+                if not (nfName in FTree.Nodes[LChild].Flags) and
+                   (LType = NIL_NODE) then
+                  LType := LChild;
+            else
+              if LType = NIL_NODE then
+                LType := LChild;
+            end;
+            LChild := NextSib(LChild);
+          end;
+          // An untyped `const U` (a `var` / `out` one is by reference
+          // already), and an open array of any mode.
+          if (LType = NIL_NODE) and (nfConst in FTree.Nodes[LParam].Flags) then
+            LByRef := True;
+          if (LType <> NIL_NODE) and (KindOf(LType) = nkArrayType) and
+             ((FTree.Nodes[LType].Aux = 1) or ((FirstChild(LType) <> NIL_NODE)
+             and (NextSib(FirstChild(LType)) = NIL_NODE))) then
+            LByRef := True;
+          if not LByRef then
+            Exit;
+          Result := FTree.Nodes[LParam].Parent;   // nkParams
+          if Result <> NIL_NODE then
+            Result := FTree.Nodes[Result].Parent; // the routine or literal
+        end;
+      skRoutine:
+        begin
+          // A routine whose declaration is the routine node's own name, with
+          // a routine or a literal around it: a nested one.
+          Result := FTree.Nodes[LDecl].Parent;
+          if (Result = NIL_NODE) or (KindOf(Result) <> nkRoutine) then
+            Exit(NIL_NODE);
+          Result := FTree.Nodes[Result].Parent;
+          while (Result <> NIL_NODE) and
+                not (KindOf(Result) in [nkRoutine, nkAnonMethod]) do
+            Result := FTree.Nodes[Result].Parent;
+        end;
+    end;
+  end;
+
+var
+  LHits: TArray<Integer>;
+  LCount, LIdx, LSym, LOwner, LCur, LFileId, LLine, LCol: Integer;
+  LSeen: TDictionary<Integer, Boolean>;
+  LAny: Boolean;
+begin
+  LAny := False;
+  for LIdx := 0 to High(FTree.Nodes) do
+    if FTree.Nodes[LIdx].Kind = nkAnonMethod then
+    begin
+      LAny := True;
+      Break;
+    end;
+  if not LAny then
+    Exit;
+  LHits := nil;
+  LCount := 0;
+  LSeen := TDictionary<Integer, Boolean>.Create;
+  try
+    for LIdx := 0 to High(FTree.Nodes) do
+    begin
+      if (FTree.Nodes[LIdx].Kind <> nkIdent) or (LIdx > High(FModel.RefMap)) then
+        Continue;
+      LSym := FModel.RefMap[LIdx];
+      if (LSym = NIL_SYM) or (FModel.Symbols[LSym].DeclNode = LIdx) or
+         not (FModel.Symbols[LSym].Kind in [skParam, skRoutine]) or
+         LSeen.ContainsKey(LSym) then
+        Continue;
+      LOwner := CaptureOwner(LSym);
+      if LOwner = NIL_NODE then
+        Continue;
+      LCur := FTree.Nodes[LIdx].Parent;
+      while (LCur <> NIL_NODE) and (LCur <> LOwner) and
+            (KindOf(LCur) <> nkAnonMethod) do
+        LCur := FTree.Nodes[LCur].Parent;
+      if (LCur = NIL_NODE) or (LCur = LOwner) or not ReachesRoot(LIdx) then
+        Continue;
+      LSeen.Add(LSym, True);
+      AppendHit(LHits, LCount, LIdx);
+    end;
+  finally
+    LSeen.Free;
+  end;
+  SortHitsBySource(LHits, LCount);
+  for LIdx := 0 to LCount - 1 do
+  begin
+    NodePos(LHits[LIdx], LFileId, LLine, LCol);
+    FModel.AddDiag(MakeDiag('E2555', Format(SE2555_CannotCapture,
+      [NodeText(LHits[LIdx])]), LHits[LIdx], LFileId, LLine, LCol));
+  end;
+end;
+
 { 4 sec. 4.11: `Slice(A, Count)` is valid only as an actual argument to an open-array
   parameter - dcc reports `E2193 Slice standard function only allowed as open
   array argument` anywhere else.
@@ -5268,6 +5408,7 @@ begin
   FModel.SealWithUnopened;
   CheckForCounters;   // needs RefMap - see its own header
   CheckBareRaises;    // structural only - see its own header
+  CheckCaptures;      // needs RefMap - see its own header
   CheckSlicePositions; // needs RefMap - see its own header
   if not FSkipTyper then
     // The platform reaches the typer for one rule only: a 64-bit ordinal

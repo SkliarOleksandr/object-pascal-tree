@@ -563,12 +563,6 @@ of less work, not a gap in following the language; its consequences are in
   procedure / function kind and parameter types (overload scoring,
   ParamTypesFit); its result type is not compared.
 
-### 17.3.1 Variable capture
-- the capture set is not computed: no model fact says which enclosing
-  locals and Self a literal references, so dcc's E2555 (capturing a `var` /
-  `out` parameter) and the loop-counter capture warning are not reported.
-  The captured names themselves resolve.
-
 ## 19-rtti-attributes.md
 
 ### 19.3.2 Applying attributes
