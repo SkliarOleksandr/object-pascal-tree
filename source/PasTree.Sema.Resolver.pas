@@ -964,6 +964,19 @@ begin
   Result := NIL_SYM;
   if (AHead = NIL_SYM) or (FModel.Symbols[AHead].Kind <> skRoutine) then
     Exit;
+  // Every answer below is an Eligible declaration, or AHead's
+  // BareHeaderTarget when AForwardOnly is off. With it on and no `forward`
+  // in the chain - every overloaded method of a class body - there is none,
+  // and the slot keys built for the header were the only work done (perf
+  // audit 2026-10, C6).
+  if AForwardOnly then
+  begin
+    LCand := AHead;
+    while (LCand <> NIL_SYM) and not Eligible(LCand) do
+      LCand := FModel.Symbols[LCand].NextOverload;
+    if LCand = NIL_SYM then
+      Exit;
+  end;
   LOverload := HasDirective(ANode, 'overload');
   LCount := CountImplParamNames(ANode);
   if LCount < 0 then
@@ -2234,12 +2247,14 @@ begin
   // references at all. So a dotted entry's symbol is in the scope's order
   // (the uses list, navigation, completion's enumeration) but not bound by
   // name; `Ns.Log.X` reaches the unit through UnitNameOf's full-name match.
+  // The dotted text once: per earlier entry it was quadratic in a program's
+  // dotted `uses` (1538 entries, 1.0 M strings; perf audit 2026-10, C4).
+  LU.NameFull := FTree.DottedText(LNameNode);
   if KindOf(LNameNode) = nkMember then
   begin
     LSym := NIL_SYM;
     for var LIdx := 0 to FUsesCount - 1 do
-      if PasSameName(FModel.UsesList[LIdx].NameFull,
-           FTree.DottedText(LNameNode)) then
+      if PasSameName(FModel.UsesList[LIdx].NameFull, LU.NameFull) then
       begin
         LSym := FModel.UsesList[LIdx].Sym;
         Break;
@@ -2278,7 +2293,6 @@ begin
         [rfReplaceAll]);
   end;
 
-  LU.NameFull := FTree.DottedText(LNameNode);
   LU.InPath := LIn;
   LU.NameNode := LNameNode;
   LU.Sym := LSym;

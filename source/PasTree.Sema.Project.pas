@@ -559,16 +559,18 @@ type
     FSystemUnitResolved: Boolean;
     FSysInitUnitId: Integer;               // memoized EnsureSysInitUnit result
     FSysInitUnitResolved: Boolean;
+    // The id above is final: published under the lock AFTER it is set, read
+    // without it (see EnsureSystemUnit).
+    FSystemUnitReady, FSysInitUnitReady: Boolean;
     // Guards EnsureSystemUnit AND EnsureSysInitUnit (both mutate the same
     // shared FModels/FByPath via LoadFile, so must exclude each other too,
-    // not just themselves): unlike ResolveUses and BindTypesX (both always
-    // sequential), CrossResolve runs ONE WORKER PER CORE by default
-    // (ForEachIndex) and is the only caller of either Ensure*Unit that can
-    // race - several units' CrossResolve can hit an unresolved implicit-
-    // System name (e.g. sLineBreak) on different threads at the same
-    // instant, all racing the SAME first-time LoadFile (which mutates the
-    // shared FModels/FByPath, neither thread-safe) - real, not
-    // hypothetical: reproduced via SemaProjectSmoke's UnitE fixture.
+    // not just themselves): unlike ResolveUses (always sequential), the
+    // cross passes run ONE WORKER PER CORE by default (ForEachIndex), and
+    // several units' CrossResolve can hit an unresolved implicit-System name
+    // (e.g. sLineBreak) on different threads at the same instant, all racing
+    // the SAME first-time LoadFile (which mutates the shared
+    // FModels/FByPath, neither thread-safe) - real, not hypothetical:
+    // reproduced via SemaProjectSmoke's UnitE fixture.
     // A plain object locked with TMonitor, like FInternalLock.
     FSystemUnitLock: TObject;
     // Phase 3c: cross-model typing.
@@ -2633,8 +2635,10 @@ begin
   FModuleRedoLimit := 0;
   FSystemUnitId := -1;
   FSystemUnitResolved := False;
+  FSystemUnitReady := False;
   FSysInitUnitId := -1;
   FSysInitUnitResolved := False;
+  FSysInitUnitReady := False;
   FSystemUnitLock := TObject.Create;
   FEscalationPercent := 40;
 end;
@@ -2990,11 +2994,14 @@ function TPasSemaProject.EnsureSystemUnit: Integer;
 var
   LPath: string;
 begin
-  // Locked unconditionally (no unlocked fast-path read of FSystemUnitResolved)
-  // - this is called only for identifiers that missed local/explicit-uses
-  // resolution, never once per token, so the lock is not a hot-path cost; a
-  // "check outside, lock, check again" version would just reintroduce the
-  // exact race this exists to fix, for a saving that doesn't matter here.
+  // The answer once final, read without the lock: ImplicitRootX asks on
+  // every root hop of every member walk, and the lock taken every time was
+  // 68% of all TMonitor.Enter calls (perf audit 2026-10, S8). Not a read of
+  // FSystemUnitResolved, which is set BEFORE the load - a reader seeing it
+  // could still read the -1 the load is about to replace; FSystemUnitReady
+  // is set after FSystemUnitId has its value, behind a barrier.
+  if FSystemUnitReady then
+    Exit(FSystemUnitId);
   TMonitor.Enter(FSystemUnitLock);
   try
     if not FSystemUnitResolved then
@@ -3004,6 +3011,8 @@ begin
         FSystemUnitId := LoadFile(LPath);
     end;
     Result := FSystemUnitId;
+    MemoryBarrier;
+    FSystemUnitReady := True;
   finally
     TMonitor.Exit(FSystemUnitLock);
   end;
@@ -3013,6 +3022,9 @@ function TPasSemaProject.EnsureSysInitUnit: Integer;
 var
   LPath: string;
 begin
+  // See EnsureSystemUnit.
+  if FSysInitUnitReady then
+    Exit(FSysInitUnitId);
   TMonitor.Enter(FSystemUnitLock);
   try
     if not FSysInitUnitResolved then
@@ -3022,6 +3034,8 @@ begin
         FSysInitUnitId := LoadFile(LPath);
     end;
     Result := FSysInitUnitId;
+    MemoryBarrier;
+    FSysInitUnitReady := True;
   finally
     TMonitor.Exit(FSystemUnitLock);
   end;
@@ -16834,9 +16848,12 @@ begin
   LBefore := LModel.Tree.Nodes[ANode].FirstToken;
   for LN := 0 to Min(High(LModel.Tree.Nodes), High(LModel.RefMap)) do
   begin
+    // The name compared off its token, length first: a NodeNameLower string
+    // per earlier identifier was 1.9 M allocations on a 3750-unit closure,
+    // and a hashed key (PasNodeKey) cost as much (perf audit 2026-10, C13).
     if (LModel.Tree.Nodes[LN].Kind <> nkIdent) or
        (LModel.Tree.Nodes[LN].FirstToken >= LBefore) or
-       (LModel.Tree.NodeNameLower(LN) <> ANameLower) then
+       not PasNodeNameIs(LModel.Tree, LN, ANameLower) then
       Continue;
     LParent := LModel.Tree.Nodes[LN].Parent;
     if (LParent <> NIL_NODE) and

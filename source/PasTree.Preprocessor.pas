@@ -1514,7 +1514,9 @@ begin
 
   Result.FileNames := FFileNames.ToArray;
   Result.Files := FFiles.ToArray;
-  Result.Visible := FVisible.ToArray;
+  // Copy, not ToArray: ToArray's SetLength zero-fills an array the size of
+  // the unit's visible tokens before filling it (perf audit 2026-10, C16).
+  Result.Visible := Copy(FVisible.List, 0, FVisible.Count);
   Result.Diagnostics := FDiags.ToArray;
   Result.ScopedEnumsEvents := FScopedEnumsEvents.ToArray;
   Result.UnresolvedDeclared := FUnresolvedDeclared.ToArray;

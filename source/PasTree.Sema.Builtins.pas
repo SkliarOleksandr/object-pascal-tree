@@ -544,23 +544,38 @@ type
 var
   GSeedTemplates: array[TSeedClass] of TSeedTemplate;
   GSigIndex: TDictionary<string, Integer>;  // NameLower -> CIntrinsics index
+  // SeedClassOf's answers, decided once (BuildSeedClasses). Asked on every
+  // PasBuiltinCanonSym / PasBuiltinIsChar, it copied the whole platform
+  // record each time - a string and a string array: a record copy and
+  // finalization, four locked refcount operations on globals every worker
+  // shares (perf audit 2026-10, C8).
+  GSeedClasses: array[TPasPlatform] of TSeedClass;
 
-function SeedClassOf(APlatform: TPasPlatform): TSeedClass;
+function SeedClassOf(APlatform: TPasPlatform): TSeedClass; inline;
+begin
+  Result := GSeedClasses[APlatform];
+end;
+
+procedure BuildSeedClasses;
 var
+  LPlat: TPasPlatform;
   LInfo: TPasPlatformInfo;
 begin
-  LInfo := PlatformInfo(APlatform);
-  if not LInfo.Is64Bit then
+  for LPlat := Low(TPasPlatform) to High(TPasPlatform) do
   begin
-    if LInfo.HasVarArgIntrinsics then
-      Result := scPosix32
+    LInfo := PlatformInfo(LPlat);
+    if not LInfo.Is64Bit then
+    begin
+      if LInfo.HasVarArgIntrinsics then
+        GSeedClasses[LPlat] := scPosix32
+      else
+        GSeedClasses[LPlat] := scWin32;
+    end
+    else if LInfo.LongBytes = 8 then
+      GSeedClasses[LPlat] := scLP64
     else
-      Result := scWin32;
-  end
-  else if LInfo.LongBytes = 8 then
-    Result := scLP64
-  else
-    Result := scLLP64;
+      GSeedClasses[LPlat] := scLLP64;
+  end;
 end;
 
 function PasBuiltinCanonSym(AModel: TPasSemaModel; ASym: Integer;
@@ -892,6 +907,7 @@ begin
 end;
 
 initialization
+  BuildSeedClasses;
   BuildSeedTemplates;
   BuildSigIndex;
   BuildIntrResult;

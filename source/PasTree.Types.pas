@@ -729,6 +729,15 @@ var
 begin
   if Length(A) = ACount then
     Exit;
+  // An unmanaged T is copied by Copy: a fresh block and a Move, where
+  // SetLength below zero-fills the block first - the tokens and nodes of
+  // every file, ~1.3 GB of writes per 3750-unit closure (perf audit 2026-10,
+  // C16). A managed T keeps the move below, which costs no refcounting.
+  if not IsManagedType(T) then
+  begin
+    A := Copy(A, 0, ACount);
+    Exit;
+  end;
   SetLength(LExact, ACount);
   if ACount > 0 then
   begin

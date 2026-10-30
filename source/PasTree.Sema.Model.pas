@@ -982,6 +982,11 @@ function SemaSliceKey(AText: PChar; ALen: Integer): TSemaKey;
   TPasTree.NodeNameLower's key, not built. Empty (Len 0) where NodeNameLower
   answers '' (no such node, no token layer). }
 function PasNodeKey(const ATree: TPasTree; ANode: Integer): TSemaKey;
+{ TPasTree.NodeNameLower(ANode) = ANameLower (a key string), with no string
+  built and no hash taken: the length decides most nodes alone - for a scan
+  that tests node after node against one name. }
+function PasNodeNameIs(const ATree: TPasTree; ANode: Integer;
+  const ANameLower: string): Boolean;
 { Does the key string ANameLower equal AKey? The comparison TSemaNames uses. }
 function SemaKeyEquals(const ANameLower: string; const AKey: TSemaKey): Boolean;
   inline;
@@ -1065,6 +1070,28 @@ var
 begin
   ATree.NodeSlice(ANode, LText, LLen);
   Result := SemaSliceKey(LText, LLen);
+end;
+
+function PasNodeNameIs(const ATree: TPasTree; ANode: Integer;
+  const ANameLower: string): Boolean;
+var
+  LText: PChar;
+  LLen, LIdx: Integer;
+begin
+  // NodeNameLower's steps: the node's slice ('' when it has none), the '&'
+  // dropped, each char folded with PasFoldChar.
+  ATree.NodeSlice(ANode, LText, LLen);
+  if (LLen > 0) and (LText^ = '&') then
+  begin
+    Inc(LText);
+    Dec(LLen);
+  end;
+  if LLen <> Length(ANameLower) then
+    Exit(False);
+  for LIdx := 0 to LLen - 1 do
+    if PasFoldChar(LText[LIdx]) <> ANameLower[LIdx + 1] then
+      Exit(False);
+  Result := True;
 end;
 
 function SemaRawKeyEquals(AName: PChar; const AKey: TSemaKey): Boolean;
