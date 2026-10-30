@@ -1411,8 +1411,11 @@ type
     function SubrangeCatX(AMid, ASym: Integer): TSemaTypeCat;
     function XSameType(const A, B: TSemaXType): Boolean;
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
+    // ACallMid / AArgNodes: the call site's model and argument nodes, read
+    // only for an open-array parameter (its element type binds T).
     function InferMethodFrame(AMid, ASym: Integer;
-      const AArgTypes: TArray<TSemaXType>; ACtx: Integer): Integer;
+      const AArgTypes: TArray<TSemaXType>; ACtx: Integer;
+      ACallMid: Integer = -1; const AArgNodes: TArray<Integer> = nil): Integer;
     function ExplicitMethodFrame(AId, AMid, ASym, ATypeArgs,
       ACtx: Integer): Integer;
     // SubstX past its early answers - see there.
@@ -12799,11 +12802,11 @@ end;
   `Take<Integer>(7)`. Returns a substitution frame (an instance-table index) to
   apply to the call's result type, or NIL_INST when nothing can be inferred.
 
-  Only the direct shape is inferred: a parameter whose declared type IS one of
-  the routine's own generic parameters. Delphi's real algorithm also matches
-  through structure (`A: TArray<T>` against `TArray<Integer>`), which is a
-  later slice - an unbound parameter makes the whole frame fail rather than
-  guess, so the call stays typed exactly as it is today.
+  Two shapes bind, as in dcc: a parameter whose declared type IS one of the
+  routine's own generic parameters, and an open array of one (`const A: array
+  of T`, from the argument's element type). dcc matches through nothing else -
+  `A: TArray<T>` against a `TArray<Integer>` is E2010 - and an unbound
+  parameter makes the whole frame fail rather than guess.
 
   NB the frame is keyed on the ROUTINE symbol, so an instance-table entry may
   name a routine rather than a type. It is only ever a substitution frame,
@@ -12811,13 +12814,14 @@ end;
   exactly this reason. There is deliberately no inference for generic TYPES
   (16.5.1: `TList.Create` cannot infer T). }
 function TPasSemaProject.InferMethodFrame(AMid, ASym: Integer;
-  const AArgTypes: TArray<TSemaXType>; ACtx: Integer): Integer;
+  const AArgTypes: TArray<TSemaXType>; ACtx: Integer; ACallMid: Integer;
+  const AArgNodes: TArray<Integer>): Integer;
 var
   LIdents, LParams: TArray<Integer>;
   LArgs: TArray<TSemaXType>;
   LM: TPasSemaModel;
-  LPIdx, LGIdx: Integer;
-  LPX: TSemaXType;
+  LPIdx, LGIdx, LTN: Integer;
+  LPX, LArgX: TSemaXType;
 begin
   Result := NIL_INST;
   LIdents := GenericParamIdents(AMid, ASym);
@@ -12832,10 +12836,31 @@ begin
   begin
     if LPIdx > High(AArgTypes) then
       Break;
-    if not XValid(AArgTypes[LPIdx]) then
-      Continue;   // untyped argument - cannot bind from it
+    LArgX := AArgTypes[LPIdx];
     LPX := DeclTypeX(AMid, LParams[LPIdx]);
-    if not XValid(LPX) then
+    // `const A: array of T` binds T to the argument's ELEMENT type - an
+    // array variable's, or an open array constructor's `[It]` (16.5.1: dcc
+    // infers through an open array, never through another instantiation -
+    // `TArray<T>` against `TArray<Integer>` is E2010). Audit E3-31.
+    if not XValid(LPX) and (ACallMid >= 0) and (LPIdx <= High(AArgNodes)) then
+    begin
+      LTN := LM.Symbols[LParams[LPIdx]].TypeNode;
+      if (LTN <> NIL_NODE) and (LM.Tree.Nodes[LTN].Kind = nkArrayType) and
+         (LM.Tree.Nodes[LTN].Aux <> 1) and
+         (LM.Tree.Nodes[LTN].FirstChild <> NIL_NODE) and
+         (LM.Tree.Nodes[LM.Tree.Nodes[LTN].FirstChild].NextSibling =
+          NIL_NODE) then
+      begin
+        LPX := ResolveTypeExpr(AMid, LM.Tree.Nodes[LTN].FirstChild);
+        if XValid(AArgTypes[LPIdx]) and
+           (XCatOf(CanonTypeX(AArgTypes[LPIdx])) <> tcArray) then
+          LArgX := XNil   // not an array: nothing to read an element from
+        else
+          LArgX := ForInElementX(ACallMid, AArgNodes[LPIdx],
+            AArgTypes[LPIdx]);
+      end;
+    end;
+    if not XValid(LPX) or not XValid(LArgX) then
       Continue;
     if (LPX.UnitId <> AMid) or
        (LM.Symbols[LPX.Sym].Kind <> skGenericParam) then
@@ -12847,7 +12872,7 @@ begin
           // First binding wins. A later argument contradicting it is a real
           // dcc error (E2010 on the call); this pass emits no diagnostics, so
           // it just keeps the first.
-          LArgs[LGIdx] := SubstX(AArgTypes[LPIdx], ACtx, 0);
+          LArgs[LGIdx] := SubstX(LArgX, ACtx, 0);
         Break;
       end;
   end;
@@ -15826,11 +15851,14 @@ var
                         LScan := LM.Tree.Nodes[LScan].NextSibling;
                       end;
                       var LArgTypes: TArray<TSemaXType> := nil;
+                      var LArgNodes: TArray<Integer> := nil;
                       SetLength(LArgTypes, LArgCount);
+                      SetLength(LArgNodes, LArgCount);
                       LArgCount := 0;
                       while LArgN <> NIL_NODE do
                       begin
                         LArgTypes[LArgCount] := GetX(LArgN);
+                        LArgNodes[LArgCount] := LArgN;
                         Inc(LArgCount);
                         LArgN := LM.Tree.Nodes[LArgN].NextSibling;
                       end;
@@ -15843,7 +15871,7 @@ var
                           LBase, LCtx);
                       if LFrame = NIL_INST then
                         LFrame := InferMethodFrame(LBestMid, LBestSym,
-                          LArgTypes, LCtx);
+                          LArgTypes, LCtx, AId, LArgNodes);
                       if LFrame <> NIL_INST then
                         SetXAt(N, SubstX(XAt(N), LFrame, 0));
                     end;

@@ -8887,6 +8887,59 @@ begin
   end;
 end;
 
+// E3-31: a generic method's T is inferred through an open-array parameter -
+// from an array variable's element and from an open array constructor's
+// (16.5.1, dcc64 37.0, local/probe-park/e331 OA.dpr).
+procedure TestOpenArrayInference;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_oainfer');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'OaP.dpr'),
+    'program OaP;'#10'type'#10 +
+    '  TItem = class Site: Integer; end;'#10 +
+    '  TU = class'#10 +
+    '    class function FirstO<T>(const A: array of T): T; static;'#10 +
+    '    class function Pair<K, V>(const A: array of K; const B: V): V;' +
+    ' static;'#10 +
+    '  end;'#10 +
+    'class function TU.FirstO<T>(const A: array of T): T;' +
+    ' begin Result := A[0]; end;'#10 +
+    'class function TU.Pair<K, V>(const A: array of K; const B: V): V;' +
+    ' begin Result := B; end;'#10 +
+    'procedure Run;'#10 +
+    'var Arr: TArray<TItem>; St: array[0..1] of TItem; It: TItem;'#10 +
+    'begin'#10 +
+    '  It := nil;'#10 +
+    '  TU.FirstO(Arr).Site := 1;'#10 +
+    '  TU.FirstO([It]).Site := 2;'#10 +
+    '  TU.FirstO(St).Site := 3;'#10 +
+    '  with TU.FirstO(Arr) do Site := 4;'#10 +
+    '  TU.Pair(Arr, It).Site := 5;'#10 +
+    '  TU.FirstO(Arr).Nope1 := 1;'#10 +
+    '  TU.FirstO([It]).Nope2 := 1;'#10 +
+    'end;'#10 +
+    'begin'#10'  Run;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'OaP.dpr'));
+    Ok('oainfer: T through an open array - only the two wrong members are' +
+      ' E2003', DiagCount(ModelByName('oap'), 'E2003') = 2);
+    Ok('oainfer: Site binds through every shape',
+      CrossRefCountInUnit(ModelByName('oap'), 'Site', 'Site', 'oap') = 5);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // B3-30: `Self` in a class method - a nested routine and an anonymous method
 // in one included, a class helper's class method too - is a class reference
 // for overload choice, and an instance is no class reference (15.1.1, dcc64
@@ -16845,6 +16898,7 @@ begin
   TestClassMethodSelf;
   TestAmbiguousGenericArgs;
   TestNestedTypeArgFrame;
+  TestOpenArrayInference;
   TestAttributeSuffixFirst;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;

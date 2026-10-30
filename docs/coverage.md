@@ -562,15 +562,6 @@ of less work, not a gap in following the language; its consequences are in
   so `V.Create` (dcc: E2003) is accepted and completion lists `Create` on
   `V.` too.
 
-### 16.5.1 Inference for generic methods & inline vars
-- inference handles only the direct shape (the parameter's declared type IS
-  the type parameter). dcc also infers through an open-array parameter -
-  `const A: array of T` from a `TArray<TItem>` variable or an open-array
-  constructor `[It]` - and PasTree leaves such a call typed as the open T:
-  `TU.FirstO(Arr).Site` is a false E2003 under -members, and in a `with`
-  body without it. A `TArray<T>` or `TList<T>` parameter does not infer in
-  dcc either (E2010).
-
 ## 17-anonymous-methods.md
 
 ### 17.2.1 Inline `procedure`/`function` literals
