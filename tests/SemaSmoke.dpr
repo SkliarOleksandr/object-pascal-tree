@@ -1420,6 +1420,32 @@ end;
 // D2: scopes are records in one array per model; Trim moves them into an
 // exact array bitwise, so the managed fields must survive with their
 // refcounts intact.
+// E3-21: dcc's code for an operator over mismatched scalars depends on the
+// pair (4.2.1, dcc64 37.0, local/probe-park/e321 O1-O12): a string with a
+// number or Boolean is E2010 naming the string first, any other pair E2008
+// under `+` and E2015 under the rest.
+procedure TestOperatorMismatchCodes;
+begin
+  Analyze(
+    'program P;'#10 +
+    'var S: string; I: Integer; B: Boolean; C: Char; D: Double;'#10 +
+    'begin'#10 +
+    '  Writeln(S + I);'#10 +        // 4: E2010 'string' and 'Integer'
+    '  Writeln(I xor S);'#10 +      // 5: E2010 'string' and 'Integer'
+    '  Writeln(D * S);'#10 +        // 6: E2010 'string' and 'Double'
+    '  Writeln(I + B);'#10 +        // 7: E2008
+    '  Writeln(C + I);'#10 +        // 8: E2008
+    '  Writeln(I - B);'#10 +        // 9: E2015
+    '  Writeln(C div D);'#10 +      // 10: E2015
+    'end.'#10);
+  Ok('opcodes: three E2010', DiagCount('E2010') = 3);
+  Ok('opcodes: the string named first, whatever the order',
+    DiagHasText('E2010', '''string'' and ''Integer''') and
+    DiagHasText('E2010', '''string'' and ''Double'''));
+  Ok('opcodes: two E2008 under +', DiagCount('E2008') = 2);
+  Ok('opcodes: two E2015 under - and div', DiagCount('E2015') = 2);
+end;
+
 procedure TestScopeList;
 var
   LList: TSemaScopeList;
@@ -4280,6 +4306,7 @@ begin
   TestSemaNamesGrowth;
   TestLazyBlockScopes;
   TestScopeList;
+  TestOperatorMismatchCodes;
 
   // Phase 1 pools spellings per unit: one heap string per distinct text, a
   // lower-case name shares its key, and the arena is cut to exact length.

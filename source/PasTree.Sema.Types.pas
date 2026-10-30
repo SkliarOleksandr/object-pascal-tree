@@ -2358,8 +2358,26 @@ begin
     WeakAliasEnd(LL) = WeakAliasEnd(LR), FIs64);
   if LAns = oaNone then
   begin
+    // dcc's code depends on the pair (4.2.1; dcc64 37.0, local/probe-park/
+    // e321 O1-O12): a string with an Integer, Boolean or real operand is
+    // E2010 naming the string's type first, whatever the operator and the
+    // order (`'ab' + 1`, `I xor S`); any other scalar mismatch is E2008
+    // under `+` (`I + True`, `Ch + I`) and E2015 under the rest (audit E3-21).
     if (CatOf(LL) in CScalar) and (CatOf(LR) in CScalar) then
-      Diag('E2015', SE2015_OperatorNotApplicable, N);
+    begin
+      if (CatOf(LL) = tcString) and
+         (CatOf(LR) in [tcInteger, tcFloat, tcBoolean]) then
+        Diag('E2010', Format(SE2010_IncompatibleTypes,
+          [M.Symbols[LL].Name, M.Symbols[LR].Name]), N)
+      else if (CatOf(LR) = tcString) and
+              (CatOf(LL) in [tcInteger, tcFloat, tcBoolean]) then
+        Diag('E2010', Format(SE2010_IncompatibleTypes,
+          [M.Symbols[LR].Name, M.Symbols[LL].Name]), N)
+      else if LOp = tkPlus then
+        Diag('E2008', SE2008_IncompatibleTypes, N)
+      else
+        Diag('E2015', SE2015_OperatorNotApplicable, N);
+    end;
     Exit;
   end;
   Result := OpSym(LAns, LL, LR, False);
