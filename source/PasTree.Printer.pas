@@ -2237,18 +2237,45 @@ begin
   end;
 end;
 
+// The main file's line of the `$I` directive that brought include file
+// AFileId in - through its includer for a nested one; 0 when it is not found.
+function IncludeMainLine(const ATree: TPasTree; AFileId: Integer): Integer;
+var
+  LCol, LDepth: Integer;
+begin
+  Result := 0;
+  for LDepth := 1 to 32 do
+  begin
+    var LFound := False;
+    for var LRef in ATree.Source.IncludeRefs do
+      if LRef.IncludedFileId = AFileId then
+      begin
+        if LRef.FileId = 0 then
+        begin
+          ATree.Source.Files[0].OffsetToLineCol(LRef.Start, Result, LCol);
+          Exit;
+        end;
+        AFileId := LRef.FileId;
+        LFound := True;
+        Break;
+      end;
+    if not LFound then
+      Exit;
+  end;
+end;
+
 function RenderItems(const ATree: TPasTree; const AItems: TPasPrintItems;
   ALayout: TPasPrintLayout; const AAt: TArray<Integer>): string;
 var
   LSB: TStringBuilder;
-  LIdx, LAt, LFile, LLine, LCol, LEndLine, LEndCol, LCurFile,
-    LCurLine: Integer;
+  LIdx, LAt, LFile, LLine, LCol, LEndLine, LEndCol, LOutLine,
+    LDirLine: Integer;
   LVis: TPasVisibleToken;
+  LGap: string;
 begin
   LSB := TStringBuilder.Create;
   try
-    LCurFile := -1;
-    LCurLine := 1;
+    LOutLine := 1;
     for LIdx := 0 to High(AItems) do
     begin
       if ALayout = plSource then
@@ -2273,29 +2300,49 @@ begin
               LEndCol);
           end;
           // The main file's lines are kept from its first line on, so the
-          // print reads side by side with the source (an include's lines
-          // start a new line each).
-          if LCurFile < 0 then
-            LCurFile := LFile;
+          // print reads side by side with the source: LOutLine counts the
+          // output's lines, and a main-file item is padded down to its own.
+          // An include's items stay on the line the output is at - the
+          // `{$I}` directive's - so they push no main-file line down (audit
+          // B2-47: one line per include line shifted everything after the
+          // first include).
           if AItems[LIdx].Glue and (LIdx > 0) then
-            LSB.Append(GapText(ATree, AItems[LIdx - 1].Vis, AItems[LIdx].Vis))
-          else if (LFile <> LCurFile) or (LLine > LCurLine) or
-                  (LSB.Length = 0) then
           begin
-            if LFile <> LCurFile then
-              LSB.Append(sLineBreak)
-            else
-              while LCurLine < LLine do
+            LGap := GapText(ATree, AItems[LIdx - 1].Vis, AItems[LIdx].Vis);
+            LSB.Append(LGap);
+            if LGap <> ' ' then
+              Inc(LOutLine, Length(LGap) div Length(sLineBreak));
+          end
+          else if LFile <> 0 then
+          begin
+            // Down to the main-file line of the `$I` that pulled it in, a
+            // nested include through its includer.
+            LDirLine := IncludeMainLine(ATree, LFile);
+            if LDirLine > LOutLine then
+            begin
+              while LOutLine < LDirLine do
               begin
                 LSB.Append(sLineBreak);
-                Inc(LCurLine);
+                Inc(LOutLine);
               end;
+              LSB.Append('  ');
+            end
+            else if LSB.Length > 0 then
+              LSB.Append(' ');
+          end
+          else if (LLine > LOutLine) or (LSB.Length = 0) then
+          begin
+            while LOutLine < LLine do
+            begin
+              LSB.Append(sLineBreak);
+              Inc(LOutLine);
+            end;
             LSB.Append(StringOfChar(' ', LCol - 1));
           end
           else if LIdx > 0 then
             LSB.Append(' ');
-          LCurFile := LFile;
-          LCurLine := LEndLine;
+          // A token over several lines (a multi-line string) brings its own.
+          Inc(LOutLine, LEndLine - LLine);
         end;
       end
       else if LIdx > 0 then

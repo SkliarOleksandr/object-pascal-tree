@@ -716,6 +716,41 @@ begin
         end;
         Result.Passed := LWhy = '';
         Result.Message := ' ' + LWhy + sLineBreak;
+      end),
+    // B2-47: the source layout keeps the main file's lines after an include
+    // - the include's items on the line of its `$I`, B and C on their own.
+    ChainCase('T3', 'plSource: an include keeps the main file''s lines',
+      function: TPasCheckResult
+      var
+        LDiags: TArray<TPasParseDiag>;
+        LTree: TPasTree;
+        LPrinted: TPasPrinted;
+        LDir: string;
+        LLines: TArray<string>;
+        LT3: TPasT3Result;
+      begin
+        LDir := TPath.Combine(TPath.GetTempPath, 'pastree_print_inc');
+        TDirectory.CreateDirectory(LDir);
+        try
+          TFile.WriteAllText(TPath.Combine(LDir, 'part.inc'),
+            '  A1 = 1;'#13#10'  A2 = 2;'#13#10'  A3 = 3;'#13#10);
+          LTree := TPasParser.ParseFile(APP.ProcessText(
+            TPath.Combine(LDir, 'UInc.pas'),
+            'unit UInc;'#13#10'interface'#13#10'const'#13#10'  A0 = 0;'#13#10 +
+            #13#10'  {$I part.inc}'#13#10'  B = 2;'#13#10#13#10#13#10 +
+            '  C = 3;'#13#10'implementation'#13#10'end.'#13#10), LDiags);
+          LPrinted := PrintTree(LTree);
+          CompareT3(LTree, LPrinted, LT3);
+          LLines := RenderItems(LTree, LPrinted.Items, plSource, LT3.ItemAt).
+            Split([sLineBreak]);
+          Result.Passed := (Length(LLines) >= 10) and
+            LLines[5].Contains('A1 = 1') and (Trim(LLines[6]) = 'B = 2 ;') and
+            (Trim(LLines[9]) = 'C = 3 ;');
+          if not Result.Passed then
+            Result.Message := '  ' + string.Join(' | ', LLines);
+        finally
+          TDirectory.Delete(LDir, True);
+        end;
       end)
   ];
 end;
