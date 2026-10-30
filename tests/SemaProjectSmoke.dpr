@@ -13594,6 +13594,65 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  // E2-40, E3-45: the rows the first answer had wrong, each as dcc's own
+  // IsManagedType answers it (dcc64 37.0, local/probe-park/e345 MG.dpr).
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_managed2');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10'  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UnitMg2.pas'),
+    'unit UnitMg2;'#10'interface'#10 +
+    'type'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TName = string[20];'#10 +
+    '  TNameRec = record N: TName; end;'#10 +
+    '  TArrStr = array[0..1] of TName;'#10 +
+    '  TDistShort = type ShortString;'#10 +
+    '  TClassVarRec = record X: Integer; class var S: string; end;'#10 +
+    '  TUnsafeRec = record [unsafe] I: IInterface; end;'#10 +
+    '  TUnsafeStr = record [unsafe] S: string; end;'#10 +
+    '  TIntArr = TArray<Integer>;'#10 +
+    '  TStrArr2 = TIntArr;'#10 +
+    '  TFieldAliasRec = record A: TIntArr; end;'#10 +
+    '  TGenDyn<T> = array of T;'#10 +
+    '  TGenDynInt = TGenDyn<Integer>;'#10 +
+    '  TOldObj = object S: string; end;'#10 +
+    '  TAssignOnly = record X: Integer; class operator Assign(' +
+    'var D: TAssignOnly; const [ref] S: TAssignOnly); end;'#10 +
+    '  TNestedRec = record Inner: record S: string end; end;'#10 +
+    '  TInlineDyn = record A: array of Integer; end;'#10 +
+    '  TInlineStat = record A: array[0..1] of string; end;'#10 +
+    '  TDistStr = type string;'#10 +
+    '  TGenRec<T> = record F: T; end;'#10 +
+    '  TGenRecStr = TGenRec<string>;'#10 +
+    '  TGenRecInt = TGenRec<Integer>;'#10 +
+    'implementation'#10 +
+    'class operator TAssignOnly.Assign(var D: TAssignOnly;' +
+    ' const [ref] S: TAssignOnly); begin end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    for var LRow in TArray<string>.Create('tname', 'tnamerec', 'tarrstr',
+      'tdistshort', 'tclassvarrec', 'tunsaferec', 'tunsafestr',
+      'tgenrecint') do
+      Ok('20.3.1 (E2-40/E3-45): ' + LRow + ' is NOT managed',
+        not GProj.IsManagedTypeX(TypeXOf('unitmg2', LRow)));
+    for var LRow in TArray<string>.Create('tintarr', 'tstrarr2',
+      'tfieldaliasrec', 'tgendynint', 'toldobj', 'tassignonly', 'tnestedrec',
+      'tinlinedyn', 'tinlinestat', 'tdiststr', 'tgenrecstr') do
+      Ok('20.3.1 (E2-40/E3-45): ' + LRow + ' is managed',
+        GProj.IsManagedTypeX(TypeXOf('unitmg2', LRow)));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   // ---- 9.4.2 (13.0), the half SemaSmoke's own case cannot reach: the
   // EXPLICIT `Self.FX` spelling inside a PARAMETERLESS operator. Needs the
   // project pipeline, and for a reason already written down (batch 6): a

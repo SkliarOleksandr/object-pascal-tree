@@ -2091,6 +2091,10 @@ type
       to add). ADepth guards the record-field/static-array recursion the
       same way every other cross-model walk in this file caps itself. }
     function IsManagedTypeX(const AX: TSemaXType; ADepth: Integer = 0): Boolean;
+    // IsManagedTypeX's reading of a type node ANode of model AMid - a
+    // definition or a field's type slot, inline anonymous types included -
+    // closed over instance AInst.
+    function IsManagedTypeNode(AMid, ANode, AInst, ADepth: Integer): Boolean;
     { Source position of ANY node in AId, as a clickable site: the file the
       node's FIRST token really came from (NOT ModelFile - an $I-included file
       is a different path), 1-based line/col. False if AId/ANode is out of
@@ -12676,7 +12680,8 @@ begin
 end;
 
 // Does the struct definition node ADefNode declare its own `class operator
-// Initialize`/`Finalize` (9.4.1's custom managed-record lifecycle, 10.4) -
+// Initialize`/`Finalize`/`Assign` (9.4.1's custom managed-record lifecycle,
+// 10.4; Assign alone makes it managed - dcc64 37.0, local/probe-park/e345) -
 // walked over the AST directly (head word = 'operator', name = the
 // operator's own first child) rather than through the symbol table, since
 // Initialize/Finalize are ALSO seeded as global builtin intrinsic routine
@@ -12701,7 +12706,8 @@ begin
       if LNameChild <> NIL_NODE then
       begin
         LName := LM.Tree.NodeNameLower(LNameChild);
-        if (LName = 'initialize') or (LName = 'finalize') then
+        if (LName = 'initialize') or (LName = 'finalize') or
+           (LName = 'assign') then
           Exit(True);
       end;
     end;
@@ -12713,94 +12719,160 @@ function TPasSemaProject.IsManagedTypeX(const AX: TSemaXType;
   ADepth: Integer): Boolean;
 var
   LM: TPasSemaModel;
-  LCanon: TSemaXType;
-  LDef, LChild, LLast, LIdx, LScope: Integer;
-  LElemX: TSemaXType;
+  LCur, LNext: TSemaXType;
+  LDef: Integer;
 begin
   Result := False;
   if not XValid(AX) or (ADepth > 8) then
     Exit;
-  // A plain alias (`type TShortStr = ShortString;`) is its OWN skType
-  // symbol with its own name, not the same symbol as its target -- follow
-  // it first, or every check below sees the ALIAS's name/shape instead of
-  // the real one (caught by TShortStr failing to read as non-managed: its
-  // own NameLower is 'tshortstr', not 'shortstring'). CanonTypeX does not
-  // follow a `= type X` DISTINCT alias (2.5.1) -- deliberately, for overload
-  // identity -- but a distinct alias has the exact same storage/managedness
-  // as its target regardless, so that is a harmless, narrow gap here, not a
-  // wrong answer worth a second alias-walk just for this.
-  LCanon := CanonTypeX(AX);
-  if not XValid(LCanon) then
-    LCanon := AX;
-  LM := FModels[LCanon.UnitId];
-  case XCatOf(LCanon) of
+  // Every alias step to the type that has storage - a DISTINCT alias too
+  // (`TDistShort = type ShortString` is unmanaged, `TDistStr = type string`
+  // managed: the same storage as the target; CanonTypeX stops at a distinct
+  // alias on purpose, for overload identity), and an alias of an
+  // instantiation (`TIntArr = TArray<Integer>`, TStringDynArray) to the
+  // instance itself, its frame kept (audit E2-40, E3-45).
+  LCur := AX;
+  for var LStep := 1 to 16 do
+  begin
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if (LDef = NIL_NODE) or not (FModels[LCur.UnitId].Tree.Nodes[LDef].Kind in
+       [nkIdent, nkMember, nkTypeArgs]) then
+      Break;
+    LNext := AliasStepX(LCur, LDef);
+    if not XValid(LNext) then
+      Break;
+    LCur := LNext;
+  end;
+  LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+  if LDef <> NIL_NODE then
+    Exit(IsManagedTypeNode(LCur.UnitId, LDef, LCur.Inst, ADepth));
+  // No definition node: a seeded name. The one unmanaged string is
+  // ShortString; the builtin-seeded dynamic arrays (TArray<T>, TBytes in a
+  // System-less analysis) are managed.
+  LM := FModels[LCur.UnitId];
+  case XCatOf(LCur) of
     tcString:
-      // The one non-managed string: a Turbo-era fixed-size ShortString.
-      // Every other seeded string name (string/UnicodeString/AnsiString/
-      // WideString/RawByteString/UTF8String) is a real refcounted long
-      // string.
-      Exit(LM.Symbols[LCanon.Sym].NameLower <> 'shortstring');
+      Result := LM.Symbols[LCur.Sym].NameLower <> 'shortstring';
     tcInterface, tcVariant:
-      Exit(True);
+      Result := True;
     tcArray:
+      Result := sfBuiltin in LM.Symbols[LCur.Sym].Flags;
+  end;
+end;
+
+function TPasSemaProject.IsManagedTypeNode(AMid, ANode, AInst,
+  ADepth: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LStruct, LScope, LSym, LDecl, LSub, LAttr: Integer;
+  LX: TSemaXType;
+  LList: TSemaSymList;
+  LSkip: Boolean;
+begin
+  Result := False;
+  if (ANode = NIL_NODE) or (ADepth > 8) then
+    Exit;
+  LM := FModels[AMid];
+  case LM.Tree.Nodes[ANode].Kind of
+    nkIdent, nkMember, nkTypeArgs:
       begin
-        // TArray<T>/TBytes are builtin-seeded dynamic-array ALIASES with no
-        // DeclNode of their own (PasTree.Sema.Builtins) -- always managed,
-        // and the only builtin names seeded as tcArray, so no name check
-        // needed beyond "is this the builtin seed at all".
-        if sfBuiltin in LM.Symbols[LCanon.Sym].Flags then
-          Exit(True);
-        LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
-        if (LDef = NIL_NODE) or (LM.Tree.Nodes[LDef].Kind <> nkArrayType) or
-           (LM.Tree.Nodes[LDef].Aux = 1) then
-          Exit;   // Aux=1: `array of const` (6.2.6) -- not a variable type
-        LChild := LM.Tree.Nodes[LDef].FirstChild;
-        if LChild = NIL_NODE then
-          Exit;
-        LLast := LM.Tree.LastChild(LDef);
-        if LLast = LChild then
-          // Exactly one child: no dimension bound, so DYNAMIC -- the array
-          // value itself is always refcounted, regardless of its element.
-          Exit(True);
-        // A STATIC array: not refcounted itself, but "managed fields force
-        // the enclosing... array to also get finalize codegen" (20.3.1) --
-        // so it counts as managed iff its ELEMENT (the last child) is.
-        LElemX := ResolveTypeExpr(LCanon.UnitId, LLast);
-        Exit(IsManagedTypeX(LElemX, ADepth + 1));
+        LX := SubstX(ResolveTypeExprNested(AMid, ANode), AInst, 0);
+        // An instantiation that cannot be made (its arguments do not
+        // resolve) answers by its generic head.
+        if not XValid(LX) and (LM.Tree.Nodes[ANode].Kind = nkTypeArgs) then
+          LX := ResolveTypeExpr(AMid, LM.Tree.Nodes[ANode].FirstChild, False);
+        Result := IsManagedTypeX(LX, ADepth + 1);
       end;
-    tcProc:
+    // `AnsiString(1252)`: the code-page clause parses as a call (7.1.2).
+    nkCall:
+      Result := IsManagedTypeNode(AMid, LM.Tree.Nodes[ANode].FirstChild,
+        AInst, ADepth + 1);
+    // `string[N]`: a sized short string, never managed (dcc64 37.0,
+    // local/probe-park/e345 MG.dpr).
+    nkStringType:
+      Result := False;
+    nkInterfaceType:
+      Result := True;
+    nkProcType:
+      // `reference to` (Aux 2) only; a plain or `of object` one is not.
+      Result := LM.Tree.Nodes[ANode].Aux = 2;
+    nkArrayType:
       begin
-        LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
-        // Aux=2: `reference to` (17.1). A plain procedural type/pointer
-        // (Aux=0) or `of object` (Aux=1) is NOT compiler-managed.
-        Exit((LDef <> NIL_NODE) and
-          (LM.Tree.Nodes[LDef].Kind = nkProcType) and
-          (LM.Tree.Nodes[LDef].Aux = 2));
-      end;
-    tcRecord:
-      begin
-        LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
-        if (LDef = NIL_NODE) or (LM.Tree.Nodes[LDef].Kind <> nkRecordType)
-        then
+        // Aux 1: `array of const`, no variable type. One child: no index,
+        // so DYNAMIC - managed whatever the element. A static array is
+        // managed iff its element is (20.3.1).
+        if (LM.Tree.Nodes[ANode].Aux = 1) or
+           (LM.Tree.Nodes[ANode].FirstChild = NIL_NODE) then
           Exit;
-        if RecordHasLifecycleOp(LCanon.UnitId, LDef) then
+        if LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling =
+           NIL_NODE then
           Exit(True);
-        // No lifecycle operator of its own -- managed iff any OWN field
-        // (not inherited; records don't have ancestors) is, recursively.
-        // Records don't nest deep enough in practice for ADepth's cap to
-        // ever matter here, but a self-referential alias chain elsewhere
-        // in the recursion (the array/proc cases above) still needs it.
-        LScope := LM.Symbols[LCanon.Sym].MemberScope;
+        Result := IsManagedTypeNode(AMid, LM.Tree.LastChild(ANode), AInst,
+          ADepth + 1);
+      end;
+    // A record, and an old-style `object` (11.5), is managed when it
+    // declares Initialize, Finalize or Assign, or when an instance field is:
+    // a `class var` lives in global storage, and an `[unsafe]` field is not
+    // counted (dcc64 37.0, local/probe-park/e345 MG.dpr). A field's type is
+    // read off its node, so an inline `record ... end`, `array of T` or
+    // `array[..] of string` field counts as the named form does.
+    nkRecordType, nkObjectType:
+      begin
+        if RecordHasLifecycleOp(AMid, ANode) then
+          Exit(True);
+        LStruct := LM.StructSymAtNode(ANode);
+        if LStruct = NIL_SYM then
+          Exit;
+        LScope := LM.Symbols[LStruct].MemberScope;
         if LScope = NIL_SCOPE then
           Exit;
-        for LIdx := 0 to LM.SymCount - 1 do
-          if (LM.Symbols[LIdx].Scope = LScope) and
-             (LM.Symbols[LIdx].Kind = skField) then
+        LList := LM.Scopes[LScope].Symbols;
+        for var LIdx := 0 to LList.Count - 1 do
+        begin
+          LSym := LList[LIdx];
+          if (LM.Symbols[LSym].Kind <> skField) or
+             (LM.Symbols[LSym].DeclNode = NIL_NODE) then
+            Continue;
+          LDecl := LM.Tree.Nodes[LM.Symbols[LSym].DeclNode].Parent;
+          LSkip := False;
+          if (LDecl <> NIL_NODE) and (LM.Tree.Nodes[LDecl].Kind = nkVarDecl) then
           begin
-            LElemX := DeclTypeX(LCanon.UnitId, LIdx);
-            if IsManagedTypeX(LElemX, ADepth + 1) then
-              Exit(True);
+            LSub := LM.Tree.Nodes[LDecl].Parent;
+            if (LSub <> NIL_NODE) and (LM.Tree.Nodes[LSub].Kind = nkVarSec) and
+               (LM.Tree.Nodes[LSub].Aux = 1) then
+              LSkip := True;   // `class var`
+            // The attribute groups are the declaration's preceding SIBLINGS
+            // (`[unsafe] I: IInterface` - nkAttrGroup, then nkVarDecl).
+            if not LSkip and (LSub <> NIL_NODE) then
+            begin
+              var LUnsafe := False;
+              var LKid := LM.Tree.Nodes[LSub].FirstChild;
+              while (LKid <> NIL_NODE) and (LKid <> LDecl) do
+              begin
+                if LM.Tree.Nodes[LKid].Kind = nkAttrGroup then
+                begin
+                  LAttr := LM.Tree.Nodes[LKid].FirstChild;
+                  while LAttr <> NIL_NODE do
+                  begin
+                    if (LM.Tree.Nodes[LAttr].Kind = nkAttribute) and
+                       (LM.Tree.Nodes[LAttr].Aux = amaUnsafe) then
+                      LUnsafe := True;
+                    LAttr := LM.Tree.Nodes[LAttr].NextSibling;
+                  end;
+                end
+                else
+                  LUnsafe := False;
+                LKid := LM.Tree.Nodes[LKid].NextSibling;
+              end;
+              LSkip := (LKid = LDecl) and LUnsafe;
+            end;
           end;
+          if LSkip then
+            Continue;
+          if IsManagedTypeNode(AMid, LM.Symbols[LSym].TypeNode, AInst,
+             ADepth + 1) then
+            Exit(True);
+        end;
       end;
   end;
 end;

@@ -591,23 +591,6 @@ of less work, not a gap in following the language; its consequences are in
   against its constructors (dcc's E2010 for `[Bar(1, 2)]` against
   `Create(const S: string)`).
 
-## 20-memory-management.md
-
-### 20.3.1 The managed-type set
-- the managed-type test (`IsManagedTypeX`, a public query with no consumer
-  in the library yet) ignores generic instantiation frames (a record
-  instantiated with a managed argument reads as unmanaged when the field's
-  declared type is the open parameter) and disagrees with dcc on these rows:
-  - read as managed, unmanaged for dcc: a sized short string (`string[20]`)
-    and every record or array built on it, a distinct alias of ShortString
-    (`= type ShortString`), a record whose only managed field is a `class
-    var`, an `[unsafe]` interface or string field;
-  - read as unmanaged, managed for dcc: an alias of an instantiation
-    (`TArray<Integer>`, `TStringDynArray`) and a record field typed through
-    one, an old-style `object` with a managed field, a record that declares
-    only `class operator Assign`, a field of an inline anonymous type
-    (`Inner: record S: string end`, `A: array of Integer`).
-
 ## B-lexical-grammar.md
 
 ### B.3 Identifiers & case rules
