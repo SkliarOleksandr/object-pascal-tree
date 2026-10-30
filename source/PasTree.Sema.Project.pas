@@ -9629,9 +9629,9 @@ begin
   // An ANONYMOUS struct's symbol has the struct node ITSELF as its declaration
   // - there is no name node and no nkTypeDecl above it (see DeclareAnonStruct).
   // So does an inline procedural type's (audit B3-38) and an anonymous method
-  // literal's (E3-39).
+  // literal's (E3-39), and an `@X` under the TYPEDADDRESS switch (E3-20).
   if LM.Tree.Nodes[LName].Kind in [nkRecordType, nkClassType, nkInterfaceType,
-     nkObjectType, nkHelperType, nkProcType, nkAnonMethod] then
+     nkObjectType, nkHelperType, nkProcType, nkAnonMethod, nkUnaryOp] then
     Exit(LName);
   LParent := LM.Tree.Nodes[LName].Parent;
   if (LParent = NIL_NODE) or (LM.Tree.Nodes[LParent].Kind <> nkTypeDecl) then
@@ -12284,7 +12284,7 @@ begin
           LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // type alias
           LDistinct := LDistinct or IsDistinctTypeDef(LCur.UnitId, LDef);
         end;
-      nkPointerType:
+      nkPointerType, nkUnaryOp:   // an `@X` under {$T+} too (E3-20)
         // Implicit dereference in member access: Object Pascal lets `P.Field`
         // stand for `P^.Field` when P is a pointer to a record, and the RTL
         // leans on it constantly (`Entry.Aliases` where Entry:
@@ -12491,7 +12491,7 @@ begin
           LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // type alias
           LDistinct := LDistinct or IsDistinctTypeDef(LCur.UnitId, LDef);
         end;
-      nkPointerType:
+      nkPointerType, nkUnaryOp:
         LNext := PointeeX(LCur);       // implicit deref: P.Field
       nkProcType, nkAnonMethod:
         LNext := ProcResultX(LCur);    // paramless func ref is called
@@ -16290,11 +16290,28 @@ var
         end;
 
       nkUnaryOp:
-        if LM.IntraType(N) = NIL_SYM then
         begin
-          LBX := OpX(N);
-          if XValid(LBX) then
-            SetXAt(N, LBX);
+          // `@X` under {$T+}: a pointer to X's type, the unnamed symbol the
+          // resolver declared for it, its pointee recorded here for PointeeX
+          // and the member walks (4.8; audit E3-20). An untyped X leaves the
+          // intra-unit typer's Pointer.
+          var LAddrSym: Integer;
+          if LM.AnonTypeSyms.TryGetValue(N, LAddrSym) then
+          begin
+            LBX := GetX(LM.Tree.Nodes[N].FirstChild);
+            if XValid(LBX) then
+            begin
+              if LProbe = nil then
+                LM.AnonPointee.AddOrSetValue(N, LBX);
+              SetXAt(N, XPlain(AId, LAddrSym));
+            end;
+          end
+          else if LM.IntraType(N) = NIL_SYM then
+          begin
+            LBX := OpX(N);
+            if XValid(LBX) then
+              SetXAt(N, LBX);
+          end;
         end;
 
       // `inherited Canvas` / `inherited GetRect(X)` as a VALUE (12.1.2): the
@@ -17878,6 +17895,13 @@ begin
       nkIdent, nkMember, nkTypeArgs:
         LCur := SubstX(ResolveTypeExpr(LCur.UnitId, LDef),
           LCur.Inst, 0);   // alias link, same frame
+      // `@X` under {$T+}: the type the project pass recorded for X (E3-20).
+      nkUnaryOp:
+        begin
+          if not FModels[LCur.UnitId].AnonPointee.TryGetValue(LDef, Result) then
+            Result := XNil;
+          Exit;
+        end;
     else
       Exit;
     end;

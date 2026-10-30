@@ -8887,6 +8887,46 @@ begin
   end;
 end;
 
+// E3-20: under {$T+} `@R` is a typed pointer to R's type - `var P := @R;
+// P.Y` and `P^.Y` are TRec's field; under {$T-} it stays Pointer (4.8,
+// dcc64 37.0, local/probe-park/e320 TA.dpr).
+procedure TestTypedAddress;
+var
+  LDir: string;
+begin
+  LDir := FreshDir('pastree_sema_typedaddr');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'TaP.dpr'),
+    'program TaP;'#10'type'#10 +
+    '  TRec = record Y: Integer; end;'#10 +
+    'var R: TRec; I: Integer;'#10 +
+    'procedure RunT;'#10'begin'#10 +
+    '  {$T+}'#10 +
+    '  var P := @R;'#10 +
+    '  P.Y := 1;'#10 +
+    '  P^.Y := 2;'#10 +
+    '  I := P.Nope1;'#10 +
+    '  I := P^.Nope2;'#10 +
+    'end;'#10 +
+    'begin'#10'  RunT;'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'TaP.dpr'));
+    Ok('typedaddr: only the two wrong members after P are E2003',
+      DiagCount(ModelByName('tap'), 'E2003') = 2);
+    Ok('typedaddr: Y binds through P and P^',
+      CrossRefCountInUnit(ModelByName('tap'), 'Y', 'Y', 'tap') = 2);
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // E3-39: an anonymous method literal is a value of its own procedural type -
 // an inline var initialized with one is called by `F()` and the paren-less
 // `F`, and the member after it is the result's (17.2.1, dcc64 37.0,
@@ -16997,6 +17037,7 @@ begin
   TestNestedTypeArgFrame;
   TestOpenArrayInference;
   TestAnonLiteralType;
+  TestTypedAddress;
   TestAttributeSuffixFirst;
   TestAttributeGuidAndPositions;
   TestHelperVisibility;

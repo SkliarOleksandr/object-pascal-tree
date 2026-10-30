@@ -3066,6 +3066,18 @@ begin
 
   else
     begin
+      // `@X` under {$T+} is a typed pointer `^T` (4.8) - a type no
+      // declaration names, so it gets an unnamed type symbol as an inline
+      // procedural type does (AnonTypeSyms); the project pass records what
+      // it points at (AnonPointee). Under {$T-}, the default, it stays
+      // Pointer and nothing is declared (audit E3-20).
+      if (KindOf(ANode) = nkUnaryOp) and
+         (FTree.Nodes[ANode].Aux >= 0) and
+         (FTree.Nodes[ANode].Aux <= High(FTree.Source.Visible)) and
+         (FTree.Source.VisibleKind(FTree.Nodes[ANode].Aux) = tkAt) and
+         FTree.Source.TypedAddressAt(FTree.Nodes[ANode].Aux) then
+        FModel.AnonTypeSyms.AddOrSetValue(ANode,
+          DeclareAnonStruct(AScope, ANode));
       LChild := FirstChild(ANode);
       while LChild <> NIL_NODE do
       begin

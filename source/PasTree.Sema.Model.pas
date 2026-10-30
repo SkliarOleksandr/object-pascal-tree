@@ -637,6 +637,10 @@ type
       in Phase 1 and never released: unlike a struct, a procedural type owns
       no member scope to snapshot from. }
     AnonTypeSyms: TPasIntMap<Integer>;
+    { `@X` under the TYPEDADDRESS switch (an AnonTypeSyms entry on an
+      nkUnaryOp) -> the type it points at, X's, recorded by the project pass
+      that typed X (audit E3-20). Never released. }
+    AnonPointee: TPasIntMap<TSemaXType>;
     { nkAmbiguous node -> Ord(TAmbigReading), absent = arUnknown: the reading
       of the call argument the parse left open (16.3.1, audit E2-04), decided
       by what its head binds to - the resolver for a head this unit declares,

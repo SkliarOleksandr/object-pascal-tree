@@ -350,6 +350,10 @@ type
     // {$A}/{$ALIGN} state changes, ascending by VisIndex; empty for the
     // overwhelming majority of units (the default is 8).
     AlignEvents: TArray<TPasStateEvent>;
+    // {$T}/{$TYPEDADDRESS} state changes, Value 1 / 0, ascending by
+    // VisIndex: what @X types as (4.8 - a typed `^T` when on). Empty for
+    // nearly every unit (the default is off).
+    TypedAddressEvents: TArray<TPasStateEvent>;
     // {$APPTYPE} directives taken, ascending by VisIndex - see
     // TPasAppTypeEvent. Retained across DemoteText (it is not text).
     AppTypeEvents: TArray<TPasAppTypeEvent>;
@@ -390,6 +394,8 @@ type
     function MinEnumSizeAt(AVisIndex: Integer): Integer;
     // The record field-alignment CAP in effect at AVisIndex (8 = the default).
     function AlignAt(AVisIndex: Integer): Integer;
+    // Is {$T+} / {$TYPEDADDRESS ON} in effect at visible token AVisIndex?
+    function TypedAddressAt(AVisIndex: Integer): Boolean;
     // The last {$APPTYPE} taken before visible position AVisIndex: False
     // when there is none, else AConsole says which.
     function AppTypeBefore(AVisIndex: Integer; out AConsole: Boolean): Boolean;
@@ -501,6 +507,9 @@ type
     FScopedEnumsEvents: TList<TPasStateEvent>;
     FMinEnumEvents: TList<TPasStateEvent>;
     FAlignEvents: TList<TPasStateEvent>;
+    // {$T} - journaled by AddOptionRef, which sees every option change.
+    FTypedAddressEvents: TList<TPasStateEvent>;
+    FTypedAddress: Boolean;
     FDefineRefs: TList<TPasDefineRef>;
     FDefineNames: TPasSpellingPool;   // DefineRefs' Name, across runs
     FIncludeRefs: TList<TPasIncludeRef>;
@@ -956,6 +965,11 @@ begin
   Result := StateAt(AlignEvents, AVisIndex, 8);   // {$A8}
 end;
 
+function TPasPreprocessed.TypedAddressAt(AVisIndex: Integer): Boolean;
+begin
+  Result := StateAt(TypedAddressEvents, AVisIndex, 0) <> 0;   // {$T-}
+end;
+
 { TPasSpellingPool ----------------------------------------------------------- }
 
 // $Q-: the FNV wraparound IS the algorithm, and the checked test build
@@ -1110,6 +1124,7 @@ begin
   FScopedEnumsEvents := TList<TPasStateEvent>.Create;
   FMinEnumEvents := TList<TPasStateEvent>.Create;
   FAlignEvents := TList<TPasStateEvent>.Create;
+  FTypedAddressEvents := TList<TPasStateEvent>.Create;
   FDefineRefs := TList<TPasDefineRef>.Create;
   FIncludeRefs := TList<TPasIncludeRef>.Create;
   FIfNameRefs := TList<TPasIfNameRef>.Create;
@@ -1383,6 +1398,7 @@ begin
   FScopedEnumsEvents.Free;
   FMinEnumEvents.Free;
   FAlignEvents.Free;
+  FTypedAddressEvents.Free;
   FAppTypeEvents.Free;
   FDefineRefs.Free;
   FIncludeRefs.Free;
@@ -1487,6 +1503,7 @@ begin
   FScopedEnumsEvents.Clear;
   FMinEnumEvents.Clear;
   FAlignEvents.Clear;
+  FTypedAddressEvents.Clear;
   FDefineRefs.Clear;
   FIncludeRefs.Clear;
   FIfNameRefs.Clear;
@@ -1497,6 +1514,9 @@ begin
   // answer it - the setters record only a change.
   SetMinEnumSize(FStartState.MinEnumSize);
   SetAlign(FStartState.Align);
+  FTypedAddress := FOpt.Switches['T'];
+  if FTypedAddress then
+    Journal(FTypedAddressEvents, 1);
   FLiveAsm := False;
   FLastVisKind := tkEndOfFile;
   FStopped := False;
@@ -1545,6 +1565,7 @@ begin
   Result.UnresolvedSymbols := FUnresolvedSymbols.ToArray;
   Result.MinEnumEvents := FMinEnumEvents.ToArray;
   Result.AlignEvents := FAlignEvents.ToArray;
+  Result.TypedAddressEvents := FTypedAddressEvents.ToArray;
   Result.AppTypeEvents := FAppTypeEvents.ToArray;
   Result.DefineRefs := FDefineRefs.ToArray;
   Result.IncludeRefs := FIncludeRefs.ToArray;
@@ -2030,6 +2051,11 @@ begin
     LRef.Touched := [];
   LRef.State := FOpt;
   FOptionRefs.Add(LRef);
+  if FOpt.Switches['T'] <> FTypedAddress then
+  begin
+    FTypedAddress := FOpt.Switches['T'];
+    Journal(FTypedAddressEvents, Ord(FTypedAddress));
+  end;
 end;
 
 procedure TPasPreprocessor.HandleInclude(AFileId: Integer;
