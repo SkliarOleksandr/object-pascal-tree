@@ -800,6 +800,11 @@ begin
     if FInPathPins = nil then
       FInPathPins := TDictionary<string, Boolean>.Create;
     FInPathPins.AddOrSetValue(LKey, True);
+    // ResolveInPath has just found the file: PinnedFile need not ask the
+    // disk again this run.
+    if FPinnedSeen = nil then
+      FPinnedSeen := TDictionary<string, Boolean>.Create;
+    FPinnedSeen.AddOrSetValue(LKey, True);
   end;
 end;
 
@@ -2146,10 +2151,35 @@ begin
 end;
 
 // One tolerant disk read (BOM honored; ANSI fallback on decode failure) -
-// LoadText's direct-from-disk path.
+// LoadText's direct-from-disk path. The file is opened directly:
+// TFile.ReadAllBytes first checks that its directory and the file exist, two
+// more file-system calls per read (~1 s of worker time over a 3750-unit
+// closure, perf audit 2026-10 S5). A failed open goes back through TFile,
+// which raises what it always raised here - EFileNotFoundException for a
+// file deleted since it was found, EInOutError for one held open - so a load
+// failure reads the same (NoteLoadFailure). So does a colon past the drive,
+// which names an NTFS stream TFile refuses.
 function TPasSourceManager.ReadFileText(const APath: string): string;
+var
+  LStream: TFileStream;
+  LBytes: TBytes;
 begin
-  Result := DecodeText(TFile.ReadAllBytes(APath), APath);
+  if Pos(':', APath, 3) > 0 then
+    Exit(DecodeText(TFile.ReadAllBytes(APath), APath));
+  try
+    LStream := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
+  except
+    on EFileStreamError do
+      Exit(DecodeText(TFile.ReadAllBytes(APath), APath));
+  end;
+  try
+    SetLength(LBytes, LStream.Size);
+    if LBytes <> nil then
+      LStream.ReadBuffer(LBytes[0], Length(LBytes));
+  finally
+    LStream.Free;
+  end;
+  Result := DecodeText(LBytes, APath);
 end;
 
 procedure TPasSourceManager.Prefetch(const APaths: TArray<string>);

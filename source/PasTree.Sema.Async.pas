@@ -15,7 +15,7 @@ unit PasTree.Sema.Async;
 
   Progress is reported into a lock-guarded snapshot the host reads any time
   (Progress); cancellation is a cooperative Interlocked flag AnalyzeStaged
-  polls between modules/waves. Cancel + WaitFor (drain) is what the host does
+  polls between modules/stages. Cancel + WaitFor (drain) is what the host does
   on project switch / shutdown before starting the next session.
 
   Not covered here (deliberately deferred): exposing the project WHILE it is
@@ -181,7 +181,7 @@ type
     procedure SetLightPaths(const APaths: TArray<string>);
     procedure Start;
     { Request cooperative cancellation; the worker stops at the next module/
-      wave boundary. Does not block. }
+      stage boundary. Does not block. }
     procedure Cancel;
     { Blocks until the worker finishes (or was cancelled and drained). }
     procedure WaitFor;

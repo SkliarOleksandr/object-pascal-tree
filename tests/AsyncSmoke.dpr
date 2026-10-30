@@ -5,16 +5,16 @@ program AsyncSmoke;
   the background async parser drives. These tests run it SYNCHRONOUSLY (no
   threads, so no flakiness) and assert:
 
-  1. RESULT EQUIVALENCE: the staged two-wave+finalizer build produces the same
+  1. RESULT EQUIVALENCE: the staged load+finalizer build produces the same
      final state (loaded units, per-unit diagnostics, cross-unit resolutions)
      as the batch AnalyzeProject over the same closure. Compared order-
      independently (by unit name + target name), since model ids depend on
-     discovery order.
-  2. The interface->full snapshot upgrade really happens (a unit is parsed
-     interface-only, then upgraded to a full tree) and an implementation-only
-     dependency, invisible in the interface wave, is discovered in wave 2.
-  3. Cancellation between waves leaves a partial-but-consistent project (no
-     crash / no leak) rather than a completed one.
+     discovery order - which the staged load keeps as its two waves gave it:
+     the interface closure first, then what only an implementation reaches.
+  2. An implementation-only dependency, which the interface closure does not
+     show, is loaded too, and its names resolve.
+  3. Cancellation at the implementation-only stage leaves a partial-but-
+     consistent project (no crash / no leak) rather than a completed one.
   4. Progress counters advance and the total grows as the closure is found.
 }
 
@@ -110,8 +110,8 @@ const
     'begin'#10 +
     'end.'#10;
   // UnitA: interface exposes TThing + KA; its IMPLEMENTATION uses UnitC - an
-  // implementation-only dependency the interface wave cannot see (exercises
-  // wave-2 discovery).
+  // implementation-only dependency the interface closure does not show
+  // (exercises the load's implementation stage).
   UNIT_A =
     'unit UnitA;'#10 +
     'interface'#10 +
@@ -151,6 +151,16 @@ const
     '  Integer = _INT;'#10 +
     'implementation'#10 +
     'end.'#10;
+
+// The models' unit names in id order.
+function ModelOrder(AProj: TPasSemaProject): string;
+var
+  LI: Integer;
+begin
+  Result := '';
+  for LI := 0 to AProj.ModelCount - 1 do
+    Result := Result + AProj.Model(LI).UnitNameLower + ' ';
+end;
 
 function BatchProject(const ADir: string): TPasSemaProject;
 begin
@@ -212,14 +222,13 @@ begin
         LRootRefs := Length(LStaged.Model(LMid).Tree.Source.DefineRefs);
     Ok('staged: root program records both DefineRefs', LRootRefs = 2);
 
-    // Wave-2 discovery: UnitC is an implementation-only dependency of UnitA,
-    // invisible to the interface wave - it must still be loaded.
+    // UnitC is an implementation-only dependency of UnitA, outside the
+    // interface closure - it must still be loaded.
     var LHasC := False;
     for LMid := 0 to LStaged.ModelCount - 1 do
       if LStaged.Model(LMid).UnitNameLower = 'unitc' then
         LHasC := True;
-    Ok('staged: implementation-only dependency UnitC discovered in wave 2',
-      LHasC);
+    Ok('staged: implementation-only dependency UnitC loaded', LHasC);
 
     // The cross-unit const use (UnitA impl: CC_MARK from UnitC) resolved -
     // proves the full (not interface-only) trees drove the final analysis.
@@ -242,7 +251,47 @@ begin
     LBatch.Free;
   end;
 
-  // ---- 2. Progress: total grows, waves observed, ends 'done' ----
+  // ---- 1b. Model ids: the interface closure first, then what only an
+  // implementation reaches - the order of the two waves the staged load
+  // once ran, which RegisterUnitName's first-loaded-wins depends on. UnitA's
+  // implementation uses UnitC, UnitB's interface uses UnitD: two waves gave
+  // D an id before C; one wave committing as it discovers (AnalyzeProject)
+  // gives C one first. ----
+  begin
+    var LOrd := TPath.Combine(TPath.GetTempPath, 'pastree_async_order');
+    if TDirectory.Exists(LOrd) then
+      TDirectory.Delete(LOrd, True);
+    TDirectory.CreateDirectory(LOrd);
+    TFile.WriteAllText(TPath.Combine(LOrd, 'App.dpr'),
+      'program App;'#10'uses UnitA, UnitB;'#10'begin'#10'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LOrd, 'UnitA.pas'),
+      'unit UnitA;'#10'interface'#10'implementation'#10'uses UnitC;'#10 +
+      'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LOrd, 'UnitB.pas'),
+      'unit UnitB;'#10'interface'#10'uses UnitD;'#10'implementation'#10 +
+      'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LOrd, 'UnitC.pas'),
+      'unit UnitC;'#10'interface'#10'implementation'#10'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LOrd, 'UnitD.pas'),
+      'unit UnitD;'#10'interface'#10'implementation'#10'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LOrd, 'System.pas'), UNIT_SYS);
+    var LStagedOrd := StagedProject(LOrd, []);
+    var LBatchOrd := BatchProject(LOrd);
+    try
+      Ok('ids: staged keeps the two waves'' order (C after the interface ' +
+        'closure)', ModelOrder(LStagedOrd) =
+        'app system unita unitb unitd unitc ');
+      Ok('ids: batch commits as it discovers (C before D)',
+        ModelOrder(LBatchOrd) = 'app system unita unitb unitc unitd ');
+      Ok('ids: both load the same closure, diagnostics included',
+        CanonicalDump(LStagedOrd) = CanonicalDump(LBatchOrd));
+    finally
+      LStagedOrd.Free;
+      LBatchOrd.Free;
+    end;
+  end;
+
+  // ---- 2. Progress: total grows, both load phases observed, ends 'done' ----
   LMaxTotal := 0;
   LMaxFull := 0;
   LProgressCalls := 0;
@@ -270,8 +319,8 @@ begin
     end);
   try
     Ok('progress: callback fired', LProgressCalls > 0);
-    Ok('progress: saw the interface wave', LSawIntfPhase);
-    Ok('progress: saw the full wave', LSawFullPhase);
+    Ok('progress: saw the interface phase', LSawIntfPhase);
+    Ok('progress: saw the full phase', LSawFullPhase);
     Ok('progress: saw the cross sub-phases', LSawCrossPhase);
     Ok('progress: ended with phase=done', LSawDone);
     Ok('progress: total grew to the full closure',
@@ -281,8 +330,8 @@ begin
     LStaged.Free;
   end;
 
-  // ---- 3. Cancellation between waves -> partial but consistent ----
-  // Cancel as soon as the full wave begins: some units are interface-ready,
+  // ---- 3. Cancellation between load phases -> partial but consistent ----
+  // Cancel as soon as the full phase begins: some units are interface-ready,
   // nothing is cross-ready, no crash, no leak.
   LCancelled := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -297,7 +346,7 @@ begin
         if AP.Phase = 'full' then
           LSeenFull := True;
       end);
-    // At least the interface wave completed; the cross finalizer did not run.
+    // At least the interface closure loaded; the cross finalizer did not run.
     var LAnyIntf := False;
     var LAnyCross := False;
     for LMid := 0 to LCancelled.ModelCount - 1 do
@@ -480,8 +529,8 @@ begin
   // ---- 7. Light mode through the session (TPasSemaProject.LightPaths) ----
   // LibL sits in a light tree; its implementation uses LibM, which a light
   // run never loads. The session forwards the trees; the progress counts a
-  // light unit as done in the full wave (it is never upgraded), so the full
-  // wave's last report already reads FullDone = Total. The tree lies
+  // light unit as done in the full phase (it is interface-only for good), so
+  // the full phase's last report already reads FullDone = Total. The tree lies
   // OUTSIDE the project directory - one under it would be exempt (own).
   var LLib := TPath.Combine(TPath.GetTempPath, 'pastree_async_lightlib');
   begin
@@ -538,7 +587,7 @@ begin
           if AP.Phase = 'full' then
             LLastFull := AP;
         end);
-      Ok('light progress: the full wave ends at FullDone = Total',
+      Ok('light progress: the full phase ends at FullDone = Total',
         (LLastFull.Total > 0) and (LLastFull.FullDone = LLastFull.Total));
     except
       LProj.Free;

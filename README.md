@@ -106,9 +106,14 @@ with no shared mutable state on the hot path, so a whole project's `uses`
 closure fans out across cores instead of being processed one file at a time:
 
 - **Parse + Phase 1** (lex -> preprocess -> parse -> per-unit scopes/symbols)
-  run one worker per core (`TParallel.&For`) over every file in the closure;
-  results are registered back **in input order** afterwards, so model IDs stay
+  run one worker per core over every file in the closure; results are
+  registered back **in input order** afterwards, so model IDs stay
   deterministic regardless of which worker finishes first.
+- **One model per grab.** Every parallel pass (`ForEachIndex`) hands its
+  workers one index at a time from a shared counter. `TParallel.&For`, which
+  it used before, doubles a worker's share every core-count grabs up to 16 x
+  the core count, so a pass's last grabs gave one worker 128-256 consecutive
+  models while the others idled: 100 ms of tails on a 3750-unit project.
 - **Cross-unit resolution** is split into a parallel *compute* step (every
   worker only reads other units' already-built reference maps) and a
   sequential *commit* step, so the one pass that has a true ordering
@@ -296,23 +301,31 @@ Opening a project, or editing a file, never blocks the editor: analysis runs
 on a background worker while the previous (still-valid) model stays live and
 usable.
 
-- **Two-wave staged pipeline** (`TPasSemaProject.AnalyzeStaged`): wave 1
-  parses every unit of the `uses` closure **interface-only**, breadth-first,
-  with the open file's own direct dependencies front-loaded so they're ready
-  first; wave 2 upgrades each unit to a full parse (revealing any
-  implementation-only dependencies wave 1 couldn't see); a finalizer then
-  runs the existing cross-unit passes over the whole closure. Each module
-  tracks its own progress - `msQueued -> msIntfReady -> msFullReady ->
-  msCrossReady` - so a consumer can gate on "just enough" instead of waiting
-  for everything.
+- **Staged pipeline** (`TPasSemaProject.AnalyzeStaged`): one load wave
+  parses every unit of the `uses` closure in full, breadth-first, with the
+  open file's own direct dependencies front-loaded so they're ready first -
+  the closure of the interface `uses` committed first (progress phase
+  `intf`), then the units only an implementation `uses` reaches (`full`); a
+  finalizer then runs the existing cross-unit passes over the whole closure.
+  Each module tracks its own progress - `msQueued -> msFullReady ->
+  msCrossReady`, `msIntfReady` for a library unit read interface-only.
+- **One wave, the ids of two.** The load used to run two waves: every unit
+  interface-only, then each one upgraded to a full parse. Nothing could use
+  the interface wave - no host reads a project during its run - and the
+  upgrade re-parsed every unit and re-ran its Phase 1, so a single wave of
+  full parses is 0.26 s and 11% CPU cheaper on a 3750-unit project (perf
+  audit 2026-10). Model ids stay the ones the two waves gave, because the
+  first file loaded under a unit name owns it (`RegisterUnitName`): a unit
+  discovers its interface `uses` at its commit, its implementation `uses`
+  once the interface closure is in, in id order - while the units only an
+  implementation reaches already parse ahead of their turn.
 - **Snapshot swap, not mutation.** A module's tree/model is an immutable
-  snapshot; the interface->full upgrade parses a *new* tree - reusing the
-  interface wave's own lexed/preprocessed token stream, not re-lexing - and
-  replaces the old model with it, freeing the old one. The replacement is
-  not synchronized: nothing may read a project while a thread is analyzing
-  it (`TryGetSnapshot` and `ModuleStatus` included). A host gets a complete
-  project from `TPasAsyncSession` below, which hands one over only when
-  its build is done.
+  snapshot; a re-parse (a re-decided `$IF`, an edit) builds a *new* model
+  and replaces the old one with it, freeing the old one. The replacement
+  is not synchronized: nothing may read a project while a thread is
+  analyzing it (`TryGetSnapshot` and `ModuleStatus` included). A host gets
+  a complete project from `TPasAsyncSession` below, which hands one over
+  only when its build is done.
 - **`TPasAsyncSession`** runs the whole pipeline on a background thread with
   double-buffered ownership: the host polls a lock-guarded progress snapshot
   (`phase done/total`, with total growing as the closure is discovered) and,
@@ -320,11 +333,9 @@ usable.
   mutable state between the worker and the UI to race. Cancellation is
   cooperative, checked between chunks/passes, so switching projects or
   closing the app never waits on a stale in-flight analysis.
-- On a large real-world project, background analysis now runs at
-  near-parity with the synchronous batch driver (~11s either way) after
-  chunked parallel upgrading and reusing the interface wave's lex/preprocess
-  pass in wave 2 - the two-wave split buys non-blocking, progressively-ready
-  analysis without a meaningful throughput cost.
+- Background analysis and the synchronous batch driver (`AnalyzeProject`)
+  now load the same way - one wave of full parses - and differ only in the
+  order they commit, so in model ids.
 - **Text-only demotion for incremental hosts** (`DemoteText`, 0.47.0): after
   a build, a host can free the token layer of every unit it does not keep
   (typically: keep open files and the project's own units, drop the

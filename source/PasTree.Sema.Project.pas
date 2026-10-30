@@ -139,7 +139,9 @@ type
     Total: Integer;      // modules discovered so far
     IntfDone: Integer;   // modules that reached at least msIntfReady
     FullDone: Integer;   // modules that reached at least msFullReady
-    Phase: string;       // 'intf' | 'full' | 'cross' | 'done' | 'cancelled'
+    // 'intf' (loading the interface `uses` closure) | 'full' (the modules
+    // only an implementation reaches) | 'cross:...' | 'done' | 'cancelled'
+    Phase: string;
   end;
 
   // The module path's two callers: an edit of a module (AnalyzeModuleOnly)
@@ -748,9 +750,9 @@ type
     procedure LoadFilesParallel(const APaths: TArray<string>);
     // Continuous closure loader - see the implementation. Returns False when
     // the run was cancelled part-way (committed models stay published).
-    function RunLoadEngine(const ASeedLoads: TArray<string>;
-      const ASeedUpgrades: TArray<Integer>; AIntfLoads: Boolean;
-      const AAfterCommits: TProc): Boolean;
+    // AOnImplSweep: ADeferImpl's interface closure is in (see there).
+    function RunLoadEngine(const AWholeLoads, ASeedLoads: TArray<string>;
+      ADeferImpl: Boolean; const AAfterCommits, AOnImplSweep: TProc): Boolean;
     // RunLoadEngine's worker computes - a method, not a nested routine,
     // because the worker is an anonymous method and cannot capture one.
     function ComputeLoad(const APath: string; AIntf: Boolean;
@@ -769,8 +771,8 @@ type
     // Clears FDonor at the end of the one run that consumed it; AReport
     // appends 'donorhits=..;donormiss=..;' to StageTimings first.
     procedure FinishDonor(AReport: Boolean);
-    function ComputeUpgrade(const ASource: TPasPreprocessed;
-      out AErrClass, AErrMsg: string): TPasSemaModel;
+    // AnalyzeStaged's half of EnsureSystemUnit/EnsureSysInitUnit - see there.
+    procedure BindImplicitUnits(const ASystem, ASysInit: string);
     procedure RegisterUnitName(AId: Integer);
     procedure DefaultProjectDirFrom(const AMainFile: string);
     procedure RecheckDonorProjectDir;
@@ -1411,7 +1413,12 @@ type
       const AArgTypes: TArray<TSemaXType>; ACtx: Integer): Integer;
     function ExplicitMethodFrame(AId, AMid, ASym, ATypeArgs,
       ACtx: Integer): Integer;
-    procedure BindTypesX(AId: Integer);
+    // The declared-type pass over AIds - see the implementation.
+    procedure BindTypesX(const AIds: TArray<Integer>);
+    procedure BindTypesXCompute(AId: Integer; out ASyms: TArray<Integer>;
+      out AXs: TArray<TSemaXType>; out AConsts: TArray<Integer>);
+    procedure BindTypesXCommit(AId: Integer; const ASyms: TArray<Integer>;
+      const AXs: TArray<TSemaXType>; const AConsts: TArray<Integer>);
     // Is the nkBinaryOp ANode of model AId an `as` cast? Rehydrates a
     // text-demoted model to read the operator - see the implementation.
     function BinaryOpIsAs(AId, ANode: Integer): Boolean;
@@ -2227,27 +2234,28 @@ type
     function DefineSide(AMid: Integer; out ARows: TArray<TPasSideDefine>): Boolean;
     // Analyze every .pas/.dpr under a directory (indexed first).
     procedure AnalyzeDirectory(const ARoot: string);
-    { Incremental analysis of ARoots' transitive uses closure, in two waves -
-      wave 1 parses every reachable module INTERFACE-ONLY (msIntfReady: enough
-      for navigation INTO it), wave 2 upgrades each to a full parse
-      (msFullReady, revealing implementation-only dependencies), then a
-      finalizer runs the cross passes (msCrossReady). APriority names files to
-      front-load (the open editor module + its direct uses) so they reach
-      readiness first. ACancelled is polled between modules and waves by the
-      driver AND inside the passes, by every pool worker, concurrently - it
-      must be thread-safe and cheap (an interlocked flag read, as
-      TPasAsyncSession passes; never UI state or a closure over mutable
-      locals). On True the call returns early leaving whatever completed
-      published (partial but consistent). AOnProgress reports a growing
-      done/total after each step, on the calling thread. Returns the model id
-      of ARoots[0], or -1.
+    { Incremental analysis of ARoots' transitive uses closure: one load wave
+      parses every reachable module in full (msFullReady; a light one
+      interface-only, msIntfReady) - the closure of the interface `uses`
+      first (progress phase 'intf'), then the modules only an implementation
+      `uses` reaches ('full') - then a finalizer runs the cross passes
+      (msCrossReady). APriority names files to front-load (the open editor
+      module + its direct uses) so they reach readiness first. The load used
+      to be two waves, every module interface-only and then each one again in
+      full; the model ids are still that order's (see RunLoadEngine).
+      ACancelled is polled between modules and stages by the driver AND
+      inside the passes, by every pool worker, concurrently - it must be
+      thread-safe and cheap (an interlocked flag read, as TPasAsyncSession
+      passes; never UI state or a closure over mutable locals). On True the
+      call returns early leaving whatever completed published (partial but
+      consistent). AOnProgress reports a growing done/total after each step,
+      on the calling thread. Returns the model id of ARoots[0], or -1.
 
       The FINAL state (models + diagnostics + cross-refs) is equivalent to
-      AnalyzeProject over the same closure; the interface wave is a transient
-      early-usability optimization. Like every Analyze*, it must not be called
-      from a thread-pool task (see ConfigureThreadPool) - TPasAsyncSession
-      runs it on a TThread of its own; a caller using it directly (tests,
-      headless) gets a deterministic staged build. }
+      AnalyzeProject over the same closure. Like every Analyze*, it must not
+      be called from a thread-pool task (see ConfigureThreadPool) -
+      TPasAsyncSession runs it on a TThread of its own; a caller using it
+      directly (tests, headless) gets a deterministic staged build. }
     function AnalyzeStaged(const ARoots, APriority: TArray<string>;
       const ACancelled: TFunc<Boolean> = nil;
       const AOnProgress: TProc<TPasStagedProgress> = nil): Integer;
@@ -2693,15 +2701,25 @@ end;
   APass names the pass for the message. AMidOf maps a body index to the model
   it belongs to: for most passes that is the index itself, but the
   candidate-driven ones iterate a subset and must map back, or the report
-  would blame an unrelated unit. }
+  would blame an unrelated unit.
+
+  The workers take ONE index per grab. TParallel.&For's stride manager
+  doubles a worker's chunk every ProcessorCount grabs, up to 16 x
+  ProcessorCount indices (256 on 16 cores), so a pass's last grabs handed one
+  worker 128-256 consecutive models while the others idled - the tails of
+  the inherited, with and xtype passes. A shared counter costs one
+  interlocked add per index, nothing beside a model's work: -100 ms over the
+  cross passes of a 3750-unit closure (perf audit 2026-10, S2). The load
+  engine pulls one item at a time for the same reason. }
 procedure TPasSemaProject.ForEachIndex(AHi: Integer; const APass: string;
   const ABody: TProc<Integer>; const AMidOf: TFunc<Integer, Integer>);
 var
-  LIdx: Integer;
+  LIdx, LNext: Integer;
   LRun: TProc<Integer>;
+  LTasks: TArray<ITask>;
 begin
-  // An anonymous method, not a nested procedure: TParallel.&For takes a
-  // TProc<Integer> and a nested one cannot be captured (E2555).
+  // An anonymous method, not a nested procedure: the workers below are
+  // anonymous methods and cannot capture a nested one (E2555).
   LRun :=
     procedure(AIndex: Integer)
     var
@@ -2725,17 +2743,49 @@ begin
         end;
       end;
     end;
-  if FSingleThreaded then
-  begin
-    for LIdx := 0 to AHi do
+  try
+    if FSingleThreaded then
     begin
-      if CancelRequested then
-        Break;
-      LRun(LIdx);
+      for LIdx := 0 to AHi do
+      begin
+        if CancelRequested then
+          Break;
+        LRun(LIdx);
+      end;
+    end
+    else if AHi < 0 then
+      Exit
+    else if TTask.CurrentTask <> nil then
+      // A pool task waiting on tasks of its own could wait for threads that
+      // never come (see ConfigureThreadPool). No Analyze* entry runs on one
+      // (EnterAnalysis); should a caller ever do so, it keeps the RTL's loop.
+      TParallel.&For(0, AHi, LRun)
+    else
+    begin
+      LNext := -1;
+      SetLength(LTasks, Min(Max(1, TThreadPool.Default.MaxWorkerThreads),
+        AHi + 1));
+      for LIdx := 0 to High(LTasks) do
+        LTasks[LIdx] := TTask.Run(
+          procedure
+          var
+            LMine: Integer;
+          begin
+            LMine := AtomicIncrement(LNext);
+            while LMine <= AHi do
+            begin
+              LRun(LMine);
+              LMine := AtomicIncrement(LNext);
+            end;
+          end);
+      TTask.WaitForAll(LTasks);
     end;
-  end
-  else
-    TParallel.&For(0, AHi, LRun);
+  finally
+    // The workers capture LRun, so it lives in this frame, and it is a
+    // closure over this frame: a cycle nothing else breaks (see
+    // AnalyzeStaged's LNotify).
+    LRun := nil;
+  end;
 end;
 
 function TPasSemaProject.CancelRequested: Boolean;
@@ -2972,6 +3022,32 @@ begin
         FSysInitUnitId := LoadFile(LPath);
     end;
     Result := FSysInitUnitId;
+  finally
+    TMonitor.Exit(FSystemUnitLock);
+  end;
+end;
+
+// EnsureSystemUnit and EnsureSysInitUnit in two halves, for AnalyzeStaged:
+// the paths resolved before its load engine (ASystem, ASysInit; '' = not
+// found), which loaded the files first; the ids taken here, from those paths
+// - not resolved again: a `uses System in` clause the engine met may have
+// pinned the name to another file since.
+procedure TPasSemaProject.BindImplicitUnits(const ASystem, ASysInit: string);
+begin
+  TMonitor.Enter(FSystemUnitLock);
+  try
+    if not FSystemUnitResolved then
+    begin
+      FSystemUnitResolved := True;
+      if ASystem <> '' then
+        FSystemUnitId := LoadFile(ASystem);
+    end;
+    if not FSysInitUnitResolved then
+    begin
+      FSysInitUnitResolved := True;
+      if ASysInit <> '' then
+        FSysInitUnitId := LoadFile(ASysInit);
+    end;
   finally
     TMonitor.Exit(FSystemUnitLock);
   end;
@@ -3395,8 +3471,8 @@ begin
   // The compiler-provided names are answerable already; anything else a
   // Declared() guard asks is recorded for RunDeclaredPass.
   APP.OnDeclared := SeedDeclaredQuery();
-  // A light unit (LightPaths) parses interface-only in EVERY wave and
-  // driver - it is never upgraded.
+  // A light unit (LightPaths) parses interface-only in EVERY driver, AIntf
+  // or not.
   LLight := IsLightFile(AFull);
   // A light unit keeps its implementation's `uses` clause too: the units it
   // imports there are known (UNIT_NOT_LOADED, or loaded when they are own).
@@ -3407,13 +3483,15 @@ begin
   else
     LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags, AIntf);
   LIsUnit := (Length(LTree.Nodes) > 0) and (LTree.Nodes[0].Kind = nkUnit);
-  // A model whose parse really did stop at the interface is TRANSIENT
-  // (replaced by the full wave) - skip the expression typer, its
-  // ExprType/E2010/E2015 output dies with the model. NOT keyed on AIntf
+  // A model whose parse really did stop at the interface skips the
+  // expression typer, as the interface wave's transient models did. Such a
+  // model is now only RunLoadEngine's stand-in for a unit whose full parse
+  // raised - kept as the two waves kept it when the upgrade raised, without
+  // its implementation, so without typed bodies either. NOT keyed on AIntf
   // alone: a program/library/package ignores the flag, parses fully,
-  // registers msFullReady and is never upgraded - skipping ITS typer would
-  // permanently lose its type diagnostics. A LIGHT model is permanent, not
-  // a wave-1 snapshot: its typer runs, as a full model's does.
+  // registers msFullReady - skipping ITS typer would permanently lose its
+  // type diagnostics. A LIGHT model is permanent: its typer runs, as a full
+  // model's does.
   Result := TPasSemaResolver.Analyze(LTree, AIntf and LIsUnit and not LLight,
     FPlatform);
   try
@@ -7160,20 +7238,22 @@ end;
 type
   // RunLoadEngine's queue entry / result. Unit-level: Delphi has no local
   // type declarations, and the queue is a generic over these.
-  TPasLoadKind = (lkLoad, lkUpgrade);
   TPasLoadItem = record
-    Kind: TPasLoadKind;
-    Path, Key: string;         // lkLoad: normalized full path + lower key
-    Mid: Integer;              // lkUpgrade: model to swap in place
-    Source: TPasPreprocessed;  // lkUpgrade: token-layer snapshot
+    Path, Key: string;         // normalized full path + lower key
   end;
   TPasLoadRes = record
     Model: TPasSemaModel;            // nil = failed; ErrClass/ErrMsg say why
     ErrClass, ErrMsg: string;
-    // True = a donor hit, which is a FULL model even in the interface wave;
-    // the commit's msIntfReady test cannot tell that from an interface-only
-    // tree (both root at nkUnit), so the worker says so explicitly.
+    // No such file (any more) - skipped, not a load failure.
+    Missing: Boolean;
+    // True = a donor hit. The interface wave of old took it whole, its
+    // implementation `uses` included, so the commit does not defer them -
+    // and nothing in the tree tells a donor hit from a fresh parse.
     FullDonor: Boolean;
+    // The full parse raised and Model is the unit's interface parse, kept as
+    // the two waves kept it when the upgrade raised; ErrClass/ErrMsg are the
+    // full parse's.
+    IntfFallback: Boolean;
   end;
 
 function TPasSemaProject.ComputeLoad(const APath: string; AIntf: Boolean;
@@ -7189,8 +7269,8 @@ begin
   AFullDonor := False;
   try
     // Donor reuse first (APath arrives normalized - see EnqueueLoad). A hit
-    // is ALWAYS a full model, even during the interface wave: the commit
-    // must not classify it msIntfReady by its nkUnit root - hence the flag.
+    // is ALWAYS a full model, taken whole: the engine must not defer its
+    // implementation `uses` by its nkUnit root - hence the flag.
     Result := TryDonorLoad(LowerCase(APath), APath);
     if Result <> nil then
     begin
@@ -7214,37 +7294,6 @@ begin
   end;
 end;
 
-function TPasSemaProject.ComputeUpgrade(const ASource: TPasPreprocessed;
-  out AErrClass, AErrMsg: string): TPasSemaModel;
-var
-  LDiags: TArray<TPasParseDiag>;
-begin
-  // The engine's upgrade of an interface model: reparse from the SAME token
-  // layer (stage 1 preprocessed the whole file; re-preprocessing would
-  // double-pay lex+PP and break the prefix invariant against on-disk
-  // changes).
-  AErrClass := '';
-  AErrMsg := '';
-  try
-    Result := TPasSemaResolver.Analyze(
-      TPasParser.ParseFile(ASource, LDiags, False), False, FPlatform);
-    try
-      Result.AddParseDiags(LDiags);
-    except
-      FreeAndNil(Result);
-      raise;
-    end;
-  except
-    on E: Exception do
-    begin
-      PasRecoverStackOverflow;   // the worker goes on to the next unit
-      Result := nil;
-      AErrClass := E.ClassName;
-      AErrMsg := E.Message;
-    end;
-  end;
-end;
-
 { Continuous closure loading - the barrier-free replacement for the
   LoadChunked/DiscoverUses rounds and for UpgradeChunked's slices.
 
@@ -7253,17 +7302,38 @@ end;
   barrier one straggler holds alone, and between slices the driver thread
   runs discovery while every worker idles. Here instead:
 
-  - N worker tasks pull items from a shared queue and parse OUT OF ORDER;
-  - the driver commits results STRICTLY IN QUEUE ORDER (a reorder buffer),
-    so model ids stay exactly as deterministic as the chunked loader's;
+  - N worker tasks pull parse jobs from a shared queue and parse OUT OF
+    ORDER;
+  - the driver commits results STRICTLY IN DISCOVERY ORDER (LSeq, a reorder
+    buffer), so model ids stay exactly as deterministic as the chunked
+    loader's;
   - discovery runs on the driver right after each commit, in commit order.
-    Committing in queue order makes per-commit discovery concatenate to the
-    very same path sequence the old id-ordered DiscoverUses sweep produced -
-    which is what keeps the queue, and therefore every model id and every
-    downstream report, byte-for-byte reproducible against the old driver;
-  - wave-2 upgrades ride the same queue; the item carries a SNAPSHOT of the
-    model's token layer, so no worker ever indexes FModels while the
-    driver's commits are growing its backing array.
+    Committing in discovery order makes per-commit discovery concatenate to
+    the very same path sequence the old id-ordered DiscoverUses sweep
+    produced - which is what keeps the order, and therefore every model id
+    and every downstream report, byte-for-byte reproducible against the old
+    driver;
+  - ADeferImpl (AnalyzeStaged) keeps the ids of the two waves it replaced -
+    every unit interface-only, then every unit upgraded to a full parse -
+    while parsing each unit once, in full. A unit the interface wave read
+    interface-only discovers its interface `uses` only at its commit; when
+    the commits drain, the driver walks those units' whole `uses` lists in
+    id order, as the upgrade wave's commits did, and loads what only an
+    implementation reaches. The upgrade wave re-parsed every unit and
+    re-ran its Phase 1 for nothing a host could see (none reads a project
+    during its run): one wave is 0.26 s and 11% CPU cheaper on a 3750-unit
+    closure (perf audit 2026-10, S1). A unit whose full parse raises is
+    loaded interface-only and says so, as a failed upgrade did;
+  - a unit only an implementation reaches is parsed AHEAD of its turn (see
+    Speculate): parse order and commit order are separate lists, so it
+    parses as soon as its importer is in, while its id is still the sweep's.
+    Started at the sweep, one big such unit parsed alone for 175 ms at the
+    end of a light build;
+  - AWholeLoads (System and SysInit) commit first and are taken whole, as a
+    model committed before the call would be - so their ids, and the order
+    their `uses` are discovered in, are what loading them before the engine
+    gave, while their parses (System's the biggest of a closure) overlap
+    the rest instead of holding up the start (perf audit 2026-10, S4).
 
   No Prefetch here: it runs TParallel.&For, and this engine's tasks occupy
   the whole pinned pool for the duration (see ConfigureThreadPool - with
@@ -7279,52 +7349,84 @@ end;
   Cancellation: the driver stops committing between items and workers stop
   taking; in-flight parses finish, their results are freed uncommitted, and
   the committed prefix stays published - LoadChunked's exact contract. }
-function TPasSemaProject.RunLoadEngine(const ASeedLoads: TArray<string>;
-  const ASeedUpgrades: TArray<Integer>; AIntfLoads: Boolean;
-  const AAfterCommits: TProc): Boolean;
+function TPasSemaProject.RunLoadEngine(const AWholeLoads,
+  ASeedLoads: TArray<string>; ADeferImpl: Boolean;
+  const AAfterCommits, AOnImplSweep: TProc): Boolean;
 const
   REPORT_EVERY = 64;
 var
-  // LQueue, LResults, LTake and LStop are guarded by TMonitor on LQueue,
-  // which outlives every worker (freed after TTask.WaitForAll).
+  // LQueue (the parse jobs), LResults (by job), LTake and LStop are guarded
+  // by TMonitor on LQueue, which outlives every worker (freed after
+  // TTask.WaitForAll).
   LQueue: TList<TPasLoadItem>;
   LResults: TDictionary<Integer, TPasLoadRes>;
   LTake: Integer;
   LStop: Boolean;
   LWorkEvt, LDoneEvt: TEvent;               // auto-reset kicks; 5 ms fallback
   LTasks: TArray<ITask>;
-  LSeen: TDictionary<string, Boolean>;      // driver-only enqueue dedup
+  // Driver-only. LSeq: the jobs in commit order, which decides model ids;
+  // LSeen: the keys in it; LJobOf: the job of every key that has one.
+  LSeq: TList<Integer>;
+  LSeen: TDictionary<string, Boolean>;
+  LJobOf: TDictionary<string, Integer>;
+  // ADeferImpl: the units whose whole `uses` list waits for the sweep, in
+  // id order; LSwept once it ran (from the start without ADeferImpl); the
+  // commits from LWholeEnd up to LFallbackEnd are the interface wave's,
+  // those below LWholeEnd AWholeLoads'.
+  LDeferred: TList<Integer>;
+  LSwept, LDefer, LDonor: Boolean;
+  LWholeEnd, LFallbackEnd: Integer;
   LItem: TPasLoadItem;
   LRes: TPasLoadRes;
   LPair: TPair<Integer, TPasLoadRes>;
-  LCommit, LSince, LIdx, LWorkers: Integer;
-  LHaveItem, LHaveRes: Boolean;
+  LCommit, LSince, LIdx, LWorkers, LMid, LJob: Integer;
+  LHaveRes: Boolean;
+  LClass, LMsg: string;
   LStatus: TPasModuleStatus;
+  LCompute: TFunc<TPasLoadItem, TPasLoadRes>;
 
-  // A full path and its key, as ResolveUnit answers them, through the
-  // dedup gate LoadFilesParallel runs per batch.
-  procedure EnqueueKeyed(const LFull, LKey: string);
+  // A parse job for the file: on the queue, not yet in commit order.
+  function AddJob(const AFull, AKey: string): Integer;
   var
-    LDummy: Integer;
     LNew: TPasLoadItem;
   begin
-    if FByPath.TryGetValue(LKey, LDummy) or LSeen.ContainsKey(LKey) then
-      Exit;
-    if not FSM.SourceExists(LFull) then
-      Exit;
-    LSeen.Add(LKey, True);
-    LNew := Default(TPasLoadItem);
-    LNew.Kind := lkLoad;
-    LNew.Path := LFull;
-    LNew.Key := LKey;
-    LNew.Mid := -1;
+    LNew.Path := AFull;
+    LNew.Key := AKey;
     TMonitor.Enter(LQueue);
     try
-      LQueue.Add(LNew);
+      Result := LQueue.Add(LNew);
     finally
       TMonitor.Exit(LQueue);
     end;
+    LJobOf.AddOrSetValue(AKey, Result);
     LWorkEvt.SetEvent;
+  end;
+
+  // A full path and its key, as ResolveUnit answers them, through the
+  // dedup gate LoadFilesParallel runs per batch, next in commit order - its
+  // job the one Speculate started for that very path, if any. Whether the
+  // file exists is the worker's question (see LCompute).
+  procedure EnqueueKeyed(const LFull, LKey: string);
+  var
+    LDummy: Integer;
+    LSame: Boolean;
+  begin
+    if FByPath.TryGetValue(LKey, LDummy) or LSeen.ContainsKey(LKey) then
+      Exit;
+    LSeen.Add(LKey, True);
+    LSame := False;
+    if LJobOf.TryGetValue(LKey, LDummy) then
+    begin
+      TMonitor.Enter(LQueue);
+      try
+        LSame := LQueue[LDummy].Path = LFull;
+      finally
+        TMonitor.Exit(LQueue);
+      end;
+    end;
+    if not LSame then
+      LDummy := AddJob(LFull, LKey);
+    LSeq.Add(LDummy);
   end;
 
   // A seed, as the host gave it.
@@ -7336,34 +7438,41 @@ var
     EnqueueKeyed(LFull, LowerCase(LFull));
   end;
 
-  procedure EnqueueUpgrade(AMid: Integer);
-  var
-    LNew: TPasLoadItem;
-  begin
-    LNew := Default(TPasLoadItem);
-    LNew.Kind := lkUpgrade;
-    LNew.Mid := AMid;
-    LNew.Source := FModels[AMid].Tree.Source;
-    TMonitor.Enter(LQueue);
-    try
-      LQueue.Add(LNew);
-    finally
-      TMonitor.Exit(LQueue);
-    end;
-    LWorkEvt.SetEvent;
-  end;
-
   // The per-model half of the old DiscoverUses sweep, run at commit time.
-  procedure DiscoverFrom(AMid: Integer);
+  // AIntfOnly: the interface's entries alone - what an interface parse's
+  // list holds, the same entries in the same order (the parser's prefix).
+  procedure DiscoverFrom(AMid: Integer; AIntfOnly: Boolean);
   var
     LU: Integer;
     LPath, LKey: string;
   begin
     for LU := 0 to High(FModels[AMid].UsesList) do
-      if FSM.ResolveUnit(FModels[AMid].UsesList[LU].NameFull,
-        FModels[AMid].UsesList[LU].InPath, FFiles[AMid], LPath, LKey) and
+      if not (AIntfOnly and FModels[AMid].UsesList[LU].InImpl) and
+         FSM.ResolveUnit(FModels[AMid].UsesList[LU].NameFull,
+           FModels[AMid].UsesList[LU].InPath, FFiles[AMid], LPath, LKey) and
          FollowsUse(FModels[AMid], LU, LPath) then
         EnqueueKeyed(LPath, LKey);
+  end;
+
+  // Jobs for deferred unit AMid's implementation `uses`, ahead of the sweep
+  // that will put them in commit order. Only jobs: the sweep's own
+  // resolution decides what is committed (EnqueueKeyed takes a job only for
+  // the same path), and an `in` clause, which pins a name for the whole
+  // project, is left to it.
+  procedure Speculate(AMid: Integer);
+  var
+    LU, LDummy: Integer;
+    LPath, LKey: string;
+  begin
+    for LU := 0 to High(FModels[AMid].UsesList) do
+      if FModels[AMid].UsesList[LU].InImpl and
+         (FModels[AMid].UsesList[LU].InPath = '') and
+         FSM.ResolveUnit(FModels[AMid].UsesList[LU].NameFull, '',
+           FFiles[AMid], LPath, LKey) and
+         FollowsUse(FModels[AMid], LU, LPath) and
+         not FByPath.TryGetValue(LKey, LDummy) and
+         not LJobOf.ContainsKey(LKey) then
+        AddJob(LPath, LKey);
   end;
 
 begin
@@ -7376,24 +7485,49 @@ begin
   Result := True;
   LQueue := TList<TPasLoadItem>.Create;
   LResults := TDictionary<Integer, TPasLoadRes>.Create;
+  LSeq := TList<Integer>.Create;
   LSeen := TDictionary<string, Boolean>.Create;
+  LJobOf := TDictionary<string, Integer>.Create;
+  LDeferred := TList<Integer>.Create;
   LWorkEvt := TEvent.Create(nil, False, False, '');
   LDoneEvt := TEvent.Create(nil, False, False, '');
   LTasks := nil;
   LTake := 0;
   LStop := False;
+  LSwept := not ADeferImpl;
+  if ADeferImpl then
+    LFallbackEnd := MaxInt
+  else
+    LFallbackEnd := 0;
+  // One job's work, on a worker (or on this thread when SingleThreaded).
+  LCompute :=
+    function(AIt: TPasLoadItem): TPasLoadRes
+    begin
+      Result := Default(TPasLoadRes);
+      // A file deleted after its directory was listed must never reach
+      // LoadText (b40f848). Asked here rather than by the driver's
+      // discovery, where these checks were ~370 ms of serial file-system
+      // calls on a 3750-unit closure (perf audit 2026-10, S4).
+      if not FSM.SourceExists(AIt.Path) then
+        Result.Missing := True
+      else
+        Result.Model := ComputeLoad(AIt.Path, False, Result.ErrClass,
+          Result.ErrMsg, Result.FullDonor);
+    end;
   try
     // Seed order decides model ids, so it replicates the chunked drivers
-    // exactly: explicit roots first (they loaded before any discovery), then
-    // one discovery sweep over every model committed before this call, in id
-    // order - the first round of the old loop.
+    // exactly: AWholeLoads, then the explicit roots (they loaded before any
+    // discovery), then one discovery sweep over every model committed before
+    // this call, in id order - the first round of the old loop. The sweep
+    // goes on at AWholeLoads' commits, the first two. It runs once the
+    // workers below are started, so they parse the first jobs while it
+    // resolves (a program's `uses` can be 1500 entries); only this thread
+    // adds jobs, so their order is the same.
+    for LIdx := 0 to High(AWholeLoads) do
+      EnqueueLoad(AWholeLoads[LIdx]);
+    LWholeEnd := LSeq.Count;
     for LIdx := 0 to High(ASeedLoads) do
       EnqueueLoad(ASeedLoads[LIdx]);
-    for LIdx := 0 to High(ASeedUpgrades) do
-      EnqueueUpgrade(ASeedUpgrades[LIdx]);
-    if ASeedUpgrades = nil then
-      for LIdx := 0 to FModels.Count - 1 do
-        DiscoverFrom(LIdx);
 
     if not FSingleThreaded then
     begin
@@ -7436,12 +7570,7 @@ begin
               // A cancelled run turns the rest into no-ops; the driver stops
               // committing at the same check, so this result is never read.
               if not CancelRequested then
-                if LIt.Kind = lkLoad then
-                  LR.Model := ComputeLoad(LIt.Path, AIntfLoads,
-                    LR.ErrClass, LR.ErrMsg, LR.FullDonor)
-                else
-                  LR.Model := ComputeUpgrade(LIt.Source,
-                    LR.ErrClass, LR.ErrMsg);
+                LR := LCompute(LIt);
               TMonitor.Enter(LQueue);
               try
                 LResults.Add(LMine, LR);
@@ -7452,45 +7581,64 @@ begin
             end;
           end);
     end;
+    for LIdx := 0 to FModels.Count - 1 do
+      DiscoverFrom(LIdx, False);
 
     LCommit := 0;
     LSince := 0;
     while True do
     begin
-      TMonitor.Enter(LQueue);
-      try
-        LHaveItem := LCommit < LQueue.Count;
-        if LHaveItem then
-          LItem := LQueue[LCommit];
-      finally
-        TMonitor.Exit(LQueue);
+      if LCommit = LSeq.Count then
+      begin
+        // Drained; only this thread adds to LSeq, so nothing can appear -
+        // unless the sweep below has yet to run.
+        if LSwept then
+          Break;
+        if CancelRequested then
+        begin
+          Result := False;
+          Break;
+        end;
+        // The interface closure is in: the deferred units' whole lists now,
+        // in id order, as the upgrade wave's commits walked them - the
+        // interface entries again included, which can answer differently
+        // once a later unit's `in` clause has pinned a name.
+        LSwept := True;
+        LFallbackEnd := LCommit;
+        if Assigned(AOnImplSweep) then
+          AOnImplSweep();
+        if CancelRequested then
+        begin
+          Result := False;
+          Break;
+        end;
+        for LMid in LDeferred do
+          DiscoverFrom(LMid, False);
+        Continue;
       end;
-      if not LHaveItem then
-        Break;   // drained; only this thread enqueues, so nothing can appear
       if CancelRequested then
       begin
         Result := False;
         Break;
       end;
+      LJob := LSeq[LCommit];
+      TMonitor.Enter(LQueue);
+      try
+        LItem := LQueue[LJob];
+      finally
+        TMonitor.Exit(LQueue);
+      end;
       if FSingleThreaded then
-      begin
-        LRes := Default(TPasLoadRes);
-        if LItem.Kind = lkLoad then
-          LRes.Model := ComputeLoad(LItem.Path, AIntfLoads,
-            LRes.ErrClass, LRes.ErrMsg, LRes.FullDonor)
-        else
-          LRes.Model := ComputeUpgrade(LItem.Source,
-            LRes.ErrClass, LRes.ErrMsg);
-      end
+        LRes := LCompute(LItem)
       else
       begin
-        // Reorder buffer: wait for THE NEXT queue index, not just any result.
+        // Reorder buffer: wait for THE NEXT commit's job, not just any result.
         repeat
           TMonitor.Enter(LQueue);
           try
-            LHaveRes := LResults.TryGetValue(LCommit, LRes);
+            LHaveRes := LResults.TryGetValue(LJob, LRes);
             if LHaveRes then
-              LResults.Remove(LCommit);
+              LResults.Remove(LJob);
           finally
             TMonitor.Exit(LQueue);
           end;
@@ -7507,56 +7655,60 @@ begin
           Break;
         end;
       end;
+      // What the interface wave read survives a full parse that raises, as
+      // it did when the upgrade raised; failing that too, the unit fails
+      // with the interface parse's reason, as it did then. Rare enough to
+      // run here, on this thread.
+      if (LRes.Model = nil) and not LRes.Missing and
+         (LCommit >= LWholeEnd) and (LCommit < LFallbackEnd) then
+      begin
+        LRes.Model := ComputeLoad(LItem.Path, True, LClass, LMsg, LDonor);
+        if LRes.Model <> nil then
+          LRes.IntfFallback := True
+        else
+        begin
+          LRes.ErrClass := LClass;
+          LRes.ErrMsg := LMsg;
+        end;
+      end;
 
       // Commit - the same registration the chunked loaders made, one item at
-      // a time, on this thread only.
-      if LItem.Kind = lkLoad then
+      // a time, on this thread only. A missing file is skipped as discovery
+      // skipped it before: no model, no load failure, no FByPath entry.
+      if not LRes.Missing and (LRes.Model <> nil) then
       begin
-        if LRes.Model <> nil then
-        begin
-          // A donor-full model registers msFullReady even in the interface
-          // wave and thereby skips wave 2 for free - the upgrade seed
-          // selects FStatus = msIntfReady only.
-          // A light model is msIntfReady in BOTH waves (wave 2's loads pass
-          // AIntfLoads = False); a light donor hit is light too, and Light
-          // is only ever set on an nkUnit root.
-          if LRes.Model.Light or (AIntfLoads and not LRes.FullDonor and
-             (Length(LRes.Model.Tree.Nodes) > 0) and
-             (LRes.Model.Tree.Nodes[0].Kind = nkUnit)) then
-            LStatus := msIntfReady
-          else
-            LStatus := msFullReady;
-          FByPath.Add(LItem.Key,
-            RegisterModel(LRes.Model, LItem.Path, LStatus));
-          RegisterUnitName(FModels.Count - 1);
-          DiscoverFrom(FModels.Count - 1);
-        end
+        // Deferred: a unit the interface wave read interface-only - not a
+        // donor hit (always taken whole), not light (an interface parse for
+        // good, its own list already held), and Light is only ever set on
+        // an nkUnit root.
+        LDefer := not LSwept and (LCommit >= LWholeEnd) and
+          not LRes.Model.Light and not LRes.FullDonor and
+          (Length(LRes.Model.Tree.Nodes) > 0) and
+          (LRes.Model.Tree.Nodes[0].Kind = nkUnit);
+        if LRes.Model.Light or LRes.IntfFallback then
+          LStatus := msIntfReady
         else
+          LStatus := msFullReady;
+        LMid := RegisterModel(LRes.Model, LItem.Path, LStatus);
+        FByPath.Add(LItem.Key, LMid);
+        RegisterUnitName(LMid);
+        DiscoverFrom(LMid, LDefer);
+        if LRes.IntfFallback then
+          // Kept rather than losing the unit - but SAID, as an internal
+          // error of the full parse.
+          NoteInternalError(LMid, 'full-parse', LRes.ErrClass, LRes.ErrMsg)
+        else if LDefer then
         begin
-          FByPath.Add(LItem.Key, -1);
-          if LRes.ErrClass <> '' then
-            NoteLoadFailure(LItem.Path, LRes.ErrClass, LRes.ErrMsg);
+          LDeferred.Add(LMid);
+          if not FSingleThreaded then
+            Speculate(LMid);
         end;
       end
-      else
+      else if not LRes.Missing then
       begin
-        if LRes.Model <> nil then
-        begin
-          // The owns-list assignment frees the interface model here, on the
-          // driver - measured at 604 ms across the client's full wave, and
-          // deliberately LEFT that way: deferring the frees into a parallel
-          // batch after the engine was tried and changed the wall time not
-          // at all (the workers overlap the driver's teardown), so the
-          // simpler form wins.
-          FModels[LItem.Mid] := LRes.Model; // owns-list frees the intf one
-          FStatus[LItem.Mid] := msFullReady;
-          DiscoverFrom(LItem.Mid);
-        end
-        else
-          // Keep the interface snapshot rather than losing the unit - but
-          // SAY SO, as an internal error of the full parse.
-          NoteInternalError(LItem.Mid, 'full-parse',
-            LRes.ErrClass, LRes.ErrMsg);
+        FByPath.Add(LItem.Key, -1);
+        if LRes.ErrClass <> '' then
+          NoteLoadFailure(LItem.Path, LRes.ErrClass, LRes.ErrMsg);
       end;
       Inc(LCommit);
       Inc(LSince);
@@ -7579,12 +7731,19 @@ begin
         LWorkEvt.SetEvent;
       TTask.WaitForAll(LTasks);
     end;
-    // A cancelled run leaves computed-but-uncommitted models behind.
+    // A closure over this frame stored in this frame: a cycle nothing else
+    // breaks (see AnalyzeStaged's LNotify).
+    LCompute := nil;
+    // A cancelled run, or a job no commit took, leaves computed models
+    // behind.
     for LPair in LResults do
       LPair.Value.Model.Free;
     LResults.Free;
     LQueue.Free;
+    LSeq.Free;
     LSeen.Free;
+    LJobOf.Free;
+    LDeferred.Free;
     LWorkEvt.Free;
     LDoneEvt.Free;
   end;
@@ -12698,15 +12857,78 @@ begin
   Result := Instantiate(XPlain(AMid, ASym), LArgs);
 end;
 
-// Declared-type pass: for every symbol whose type expression did not bind to
-// a plain local type, resolve it cross-model / as an instantiation.
-procedure TPasSemaProject.BindTypesX(AId: Integer);
+{ Declared-type pass: for every symbol whose type expression did not bind to
+  a plain local type, resolve it cross-model / as an instantiation - for the
+  models AIds, written to their SymTypeX in AIds order.
+
+  In two halves (perf audit 2026-10, S3: 250 -> 132 ms on a 3750-unit
+  closure). A written type and a bare property redeclaration resolve through
+  SymDeclTypeX, which never reads SymTypeX, so every model's are computed in
+  parallel (BindTypesXCompute). The ordered half (BindTypesXCommit) then
+  writes them model by model and, within a model, symbol by symbol, inferring
+  each true constant at its turn: a constant's inference DOES read SymTypeX,
+  its own model's and other units', and finds there exactly what the old
+  single sequential loop had written by then. }
+procedure TPasSemaProject.BindTypesX(const AIds: TArray<Integer>);
+var
+  LSyms, LConsts: TArray<TArray<Integer>>;
+  LXs: TArray<TArray<TSemaXType>>;
+  LSlot: Integer;
+begin
+  SetLength(LSyms, Length(AIds));
+  SetLength(LXs, Length(AIds));
+  SetLength(LConsts, Length(AIds));
+  ForEachIndex(High(AIds), 'bindx',
+    procedure(ASlot: Integer)
+    begin
+      BindTypesXCompute(AIds[ASlot], LSyms[ASlot], LXs[ASlot],
+        LConsts[ASlot]);
+    end,
+    function(ASlot: Integer): Integer
+    begin
+      Result := AIds[ASlot];
+    end);
+  for LSlot := 0 to High(AIds) do
+  begin
+    // A cancelled staged run stops between models (see RunCrossPipeline).
+    if (LSlot and 63 = 0) and CancelRequested then
+      Exit;
+    BindTypesXCommit(AIds[LSlot], LSyms[LSlot], LXs[LSlot], LConsts[LSlot]);
+    LSyms[LSlot] := nil;
+    LXs[LSlot] := nil;
+    LConsts[LSlot] := nil;
+  end;
+end;
+
+// BindTypesX's parallel half for one model: the types it binds (ASyms with
+// AXs) and the true constants left to the ordered half (AConsts), both in
+// symbol order. Set only once the model is done, so a raise leaves nothing.
+procedure TPasSemaProject.BindTypesXCompute(AId: Integer;
+  out ASyms: TArray<Integer>; out AXs: TArray<TSemaXType>;
+  out AConsts: TArray<Integer>);
 var
   LM: TPasSemaModel;
-  LSym: Integer;
+  LSym, LN, LC: Integer;
   LX: TSemaXType;
+  LSyms, LConsts: TArray<Integer>;
+  LXs: TArray<TSemaXType>;
+
+  procedure Add(ASym: Integer; const AX: TSemaXType);
+  begin
+    if LN = Length(LSyms) then
+    begin
+      SetLength(LSyms, LN * 2 + 16);
+      SetLength(LXs, LN * 2 + 16);
+    end;
+    LSyms[LN] := ASym;
+    LXs[LN] := AX;
+    Inc(LN);
+  end;
+
 begin
   LM := FModels[AId];
+  LN := 0;
+  LC := 0;
   for LSym := 0 to LM.SymCount - 1 do
     if LM.Symbols[LSym].TypeNode <> NIL_NODE then
     begin
@@ -12724,15 +12946,16 @@ begin
          // - went undeclared.
          (IsGenericTypeSym(AId, LM.Symbols[LSym].TypeSym) and
           not ((LX.UnitId = AId) and (LX.Sym = LM.Symbols[LSym].TypeSym)))) then
-        LM.SymTypeX.AddOrSetValue(LSym, LX);
+        Add(LSym, LX);
     end
     // A TRUE constant (3.2.1) - `const Max = 100;` - writes no type, and its
-    // type is the initializer's. Filled HERE, in the sequential declared-type
-    // pass, because another unit's CrossType reads this model's SymTypeX for
-    // it (`MyMax.ToString`, `with` over a record constant) and that pass runs
-    // in parallel over frozen tables. Only the section form: an inline
-    // `const` inside a body is CrossType's own to type, from a walk that
-    // knows overloads and ambiguity (see the nkInlineVar case there).
+    // type is the initializer's. Filled in this pass's ordered half
+    // (BindTypesXCommit), because another unit's CrossType reads this
+    // model's SymTypeX for it (`MyMax.ToString`, `with` over a record
+    // constant) and that pass runs in parallel over frozen tables. Only the
+    // section form: an inline `const` inside a body is CrossType's own to
+    // type, from a walk that knows overloads and ambiguity (see the
+    // nkInlineVar case there).
     else if (LM.Symbols[LSym].Kind = skConst) and
             not (sfBuiltin in LM.Symbols[LSym].Flags) and
             (LM.Symbols[LSym].DeclNode <> NIL_NODE) and
@@ -12740,11 +12963,10 @@ begin
             (LM.Tree.Nodes[LM.Tree.Nodes[LM.Symbols[LSym].DeclNode].Parent].Kind
              = nkConstDecl) then
     begin
-      // Sequential phase: following a constant defined by ANOTHER unit's
-      // constant is safe here, and nowhere else (see UntypedInitTypeX).
-      LX := InferredDeclTypeX(AId, LSym, {AFollowForeign} True);
-      if XValid(LX) then
-        LM.SymTypeX.AddOrSetValue(LSym, LX);
+      if LC = Length(LConsts) then
+        SetLength(LConsts, LC * 2 + 16);
+      LConsts[LC] := LSym;
+      Inc(LC);
     end
     // A bare property REDECLARATION - `property Items;` promoting visibility,
     // no type written - has no TypeNode and so was skipped above, and
@@ -12760,8 +12982,47 @@ begin
     begin
       LX := SymDeclTypeX(AId, LSym);
       if XValid(LX) then
-        LM.SymTypeX.AddOrSetValue(LSym, LX);
+        Add(LSym, LX);
     end;
+  SetLength(LSyms, LN);
+  SetLength(LXs, LN);
+  SetLength(LConsts, LC);
+  ASyms := LSyms;
+  AXs := LXs;
+  AConsts := LConsts;
+end;
+
+// BindTypesX's ordered half for one model: BindTypesXCompute's types written
+// and each true constant inferred, in symbol order - the order of the old
+// single loop, which a constant's inference observes (see BindTypesX).
+procedure TPasSemaProject.BindTypesXCommit(AId: Integer;
+  const ASyms: TArray<Integer>; const AXs: TArray<TSemaXType>;
+  const AConsts: TArray<Integer>);
+var
+  LM: TPasSemaModel;
+  LK, LC: Integer;
+  LX: TSemaXType;
+begin
+  LM := FModels[AId];
+  LK := 0;
+  for LC := 0 to High(AConsts) do
+  begin
+    while (LK <= High(ASyms)) and (ASyms[LK] < AConsts[LC]) do
+    begin
+      LM.SymTypeX.AddOrSetValue(ASyms[LK], AXs[LK]);
+      Inc(LK);
+    end;
+    // Sequential phase: following a constant defined by ANOTHER unit's
+    // constant is safe here, and nowhere else (see UntypedInitTypeX).
+    LX := InferredDeclTypeX(AId, AConsts[LC], {AFollowForeign} True);
+    if XValid(LX) then
+      LM.SymTypeX.AddOrSetValue(AConsts[LC], LX);
+  end;
+  while LK <= High(ASyms) do
+  begin
+    LM.SymTypeX.AddOrSetValue(ASyms[LK], AXs[LK]);
+    Inc(LK);
+  end;
 end;
 
 // Expression pass: bottom-up over the whole tree, typing what the intra-unit
@@ -21428,7 +21689,7 @@ begin
     // CrossResolve DEFERS every with-body identifier to this pass rather than
     // binding it (see there), so without it those names are never bound and
     // never diagnosed - a hole in this driver only. Run over the whole loaded
-    // set, like the BindTypesX loop below: the with pass reads the used
+    // set, like BindTypesX below: the with pass reads the used
     // units' state and is the sole writer of these bindings.
     //
     // Declared types for EVERY loaded model BEFORE the with pass (and so
@@ -21436,8 +21697,7 @@ begin
     // pass types its targets with the expression walk (WithTargetTypeX), and
     // that walk reads declared types from SymTypeX. BindTypesX itself needs
     // only declaration-site bindings, which are complete by now.
-    for LIdx := 0 to FModels.Count - 1 do
-      BindTypesX(LIdx);
+    BindTypesX(IdsUpTo(FModels.Count));
     RunWithPass(FModels.Count);
     CheckCalls(Result);
     CheckConstraints(Result);
@@ -22390,11 +22650,10 @@ begin
   Lap('inherited');
   // Only these models' declared types are new; every other model's SymTypeX
   // stands (their text, and so their declarations, did not change).
-  // Sequential by design - see AnalyzeDirectory's Phase-3c comment. BEFORE
-  // the with pass, whose target typing reads SymTypeX (see RunWithPass's
-  // caller in AnalyzeProject for why).
-  for LId in AIds do
-    BindTypesX(LId);
+  // Committed in AIds order - see BindTypesX. BEFORE the with pass, whose
+  // target typing reads SymTypeX (see RunWithPass's caller in AnalyzeProject
+  // for why).
+  BindTypesX(AIds);
   Lap('bindx');
   RunWithOver(AIds);
   Lap('with');
@@ -25376,8 +25635,6 @@ end;
 
 function TPasSemaProject.RunCrossPipeline(ALN: Integer;
   const AStep: TFunc<string, Boolean>): Boolean;
-var
-  LIdx: Integer;
 begin
   Result := False;
   // Each pass writes ONLY its own model and reads the others' Phase-1 state
@@ -25394,14 +25651,9 @@ begin
   RunInheritedPass(ALN);
   if not AStep('inherited') then
     Exit;
-  // Sequential by design; CrossType itself is not - see RunCrossTypePass.
+  // Written in model order (see BindTypesX), which stops early on a cancel.
   // BindTypesX needs only declaration-site bindings, complete by now.
-  for LIdx := 0 to FModels.Count - 1 do
-  begin
-    if (LIdx and 63 = 0) and not AStep('') then
-      Exit;
-    BindTypesX(LIdx);
-  end;
+  BindTypesX(IdsUpTo(FModels.Count));
   if not AStep('bindx') then
     Exit;
   // Timed apart because it iterates to a fixpoint: its cost is the one that
@@ -25462,7 +25714,7 @@ begin
     // RunLoadEngine). ResolveUses (sequential, the single source of truth for
     // UnitId assignment) then finds every file cached, exactly as it did after
     // the old per-round batch loads.
-    RunLoadEngine(nil, nil, {AIntfLoads} False, nil);
+    RunLoadEngine(nil, nil, {ADeferImpl} False, nil, nil);
     Stage('load');
     for LIdx := 0 to FModels.Count - 1 do
       ResolveUses(LIdx);
@@ -25564,9 +25816,8 @@ function TPasSemaProject.AnalyzeStaged(const ARoots, APriority: TArray<string>;
 var
   LProgress: TPasStagedProgress;
   LN, LIdx: Integer;
-  LOrdered: TArray<string>;
-  LIds: TArray<Integer>;
-  LPath, LKey: string;
+  LOrdered, LWhole: TArray<string>;
+  LPath, LKey, LPhase, LSysPath, LSysInitPath: string;
   LSeen: TDictionary<string, Boolean>;
   LSW: TStopwatch;
   // Recount+Report as a CAPTURED closure: RunLoadEngine's progress hook is an
@@ -25651,11 +25902,6 @@ begin
     end;
     SetLength(LOrdered, LIdx);
 
-    // The implicit System unit is part of every closure (1.2.1) but never
-    // named in a `uses` clause - pull it in up front (full, like
-    // AnalyzeProject) so wave 1's BFS also walks its uses and the finalizer
-    // covers it. Matches AnalyzeProject's early EnsureSystemUnit. SysInit
-    // rides along the same way.
     // A single program root first, as AnalyzeProject loads its main file:
     // the units' CONSOLE follows its `{$APPTYPE}`, so it is decided before
     // any of them is preprocessed. The engine discovers from it like from
@@ -25663,46 +25909,55 @@ begin
     if (Length(ARoots) = 1) and
        SameText(TPath.GetExtension(ARoots[0]), '.dpr') then
       DecideConsole(LoadFile(ARoots[0]));
-    EnsureSystemUnit;
-    EnsureSysInitUnit;
+    // The implicit System unit is part of every closure (1.2.1) but never
+    // named in a `uses` clause - pulled in up front (full, like
+    // AnalyzeProject) so the load's BFS also walks its uses and the finalizer
+    // covers it. SysInit rides along the same way. Resolved here, where
+    // AnalyzeProject's early EnsureSystemUnit loads them, but parsed by the
+    // engine, first and taken whole (AWholeLoads) - the same ids, without
+    // the biggest parse of a closure running alone before the engine starts.
+    LSysPath := '';
+    LSysInitPath := '';
+    if not FSystemUnitResolved and
+       not FSM.ResolveUnit('System', '', '', LSysPath) then
+      LSysPath := '';
+    if not FSysInitUnitResolved and
+       not FSM.ResolveUnit('SysInit', '', '', LSysInitPath) then
+      LSysInitPath := '';
+    LWhole := nil;
+    if LSysPath <> '' then
+      LWhole := LWhole + [LSysPath];
+    if LSysInitPath <> '' then
+      LWhole := LWhole + [LSysInitPath];
 
-    // ---- Wave 1: interface-only closure, continuous (see RunLoadEngine -
-    // parses run out of order, commits and discovery keep the old BFS's
-    // deterministic id order; the engine reports every 64 commits, the same
-    // heartbeat the 64-file chunks used to give) ----
+    // ---- One load wave, continuous (see RunLoadEngine - parses run out of
+    // order, commits and discovery keep the deterministic id order; the
+    // engine reports every 64 commits, the same heartbeat the 64-file chunks
+    // used to give). Every unit parses in full once; the closure of the
+    // interface `uses` commits first ('intf'), then the units only an
+    // implementation reaches ('full') - the ids of the two waves this
+    // replaced (ADeferImpl). The sweep's callback is an anonymous method, so
+    // it stamps the stage itself (StageMark is nested - E2555). ----
+    LPhase := 'intf';
     Report('intf');
-    if not RunLoadEngine(LOrdered, nil, {AIntfLoads} True,
+    if not RunLoadEngine(LWhole, LOrdered, {ADeferImpl} True,
       procedure
       begin
-        LNotify('intf');
-      end) then
-    begin
-      Report('cancelled');
-      Exit;
-    end;
-    StageMark('intf');
-
-    // ---- Wave 2: upgrade every module to a full parse, discovering any
-    // implementation-only dependencies the interface trees didn't show.
-    // Upgrades and the loads they discover ride one queue, so a discovered
-    // unit parses WHILE later upgrades still run - the old shape upgraded
-    // everything, then loaded, in separate barriered rounds. ----
-    Report('full');
-    LIds := nil;
-    for LIdx := 0 to FStatus.Count - 1 do
-      // A light unit stays interface-only: never upgraded, so its
-      // implementation `uses` is never discovered either.
-      if (FStatus[LIdx] = msIntfReady) and not FModels[LIdx].Light then
-        LIds := LIds + [LIdx];
-    if not RunLoadEngine(nil, LIds, {AIntfLoads} False,
+        LNotify(LPhase);
+      end,
       procedure
       begin
+        FStageTimings := FStageTimings +
+          Format('%s=%d;', ['intf', LSW.ElapsedMilliseconds]);
+        LSW := TStopwatch.StartNew;
+        LPhase := 'full';
         LNotify('full');
       end) then
     begin
       Report('cancelled');
       Exit;
     end;
+    BindImplicitUnits(LSysPath, LSysInitPath);
     StageMark('full');
 
     // ---- Finalizer: cross passes over the whole closure. Reported as
