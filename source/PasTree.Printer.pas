@@ -1693,6 +1693,16 @@ begin
         ListFrom(C1, ',', ANode);
         Kw('>', ANode);
       end;
+    nkAmbiguous:
+      begin
+        // Flat (16.3.1): head, items, then the parenthesised tail - written
+        // as it stands, whatever the model decided.
+        Emit(C0);
+        Kw('<', ANode);
+        ListUntil(C1, T.LastChild(ANode), ',', ANode);
+        Kw('>', ANode);
+        Emit(T.LastChild(ANode));
+      end;
     nkSetCtor:
       begin
         Kw('[', ANode);

@@ -8954,6 +8954,145 @@ begin
   end;
 end;
 
+// The nkAmbiguous nodes of AModel read as AReading (16.3.1).
+function AmbigCount(AModel: TPasSemaModel; AReading: TAmbigReading): Integer;
+var
+  LNode: Integer;
+begin
+  Result := 0;
+  for LNode := 0 to High(AModel.Tree.Nodes) do
+    if (AModel.Tree.Nodes[LNode].Kind = nkAmbiguous) and
+       (AModel.AmbigReadingOf(LNode) = AReading) then
+      Inc(Result);
+end;
+
+// E2-04: `F(H < I1, I2 > (E))` is one generic call or cast when H names a
+// generic routine or type and two comparisons when H names a value (16.3.1,
+// dcc64 37.0, local/probe-park/e204 G1.dpr, G3.dpr) - the head in this unit
+// and in another, bare and dotted, three items, nested in another call. The
+// overload of Pick / PickO each reading picks is read back through the
+// member after it (XA: one Integer or object, XB: two Booleans). The reading
+// survives a demotion and a rehydration; a head nothing binds leaves it
+// unknown, and no arity is judged over it.
+procedure TestAmbiguousGenericArgs;
+var
+  LDir, LMain: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_ambig');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'UAm.pas'),
+    'unit UAm;'#10'interface'#10'type'#10 +
+    '  TRA = record XA: Integer; end;'#10 +
+    '  TRB = record XB: Integer; end;'#10 +
+    '  TBox<K, V> = class end;'#10 +
+    '  THolder = class'#10 +
+    '    Fld: Integer;'#10 +
+    '    class function Gen<T, U>(X: Integer): Integer; static;'#10 +
+    '    function NonGen: Integer;'#10 +
+    '  end;'#10 +
+    'var'#10'  GV: Integer;'#10'  GH: THolder;'#10 +
+    'function Pick(X: Integer): TRA; overload;'#10 +
+    'function Pick(X, Y: Boolean): TRB; overload;'#10 +
+    'function PickO(X: TObject): TRA; overload;'#10 +
+    'function PickO(X, Y: Boolean): TRB; overload;'#10 +
+    'function Pick3(X: Boolean; Y: Integer; Z: Boolean): TRB;'#10 +
+    'implementation'#10 +
+    'class function THolder.Gen<T, U>(X: Integer): Integer; begin end;'#10 +
+    'function THolder.NonGen: Integer; begin end;'#10 +
+    'function Pick(X: Integer): TRA; begin end;'#10 +
+    'function Pick(X, Y: Boolean): TRB; begin end;'#10 +
+    'function PickO(X: TObject): TRA; begin end;'#10 +
+    'function PickO(X, Y: Boolean): TRB; begin end;'#10 +
+    'function Pick3(X: Boolean; Y: Integer; Z: Boolean): TRB; begin end;'#10 +
+    'end.'#10);
+  LMain := TPath.Combine(LDir, 'AmP.dpr');
+  TFile.WriteAllText(LMain,
+    'program AmP;'#10'uses UAm;'#10'type'#10 +
+    '  TLoc = class'#10 +
+    '    Fld: Integer;'#10 +
+    '    class function LGen<T, U>(X: Integer): Integer; static;'#10 +
+    '    procedure M;'#10 +
+    '  end;'#10 +
+    '  TLBox<K, V> = class end;'#10 +
+    'var'#10'  A, B, C, D, E, LV, X: Integer;'#10'  O: TObject;'#10 +
+    'class function TLoc.LGen<T, U>(X: Integer): Integer; begin end;'#10 +
+    'procedure TLoc.M;'#10 +
+    'begin'#10 +
+    '  X := Pick(LGen<Integer, Byte>(D)).XA;'#10 +
+    '  X := Pick(Fld < B, C > (D)).XB;'#10 +
+    'end;'#10 +
+    'begin'#10 +
+    '  X := Pick(LV < B, C > (D)).XB;'#10 +
+    '  X := Pick(GV < B, C > (D)).XB;'#10 +
+    '  X := Pick(GH.Fld < B, C > (D)).XB;'#10 +
+    '  X := Pick(GH.Gen<Integer, Byte>(D)).XA;'#10 +
+    '  X := Pick(THolder.Gen<Integer, Byte>(D)).XA;'#10 +
+    '  X := Pick(GH.NonGen < B, C > (D)).XB;'#10 +
+    '  X := Pick3(A < B, E, C > (D)).XB;'#10 +
+    '  X := Pick(Pick(A < B, C > (D + 1)).XB).XA;'#10 +
+    '  X := PickO(TBox<Integer, Byte>(O)).XA;'#10 +
+    '  X := PickO(TLBox<Integer, Byte>(O)).XA;'#10 +
+    '  X := PickO(LV < B, C > (D)).XB;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(LMain);
+    LM := ModelByName('amp');
+    Ok('ambig: five generic calls and casts, eight comparison lists (' +
+      IntToStr(AmbigCount(LM, arGeneric)) + ' / ' +
+      IntToStr(AmbigCount(LM, arCompare)) + ' / ' +
+      IntToStr(AmbigCount(LM, arUnknown)) + ')',
+      (AmbigCount(LM, arGeneric) = 5) and (AmbigCount(LM, arCompare) = 8) and
+      (AmbigCount(LM, arUnknown) = 0));
+    Ok('ambig: each reading picks its overload - no E2003 on XA / XB',
+      DiagCount(LM, 'E2003') = 0);
+    Ok('ambig: no arity verdict over either reading',
+      (DiagCount(LM, 'E2035') = 0) and (DiagCount(LM, 'E2034') = 0) and
+      (DiagCount(LM, 'E2250') = 0));
+    GProj.DemoteText([]);
+    Ok('ambig: the readings survive a text demotion', LM.Demoted and
+      (AmbigCount(LM, arGeneric) = 5) and (AmbigCount(LM, arCompare) = 8));
+    Ok('ambig: and a rehydration',
+      GProj.EnsureHydrated(GProj.ModelIdOf(LMain)) and not LM.Demoted and
+      (AmbigCount(LM, arGeneric) = 5) and (AmbigCount(LM, arCompare) = 8));
+    GProj.ReleaseTransientMaps([]);
+    Ok('ambig: and a release of the transient maps',
+      (AmbigCount(LM, arGeneric) = 5) and (AmbigCount(LM, arCompare) = 8));
+  finally
+    FreeAndNil(GProj);
+  end;
+  // The head binds nowhere: the reading stays unknown, and the call says
+  // nothing about its arity beside the E2003 (it read as one argument and
+  // gave a false E2035 before).
+  LMain := TPath.Combine(LDir, 'UnkP.dpr');
+  TFile.WriteAllText(LMain,
+    'program UnkP;'#10 +
+    'procedure Pick(X, Y: Boolean); begin end;'#10 +
+    'var B, C, D: Integer;'#10 +
+    'begin'#10 +
+    '  Pick(MV < B, C > (D));'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(LMain);
+    LM := ModelByName('unkp');
+    Ok('ambig: an unbound head leaves the reading unknown',
+      AmbigCount(LM, arUnknown) = 1);
+    Ok('ambig: and only its E2003 - no arity verdict',
+      (DiagCount(LM, 'E2003') = 1) and (DiagCount(LM, 'E2035') = 0) and
+      (DiagCount(LM, 'E2034') = 0));
+  finally
+    FreeAndNil(GProj);
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // E3-01, E3-03, B3-49: `[X]` means `XAttribute` wherever that is found - a
 // used unit, System - and the bare `X` only when it is found nowhere
 // (19.3.2, dcc64 37.0); a unit-qualified `[U.X]` the same in U.
@@ -16704,6 +16843,7 @@ begin
   TestSystemOverloadJoins;
   TestInlineProcType;
   TestClassMethodSelf;
+  TestAmbiguousGenericArgs;
   TestNestedTypeArgFrame;
   TestAttributeSuffixFirst;
   TestAttributeGuidAndPositions;

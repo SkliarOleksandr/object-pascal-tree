@@ -9312,6 +9312,13 @@ begin
       case LModel.Tree.Nodes[LArg].Kind of
         nkError:   LSkip := True;
         nkMissing: LTrailing := True;
+        // `Foo(A < B, C > (D))` (16.3.1): the arguments it stands for, none
+        // judged while nothing decided how many.
+        nkAmbiguous:
+          if LModel.AmbigArgCount(LArg) < 0 then
+            LSkip := True
+          else
+            Inc(LArgCount, LModel.AmbigArgCount(LArg));
       else
         Inc(LArgCount);
       end;
@@ -10876,7 +10883,7 @@ begin
       if LM.AnonTypeSyms.TryGetValue(ANode, LSym) then
         Result := XPlain(AId, LSym);
 
-    nkTypeArgs:
+    nkTypeArgs, nkAmbiguous:
       begin
         // ABare=False: the base of `T<...>` is SUPPOSED to be the generic, and
         // this branch does its own arity matching just below.
@@ -10886,7 +10893,7 @@ begin
         LArgs := nil;
         LArgCount := 0;
         LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
-        while LArgNode <> NIL_NODE do
+        while LArgNode <> PasTypeArgsEnd(LM.Tree, ANode) do
         begin
           Inc(LArgCount);
           LArgNode := LM.Tree.Nodes[LArgNode].NextSibling;
@@ -10894,7 +10901,7 @@ begin
         LBase := TypeAtArityX(AId, LBase, LArgCount,
           LM.Tree.Nodes[ANode].FirstChild);
         LArgNode := LM.Tree.Nodes[LM.Tree.Nodes[ANode].FirstChild].NextSibling;
-        while LArgNode <> NIL_NODE do
+        while LArgNode <> PasTypeArgsEnd(LM.Tree, ANode) do
         begin
           LArg := ResolveTypeExpr(AId, LArgNode);
           // A type ARGUMENT may be a NESTED type named through its outer type
@@ -12884,7 +12891,7 @@ begin
   LM := FModels[AId];
   // The first child is the callee designator; the rest are the arguments.
   LNode := LM.Tree.Nodes[LM.Tree.Nodes[ATypeArgs].FirstChild].NextSibling;
-  while LNode <> NIL_NODE do
+  while LNode <> PasTypeArgsEnd(LM.Tree, ATypeArgs) do
   begin
     LX := ResolveTypeExpr(AId, LNode);
     if not XValid(LX) then
@@ -13487,7 +13494,7 @@ var
   begin
     LName := ACalleeNode;
     // `Obj.M<T>`: the designator is the type-argument node's first child.
-    if LM.Tree.Nodes[LName].Kind = nkTypeArgs then
+    if LM.Tree.Nodes[LName].Kind in [nkTypeArgs, nkAmbiguous] then
       LName := LM.Tree.Nodes[LName].FirstChild;
     if (LName <> NIL_NODE) and (LM.Tree.Nodes[LName].Kind = nkMember) then
     begin
@@ -13520,7 +13527,7 @@ var
           if LName = NIL_NODE then
             Exit;
         end;
-      nkTypeArgs:
+      nkTypeArgs, nkAmbiguous:
         Exit(TargetSym(LM.Tree.Nodes[N].FirstChild, AMid, ASym));
     else
       Exit;
@@ -13588,6 +13595,29 @@ var
       Exit(True);
     Result := TargetSym(N, LMid, LSym) and
       (FModels[LMid].Symbols[LSym].Kind in [skType, skBuiltinType]);
+  end;
+
+  // Is the nkAmbiguous N the generic call or cast (16.3.1)? Decided by what
+  // its head binds to now - this pass sees another unit's head first, and may
+  // have moved a Phase-1 binding - and recorded for every later reader (the
+  // scorers, CheckCalls, completion). A probe reads, never records.
+  function AmbigIsGeneric(N: Integer): Boolean;
+  var
+    LMid, LSym: Integer;
+    LReading, LFresh: TAmbigReading;
+  begin
+    LReading := LM.AmbigReadingOf(N);
+    if TargetSym(N, LMid, LSym) then
+    begin
+      LFresh := FModels[LMid].AmbigReadingForSym(LSym);
+      if (LFresh <> arUnknown) and (LFresh <> LReading) then
+      begin
+        LReading := LFresh;
+        if LProbe = nil then
+          LM.AmbigReadings.AddOrSetValue(N, Ord(LFresh));
+      end;
+    end;
+    Result := LReading = arGeneric;
   end;
 
   // A node's best-known type: this pass's result, else the intra-unit one.
@@ -13762,9 +13792,9 @@ var
   var
     LPM: TPasSemaModel;
     LPList: TSemaSymList;
-    LReq, LTot, LPos, LPCount, LArg, LArgs, LCore: Integer;
+    LReq, LTot, LPos, LPCount, LArg, LArgs, LK, LL, LR, LS: Integer;
     LVariadic, LTrailing: Boolean;
-    LArgX, LParX, LCanonParX, LCanonArgX: TSemaXType;
+    LArgX, LParX: TSemaXType;
 
     // The parameter count of a signature node - an nkAnonMethod literal or
     // an nkProcType - and whether it is a function, read off the scope the
@@ -13960,37 +13990,20 @@ var
       Result := (LOuter <> NIL_NODE) and (LM.Tree.Nodes[LOuter].Aux = 1);
     end;
 
-  begin
-    // Present arguments and the trailing-comma slot, and the one arity rule
-    // (CallArgCount, ArityFits - 6.2.5): the slot is not an argument, so
-    // `F(1, 2,)` fits `F(A: Integer; B: Integer = 0)` (audit B3-32).
-    LArgs := CallArgCount(LM.Tree, ACall, LTrailing);
-    if not RoutineArity(AMid, ACand, LReq, LTot, LVariadic) then
-      Exit(0);
-    if not (LVariadic or TPasSemaTyper.ArityFits(LArgs, LReq, LTot,
-       LTrailing)) then
-      Exit(-1);
-    Result := 0;
-    // The parameters straight off the candidate's param scope, in XParamSyms'
-    // order and filter: an array per candidate, with its free, was 1.1% of a
-    // client build's CPU (perf audit 2026-10, C11).
-    LPM := FModels[AMid];
-    LPList := Default(TSemaSymList);
-    LPCount := 0;
-    if LPM.Symbols[ACand].MemberScope <> NIL_SCOPE then
+    // One argument against the parameter type AParX: AArg its node, or
+    // NIL_NODE for a comparison an nkAmbiguous stands for (16.3.1) - typed
+    // AArgX, with no node shape to read. Above 0 a match, 0 no evidence,
+    // -1 rejects the candidate.
+    function ArgScore(AArg: Integer; const AArgX, AParX: TSemaXType): Integer;
+    var
+      LArg, LCore: Integer;
+      LArgX, LParX, LCanonParX, LCanonArgX: TSemaXType;
     begin
-      LPList := LPM.Scopes[LPM.Symbols[ACand].MemberScope].Symbols;
-      LPCount := LPList.Count;
-    end;
-    LPos := 0;
-    while (LPos < LPCount) and (LPM.Symbols[LPList[LPos]].Kind <> skParam) do
-      Inc(LPos);
-    LArg := LM.Tree.Nodes[LM.Tree.Nodes[ACall].FirstChild].NextSibling;
-    while (LArg <> NIL_NODE) and (LPos < LPCount) and
-          (LM.Tree.Nodes[LArg].Kind <> nkMissing) do
-    begin
-      LArgX := GetX(LArg);
-      LParX := SubstX(DeclTypeX(AMid, LPList[LPos]), ACtx, 0);
+      Result := 0;
+      LArg := AArg;
+      LArgX := AArgX;
+      LParX := AParX;
+      LCore := NIL_NODE;
       // Each side canonicalized once per argument: the tests below asked for
       // the same CanonTypeX up to four times (C11).
       LCanonParX := LParX;
@@ -13999,106 +14012,104 @@ var
       LCanonArgX := LArgX;
       if XValid(LArgX) and XValid(LParX) then
         LCanonArgX := CanonTypeX(LArgX);
-      // The literal tests below look through parentheses: `(procedure begin
-      // ... end)` is how a multi-line anonymous argument is often written,
-      // and the client group's own instance of the TProc case was exactly that.
-      LCore := PeelParens(LM.Tree, LArg);
-      // A paren-less constructor call through its type, `Reg(TFoo.Create)`,
-      // is the instance it constructs - typed as the nkCall form types it
-      // (audit E3-25: it scored as nothing, and a `class of` overload
-      // declared first won).
-      if (LM.Tree.Nodes[LCore].Kind = nkMember) and
-         (LM.Tree.Nodes[LCore].FirstChild <> NIL_NODE) and
-         IsTypeDesignator(LM.Tree.Nodes[LCore].FirstChild) then
+      if LArg <> NIL_NODE then
       begin
-        var LCMid, LCSym: Integer;
-        if TargetSym(LCore, LCMid, LCSym) and IsConstructorSym(LCMid, LCSym) then
+        // The literal tests below look through parentheses: `(procedure begin
+        // ... end)` is how a multi-line anonymous argument is often written,
+        // and the client group's own instance of the TProc case was exactly that.
+        LCore := PeelParens(LM.Tree, LArg);
+        // A paren-less constructor call through its type, `Reg(TFoo.Create)`,
+        // is the instance it constructs - typed as the nkCall form types it
+        // (audit E3-25: it scored as nothing, and a `class of` overload
+        // declared first won).
+        if (LM.Tree.Nodes[LCore].Kind = nkMember) and
+           (LM.Tree.Nodes[LCore].FirstChild <> NIL_NODE) and
+           IsTypeDesignator(LM.Tree.Nodes[LCore].FirstChild) then
         begin
-          LArgX := CtorResultX(GetX(LM.Tree.Nodes[LCore].FirstChild));
-          LCanonArgX := LArgX;
-          if XValid(LArgX) and XValid(LParX) then
-            LCanonArgX := CanonTypeX(LArgX);
+          var LCMid, LCSym: Integer;
+          if TargetSym(LCore, LCMid, LCSym) and IsConstructorSym(LCMid, LCSym) then
+          begin
+            LArgX := CtorResultX(GetX(LM.Tree.Nodes[LCore].FirstChild));
+            LCanonArgX := LArgX;
+            if XValid(LArgX) and XValid(LParX) then
+              LCanonArgX := CanonTypeX(LArgX);
+          end;
+        end
+        // A TYPE NAME is a class reference in a value position (15.2.1), not
+        // an instance: `Reg(TFoo)` takes `Reg(C: TFooClass)` over `Reg(O:
+        // TFoo)` in either order (local/probe-b34 P1; audit E3-25 - GetX types
+        // it as the instance, which scored the instance overload exact). So is
+        // `Self` in a class method (IsClassMethodSelf; audit B3-30), and so is
+        // a generic type name, `SubscribeToMessage(TMessage<TNotification>,
+        // ...)` (System.Notification) - unless its head is a generic ROUTINE,
+        // whose paren-less call is a value.
+        else if XValid(LArgX) and XValid(LParX) and
+                (XCatOf(LCanonArgX) = tcClass) and
+                ((LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+                 (IsTypeDesignator(LCore) or IsClassMethodSelf(LCore)) or
+                 (LM.Tree.Nodes[LCore].Kind = nkTypeArgs) and
+                 not HeadIsRoutine(LCore)) then
+        begin
+          var LCanonPar := LCanonParX;
+          case XCatOf(LCanonPar) of
+            tcClassOf:
+              begin
+                var LTarget := CanonTypeX(ClassRefTargetX(LCanonPar));
+                if XValid(LTarget) and XSameType(LTarget, LCanonArgX) then
+                  Inc(Result, 2)
+                else if XValid(LTarget) and
+                        XDescendsFrom(LCanonArgX, LTarget) then
+                  Inc(Result, 1)
+                else if XValid(LTarget) and
+                        (FModels[LTarget.UnitId].Symbols[LTarget.Sym].Kind <>
+                         skGenericParam) then
+                  Exit(-1);
+              end;
+            // A class reference is no instance, record, scalar or interface.
+            tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
+            tcChar, tcString, tcEnum, tcSet, tcArray:
+              Exit(-1);
+          end;
+          Exit;
         end;
-      end
-      // A TYPE NAME is a class reference in a value position (15.2.1), not
-      // an instance: `Reg(TFoo)` takes `Reg(C: TFooClass)` over `Reg(O:
-      // TFoo)` in either order (local/probe-b34 P1; audit E3-25 - GetX types
-      // it as the instance, which scored the instance overload exact). So is
-      // `Self` in a class method (IsClassMethodSelf; audit B3-30), and so is
-      // a generic type name, `SubscribeToMessage(TMessage<TNotification>,
-      // ...)` (System.Notification) - unless its head is a generic ROUTINE,
-      // whose paren-less call is a value.
-      else if XValid(LArgX) and XValid(LParX) and
-              (XCatOf(LCanonArgX) = tcClass) and
-              ((LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
-               (IsTypeDesignator(LCore) or IsClassMethodSelf(LCore)) or
-               (LM.Tree.Nodes[LCore].Kind = nkTypeArgs) and
-               not HeadIsRoutine(LCore)) then
-      begin
-        var LCanonPar := LCanonParX;
-        case XCatOf(LCanonPar) of
-          tcClassOf:
-            begin
-              var LTarget := CanonTypeX(ClassRefTargetX(LCanonPar));
-              if XValid(LTarget) and XSameType(LTarget, LCanonArgX) then
-                Inc(Result, 2)
-              else if XValid(LTarget) and
-                      XDescendsFrom(LCanonArgX, LTarget) then
-                Inc(Result, 1)
-              else if XValid(LTarget) and
-                      (FModels[LTarget.UnitId].Symbols[LTarget.Sym].Kind <>
-                       skGenericParam) then
-                Exit(-1);
-            end;
-          // A class reference is no instance, record, scalar or interface.
-          tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
-          tcChar, tcString, tcEnum, tcSet, tcArray:
-            Exit(-1);
-        end;
-        LArg := LM.Tree.Nodes[LArg].NextSibling;
-        Inc(LPos);
-        while (LPos < LPCount) and
-              (LPM.Symbols[LPList[LPos]].Kind <> skParam) do
-          Inc(LPos);
-        Continue;
+        // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
+        // the only mismatch that does. `TThread.Synchronize(nil, procedure ...
+        // end)` fits BOTH the public `(const AThread: TThread; AThreadProc:
+        // TThreadProcedure)` and the PRIVATE `(ASyncRec: PSynchronizeRecord;
+        // QueueEvent: Boolean = False; ForceQueue: Boolean = False)` on arity,
+        // `nil` scores the same against either first parameter, and the first
+        // candidate - the private one - won the tie. 41 of bigflat's 111 false
+        // E2361 came from that single pair.
+        //
+        // Deliberately SYNTACTIC and not a general type-mismatch rejection. A
+        // written-out `procedure ... end` is a value of procedural type and
+        // nothing else, so this is provable at the node; a general "the types do
+        // not fit" rule is not, and would have to answer for record `Implicit`
+        // operators, Variant, untyped parameters, and the rule that a
+        // PARAMETERLESS function reference in a value position is CALLED (which
+        // is why a tcProc argument in general may legitimately meet a Boolean
+        // parameter - see the E2012 entry). A literal cannot be called that way.
+        // The same holds for a `[...]` against a parameter it cannot be passed
+        // to - a string, a scalar, a class (IsBracketToScalar). ArgShapeRejects
+        // is the rule the unit's ScoreArgs applies too.
+        if XValid(LParX) and ArgShapeRejects(LM.Tree.Nodes[LCore].Kind,
+             IsProcedureDesignator(LCore), XCatOf(LCanonParX),
+             FModels[LParX.UnitId].Symbols[LParX.Sym].Kind = skGenericParam) then
+          Exit(-1);
+        // The same literal against a procedural parameter it cannot be passed
+        // to (LiteralFits): a method pointer, a plain procedural type, or a
+        // `reference to` type of another signature. dcc picks the overload the
+        // literal fits, in either declaration order (probed, dcc32 37.0): a UI
+        // unit on the client group declares `Make(..., AEvent: TNotifyEvent =
+        // nil)` beside `Make(..., AProc: TProc)`, both scored 0 on the literal,
+        // and the first - the event one - won the tie, so the TProc overload
+        // had no references (pastree-mcp, 2026-09-25); `Take(TProc)` beside
+        // `Take(TProc<Integer>)` is the same tie between two references.
+        // Provable at the node, like the rule above.
+        if (LM.Tree.Nodes[LCore].Kind = nkAnonMethod) and XValid(LParX) and
+           (XCatOf(LParX) = tcProc) and not LiteralFits(LCore, LParX) then
+          Exit(-1);
       end;
-      // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
-      // the only mismatch that does. `TThread.Synchronize(nil, procedure ...
-      // end)` fits BOTH the public `(const AThread: TThread; AThreadProc:
-      // TThreadProcedure)` and the PRIVATE `(ASyncRec: PSynchronizeRecord;
-      // QueueEvent: Boolean = False; ForceQueue: Boolean = False)` on arity,
-      // `nil` scores the same against either first parameter, and the first
-      // candidate - the private one - won the tie. 41 of bigflat's 111 false
-      // E2361 came from that single pair.
-      //
-      // Deliberately SYNTACTIC and not a general type-mismatch rejection. A
-      // written-out `procedure ... end` is a value of procedural type and
-      // nothing else, so this is provable at the node; a general "the types do
-      // not fit" rule is not, and would have to answer for record `Implicit`
-      // operators, Variant, untyped parameters, and the rule that a
-      // PARAMETERLESS function reference in a value position is CALLED (which
-      // is why a tcProc argument in general may legitimately meet a Boolean
-      // parameter - see the E2012 entry). A literal cannot be called that way.
-      // The same holds for a `[...]` against a parameter it cannot be passed
-      // to - a string, a scalar, a class (IsBracketToScalar). ArgShapeRejects
-      // is the rule the unit's ScoreArgs applies too.
-      if XValid(LParX) and ArgShapeRejects(LM.Tree.Nodes[LCore].Kind,
-           IsProcedureDesignator(LCore), XCatOf(LCanonParX),
-           FModels[LParX.UnitId].Symbols[LParX.Sym].Kind = skGenericParam) then
-        Exit(-1);
-      // The same literal against a procedural parameter it cannot be passed
-      // to (LiteralFits): a method pointer, a plain procedural type, or a
-      // `reference to` type of another signature. dcc picks the overload the
-      // literal fits, in either declaration order (probed, dcc32 37.0): a UI
-      // unit on the client group declares `Make(..., AEvent: TNotifyEvent =
-      // nil)` beside `Make(..., AProc: TProc)`, both scored 0 on the literal,
-      // and the first - the event one - won the tie, so the TProc overload
-      // had no references (pastree-mcp, 2026-09-25); `Take(TProc)` beside
-      // `Take(TProc<Integer>)` is the same tie between two references.
-      // Provable at the node, like the rule above.
-      if (LM.Tree.Nodes[LCore].Kind = nkAnonMethod) and XValid(LParX) and
-         (XCatOf(LParX) = tcProc) and not LiteralFits(LCore, LParX) then
-        Exit(-1);
       if XValid(LArgX) and XValid(LParX) then
         // A one-character literal is a Char constant (IsCharLiteralExpr -
         // through parentheses and both branches of an inline `if`, every
@@ -14107,7 +14118,7 @@ var
         // least - 'a' takes F(WideChar) over F(AnsiChar) and F(string) over
         // F(AnsiChar), either order (local/probe-b31 O2, probe-b32 P1).
         if (XCatOf(LCanonParX) = tcChar) and
-           IsCharLiteralExpr(LM.Tree, LCore) then
+           (LCore <> NIL_NODE) and IsCharLiteralExpr(LM.Tree, LCore) then
         begin
           var LCharX := LCanonParX;
           if PasBuiltinIsChar(FModels[LCharX.UnitId], LCharX.Sym,
@@ -14181,11 +14192,85 @@ var
           else if XAssignableX(LParX, LArgX) then
             Inc(Result, 1);
         end;
-      LArg := LM.Tree.Nodes[LArg].NextSibling;
+    end;
+
+    // The next parameter of the candidate's param scope after LPos (or the
+    // first, from -1), in XParamSyms' order and filter.
+    procedure NextParam;
+    begin
       Inc(LPos);
       while (LPos < LPCount) and
             (LPM.Symbols[LPList[LPos]].Kind <> skParam) do
         Inc(LPos);
+    end;
+
+  begin
+    // Present arguments and the trailing-comma slot, and the one arity rule
+    // (CallArgCount, ArityFits - 6.2.5): the slot is not an argument, so
+    // `F(1, 2,)` fits `F(A: Integer; B: Integer = 0)` (audit B3-32). An
+    // nkAmbiguous argument nothing has decided yet leaves no count to judge:
+    // no candidate is chosen over it (16.3.1).
+    LArgs := CallArgCount(LM, ACall, LTrailing);
+    if LArgs < 0 then
+      Exit(-1);
+    if not RoutineArity(AMid, ACand, LReq, LTot, LVariadic) then
+      Exit(0);
+    if not (LVariadic or TPasSemaTyper.ArityFits(LArgs, LReq, LTot,
+       LTrailing)) then
+      Exit(-1);
+    Result := 0;
+    // The parameters straight off the candidate's param scope, in XParamSyms'
+    // order and filter: an array per candidate, with its free, was 1.1% of a
+    // client build's CPU (perf audit 2026-10, C11).
+    LPM := FModels[AMid];
+    LPList := Default(TSemaSymList);
+    LPCount := 0;
+    if LPM.Symbols[ACand].MemberScope <> NIL_SCOPE then
+    begin
+      LPList := LPM.Scopes[LPM.Symbols[ACand].MemberScope].Symbols;
+      LPCount := LPList.Count;
+    end;
+    LPos := -1;
+    NextParam;
+    LArg := CallFirstArg(LM.Tree, ACall);
+    while (LArg <> NIL_NODE) and (LPos < LPCount) and
+          (LM.Tree.Nodes[LArg].Kind <> nkMissing) do
+    begin
+      if (LM.Tree.Nodes[LArg].Kind = nkAmbiguous) and
+         (LM.AmbigReadingOf(LArg) = arCompare) then
+      begin
+        // `F(A < B, C > (D))` (16.3.1): the arguments it stands for, a
+        // comparison a Boolean with no node of its own.
+        for LK := 0 to LM.AmbigArgCount(LArg) - 1 do
+        begin
+          if LPos >= LPCount then
+            Exit;
+          LParX := SubstX(DeclTypeX(AMid, LPList[LPos]), ACtx, 0);
+          if LM.AmbigArg(LArg, LK, LL, LR) then
+          begin
+            LArgX := XNil;
+            if XValid(GetX(LL)) and XValid(GetX(LR)) then
+              LArgX := BuiltinX(AId, 'boolean');
+            LS := ArgScore(NIL_NODE, LArgX, LParX);
+          end
+          else
+            LS := ArgScore(LL, GetX(LL), LParX);
+          if LS < 0 then
+            Exit(-1);
+          Inc(Result, LS);
+          NextParam;
+        end;
+      end
+      else
+      begin
+        LS := ArgScore(LArg, GetX(LArg),
+          SubstX(DeclTypeX(AMid, LPList[LPos]), ACtx, 0));
+        if LS < 0 then
+          Exit(-1);
+        Inc(Result, LS);
+        NextParam;
+      end;
+      LArg := LM.Tree.Nodes[LArg].NextSibling;
     end;
   end;
 
@@ -14197,7 +14282,7 @@ var
   begin
     Result := 0;
     LNode := LM.Tree.Nodes[LM.Tree.Nodes[ATypeArgs].FirstChild].NextSibling;
-    while LNode <> NIL_NODE do
+    while LNode <> PasTypeArgsEnd(LM.Tree, ATypeArgs) do
     begin
       Inc(Result);
       LNode := LM.Tree.Nodes[LNode].NextSibling;
@@ -14401,7 +14486,7 @@ var
     ABestCtx := ACtx;
     AAmbiguous := False;
     LTypeArgs := -1;
-    if LM.Tree.Nodes[ACalleeNode].Kind = nkTypeArgs then
+    if LM.Tree.Nodes[ACalleeNode].Kind in [nkTypeArgs, nkAmbiguous] then
       LTypeArgs := WrittenTypeArgCount(ACalleeNode);
     // Is the callee qualified by a TYPE (`TMonitor.Enter(X)`) rather than by a
     // value? Then an INSTANCE method is not a candidate at all, and that is the
@@ -15626,9 +15711,17 @@ var
             EmitE2003(LM, LName, AId);
         end;
 
-      nkCall:
+      // `F(H < I1, I2 > (E))` (16.3.1): read as the generic call or cast, an
+      // nkAmbiguous is the call with H<I1, I2> for its callee and the tail its
+      // one argument - the same selection, the same frame. Read as
+      // comparisons it is no value of its own: its leaves were typed above.
+      nkCall, nkAmbiguous:
+        if (LM.Tree.Nodes[N].Kind = nkCall) or AmbigIsGeneric(N) then
         begin
-          LBase := LM.Tree.Nodes[N].FirstChild;   // the callee
+          if LM.Tree.Nodes[N].Kind = nkCall then
+            LBase := LM.Tree.Nodes[N].FirstChild   // the callee
+          else
+            LBase := N;
           if (LBase <> NIL_NODE) and TargetSym(LBase, LMemMid, LMemSym) then
             case FModels[LMemMid].Symbols[LMemSym].Kind of
               skRoutine:
@@ -15642,7 +15735,7 @@ var
                   LIntrArgs := nil;
                   if PasIntrinsicReadsArgs(LIntrShape) then
                   begin
-                    var LArgN := LM.Tree.Nodes[LBase].NextSibling;
+                    var LArgN := CallFirstArg(LM.Tree, N);
                     var LArgCount := 0;
                     var LScan := LArgN;
                     while LScan <> NIL_NODE do
@@ -15667,7 +15760,7 @@ var
                   // `Obj.M<T>(...)`: the owner's frame sits on the designator
                   // under the type-argument node, not on the node itself.
                   if (LCtx = NIL_INST) and
-                     (LM.Tree.Nodes[LBase].Kind = nkTypeArgs) and
+                     (LM.Tree.Nodes[LBase].Kind in [nkTypeArgs, nkAmbiguous]) and
                      (LM.Tree.Nodes[LBase].FirstChild <> NIL_NODE) then
                     LCtx := CtxAt(LM.Tree.Nodes[LBase].FirstChild);
                   // A callee written `Name<...>` cannot mean a NON-generic
@@ -15679,7 +15772,7 @@ var
                   // front of `TJSONValue.GetValue<T>(APath): T`, so
                   // `Obj.GetValue<TJSONObject>('c').Get(...)` typed as
                   // TJSONValue and lost `Get`.
-                  if LM.Tree.Nodes[LBase].Kind = nkTypeArgs then
+                  if LM.Tree.Nodes[LBase].Kind in [nkTypeArgs, nkAmbiguous] then
                     RetargetToGeneric(LBase, LMemMid, LMemSym);
                   if SelectCallTarget(N, LBase, LMemMid, LMemSym, LCtx,
                     LBestMid, LBestSym, LBestCtx, LAmbiguous) then
@@ -15724,7 +15817,7 @@ var
                       // parameter is never substituted by it.
                       // Count the arguments first and size the array once -
                       // the old `+ [x]` reallocated per argument, per call.
-                      var LArgN := LM.Tree.Nodes[LBase].NextSibling;
+                      var LArgN := CallFirstArg(LM.Tree, N);
                       var LArgCount := 0;
                       var LScan := LArgN;
                       while LScan <> NIL_NODE do
@@ -15745,7 +15838,7 @@ var
                       // case they are the answer and inference is not
                       // consulted at all - see ExplicitMethodFrame.
                       var LFrame := NIL_INST;
-                      if LM.Tree.Nodes[LBase].Kind = nkTypeArgs then
+                      if LM.Tree.Nodes[LBase].Kind in [nkTypeArgs, nkAmbiguous] then
                         LFrame := ExplicitMethodFrame(AId, LBestMid, LBestSym,
                           LBase, LCtx);
                       if LFrame = NIL_INST then
@@ -15766,7 +15859,11 @@ var
                   // the call untyped rather than claim the wrong result.
                 end;
               skType, skBuiltinType:
-                SetXAt(N, GetX(LBase));   // a cast (incl. instantiated generic)
+                if LM.Tree.Nodes[N].Kind = nkAmbiguous then
+                  // `IMap<K, V>(X)`: the instantiation the head and items name
+                  SetXAt(N, ResolveTypeExpr(AId, N))
+                else
+                  SetXAt(N, GetX(LBase));   // a cast (incl. instantiated generic)
             else
               // A VALUE of a procedural type, called with arguments: a
               // variable, field, parameter or property (`GlobalGateway(True,

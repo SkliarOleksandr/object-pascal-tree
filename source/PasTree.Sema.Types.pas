@@ -161,6 +161,13 @@ type
     function IsValuePos(N: Integer): Boolean;
     function DeclaresConversion(ASym: Integer; AExplicitToo: Boolean): Boolean;
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
+    { One argument against the parameter AParam: AArg its node, or NIL_NODE
+      for a comparison an nkAmbiguous stands for (no node shape to read);
+      AAt its type. 2 exact, 1 assignable, 0 no evidence, -1 rejected. }
+    function ScoreArg(AArg, AAt, AParam: Integer): Integer;
+    { The type of the comparison `ALeft < ARight` / `ALeft > ARight` an
+      nkAmbiguous stands for: Boolean once both operands are typed. }
+    function CompareType(ALeft, ARight: Integer): Integer;
 
     function SelectOverload(ACall, AHead: Integer): Integer;
     function MemberResult(N: Integer): Integer;
@@ -276,9 +283,16 @@ function ArgStructNeedsConv(AParCat, AArgCat: TSemaTypeCat): Boolean;
   the nkMissing slot a trailing comma leaves (`F(1, 2,)`, ParseArgList) not
   counted - and whether that slot is there (ATrailing). The one count every
   arity test reads with TPasSemaTyper.ArityFits (6.2.5; audit B3-32 /
-  D2-15: the project scorer counted the slot as an argument). }
-function CallArgCount(const ATree: TPasTree; ACall: Integer;
+  D2-15: the project scorer counted the slot as an argument). An nkAmbiguous
+  argument counts as the arguments it stands for (AModel.AmbigArgCount), and
+  the count is -1 while one of them is unknown: no arity can be judged then.
+  ACall may itself be an nkAmbiguous read as a generic call - its one
+  argument is the tail (CallFirstArg). }
+function CallArgCount(const AModel: TPasSemaModel; ACall: Integer;
   out ATrailing: Boolean): Integer;
+{ The first argument node of ACall: the one after the callee of an nkCall, the
+  parenthesised tail of an nkAmbiguous read as a generic call. }
+function CallFirstArg(const ATree: TPasTree; ACall: Integer): Integer;
 
 { Category-level assignability, the one rule of TPasSemaTyper.Assignable and
   TPasSemaProject.XAssignableX: conservative - only a definite scalar
@@ -587,23 +601,39 @@ begin
              (AParCat in [tcRecord, tcClass, tcInterface]));
 end;
 
-function CallArgCount(const ATree: TPasTree; ACall: Integer;
+function CallFirstArg(const ATree: TPasTree; ACall: Integer): Integer;
+begin
+  if ATree.Nodes[ACall].Kind = nkAmbiguous then
+    Exit(ATree.LastChild(ACall));
+  Result := ATree.Nodes[ACall].FirstChild;   // the callee
+  if Result <> NIL_NODE then
+    Result := ATree.Nodes[Result].NextSibling;
+end;
+
+function CallArgCount(const AModel: TPasSemaModel; ACall: Integer;
   out ATrailing: Boolean): Integer;
 var
-  LArg: Integer;
+  LArg, LN: Integer;
 begin
   Result := 0;
   ATrailing := False;
-  LArg := ATree.Nodes[ACall].FirstChild;   // the callee
-  if LArg <> NIL_NODE then
-    LArg := ATree.Nodes[LArg].NextSibling;
+  LArg := CallFirstArg(AModel.Tree, ACall);
   while LArg <> NIL_NODE do
   begin
-    if ATree.Nodes[LArg].Kind = nkMissing then
-      ATrailing := True
+    case AModel.Tree.Nodes[LArg].Kind of
+      nkMissing:
+        ATrailing := True;
+      nkAmbiguous:
+        begin
+          LN := AModel.AmbigArgCount(LArg);
+          if LN < 0 then
+            Exit(-1);
+          Inc(Result, LN);
+        end;
     else
       Inc(Result);
-    LArg := ATree.Nodes[LArg].NextSibling;
+    end;
+    LArg := AModel.Tree.Nodes[LArg].NextSibling;
   end;
 end;
 
@@ -2395,12 +2425,12 @@ function TPasSemaTyper.ArgCount(ACall: Integer): Integer;
 var
   LTrailing: Boolean;
 begin
-  Result := CallArgCount(T, ACall, LTrailing);
+  Result := CallArgCount(M, ACall, LTrailing);
 end;
 
 function TPasSemaTyper.TrailingSlot(ACall: Integer): Boolean;
 begin
-  CallArgCount(T, ACall, Result);
+  CallArgCount(M, ACall, Result);
 end;
 
 // Does a candidate with (AReq, ATot) parameters admit AArgs present arguments?
@@ -2424,7 +2454,7 @@ var
   LArg: Integer;
 begin
   Result := False;
-  LArg := Sib(Child(ACall));
+  LArg := CallFirstArg(T, ACall);
   while LArg <> NIL_NODE do
   begin
     if Kind(LArg) = nkError then
@@ -2523,83 +2553,120 @@ end;
 function TPasSemaTyper.ScoreArgs(ACall: Integer;
   const AParams: TArray<Integer>): Integer;
 var
-  LArg, LCore, LIdx, LAt, LPt, LCAt, LCPt: Integer;
-  LParCat: TSemaTypeCat;
+  LArg, LIdx, LScore, LK, LL, LR: Integer;
 begin
   Result := 0;
-  LArg := Sib(Child(ACall));
+  LArg := CallFirstArg(T, ACall);
   LIdx := 0;
   while (LArg <> NIL_NODE) and (LIdx <= High(AParams)) do
   begin
     // The empty slot of a trailing comma is not an argument (CallArgCount).
     if Kind(LArg) = nkMissing then
       Break;
-    LCore := PeelParens(T, LArg);
-    LAt := M.ExprType[LArg];
-    LPt := M.Symbols[AParams[LIdx]].TypeSym;
-    if LPt <> NIL_SYM then
+    if (Kind(LArg) = nkAmbiguous) and (M.AmbigReadingOf(LArg) = arCompare) then
     begin
-      LParCat := CatOf(LPt);
-      // A class TYPE NAME is a class reference (15.2.1), not an instance:
-      // `Reg(TFoo)` takes Reg(C: TFooClass) over Reg(O: TFoo) - the
-      // project scorer's rule (audit E3-25, local/probe-b34 P1). Its own
-      // class's reference scores exact, another's assignable.
-      if (Kind(LCore) in [nkIdent, nkMember]) and (LAt <> NIL_SYM) and
-         (Head(LCore) = LAt) and (M.Symbols[LAt].Kind = skType) and
-         (CatOf(LAt) = tcClass) then
+      // `F(A < B, C > (D))` (16.3.1): the arguments it stands for, each
+      // comparison a Boolean of its own with no node to read a shape off.
+      for LK := 0 to M.AmbigArgCount(LArg) - 1 do
       begin
-        case LParCat of
-          tcClassOf:
-            if ClassRefTarget(LPt) = WeakAliasEnd(LAt) then
-              Inc(Result, 2)
-            else
-              Inc(Result, 1);
-          tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
-          tcChar, tcString, tcEnum, tcSet, tcArray:
-            Exit(-1);
-        end;
-        LArg := Sib(LArg);
-        Inc(LIdx);
-        Continue;
-      end;
-      // An anonymous method, a procedure designator, a `[...]` against a
-      // parameter it cannot be passed to - provable at the node, typed or
-      // not (neither has a type of its own here).
-      if ArgShapeRejects(Kind(LCore), IsProcDesignator(LCore), LParCat,
-         M.Symbols[LPt].Kind = skGenericParam) then
-        Exit(-1);
-      // A one-character literal - through parentheses, or both branches of
-      // an inline `if` - is typed `string` here but is a Char constant:
-      // `Char` fits it best, `AnsiChar` below a string parameter
-      // (local/probe-b31 O2, probe-b32 P1).
-      if (LParCat = tcChar) and IsCharLiteralExpr(T, LCore) then
-      begin
-        if PasBuiltinIsChar(M, WeakAliasEnd(LPt), FPlatform) then
-          Inc(Result, 3)
+        if LIdx > High(AParams) then
+          Exit;
+        if M.AmbigArg(LArg, LK, LL, LR) then
+          LScore := ScoreArg(NIL_NODE, CompareType(LL, LR), AParams[LIdx])
         else
-          Inc(Result, 1);
-      end
-      else if LAt <> NIL_SYM then
-      begin
-        // The same type under two names is an exact match: a weak alias
-        // (WeakAliasEnd), one type under two seeded names (Integer /
-        // LongInt, Char / WideChar - PasBuiltinCanonSym, audit A3-17).
-        LCAt := PasBuiltinCanonSym(M, WeakAliasEnd(LAt), FPlatform);
-        LCPt := PasBuiltinCanonSym(M, WeakAliasEnd(LPt), FPlatform);
-        if (LAt = LPt) or (LCAt = LCPt) then
-          Inc(Result, 2)
-        else if ArgCatRejects(LParCat, CatOf(LAt)) or
-           (ArgStructNeedsConv(LParCat, CatOf(LAt)) and
-            ArgStructRejects(LParCat, CatOf(LAt),
-              DeclaresConversion(LPt, True),
-              DeclaresConversion(LAt, True))) then
-          Exit(-1)
-        else if Assignable(LPt, LAt) then
-          Inc(Result, 1);
+          LScore := ScoreArg(LL, M.ExprType[LL], AParams[LIdx]);
+        if LScore < 0 then
+          Exit(-1);
+        Inc(Result, LScore);
+        Inc(LIdx);
       end;
+    end
+    else
+    begin
+      LScore := ScoreArg(LArg, M.ExprType[LArg], AParams[LIdx]);
+      if LScore < 0 then
+        Exit(-1);
+      Inc(Result, LScore);
+      Inc(LIdx);
     end;
     LArg := Sib(LArg);
-    Inc(LIdx);
+  end;
+end;
+
+function TPasSemaTyper.CompareType(ALeft, ARight: Integer): Integer;
+begin
+  Result := NIL_SYM;
+  if (M.ExprType[ALeft] <> NIL_SYM) and (M.ExprType[ARight] <> NIL_SYM) then
+    Result := Bool;
+end;
+
+function TPasSemaTyper.ScoreArg(AArg, AAt, AParam: Integer): Integer;
+var
+  LCore, LPt, LCAt, LCPt: Integer;
+  LParCat: TSemaTypeCat;
+begin
+  Result := 0;
+  LPt := M.Symbols[AParam].TypeSym;
+  if LPt = NIL_SYM then
+    Exit;
+  LParCat := CatOf(LPt);
+  if AArg <> NIL_NODE then
+  begin
+    LCore := PeelParens(T, AArg);
+    // A class TYPE NAME is a class reference (15.2.1), not an instance:
+    // `Reg(TFoo)` takes Reg(C: TFooClass) over Reg(O: TFoo) - the
+    // project scorer's rule (audit E3-25, local/probe-b34 P1). Its own
+    // class's reference scores exact, another's assignable.
+    if (Kind(LCore) in [nkIdent, nkMember]) and (AAt <> NIL_SYM) and
+       (Head(LCore) = AAt) and (M.Symbols[AAt].Kind = skType) and
+       (CatOf(AAt) = tcClass) then
+    begin
+      case LParCat of
+        tcClassOf:
+          if ClassRefTarget(LPt) = WeakAliasEnd(AAt) then
+            Result := 2
+          else
+            Result := 1;
+        tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
+        tcChar, tcString, tcEnum, tcSet, tcArray:
+          Result := -1;
+      end;
+      Exit;
+    end;
+    // An anonymous method, a procedure designator, a `[...]` against a
+    // parameter it cannot be passed to - provable at the node, typed or
+    // not (neither has a type of its own here).
+    if ArgShapeRejects(Kind(LCore), IsProcDesignator(LCore), LParCat,
+       M.Symbols[LPt].Kind = skGenericParam) then
+      Exit(-1);
+    // A one-character literal - through parentheses, or both branches of
+    // an inline `if` - is typed `string` here but is a Char constant:
+    // `Char` fits it best, `AnsiChar` below a string parameter
+    // (local/probe-b31 O2, probe-b32 P1).
+    if (LParCat = tcChar) and IsCharLiteralExpr(T, LCore) then
+    begin
+      if PasBuiltinIsChar(M, WeakAliasEnd(LPt), FPlatform) then
+        Exit(3);
+      Exit(1);
+    end;
+  end;
+  if AAt <> NIL_SYM then
+  begin
+    // The same type under two names is an exact match: a weak alias
+    // (WeakAliasEnd), one type under two seeded names (Integer /
+    // LongInt, Char / WideChar - PasBuiltinCanonSym, audit A3-17).
+    LCAt := PasBuiltinCanonSym(M, WeakAliasEnd(AAt), FPlatform);
+    LCPt := PasBuiltinCanonSym(M, WeakAliasEnd(LPt), FPlatform);
+    if (AAt = LPt) or (LCAt = LCPt) then
+      Result := 2
+    else if ArgCatRejects(LParCat, CatOf(AAt)) or
+       (ArgStructNeedsConv(LParCat, CatOf(AAt)) and
+        ArgStructRejects(LParCat, CatOf(AAt),
+          DeclaresConversion(LPt, True),
+          DeclaresConversion(AAt, True))) then
+      Result := -1
+    else if Assignable(LPt, AAt) then
+      Result := 1;
   end;
 end;
 
@@ -2639,6 +2706,10 @@ var
 begin
   LAnyOverload := False;
   LArgs := ArgCount(ACall);
+  // An nkAmbiguous argument whose head nothing has bound yet (16.3.1): one
+  // argument or several, so no overload can be chosen and no count judged.
+  if LArgs < 0 then
+    Exit(NIL_SYM);
   LTrailing := TrailingSlot(ACall);
   LBest := AHead; LBestScore := -1;
   LAnyFit := False; LAllHaveParams := True; LAnyVariadic := False;
@@ -2772,7 +2843,7 @@ begin
   // (CrossType) retypes the call against the properly MERGED set.
   if (Length(M.UsesList) > 0) and LAnyFit and (LBestScore = 0) then
   begin
-    var LArg := Sib(Child(ACall));
+    var LArg := CallFirstArg(T, ACall);
     while LArg <> NIL_NODE do
     begin
       if M.ExprType[LArg] <> NIL_SYM then
@@ -3131,7 +3202,7 @@ begin
   // The first argument, if any - a bare `Pi` is an nkIdent with no children.
   LArg := NIL_NODE;
   if (Kind(ACall) = nkCall) and (Child(ACall) <> NIL_NODE) then
-    LArg := Sib(Child(ACall));
+    LArg := CallFirstArg(T, ACall);
   LA := NIL_SYM;
   if (LArg <> NIL_NODE) and PasIntrinsicReadsArgs(LShape) then
     LA := M.ExprType[LArg];
@@ -3580,6 +3651,14 @@ begin
     nkCall: Result := CallResult(N);
     nkMember: Result := MemberResult(N);
     nkTypeArgs: Result := M.ExprType[Child(N)];
+    // The generic call or cast an nkAmbiguous may be (16.3.1): CallResult
+    // reads its head as the callee and its tail as the one argument. Read as
+    // comparisons it is several arguments and no one value.
+    nkAmbiguous:
+      if M.AmbigReadingOf(N) = arGeneric then
+        Result := CallResult(N)
+      else
+        Result := NIL_SYM;
     nkInlineIf:
       Result := InlineIfResult(N);
   else

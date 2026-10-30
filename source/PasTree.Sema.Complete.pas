@@ -1926,7 +1926,7 @@ begin
      (FModel.Tree.Nodes[ACall].Kind <> nkCall) then
     Exit;
   LM := ProjModel(AMid, 'ArityOverload');
-  LArgs := CallArgCount(FModel.Tree, ACall, LTrailing);
+  LArgs := CallArgCount(FModel, ACall, LTrailing);
   LCur := ASym;
   for LHop := 1 to 64 do
   begin

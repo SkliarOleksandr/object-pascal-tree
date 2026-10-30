@@ -533,11 +533,18 @@ of less work, not a gap in following the language; its consequences are in
   last analysis never saw stays unsubstituted - the overlay generic's
   members, its parameters open.
 - `Id<...>` in an expression is told from a comparison by syntax, where dcc
-  decides by what the head names (spec 16.3.1): `F(A < B, C > (D))` - two
-  comparisons for dcc - is read as a generic call or cast with one
-  argument (the corpora hold none of those and several generic calls of
-  that shape), and a Variant chain `VA < VB > -VC` written after a member
-  (`R.VA < ...`) as type arguments.
+  decides by what the head names (spec 16.3.1), in every shape but one: a
+  call argument written exactly `H < I1, ..., In > (E)` (names only in the
+  list, one expression in the tail, the argument ending after it) is an
+  nkAmbiguous whose reading follows the head, as dcc's does. Still read by
+  syntax: the same shape in an index or a set constructor (`X[A < B, C >
+  (D)]`), which stays generic; a tail followed by an operator or a selector, or a head with an operand
+  to its left (`F(X + A < B, C > (D))`), which stay a generic call or cast;
+  the bare-head tails `GetData<Integer> + 1` and `GetData<PRec>^.X`
+  without a member before the head, which stay comparisons - in each the
+  tail parses differently in the two readings, so no flat node holds both;
+  and a Variant chain `VA < VB > -VC` written after a member (`R.VA <
+  ...`), read as type arguments.
 
 ### 16.4.1 Type-parameter constraints
 - interface constraints and the `constructor` constraint

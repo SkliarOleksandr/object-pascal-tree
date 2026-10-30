@@ -355,7 +355,7 @@ const
     method is an nkDirective child, and the initializer after a procedural
     type's directives is its declaration's. A new finding of the kind is
     filed here as a `loss:F<n>` row, until the tree holds it. }
-  OWN_RULE_TEXT: array[0..229] of string = (
+  OWN_RULE_TEXT: array[0..232] of string = (
     // ---- leaves: the token is the node's own text ----
     'Ident | <ident> @words @keywords | once | leaf | the name as written; ' +
       'a reserved word only after a dot, as an operator name or as the ' +
@@ -394,6 +394,9 @@ const
     'TypeArgs | > | opt | derived | the kind; a fused >= closing the list ' +
       'lies outside it (normalization list)',
     'TypeArgs | , | - | derived | between the arguments',
+    'Ambiguous | < | head once | derived | the kind, after the head (16.3.1)',
+    'Ambiguous | > | once | derived | the kind, before the tail',
+    'Ambiguous | , | - | derived | between the list items',
     'SetCtor | [ | head once | derived | the kind',
     'SetCtor | ] | once | derived | the kind',
     'SetCtor | , | - | derived | between the elements',
@@ -1295,7 +1298,7 @@ const
   // bracket or the dot after their first child (tree-contract.md sec. 5):
   // their span starts where that child does.
   LEFT_OPERAND_KINDS = [nkMember, nkBinaryOp, nkCall, nkIndex, nkDeref,
-    nkTypeArgs, nkRange, nkSubrange, nkFormattedArg, nkNamedArg];
+    nkTypeArgs, nkRange, nkSubrange, nkFormattedArg, nkNamedArg, nkAmbiguous];
 var
   LCount, LLastVis, LBefore, LOrderCount, LOrphanStart: Integer;
   LState: TArray<Byte>;

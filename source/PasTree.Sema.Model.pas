@@ -43,6 +43,11 @@ type
   // The synchronous drivers take every model straight to msCrossReady.
   TPasModuleStatus = (msQueued, msIntfReady, msFullReady, msCrossReady);
 
+  // How an nkAmbiguous call argument `H < I1, ..., In > (E)` reads (16.3.1):
+  // by what H names. arUnknown until H is bound - every check then says
+  // nothing about the call it stands in.
+  TAmbigReading = (arUnknown, arGeneric, arCompare);
+
   TSemaSymbolKind = (skType, skVar, skConst, skField, skRoutine, skParam,
     skProperty, skEnumValue, skGenericParam, skLabel, skUnitRef, skBuiltinType,
     // Never a declared symbol: completion KEYWORD rows carry this so a host
@@ -632,6 +637,13 @@ type
       in Phase 1 and never released: unlike a struct, a procedural type owns
       no member scope to snapshot from. }
     AnonTypeSyms: TPasIntMap<Integer>;
+    { nkAmbiguous node -> Ord(TAmbigReading), absent = arUnknown: the reading
+      of the call argument the parse left open (16.3.1, audit E2-04), decided
+      by what its head binds to - the resolver for a head this unit declares,
+      the cross typer for any other. The tree is never rewritten for it.
+      Never released: a handful of entries in the rare unit that has one, and
+      the arity checks read it after every release and demotion. }
+    AmbigReadings: TPasIntMap<Byte>;
     Demoted: Boolean;
     { True when this model's FINAL token stream came from the declared-pass
       re-preprocess (the per-unit $IF oracle) rather than the plain seeded
@@ -886,6 +898,30 @@ type
       its parameters live under (an implementation may leave it off). Read
       from sfOverloadDirective, so a demoted model answers too. }
     function RoutineSaysOverload(ASym: Integer): Boolean;
+    { The reading of the nkAmbiguous ANode - AmbigReadings, arUnknown when
+      nothing decided it yet. }
+    function AmbigReadingOf(ANode: Integer): TAmbigReading;
+    { What an nkAmbiguous head bound to ASym (a symbol of THIS model) makes
+      of it (16.3.1, dcc64 37.0): a type, or a routine whose overload set
+      holds a generic one, reads as type arguments; any other value - a
+      variable, constant, field, parameter, property, enum value, a
+      non-generic routine - as comparisons; anything else is arUnknown. }
+    function AmbigReadingForSym(ASym: Integer): TAmbigReading;
+    { The ONE accessor for an nkAmbiguous call argument's structure: how many
+      arguments it stands for - 1 (the generic call or cast), n (n list
+      items: `H < I1`, I2..In-1, `In > (E)`), -1 while the reading is
+      unknown. }
+    function AmbigArgCount(ANode: Integer): Integer;
+    { Its AIndex-th argument (0-based, below AmbigArgCount): True for a
+      comparison - ALeft and ARight its operands, the head and the first item
+      (`<`) or the last item and the parenthesised tail (`>`); False for a
+      node standing as it is - a middle item, or ANode itself in the generic
+      reading. }
+    function AmbigArg(ANode, AIndex: Integer; out ALeft, ARight: Integer):
+      Boolean;
+    { The nkIdent that names an nkAmbiguous's head: the head itself, or the
+      last segment of a dotted one. }
+    function AmbigHeadName(ANode: Integer): Integer;
     { Does the struct scope AScope declare a `class operator` named
       ANameLower (`implicit`, `explicit`, `round`, ...)? An operator is never
       bound by name (9.3.1 - TPasSemaResolver.DeclareSym), so it is found by
@@ -2880,6 +2916,105 @@ begin
   Result := (ASym >= 0) and (ASym < SymCount) and
     (Symbols[ASym].Kind = skRoutine) and
     (sfOverloadDirective in Symbols[ASym].Flags);
+end;
+
+function TPasSemaModel.AmbigReadingOf(ANode: Integer): TAmbigReading;
+var
+  LReading: Byte;
+begin
+  Result := arUnknown;
+  if AmbigReadings.TryGetValue(ANode, LReading) then
+    Result := TAmbigReading(LReading);
+end;
+
+function TPasSemaModel.AmbigReadingForSym(ASym: Integer): TAmbigReading;
+var
+  LSym, LDecl, LParams: Integer;
+begin
+  Result := arUnknown;
+  if (ASym < 0) or (ASym >= SymCount) then
+    Exit;
+  case Symbols[ASym].Kind of
+    skType, skBuiltinType:
+      Result := arGeneric;
+    skVar, skConst, skField, skParam, skProperty, skEnumValue:
+      Result := arCompare;
+    skRoutine:
+      begin
+        // The whole set: `Ovl(X: Integer)` declared before `Ovl<T, U>(X)`
+        // still reads `H.Ovl<A, B>(D)` as the generic call (dcc64 37.0,
+        // local/probe-park/e204 G3). The generic parameters hang off the
+        // declaration's nkRoutine, as GenericParamsNodeOf reads them.
+        Result := arCompare;
+        LSym := ASym;
+        while (LSym <> NIL_SYM) and (Symbols[LSym].Kind = skRoutine) do
+        begin
+          LDecl := Symbols[LSym].DeclNode;
+          if LDecl <> NIL_NODE then
+            LDecl := Tree.Nodes[LDecl].Parent;
+          if (LDecl <> NIL_NODE) and (Tree.Nodes[LDecl].Kind = nkRoutine) then
+          begin
+            LParams := Tree.Nodes[LDecl].FirstChild;
+            while (LParams <> NIL_NODE) and
+                  (Tree.Nodes[LParams].Kind <> nkGenericParams) do
+              LParams := Tree.Nodes[LParams].NextSibling;
+            if LParams <> NIL_NODE then
+              Exit(arGeneric);
+          end;
+          LSym := Symbols[LSym].NextOverload;
+        end;
+      end;
+  end;
+end;
+
+function TPasSemaModel.AmbigArgCount(ANode: Integer): Integer;
+begin
+  case AmbigReadingOf(ANode) of
+    arGeneric:
+      Result := 1;
+    arCompare:
+      // Head, the n items, the tail: n arguments.
+      Result := PasChildCount(Tree, ANode) - 2;
+  else
+    Result := -1;
+  end;
+end;
+
+function TPasSemaModel.AmbigArg(ANode, AIndex: Integer; out ALeft,
+  ARight: Integer): Boolean;
+var
+  LCount: Integer;
+begin
+  ALeft := ANode;
+  ARight := NIL_NODE;
+  Result := False;
+  if AmbigReadingOf(ANode) <> arCompare then
+    Exit;
+  LCount := PasChildCount(Tree, ANode) - 2;
+  // Children: head = 0, items 1..n, tail n + 1. Argument k (0-based) is
+  // `head < item1` for k = 0, `item_n > tail` for k = n - 1, item_k + 1
+  // between.
+  ALeft := PasNthChild(Tree, ANode, AIndex);
+  if AIndex = 0 then
+  begin
+    ARight := Tree.Nodes[ALeft].NextSibling;
+    Result := True;
+  end
+  else if AIndex = LCount - 1 then
+  begin
+    ALeft := Tree.Nodes[ALeft].NextSibling;
+    ARight := Tree.Nodes[ALeft].NextSibling;
+    Result := True;
+  end
+  else
+    ALeft := Tree.Nodes[ALeft].NextSibling;
+end;
+
+function TPasSemaModel.AmbigHeadName(ANode: Integer): Integer;
+begin
+  Result := Tree.Nodes[ANode].FirstChild;
+  if (Result <> NIL_NODE) and (Tree.Nodes[Result].Kind = nkMember) then
+    Result := Tree.LastChild(Result);
 end;
 
 function TPasSemaModel.DeclaresOperator(AScope: Integer;

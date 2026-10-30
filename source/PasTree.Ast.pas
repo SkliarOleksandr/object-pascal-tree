@@ -205,7 +205,7 @@ type
                       // argument list (4.10.1): name = child 0, value = child 1.
                       // The NAME is a dispatch parameter name, NOT a reference -
                       // nothing resolves it.
-    nkProgramParams   // 1.1.1: `program X(Input, Output);` - the legacy
+    nkProgramParams,  // 1.1.1: `program X(Input, Output);` - the legacy
                       // parameter list after a program's name, one nkIdent
                       // per name (F17). dcc takes plain identifiers only, at
                       // least one, and they declare nothing and refer to
@@ -213,6 +213,16 @@ type
                       // E2003, `program X(A, A);` compiles): nothing resolves
                       // them. A `library` takes none (E2029, a parse
                       // diagnostic; read all the same).
+    nkAmbiguous       // 16.3.1: a call argument `H < I1, ..., In > (E)` the
+                      // parse cannot decide - type arguments when H names a
+                      // generic type or routine (one argument, a cast or a
+                      // call), comparisons when H names a value (n
+                      // arguments: `H < I1`, I2..In-1, `In > (E)`). FLAT:
+                      // the leaves in token order - H (an nkIdent or a
+                      // dotted nkMember), each Ii (the same), the nkParen
+                      // `(E)` last; the `<`, `,` and `>` are its own. The
+                      // reading lives in the model (AmbigReadingOf), never
+                      // in the tree; AmbigArgs is the one accessor.
   );
 
   TPasNodeFlag = (
@@ -484,6 +494,7 @@ type
       becomes the first child of an enclosing node, e.g. assignment). }
     procedure Adopt(ANewParent, ANode: Integer);
     function Kind(ANode: Integer): TPasNodeKind;
+    function FirstTokenOf(ANode: Integer): Integer;
     function FirstChild(ANode: Integer): Integer;
     function LastChild(ANode: Integer): Integer;
     function ParentOf(ANode: Integer): Integer;
@@ -531,6 +542,16 @@ type
     9.1.2). A helper's leading run is its own business (ancestor helpers,
     then the `for` target) and is not read here. }
   function PasHeritageRef(const ATree: TPasTree; ADef: Integer): Integer;
+
+  { Where the type arguments of ANode end, the sibling a walk from its head
+    stops at: NIL_NODE for an nkTypeArgs, the parenthesised tail for an
+    nkAmbiguous read as a generic call (16.3.1) - the one difference between
+    the two that a type-argument walk must know. }
+  function PasTypeArgsEnd(const ATree: TPasTree; ANode: Integer): Integer;
+    inline;
+  function PasChildCount(const ATree: TPasTree; ANode: Integer): Integer;
+  { The AIndex-th child (0-based), NIL_NODE past the last. }
+  function PasNthChild(const ATree: TPasTree; ANode, AIndex: Integer): Integer;
 
   { The parts of an `array [dims] of T` definition node (8.1.1, 8.2.1): the
     index types lead the children, the element type is the LAST child, and
@@ -635,6 +656,36 @@ begin
   if (Result <> NIL_NODE) and not (ATree.Nodes[Result].Kind in
      [nkIdent, nkMember, nkTypeArgs]) then
     Result := NIL_NODE;
+end;
+
+function PasTypeArgsEnd(const ATree: TPasTree; ANode: Integer): Integer;
+begin
+  Result := NIL_NODE;
+  if ATree.Nodes[ANode].Kind = nkAmbiguous then
+    Result := ATree.LastChild(ANode);
+end;
+
+function PasChildCount(const ATree: TPasTree; ANode: Integer): Integer;
+var
+  LChild: Integer;
+begin
+  Result := 0;
+  LChild := ATree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    Inc(Result);
+    LChild := ATree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function PasNthChild(const ATree: TPasTree; ANode, AIndex: Integer): Integer;
+begin
+  Result := ATree.Nodes[ANode].FirstChild;
+  while (Result <> NIL_NODE) and (AIndex > 0) do
+  begin
+    Result := ATree.Nodes[Result].NextSibling;
+    Dec(AIndex);
+  end;
 end;
 
 function PasArrayElemNode(const ATree: TPasTree; ADef: Integer): Integer;
@@ -1666,6 +1717,11 @@ end;
 function TPasTreeBuilder.Kind(ANode: Integer): TPasNodeKind;
 begin
   Result := FNodes[ANode].Kind;
+end;
+
+function TPasTreeBuilder.FirstTokenOf(ANode: Integer): Integer;
+begin
+  Result := FNodes[ANode].FirstToken;
 end;
 
 function TPasTreeBuilder.FirstChild(ANode: Integer): Integer;

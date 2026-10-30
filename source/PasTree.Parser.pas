@@ -96,6 +96,11 @@ type
     // the real tkGreaterEqual, and the Next() that consumes it advances FPos
     // past the whole compound token exactly as an ordinary Next always does.
     FSplitEq: Boolean;
+    // The first token of the call argument being parsed (ParseArgList), -1
+    // outside one: an nkAmbiguous (16.3.1) is built only for a name that
+    // starts the argument - a prefix or an operand to its left groups
+    // differently in the comparison reading.
+    FArgItemStart: Integer;
     // cursor
     { FSrc.VisibleKind, here: the parser, Ast, CondEval and the preprocessor
       use each other in a cycle, and the compiler inlines nothing across one
@@ -166,6 +171,15 @@ type
       and a type reference's. }
     function ParseTypeArgs(AHead: Integer): Integer;
     function ScanGenericArgs(AFrom: Integer; ADotted: Boolean): Integer;
+    { True when the generic-looking list from the `<` at AFrom to the `(` at
+      AParen, over the name AHead, is the one shape the parse leaves open
+      (16.3.1, audit E2-04): AHead a name or a dotted name that starts the
+      call argument being parsed, the list only names with a top-level
+      comma, `(` one expression `)` and then the argument's `,` or `)`. }
+    function AtAmbiguousArg(AHead, AFrom, AParen: Integer): Boolean;
+    { The flat nkAmbiguous over AHead, from the `<` at the cursor through the
+      tail's `)` - after AtAmbiguousArg said so. }
+    function ParseAmbiguous(AHead: Integer): Integer;
     function AtMemberName: Boolean;
     function MaybeNamedArg(AArg: Integer): Integer;
     function ParseArgList(ACall: Integer): Integer;
@@ -1052,7 +1066,11 @@ begin
           LScan := ScanGenericArgs(FPos, FB.Kind(Result) = nkMember);
           if LScan < 0 then
             Break;
-          Result := ParseTypeArgs(Result);
+          if (LScan <= FLast) and (FSrc.VisibleToken(LScan).Kind = tkLParen) and
+             AtAmbiguousArg(Result, FPos, LScan) then
+            Result := ParseAmbiguous(Result)
+          else
+            Result := ParseTypeArgs(Result);
         end;
     else
       Break;
@@ -1096,10 +1114,11 @@ end;
 
 function TPasParser.ParseArgList(ACall: Integer): Integer;
 var
-  LArg, LWrap, LDepth: Integer;
+  LArg, LWrap, LDepth, LOuterItem: Integer;
 begin
   // At '('.
   Next;
+  LOuterItem := FArgItemStart;
   // A comma PROMISES an argument: `F(,1)` and `F(1,,2)` are each one E2029
   // for dcc. The loop therefore runs per slot, not per present expression -
   // an empty slot is reported once, marked with an nkError (so CheckCalls
@@ -1122,7 +1141,9 @@ begin
       Next;
       Continue;
     end;
+    FArgItemStart := FPos;
     LArg := ParseExpression;
+    FArgItemStart := LOuterItem;
     if CurKind = tkColon then
     begin
       // Write/Str formatted argument (4.11.2): expr:width[:prec].
@@ -1261,6 +1282,117 @@ begin
     end;
   LeaveGuard;
   CloseGeneric('">"');
+  FB.SetLast(Result, FPos - 1);
+end;
+
+function TPasParser.AtAmbiguousArg(AHead, AFrom, AParen: Integer): Boolean;
+var
+  LNode, LIdx, LDepth: Integer;
+  LKind: TPasTokenKind;
+  LName, LComma: Boolean;
+begin
+  // dcc reads `F(H < I1, I2 > (E))` by what H names (16.3.1): type arguments
+  // after a generic type or routine, two comparisons after a value. The parse
+  // cannot see that, so this one shape gets a node that holds both readings;
+  // the model decides. Only where the two readings differ in nothing but the
+  // grouping of these very leaves: H starts the argument (an operand or a
+  // prefix to its left would bind to `H` alone in the comparison reading),
+  // the items are names only, the tail is one parenthesised expression (a
+  // comparison has one right operand) and the argument ends right after it.
+  Result := False;
+  if FArgItemStart < 0 then
+    Exit;
+  LNode := AHead;
+  while FB.Kind(LNode) = nkMember do
+  begin
+    if (FB.LastChild(LNode) = NIL_NODE) or
+       (FB.Kind(FB.LastChild(LNode)) <> nkIdent) then
+      Exit;
+    LNode := FB.FirstChild(LNode);
+    if LNode = NIL_NODE then
+      Exit;
+  end;
+  if (FB.Kind(LNode) <> nkIdent) or (FB.FirstTokenOf(LNode) <> FArgItemStart) then
+    Exit;
+  // The list: `name {. name} {, name {. name}}`, at least one comma.
+  LName := False;
+  LComma := False;
+  for LIdx := AFrom + 1 to AParen - 2 do
+    case FSrc.VisibleToken(LIdx).Kind of
+      tkIdentifier:
+        if LName then
+          Exit
+        else
+          LName := True;
+      tkDot:
+        if not LName then
+          Exit
+        else
+          LName := False;
+      tkComma:
+        if not LName then
+          Exit
+        else
+        begin
+          LName := False;
+          LComma := True;
+        end;
+    else
+      Exit;
+    end;
+  if not LName or not LComma or
+     (FSrc.VisibleToken(AParen - 1).Kind <> tkGreater) then
+    Exit;
+  // The tail: one expression in parentheses, then the argument's end.
+  LDepth := 0;
+  LIdx := AParen;
+  while LIdx <= FLast do
+  begin
+    LKind := FSrc.VisibleToken(LIdx).Kind;
+    case LKind of
+      tkLParen, tkLBracket:
+        Inc(LDepth);
+      tkRParen, tkRBracket:
+        begin
+          Dec(LDepth);
+          if LDepth = 0 then
+            Break;
+        end;
+      tkComma:
+        if LDepth = 1 then
+          Exit;
+      tkSemicolon, tkEndOfFile:
+        Exit;
+    end;
+    Inc(LIdx);
+  end;
+  if (LIdx >= FLast) or (LIdx = AParen + 1) or
+     (FSrc.VisibleToken(LIdx).Kind <> tkRParen) then
+    Exit;
+  Result := FSrc.VisibleToken(LIdx + 1).Kind in [tkComma, tkRParen];
+end;
+
+function TPasParser.ParseAmbiguous(AHead: Integer): Integer;
+var
+  LParen: Integer;
+begin
+  Result := FB.AddNode(nkAmbiguous, NIL_NODE, FPos);
+  FB.Adopt(Result, AHead);
+  Next; // '<'
+  while CurKind <> tkGreater do
+  begin
+    FB.Adopt(Result, ParseTypeRef);
+    if CurKind <> tkComma then
+      Break;
+    Next;
+  end;
+  Expect(tkGreater, '">"');
+  LParen := FB.AddNode(nkParen, NIL_NODE, FPos);
+  Next; // '('
+  FB.Adopt(LParen, ParseExpression);
+  Expect(tkRParen, '")"');
+  FB.SetLast(LParen, FPos - 1);
+  FB.Adopt(Result, LParen);
   FB.SetLast(Result, FPos - 1);
 end;
 
@@ -4700,6 +4832,7 @@ begin
   Result.FLast := High(ASource.Visible);
   Result.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
   Result.FB.Init(Length(ASource.Visible) * 3 div 4 + 64, AScratch);
+  Result.FArgItemStart := -1;
 end;
 
 function TPasParser.Finish(out ADiags: TArray<TPasParseDiag>): TPasTree;

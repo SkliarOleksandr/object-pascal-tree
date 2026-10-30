@@ -30,6 +30,7 @@ the flags mean. The expression and statement kinds read as follows (`c0`,
 | nkMember | `c0 . c1` |
 | nkDeref | `c0 ^` |
 | nkTypeArgs | `c0 < c1, ... >` |
+| nkAmbiguous | `c0 < c1, ... >` then the last child, an nkParen - a call argument the parse cannot decide (spec 16.3.1); flat: the head, the list items and the tail are its leaves, never regrouped. What it means is the model's (`AmbigReadingOf`, `AmbigArgCount`, `AmbigArg`): one generic call or cast, `n` comparisons, or not yet known |
 | nkSetCtor | `[ c0, ... ]` |
 | nkRange | `c0 .. c1` |
 | nkInlineIf | `if c0 then c1 else c2` |
@@ -153,8 +154,8 @@ same program, and T3 counts the losses per finding.
 - nkMember's FirstToken is its dot; its left edge is `NodeLeftmostVis`. The
   same holds for every kind whose FirstToken stands after its first child -
   the operator, bracket or postfix that follows its left operand: nkBinaryOp,
-  nkCall, nkIndex, nkDeref, nkTypeArgs, nkRange, nkSubrange, nkFormattedArg
-  and nkNamedArg. Only these, and a declaration's leading attribute groups
+  nkCall, nkIndex, nkDeref, nkTypeArgs, nkAmbiguous, nkRange, nkSubrange,
+  nkFormattedArg and nkNamedArg. Only these, and a declaration's leading attribute groups
   (`[Weak] FRef: TObject`, `[A] TFoo = class`: the FirstToken is the name),
   stand before a node's FirstToken; any other child that does is an I2
   violation.

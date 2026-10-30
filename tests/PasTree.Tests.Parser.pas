@@ -30,7 +30,7 @@ uses
   PasTree.TestKit;
 
 const
-  STMT_CASES: array[0..147] of TPasCaseRow = (
+  STMT_CASES: array[0..153] of TPasCaseRow = (
     // ---- 5.1.1 assignment ----
     (Section: '5.1.1'; Name: 'assign'; Source: 'X := 42;';
      Expected: 'Block(Assign(Ident''X'' IntLit''42''))'; ExpectDiags: 0),
@@ -721,6 +721,42 @@ const
      Expected: 'Block(Assign(Ident''I'' Call(Ident''F'' ' +
        'BinaryOp''<''(IntLit''0'' Ident''A'') BinaryOp''>''(Ident''B'' ' +
        'IntLit''1''))))'; ExpectDiags: 0),
+    // E2-04 (dcc64 37.0, local/probe-park/e204): `(` after a list with a
+    // top-level comma reads by what the head names, so a call argument of
+    // exactly that shape is a flat nkAmbiguous - the leaves in token order,
+    // the reading left to the model. Every other `(` shape keeps the call or
+    // cast: a tail of several arguments, an operator after the tail, a
+    // keyword type among the items, a statement.
+    (Section: '16.3.1'; Name: 'E2-04 a comma list then ( is ambiguous';
+     Source: 'I := F(A < B, C > (D + 1));';
+     Expected: 'Block(Assign(Ident''I'' Call(Ident''F'' Ambiguous(Ident''A'' ' +
+       'Ident''B'' Ident''C'' Paren(BinaryOp''+''(Ident''D'' ' +
+       'IntLit''1''))))))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'E2-04 dotted names, three items, more args';
+     Source: 'I := F(X.Y < B, E.G, C > (D), 1);';
+     Expected: 'Block(Assign(Ident''I'' Call(Ident''F'' Ambiguous(' +
+       'Member(Ident''X'' Ident''Y'') Ident''B'' Member(Ident''E'' ' +
+       'Ident''G'') Ident''C'' Paren(Ident''D'')) IntLit''1'')))';
+     ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'E2-04 a tail of two arguments is a call';
+     Source: 'I := F(S.Agg<A, B>(5, G));';
+     Expected: 'Block(Assign(Ident''I'' Call(Ident''F'' Call(TypeArgs(' +
+       'Member(Ident''S'' Ident''Agg'') Ident''A'' Ident''B'') IntLit''5'' ' +
+       'Ident''G''))))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'E2-04 an operator after the tail is a call';
+     Source: 'I := F(A<B, C>(D) + 1);';
+     Expected: 'Block(Assign(Ident''I'' Call(Ident''F'' BinaryOp''+''(' +
+       'Call(TypeArgs(Ident''A'' Ident''B'' Ident''C'') Ident''D'') ' +
+       'IntLit''1''))))'; ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'E2-04 a keyword type among the items';
+     Source: 'I := F(G<Integer, string>(D));';
+     Expected: 'Block(Assign(Ident''I'' Call(Ident''F'' Call(TypeArgs(' +
+       'Ident''G'' Ident''Integer'' Ident''string'') Ident''D''))))';
+     ExpectDiags: 0),
+    (Section: '16.3.1'; Name: 'E2-04 outside an argument list it is a call';
+     Source: 'I := G<A, B>(D);';
+     Expected: 'Block(Assign(Ident''I'' Call(TypeArgs(Ident''G'' ' +
+       'Ident''A'' Ident''B'') Ident''D'')))'; ExpectDiags: 0),
     (Section: '16.3.1'; Name: 'B55 a bare head keeps a comparison chain';
      Source: 'B := VA < VB > -VC;';
      Expected: 'Block(Assign(Ident''B'' ' +

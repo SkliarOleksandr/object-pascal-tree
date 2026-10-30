@@ -439,7 +439,8 @@ var
   LParent: Integer;
 begin
   LParent := FTree.Nodes[ANode].Parent;
-  Result := (LParent = NIL_NODE) or (KindOf(LParent) <> nkTypeArgs) or
+  Result := (LParent = NIL_NODE) or
+    not (KindOf(LParent) in [nkTypeArgs, nkAmbiguous]) or
     (FirstChild(LParent) <> ANode);
 end;
 
@@ -1628,13 +1629,13 @@ begin
   Result := 0;
   if ANode = NIL_NODE then
     Exit;
-  if KindOf(ANode) = nkTypeArgs then
+  if KindOf(ANode) in [nkTypeArgs, nkAmbiguous] then
   begin
-    // Head then one child per argument.
+    // Head then one child per argument - an nkAmbiguous's tail excluded.
     LP := FirstChild(ANode);
     if LP <> NIL_NODE then
       LP := NextSib(LP);
-    while LP <> NIL_NODE do
+    while LP <> PasTypeArgsEnd(FTree, ANode) do
     begin
       Inc(Result);
       LP := NextSib(LP);
@@ -3579,7 +3580,8 @@ begin
             begin
               var LQParent := FTree.Nodes[ANode].Parent;
               var LQWant := 0;
-              if (LQParent <> NIL_NODE) and (KindOf(LQParent) = nkTypeArgs) and
+              if (LQParent <> NIL_NODE) and
+                 (KindOf(LQParent) in [nkTypeArgs, nkAmbiguous]) and
                  (FirstChild(LQParent) = ANode) then
                 LQWant := GenericArityOfParamsNode(LQParent);
               if GenericArityOfSym(LQSym) <> LQWant then
@@ -3602,6 +3604,18 @@ begin
   begin
     ResolveNode(LChild);
     LChild := NextSib(LChild);
+  end;
+  // `F(H < I1, I2 > (E))` (16.3.1): a head this unit declares decides the
+  // reading now; another unit's is the cross typer's (CrossType.Walk).
+  if KindOf(ANode) = nkAmbiguous then
+  begin
+    var LHeadSym := FModel.RefMap[FModel.AmbigHeadName(ANode)];
+    if LHeadSym <> NIL_SYM then
+    begin
+      var LReading := FModel.AmbigReadingForSym(LHeadSym);
+      if LReading <> arUnknown then
+        FModel.AmbigReadings.AddOrSetValue(ANode, Ord(LReading));
+    end;
   end;
 end;
 
