@@ -2390,9 +2390,10 @@ type
   value, its test, and a plain (uninstantiated) wrapper - so a caller of
   FindMemberX/WithTargetTypeX can build and test the record without knowing
   its field conventions. }
-function XNil: TSemaXType;
-function XValid(const AX: TSemaXType): Boolean;
-function XPlain(AMid, ASym: Integer): TSemaXType;
+// Inline: about 370 call sites on per-node and per-hop paths (audit C1-25).
+function XNil: TSemaXType; inline;
+function XValid(const AX: TSemaXType): Boolean; inline;
+function XPlain(AMid, ASym: Integer): TSemaXType; inline;
 
 { The key a project and a navigator index a file path by - its lower-cased
   full path. False for a path TPath.GetFullPath rejects (empty, or holding a
@@ -2414,7 +2415,27 @@ uses
   PasTree.Sema.Diagnostics,
   PasTree.WordIndex;
 
+// The TSemaXType helpers first, so every call below can inline them.
+function XNil: TSemaXType;
+begin
+  Result.UnitId := NIL_SYM;
+  Result.Sym := NIL_SYM;
+  Result.Inst := NIL_INST;
+end;
+
+function XValid(const AX: TSemaXType): Boolean;
+begin
+  Result := AX.Sym <> NIL_SYM;
+end;
+
+function XPlain(AMid, ASym: Integer): TSemaXType;
+begin
+  Result.UnitId := AMid;
+  Result.Sym := ASym;
+  Result.Inst := NIL_INST;
+end;
 const
+
   { Overlay tombstone: "this node's committed ExtRefMap entry must go away".
 
     CrossType's same-model binding (BindNode) once called ExtRefMap.Remove
@@ -9514,24 +9535,6 @@ end;
 
 { Phase 3c - cross-model typing }
 
-function XNil: TSemaXType;
-begin
-  Result.UnitId := NIL_SYM;
-  Result.Sym := NIL_SYM;
-  Result.Inst := NIL_INST;
-end;
-
-function XValid(const AX: TSemaXType): Boolean;
-begin
-  Result := AX.Sym <> NIL_SYM;
-end;
-
-function XPlain(AMid, ASym: Integer): TSemaXType;
-begin
-  Result.UnitId := AMid;
-  Result.Sym := ASym;
-  Result.Inst := NIL_INST;
-end;
 
 function PasFullPathKey(const APath: string; out AKey: string): Boolean;
 begin
