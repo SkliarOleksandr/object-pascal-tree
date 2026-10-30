@@ -3181,6 +3181,95 @@ end;
 // declared parameters (the declared arity), in a helper's method (the
 // extended type's X for the named form, its ancestor's for the bare one),
 // and a bare one used as a value (`inherited.X`).
+// E2-44: a bare `inherited` in a `message` method goes to the ancestor's
+// handler of the same message id, whatever its name, else DefaultHandler
+// (12.1.2, 12.3.1; dcc64 37.0 runtime, local/probe-park/e244 MI.dpr).
+procedure TestInheritedMessageId;
+const
+  MSG_SYS =
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class'#10 +
+    '    procedure DefaultHandler(var Message); virtual;'#10 +
+    '  end;'#10 +
+    'implementation'#10 +
+    'procedure TObject.DefaultHandler(var Message); begin end;'#10 +
+    'end.'#10;
+  MSG_A =
+    'unit MsgA;'#10 +                                           // 1
+    'interface'#10 +                                            // 2
+    'const MBase = $400;'#10 +                                  // 3
+    'type'#10 +                                                 // 4
+    '  TMsg = record Msg: Cardinal; end;'#10 +                  // 5
+    '  TBase = class'#10 +                                      // 6
+    '    procedure WMFoo(var M: TMsg); message MBase + 1;'#10 + // 7
+    '  end;'#10 +                                               // 8
+    'implementation'#10 +                                       // 9
+    'procedure TBase.WMFoo(var M: TMsg); begin end;'#10 +       // 10
+    'end.'#10;                                                  // 11
+  MSG_B =
+    'unit MsgB;'#10 +                                           // 1
+    'interface'#10 +                                            // 2
+    'uses MsgA;'#10 +                                           // 3
+    'type'#10 +                                                 // 4
+    '  TMid = class(TBase)'#10 +                                // 5
+    '    procedure MyFoo(var M: TMsg); message MBase + 1;'#10 + // 6
+    '    procedure MyBar(var M: TMsg); message MBase + 2;'#10 + // 7
+    '  end;'#10 +                                               // 8
+    'implementation'#10 +                                       // 9
+    'procedure TMid.MyFoo(var M: TMsg);'#10 +                   // 10
+    'begin'#10 +                                                // 11
+    '  inherited;'#10 +                                         // 12
+    'end;'#10 +                                                 // 13
+    'procedure TMid.MyBar(var M: TMsg);'#10 +                   // 14
+    'begin'#10 +                                                // 15
+    '  inherited;'#10 +                                         // 16
+    'end;'#10 +                                                 // 17
+    'end.'#10;                                                  // 18
+var
+  LDir: string;
+  LProj: TPasSemaProject;
+  LNav: TPasNavigator;
+  LMid: Integer;
+
+  function Kw(ALine: Integer): string;
+  var
+    T: TPasNavTarget;
+  begin
+    if LNav.GotoBareInherited(LMid, ALine, 3, T) then
+      Result := ChangeFileExt(ExtractFileName(T.FilePath), '') + ':' +
+        IntToStr(T.Line) + ' ' + T.Name
+    else
+      Result := '-';
+  end;
+
+begin
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_nav_inhmsg');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'), MSG_SYS);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MsgA.pas'), MSG_A);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MsgB.pas'), MSG_B);
+  LProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    LProj.AnalyzeDirectory(LDir);
+    LNav := TPasNavigator.Create(LProj);
+    try
+      LMid := LNav.ModelIdOf(TPath.Combine(LDir, 'MsgB.pas'));
+      Ok('inhmsg: the same id under another name [' + Kw(12) + ']',
+        Kw(12) = 'MsgA:7 WMFoo');
+      Ok('inhmsg: no ancestor handler - DefaultHandler [' + Kw(16) + ']',
+        Kw(16) = 'System:5 DefaultHandler');
+    finally
+      LNav.Free;
+    end;
+  finally
+    LProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestInheritedTargets;
 const
   INH_SYS =
@@ -6993,6 +7082,7 @@ begin
   TestAggregateLabels;
   TestOverrideIndex;
   TestInheritedTargets;
+  TestInheritedMessageId;
   TestRoutinePairs;
   TestUnitIdentity;
   TestUnusedUses;

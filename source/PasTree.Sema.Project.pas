@@ -364,6 +364,10 @@ type
              the ancestry is UNKNOWN past this point, not absent. }
   TPasHeritageHop = (hhNext, hhNone, hhBroken);
 
+  { TPasSemaProject.MessageIdOf / MessageHandlerX: a message id read (mirId),
+    none there (mirNone), or one that cannot be read (mirUnknown). }
+  TPasMsgIdRead = (mirId, mirNone, mirUnknown);
+
   { TPasSemaProject.XDescent: does a type descend from another? xdUnknown
     when the walk met a link it cannot follow (an ancestor's unit missing
     from the path, a depth cap) - a diagnostic acts on xdNo only. }
@@ -1943,6 +1947,19 @@ type
       both read it. False when there is no method or no such member. }
     function BareInheritedTarget(AMid, ANode: Integer;
       out AMemMid, AMemSym, ACtx: Integer): Boolean;
+    // The message id of the method declaration ASym of model AMid (12.3.1,
+    // `procedure WMSize(var M: TWMSize); message WM_SIZE;`), its constant
+    // folded: mirId with AId, mirNone for a method with no `message`
+    // directive, mirUnknown when that cannot be read - a demoted model's
+    // text is gone, an id that does not fold.
+    function MessageIdOf(AMid, ASym: Integer;
+      out AId: Int64): TPasMsgIdRead;
+    // The handler of message id AId in AStart or its ancestors, with the
+    // frame of the hop it was found at: mirId found, mirNone none (then
+    // DefaultHandler is what dcc calls), mirUnknown when a class on the way
+    // has a handler whose id cannot be read.
+    function MessageHandlerX(const AStart: TSemaXType; AId: Int64;
+      out AMemMid, AMemSym, ACtx: Integer): TPasMsgIdRead;
     function IsConstructorSym(AMid, ASym: Integer): Boolean;
     function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
@@ -11874,6 +11891,7 @@ var
   LVariadic, LNoHelpers: Boolean;
   LKey: TSemaKey;
   LStart: TSemaXType;
+  LMsgId: Int64;
 begin
   Result := False;
   AMemMid := NIL_SYM;
@@ -11959,8 +11977,33 @@ begin
     end;
   end;
   LStart := InheritedStartX(AMid, LStruct, True, LNoHelpers);
-  if not XValid(LStart) or
-     not FindMemberX(AMid, LStart, LKey, AMemMid, AMemSym, ACtx, 0,
+  if not XValid(LStart) then
+    Exit;
+  // A `message` method's bare `inherited` is dispatched by the message ID,
+  // not the name: the nearest ancestor's handler of that id whatever it is
+  // called, else DefaultHandler (12.1.2, 12.3.1; audit E2-44). An id that
+  // does not fold keeps the name rule below.
+  LScope := LM.Symbols[LStruct].MemberScope;
+  if LScope <> NIL_SCOPE then
+  begin
+    LDecl := LM.FindLocalNoHelpers(LScope, LKey);
+    while LDecl <> NIL_SYM do
+    begin
+      if MessageIdOf(AMid, LDecl, LMsgId) = mirId then
+      begin
+        case MessageHandlerX(LStart, LMsgId, AMemMid, AMemSym, ACtx) of
+          mirId:
+            Exit(True);
+          mirNone:
+            Exit(FindMemberX(AMid, LStart, SemaKey('defaulthandler'), AMemMid,
+              AMemSym, ACtx, 0, LNoHelpers));
+        end;
+        Break;   // an ancestor's id unreadable: the name rule below
+      end;
+      LDecl := LM.Symbols[LDecl].NextOverload;
+    end;
+  end;
+  if not FindMemberX(AMid, LStart, LKey, AMemMid, AMemSym, ACtx, 0,
        LNoHelpers) then
     Exit;
   // The arguments passed on are the method's own, so among same-named
@@ -11980,6 +12023,91 @@ begin
     LCand := LTM.Symbols[LCand].NextOverload;
   end;
   Result := True;
+end;
+
+function TPasSemaProject.MessageIdOf(AMid, ASym: Integer;
+  out AId: Int64): TPasMsgIdRead;
+var
+  LM: TPasSemaModel;
+  LRoutine, LChild, LExpr: Integer;
+  LVal: TPasCondValue;
+  LCtx: TPasCondContext;
+begin
+  Result := mirNone;
+  AId := 0;
+  LM := FModels[AMid];
+  if (LM.Symbols[ASym].Kind <> skRoutine) or
+     (LM.Symbols[ASym].DeclNode = NIL_NODE) then
+    Exit;
+  if LM.Demoted then
+    Exit(mirUnknown);
+  LRoutine := LM.Tree.Nodes[LM.Symbols[ASym].DeclNode].Parent;
+  if (LRoutine = NIL_NODE) or (LM.Tree.Nodes[LRoutine].Kind <> nkRoutine) then
+    Exit;
+  LChild := LM.Tree.Nodes[LRoutine].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (LM.Tree.Nodes[LChild].Kind = nkDirective) and
+       LM.Tree.NodeTextEquals(LChild, 'message') then
+    begin
+      LExpr := LM.Tree.Nodes[LChild].FirstChild;
+      if LExpr = NIL_NODE then
+        Exit(mirUnknown);
+      LCtx := OracleCondCtx(AMid, 0);
+      LVal := EvalCondNode(LM.Tree, LExpr, LCtx);
+      if LVal.Guessed or (LVal.Kind = cvStr) then
+        Exit(mirUnknown);
+      AId := Trunc(CondAsNum(LVal));
+      Exit(mirId);
+    end;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function TPasSemaProject.MessageHandlerX(const AStart: TSemaXType; AId: Int64;
+  out AMemMid, AMemSym, ACtx: Integer): TPasMsgIdRead;
+var
+  LCur: TSemaXType;
+  LM: TPasSemaModel;
+  LScope, LSym, LDepth: Integer;
+  LList: TSemaSymList;
+  LId: Int64;
+begin
+  Result := mirNone;
+  AMemMid := NIL_SYM;
+  AMemSym := NIL_SYM;
+  ACtx := NIL_INST;
+  LCur := AStart;
+  for LDepth := 1 to 64 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LM := FModels[LCur.UnitId];
+    LScope := LM.Symbols[LCur.Sym].MemberScope;
+    if LScope <> NIL_SCOPE then
+    begin
+      LList := LM.Scopes[LScope].Symbols;
+      for var LIdx := 0 to LList.Count - 1 do
+      begin
+        LSym := LList[LIdx];
+        if LM.Symbols[LSym].Kind <> skRoutine then
+          Continue;
+        case MessageIdOf(LCur.UnitId, LSym, LId) of
+          mirId:
+            if LId = AId then
+            begin
+              AMemMid := LCur.UnitId;
+              AMemSym := LSym;
+              ACtx := LCur.Inst;
+              Exit(mirId);
+            end;
+          mirUnknown:
+            Exit(mirUnknown);
+        end;
+      end;
+    end;
+    LCur := AncestorOfX(LCur);
+  end;
 end;
 
 // Member lookup by name on a type, following type aliases and the first

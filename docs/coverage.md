@@ -459,10 +459,6 @@ of less work, not a gap in following the language; its consequences are in
   re-points the name to the ancestor's member and types it, so what reads
   the unit's own bindings alone (the completion overlay, a unit analyzed
   without the project passes) sees the class's member.
-- a bare `inherited` in a `message` method is looked up by the method's
-  name; dcc dispatches it by the message id (the ancestor's handler of that
-  id, whatever its name, else DefaultHandler), so Go To on it and its typing
-  as a value can name the wrong method or none.
 
 ## 13-properties-events.md
 
