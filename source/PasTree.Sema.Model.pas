@@ -301,6 +301,7 @@ type
     function Home(AKey: Integer): Integer; inline;
     function IndexOf(AKey: Integer): Integer;
     procedure Grow;
+    procedure Rebuild(ACapacity: Integer);
     function GetItem(AKey: Integer): V;
     procedure SetItem(AKey: Integer; const AValue: V);
   public
@@ -311,6 +312,10 @@ type
     procedure Remove(AKey: Integer);
     // Drops the slot array too: an emptied map holds no heap.
     procedure Clear;
+    // Room for ACount more keys at once: one table rebuild where adding them
+    // one by one doubled it again and again (perf audit 2026-10, S6). The
+    // capacity is the one those doublings end at.
+    procedure Reserve(ACount: Integer);
     function GetEnumerator: TEnumerator; inline;
     property Count: Integer read FCount;
     property Items[AKey: Integer]: V read GetItem write SetItem; default;
@@ -318,7 +323,11 @@ type
 
   TSemaPoolSlot = record
     H: Cardinal;
-    S: string;       // '' = empty slot
+    // The pooled string - a reference the pool counts by hand, nil = empty
+    // slot. As a string field every slot moved in Grow went through the
+    // RTL's RTTI-driven CopyRecord, and Clear finalized the whole capacity
+    // record by record (perf audit 2026-10, C1).
+    P: Pointer;
   end;
 
   { Phase 1's spelling pool (TPasSemaModel.FNamePool): a set of strings,
@@ -327,7 +336,9 @@ type
     case-sensitive), pooling AText itself the first time. A TDictionary
     <string, string> in its place cost ~4% of the client's analysis CPU.
     A LOCAL pool must be Clear'ed before use: a record local initializes its
-    managed fields only, and a garbage FCount grows the table without end. }
+    managed fields only, and a garbage FCount grows the table without end.
+    And after: the pool holds its strings by hand-counted references
+    (TSemaPoolSlot), which only Clear releases. }
   TSemaNamePool = record
   private
     FSlots: TArray<TSemaPoolSlot>;
@@ -1324,11 +1335,12 @@ begin
   SetLength(FSlots, LCap);
   LMask := LCap - 1;
   for LIdx := 0 to High(LOld) do
-    if LOld[LIdx].S <> '' then
+    if LOld[LIdx].P <> nil then
     begin
       LAt := Integer(LOld[LIdx].H and Cardinal(LMask));
-      while FSlots[LAt].S <> '' do
+      while FSlots[LAt].P <> nil do
         LAt := (LAt + 1) and LMask;
+      // The reference moves with the slot: no count changes.
       FSlots[LAt] := LOld[LIdx];
     end;
 end;
@@ -1345,14 +1357,14 @@ begin
   LHash := PasNameHash(AText);
   LMask := High(FSlots);
   LIdx := Integer(LHash and Cardinal(LMask));
-  while FSlots[LIdx].S <> '' do
+  while FSlots[LIdx].P <> nil do
   begin
-    if (FSlots[LIdx].H = LHash) and (FSlots[LIdx].S = AText) then
-      Exit(FSlots[LIdx].S);
+    if (FSlots[LIdx].H = LHash) and (string(FSlots[LIdx].P) = AText) then
+      Exit(string(FSlots[LIdx].P));
     LIdx := (LIdx + 1) and LMask;
   end;
   FSlots[LIdx].H := LHash;
-  FSlots[LIdx].S := AText;
+  string(FSlots[LIdx].P) := AText;   // the pool's reference
   Inc(FCount);
   Result := AText;
 end;
@@ -1380,10 +1392,11 @@ begin
     LHash := RawSliceHash(AText, ALen);
   LMask := High(FSlots);
   LIdx := Integer(LHash and Cardinal(LMask));
-  while FSlots[LIdx].S <> '' do
+  while FSlots[LIdx].P <> nil do
   begin
-    if (FSlots[LIdx].H = LHash) and SemaKeyEquals(FSlots[LIdx].S, LKey) then
-      Exit(FSlots[LIdx].S);
+    if (FSlots[LIdx].H = LHash) and
+       SemaKeyEquals(string(FSlots[LIdx].P), LKey) then
+      Exit(string(FSlots[LIdx].P));
     LIdx := (LIdx + 1) and LMask;
   end;
   LKey.Hash := LHash;
@@ -1392,12 +1405,17 @@ begin
   else
     SetString(Result, AText, ALen);
   FSlots[LIdx].H := LHash;
-  FSlots[LIdx].S := Result;
+  string(FSlots[LIdx].P) := Result;   // the pool's reference
   Inc(FCount);
 end;
 
 procedure TSemaNamePool.Clear;
+var
+  LIdx: Integer;
 begin
+  for LIdx := 0 to High(FSlots) do
+    if FSlots[LIdx].P <> nil then
+      string(FSlots[LIdx].P) := '';   // the pool's reference released
   FSlots := nil;
   FCount := 0;
 end;
@@ -1571,13 +1589,34 @@ end;
 
 procedure TPasIntMap<V>.Grow;
 var
+  LCap: Integer;
+begin
+  LCap := Length(FSlots) * 2;
+  if LCap < 4 then
+    LCap := 4;
+  Rebuild(LCap);
+end;
+
+procedure TPasIntMap<V>.Reserve(ACount: Integer);
+var
+  LCap: Integer;
+begin
+  LCap := Length(FSlots);
+  if LCap < 4 then
+    LCap := 4;
+  while (FCount + ACount) * 4 > LCap * 3 do
+    LCap := LCap * 2;
+  if LCap > Length(FSlots) then
+    Rebuild(LCap);
+end;
+
+procedure TPasIntMap<V>.Rebuild(ACapacity: Integer);
+var
   LOld: TArray<TSlot>;
   LIdx, LAt, LMask, LCap: Integer;
 begin
   LOld := FSlots;
-  LCap := Length(LOld) * 2;
-  if LCap < 4 then
-    LCap := 4;
+  LCap := ACapacity;
   FSlots := nil;
   SetLength(FSlots, LCap);
   for LIdx := 0 to LCap - 1 do
@@ -1667,10 +1706,30 @@ begin
 end;
 
 procedure TPasIntMap<V>.Add(AKey: Integer; const AValue: V);
+var
+  LIdx, LMask: Integer;
 begin
-  if ContainsKey(AKey) then
-    raise EListError.CreateFmt('TPasIntMap: duplicate key %d', [AKey]);
-  AddOrSetValue(AKey, AValue);
+  Assert(AKey <> CEmptyKey);
+  // One probe, not ContainsKey's and then AddOrSetValue's (perf audit
+  // 2026-10, S6) - but at the growth threshold the duplicate check comes
+  // first, so a duplicate raises with the table as it was.
+  if (FCount + 1) * 4 > Length(FSlots) * 3 then
+  begin
+    if IndexOf(AKey) >= 0 then
+      raise EListError.CreateFmt('TPasIntMap: duplicate key %d', [AKey]);
+    Grow;
+  end;
+  LMask := High(FSlots);
+  LIdx := Home(AKey);
+  while FSlots[LIdx].Key <> CEmptyKey do
+  begin
+    if FSlots[LIdx].Key = AKey then
+      raise EListError.CreateFmt('TPasIntMap: duplicate key %d', [AKey]);
+    LIdx := (LIdx + 1) and LMask;
+  end;
+  FSlots[LIdx].Key := AKey;
+  FSlots[LIdx].Value := AValue;
+  Inc(FCount);
 end;
 
 procedure TPasIntMap<V>.Remove(AKey: Integer);
@@ -2838,7 +2897,7 @@ begin
   LVis := Tree.Nodes[LNode].FirstToken;
   if (LVis < 0) or (LVis > High(Tree.Source.Visible)) then
     Exit;
-  case Tree.Source.VisibleToken(LVis).Kind of
+  case Tree.Source.VisibleKind(LVis) of
     tkProcedure: Result := rhProcedure;
     tkFunction: Result := rhFunction;
     tkConstructor: Result := rhConstructor;

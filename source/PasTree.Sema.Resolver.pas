@@ -641,7 +641,7 @@ var
 begin
   LNext := FTree.Nodes[ANode].LastToken + 1;
   if (LNext >= 0) and (LNext <= High(FTree.Source.Visible)) then
-    Result := FTree.Source.VisibleToken(LNext).Kind
+    Result := FTree.Source.VisibleKind(LNext)
   else
     Result := tkUnknown;
 end;
@@ -2986,7 +2986,7 @@ begin
                  (FTree.Nodes[LP].FirstToken >= 0) and
                  (FTree.Nodes[LP].FirstToken <= High(FTree.Source.Visible)) then
                 FModel.KeywordConstraints.AddOrSetValue(LP,
-                  Ord(FTree.Source.VisibleToken(FTree.Nodes[LP].FirstToken).Kind));
+                  Ord(FTree.Source.VisibleKind(FTree.Nodes[LP].FirstToken)));
               Collect(LP, AScope);
               LP := NextSib(LP);
             end;

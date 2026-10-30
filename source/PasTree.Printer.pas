@@ -495,7 +495,7 @@ begin
   // The sentinel is no text of the source (N4). Out of range only in a
   // tree the printer is not meant for (an operator of an error tree).
   if (AVis < 0) or (AVis > High(T.Source.Visible)) or
-     (T.Source.VisibleToken(AVis).Kind = tkEndOfFile) then
+     (T.Source.VisibleKind(AVis) = tkEndOfFile) then
     Exit;
   Add(T.Source.VisibleText(AVis), ACls, ANode, AVis, AGlue);
 end;
@@ -1364,7 +1364,7 @@ begin
       LVis := T.Nodes[LChild].LastToken + 1
     else
     begin
-      if (T.Source.VisibleToken(LVis).Kind = tkIdentifier) and
+      if (T.Source.VisibleKind(LVis) = tkIdentifier) and
          SameText(T.Source.VisibleText(LVis), 'delayed') then
         Exit(LVis);
       Inc(LVis);
@@ -1633,7 +1633,7 @@ begin
         begin
           LOpKind := tkUnknown;
           if (LOp >= 0) and (LOp <= High(T.Source.Visible)) then
-            LOpKind := T.Source.VisibleToken(LOp).Kind;
+            LOpKind := T.Source.VisibleKind(LOp);
           // nfNegated: `not in` reads the `not` first, `is not` after.
           if (nfNegated in T.Nodes[ANode].Flags) and (LOpKind = tkIn) then
             Kw('not', ANode);
@@ -2463,7 +2463,7 @@ var
     LPos: Integer;
   begin
     for LPos := AOwn.OwnStart[ANode] to AOwn.OwnStart[ANode + 1] - 1 do
-      if ATree.Source.VisibleToken(AOwn.Own[LPos]).Kind = AKind then
+      if ATree.Source.VisibleKind(AOwn.Own[LPos]) = AKind then
         Exit(AOwn.Own[LPos]);
     Result := -1;
   end;
@@ -2535,7 +2535,7 @@ begin
     Inc(AResult.Original);
     LOwner := AOwn.Owner[LVis];
     LRule := AOwn.Rule[LVis];
-    LTok := ATree.Source.VisibleToken(LVis).Kind;
+    LTok := ATree.Source.VisibleKind(LVis);
     if LMoveBefore[LVis] >= 0 then
     begin
       // N10: `of object` before the directives.
@@ -2562,13 +2562,13 @@ begin
     else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind = nkAggregate) and
        (LTok = tkSemicolon) and (LVis < LLast) and
        (AOwn.Owner[LVis + 1] = LOwner) and
-       (ATree.Source.VisibleToken(LVis + 1).Kind = tkRParen) then
+       (ATree.Source.VisibleKind(LVis + 1) = tkRParen) then
       Inc(AResult.Normalized)                                        // N11
     else if (LOwner >= 0) and
        (ATree.Nodes[LOwner].Kind in [nkClassType, nkObjectType]) and
        (LTok = tkIdentifier) and (LVis > 0) and
        (AOwn.Owner[LVis - 1] = LOwner) and
-       (ATree.Source.VisibleToken(LVis - 1).Kind = tkIdentifier) and
+       (ATree.Source.VisibleKind(LVis - 1) = tkIdentifier) and
        SameText(ATree.Source.VisibleText(LVis), ATree.Source.VisibleText(
          LVis - 1)) and
        (SameText(ATree.Source.VisibleText(LVis), 'abstract') or
@@ -2577,7 +2577,7 @@ begin
     else if (LOwner >= 0) and (ATree.Nodes[LOwner].Kind = nkAttrGroup) and
        (LTok = tkRBracket) and (LVis < LLast) and
        (AOwn.Owner[LVis + 1] = LOwner) and
-       (ATree.Source.VisibleToken(LVis + 1).Kind = tkLBracket) then
+       (ATree.Source.VisibleKind(LVis + 1) = tkLBracket) then
     begin
       Inc(AResult.Normalized);                                       // N8
       AddO(LVis, ',', 0);
@@ -2777,7 +2777,7 @@ begin
       begin
         LVis := AOwn.Own[LIdx];
         LRule := AOwn.Rule[LVis];
-        if (ATree.Source.VisibleToken(LVis).Kind = tkEndOfFile) or
+        if (ATree.Source.VisibleKind(LVis) = tkEndOfFile) or
            ((LRule >= 0) and GRuleAfterEnd[LRule]) then
           Continue;
         if not (LKind in SPAN_KINDS) and (LRule >= 0) and
@@ -2788,8 +2788,8 @@ begin
         // in any case (N3) - but in asm, whose range is copied as written
         // and lexed anew (an identifier here may be a chunk there).
         if (LKind <> nkAsmStmt) and
-           (IsKeyword(ATree.Source.VisibleToken(LVis).Kind) or
-            ((ATree.Source.VisibleToken(LVis).Kind = tkIdentifier) and
+           (IsKeyword(ATree.Source.VisibleKind(LVis)) or
+            ((ATree.Source.VisibleKind(LVis) = tkIdentifier) and
              (LRule >= 0) and (GRuleCls[LRule] in [ocContract, ocLoss]))) then
           LText := LowerCase(LText);
         // An asm range is its text, whitespace aside: where the lexer cuts

@@ -1301,7 +1301,7 @@ function EvalCondNode(const ATree: TPasTree; ANode: Integer;
     Result := MkGuess;
     // The operator's token KIND - every operator here is a reserved word or
     // punctuation with a dedicated kind, so no text is built to dispatch.
-    LOp := ATree.Source.VisibleToken(ATree.Nodes[ABinNode].Aux).Kind;
+    LOp := ATree.Source.VisibleKind(ATree.Nodes[ABinNode].Aux);
 
     // and/or/xor of two integers are BITWISE in a constant expression:
     // `(6 and 1) <> 0` is False, `(1 or 2) = 3` True (audit E2-22).
@@ -1479,7 +1479,7 @@ begin
         if (LChild = NIL_NODE) or (ATree.Nodes[ANode].Aux < 0) then
           Exit;
         var LOpKind :=
-          ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind;
+          ATree.Source.VisibleKind(ATree.Nodes[ANode].Aux);
         LVal := EvalCondNode(ATree, LChild, ACtx);
         // An abort ignores the operator entirely - `not (UNDECL > 3)` is True,
         // not False. An unresolvable name under `not` stays the error token

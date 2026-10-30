@@ -97,6 +97,10 @@ type
     // past the whole compound token exactly as an ordinary Next always does.
     FSplitEq: Boolean;
     // cursor
+    { FSrc.VisibleKind, here: the parser, Ast, CondEval and the preprocessor
+      use each other in a cycle, and the compiler inlines nothing across one
+      - while CurKind asks at every parsing step (perf audit 2026-10, C17). }
+    function VisKind(AIdx: Integer): TPasTokenKind; inline;
     function CurKind: TPasTokenKind;
     function EnterGuard: Boolean;
     procedure LeaveGuard;
@@ -295,7 +299,8 @@ type
     { A parser over ASource at its first token: the fuel budget and the
       arena sized for it. Finish hands out the diagnostics and the tree.
       Every entry point is Start, its own parse, Finish. }
-    class function Start(const ASource: TPasPreprocessed): TPasParser; static;
+    class function Start(const ASource: TPasPreprocessed;
+      AScratch: TPasNodeScratch = nil): TPasParser; static;
     function Finish(out ADiags: TArray<TPasParseDiag>): TPasTree;
   public
     class function ParseStatements(const ASource: TPasPreprocessed;
@@ -310,10 +315,12 @@ type
       the same source, EXCEPT Nodes[0] (nkUnit root) LastToken and the
       nkInterfaceSec node's NextSibling (NIL_NODE here vs the impl section in
       a full parse) - see StagedParseSmoke for the exact, tested delta.
-      AInterfaceOnly True is pmInterface, False pmFull. }
+      AInterfaceOnly True is pmInterface, False pmFull. AScratch: the tree
+      builder's working arrays, kept across files (TPasTreeBuilder.Init). }
     class function ParseFile(const ASource: TPasPreprocessed;
       out ADiags: TArray<TPasParseDiag>;
-      AInterfaceOnly: Boolean = False): TPasTree; overload; static;
+      AInterfaceOnly: Boolean = False;
+      AScratch: TPasNodeScratch = nil): TPasTree; overload; static;
     { The same with the mode spelled out. pmInterfaceAndImplUses goes on past
       the interface: when `implementation` follows, its nkImplementationSec
       node and the clause after it, if `uses` comes next, are built as the
@@ -322,8 +329,8 @@ type
       the implementation section's LastToken, FirstChild (when there is no
       `uses` clause) and NextSibling, and the clause's NextSibling. }
     class function ParseFile(const ASource: TPasPreprocessed;
-      out ADiags: TArray<TPasParseDiag>;
-      AMode: TPasParseMode): TPasTree; overload; static;
+      out ADiags: TArray<TPasParseDiag>; AMode: TPasParseMode;
+      AScratch: TPasNodeScratch = nil): TPasTree; overload; static;
     { Parses ONE expression out of a bare text fragment (no unit around it):
       lexes AText, wraps the tokens in a minimal single-file visible stream,
       and runs the expression grammar once. ARoot is the expression's root
@@ -371,6 +378,12 @@ const
 
 { TPasParser - cursor ------------------------------------------------------- }
 
+function TPasParser.VisKind(AIdx: Integer): TPasTokenKind;
+begin
+  Result := FSrc.Files[FSrc.Visible[AIdx].FileId].Tokens[
+    FSrc.Visible[AIdx].TokenIndex].Kind;
+end;
+
 function TPasParser.CurKind: TPasTokenKind;
 begin
   // Fuel watchdog: CurKind is evaluated by every parsing loop's condition,
@@ -388,7 +401,7 @@ begin
   if FSplitEq then
     Result := tkEqual
   else
-    Result := FSrc.VisibleToken(FPos).Kind;
+    Result := VisKind(FPos);
 end;
 
 function TPasParser.AtGenericClose: Boolean;
@@ -434,7 +447,7 @@ begin
   LIdx := FPos + AOffset;
   if LIdx > FLast then
     LIdx := FLast;
-  Result := FSrc.VisibleToken(LIdx).Kind;
+  Result := VisKind(LIdx);
 end;
 
 function TPasParser.CurText: string;
@@ -537,11 +550,11 @@ begin
   // Does another string element (B.6.1) start at visible index AIdx?
   if AIdx > FLast then
     Exit(False);
-  LKind := FSrc.VisibleToken(AIdx).Kind;
+  LKind := VisKind(AIdx);
   Result := LKind in [tkStringLiteral, tkMultilineString, tkControlChar,
     tkCaretChar];
   if (not Result) and (LKind = tkCaret) and (AIdx < FLast) and
-     (FSrc.VisibleToken(AIdx + 1).Kind = tkIdentifier) and
+     (VisKind(AIdx + 1) = tkIdentifier) and
      (FSrc.VisibleToken(AIdx + 1).Len = 1) and
      (FSrc.Visible[AIdx + 1].FileId = FSrc.Visible[AIdx].FileId) and
      (FSrc.Visible[AIdx + 1].TokenIndex = FSrc.Visible[AIdx].TokenIndex + 1)
@@ -627,7 +640,7 @@ begin
       Break;
     end;
     Next; // operator
-    LTypeTest := FSrc.VisibleToken(LOp).Kind = tkIs;
+    LTypeTest := VisKind(LOp) = tkIs;
     LTypeName := False;
     if LTypeTest and (CurKind = tkNot) then
     begin
@@ -1285,7 +1298,7 @@ begin
     LOperand := LOperand - [tkPlus, tkMinus, tkCaret, tkLBracket];
   while (LIdx <= FLast) and (LSteps < 64) do
   begin
-    LKind := FSrc.VisibleToken(LIdx).Kind;
+    LKind := VisKind(LIdx);
     case LKind of
       tkLess:
         Inc(LDepth);
@@ -1296,7 +1309,7 @@ begin
           begin
             if LIdx < FLast then
             begin
-              LKind := FSrc.VisibleToken(LIdx + 1).Kind;
+              LKind := VisKind(LIdx + 1);
               // Accept unless the follower could start an operand (LOperand):
               // `;` `then` `=` `do` `and` leave the comparison reading
               // without a right operand. Covers Value.AsType<T>;,
@@ -3235,7 +3248,7 @@ end;
 function TPasParser.DirectiveNameStartsDecl: Boolean;
 begin
   Result := (CurKind = tkIdentifier) and (FPos < FLast) and
-    (FSrc.VisibleToken(FPos + 1).Kind in [tkEqual, tkColon]);
+    (VisKind(FPos + 1) in [tkEqual, tkColon]);
 end;
 
 function TPasParser.IsDirectiveWord: Boolean;
@@ -3279,7 +3292,7 @@ var
 begin
   if AVisIndex > FLast then
     AVisIndex := FLast;
-  case FSrc.VisibleToken(AVisIndex).Kind of
+  case VisKind(AVisIndex) of
     tkLibrary:
       Exit(True);
     tkIdentifier:
@@ -3313,7 +3326,7 @@ var
   LWord: string;
 begin
   if (AVisIndex > FLast) or
-     (FSrc.VisibleToken(AVisIndex).Kind <> tkIdentifier) then
+     (VisKind(AVisIndex) <> tkIdentifier) then
     Exit(False);
   FSrc.VisibleSlice(AVisIndex, LText, LLen);
   for LWord in STARTERS do
@@ -3388,7 +3401,7 @@ begin
   LOf := False;
   while LIdx <= FLast do
   begin
-    case FSrc.VisibleToken(LIdx).Kind of
+    case VisKind(LIdx) of
       tkLParen, tkLBracket:
         Inc(LDepth);
       tkRParen, tkRBracket:
@@ -3728,7 +3741,7 @@ begin
   while (LProbe <= FLast) and IsDirectiveWord(LProbe) do
     Inc(LProbe);
   if (LProbe > FPos) and (LProbe <= FLast) and
-     (FSrc.VisibleToken(LProbe).Kind = tkSemicolon) then
+     (VisKind(LProbe) = tkSemicolon) then
     ParseDirectiveRun(Result, True);
   Expect(tkSemicolon, '";"');
   if not ParseRoutineDirectives(Result) then
@@ -3900,14 +3913,14 @@ var
     // EXPRESSION, not a one-element nested aggregate. Only the bare
     // `((...))` shape - the inner group closing immediately before the outer
     // one - is genuinely ambiguous, so that is all that is treated as one.
-    LFirstLParen := FSrc.VisibleToken(FPos + 1).Kind = tkLParen;
+    LFirstLParen := VisKind(FPos + 1) = tkLParen;
     LInnerClose := -1;
     // No step cap: the scan is linear and stops at depth 0 or the file's
     // end, and a cap read a table whose FIRST element is a long nested
     // aggregate (a 2048-value row) as an expression (audit B2-01).
     while LIdx <= FLast do
     begin
-      LKind := FSrc.VisibleToken(LIdx).Kind;
+      LKind := VisKind(LIdx);
       // The empty aggregate `()` closes depth immediately (OleControls).
       if (LIdx = FPos + 1) and (LKind = tkRParen) then
         Exit(True);
@@ -4451,18 +4464,18 @@ begin
     LEnd := FLast - 1;
   for LIdx := FPos + 1 to LEnd do
   begin
-    LKind := FSrc.VisibleToken(LIdx).Kind;
+    LKind := VisKind(LIdx);
     if not ((LKind in [tkUnit, tkProgram, tkLibrary]) or ((LKind = tkIdentifier)
        and SameText(FSrc.VisibleText(LIdx), 'package'))) then
       Continue;
     LName := LIdx + 1;
-    if FSrc.VisibleToken(LName).Kind <> tkIdentifier then
+    if VisKind(LName) <> tkIdentifier then
       Continue;
-    while (LName + 2 <= FLast) and (FSrc.VisibleToken(LName + 1).Kind = tkDot)
-      and (FSrc.VisibleToken(LName + 2).Kind = tkIdentifier) do
+    while (LName + 2 <= FLast) and (VisKind(LName + 1) = tkDot)
+      and (VisKind(LName + 2) = tkIdentifier) do
       Inc(LName, 2);
     if (LName + 1 <= FLast) and
-       ((FSrc.VisibleToken(LName + 1).Kind in [tkSemicolon, tkLParen]) or
+       ((VisKind(LName + 1) in [tkSemicolon, tkLParen]) or
         IsHintWord(LName + 1)) then
     begin
       Error('unit, program, library or package expected');
@@ -4473,17 +4486,18 @@ begin
 end;
 
 class function TPasParser.ParseFile(const ASource: TPasPreprocessed;
-  out ADiags: TArray<TPasParseDiag>;
-  AInterfaceOnly: Boolean = False): TPasTree;
+  out ADiags: TArray<TPasParseDiag>; AInterfaceOnly: Boolean;
+  AScratch: TPasNodeScratch): TPasTree;
 begin
   if AInterfaceOnly then
-    Result := ParseFile(ASource, ADiags, pmInterface)
+    Result := ParseFile(ASource, ADiags, pmInterface, AScratch)
   else
-    Result := ParseFile(ASource, ADiags, pmFull);
+    Result := ParseFile(ASource, ADiags, pmFull, AScratch);
 end;
 
 class function TPasParser.ParseFile(const ASource: TPasPreprocessed;
-  out ADiags: TArray<TPasParseDiag>; AMode: TPasParseMode): TPasTree;
+  out ADiags: TArray<TPasParseDiag>; AMode: TPasParseMode;
+  AScratch: TPasNodeScratch): TPasTree;
 var
   LP: TPasParser;
   LRoot, LSec: Integer;
@@ -4492,7 +4506,7 @@ begin
   // Every mode but pmFull stops early; the implementation's `uses` clause
   // is the one part pmInterfaceAndImplUses reads past the interface.
   LStopEarly := AMode <> pmFull;
-  LP := Start(ASource);
+  LP := Start(ASource, AScratch);
   LP.SkipToModuleHead;
   case LP.CurKind of
     tkUnit:
@@ -4663,8 +4677,8 @@ begin
   // the flag, and must: the two parses are then one tree).
   if not (LStopEarly and (LP.FB.Kind(LRoot) = nkUnit)) and
      (LP.FPos < LP.FLast) and not ((LP.FPos >= 2) and
-     (LP.FSrc.VisibleToken(LP.FPos - 1).Kind = tkDot) and
-     (LP.FSrc.VisibleToken(LP.FPos - 2).Kind = tkEnd)) then
+     (LP.VisKind(LP.FPos - 1) = tkDot) and
+     (LP.VisKind(LP.FPos - 2) = tkEnd)) then
   begin
     if LP.FB.Kind(LRoot) <> nkError then
     begin
@@ -4678,13 +4692,14 @@ begin
   Result := LP.Finish(ADiags);
 end;
 
-class function TPasParser.Start(const ASource: TPasPreprocessed): TPasParser;
+class function TPasParser.Start(const ASource: TPasPreprocessed;
+  AScratch: TPasNodeScratch): TPasParser;
 begin
   Result := Default(TPasParser);
   Result.FSrc := ASource;
   Result.FLast := High(ASource.Visible);
   Result.FFuel := Int64(Length(ASource.Visible)) * 200 + 10000;
-  Result.FB.Init(Length(ASource.Visible) * 3 div 4 + 64);
+  Result.FB.Init(Length(ASource.Visible) * 3 div 4 + 64, AScratch);
 end;
 
 function TPasParser.Finish(out ADiags: TArray<TPasParseDiag>): TPasTree;

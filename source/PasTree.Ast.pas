@@ -447,15 +447,32 @@ type
     function NodeDisplayText(AIndex: Integer): string;
   end;
 
+  { A tree builder's working arrays, kept by a caller that parses file after
+    file (the project keeps one with each pooled preprocessor) - see
+    TPasTreeBuilder.Init. }
+  TPasNodeScratch = class
+  public
+    Nodes: TArray<TPasNode>;
+    LastChild: TArray<Integer>;
+  end;
+
   { Arena builder used by the parser. }
   TPasTreeBuilder = record
   private
     FNodes: TArray<TPasNode>;
     FCount: Integer;
     FLastChild: TArray<Integer>;  // parallel: last child per node
+    FScratch: TPasNodeScratch;
     procedure Grow;
   public
-    procedure Init(ACapacityHint: Integer = 64);
+    { AScratch (optional): the arrays to build in, taken over when big
+      enough and handed back by Build. AddNode writes every field of a node
+      and its FLastChild slot, and nothing reads a node it has not added, so
+      what an earlier parse left there is never seen. Allocating and
+      zero-filling hint-sized arrays per file, then copying them to size, was
+      the second CPU leaf of a load (perf audit 2026-10, S7). }
+    procedure Init(ACapacityHint: Integer = 64;
+      AScratch: TPasNodeScratch = nil);
     function AddNode(AKind: TPasNodeKind; AParent, AFirstToken: Integer):
       Integer;
     procedure SetLast(ANode, ALastToken: Integer);
@@ -804,6 +821,22 @@ end;
 
 { TPasTree }
 
+{ TPasPreprocessed.VisibleSlice, here: this unit, the parser, CondEval and
+  the preprocessor use each other in a cycle, and the compiler inlines
+  nothing across one - while every name key and node text starts with a
+  slice (perf audit 2026-10, C17). }
+procedure SliceOf(const ASource: TPasPreprocessed; AVis: Integer;
+  out AText: PChar; out ALen: Integer); inline;
+var
+  LFileId, LTokIdx: Integer;
+begin
+  LFileId := ASource.Visible[AVis].FileId;
+  LTokIdx := ASource.Visible[AVis].TokenIndex;
+  AText := PChar(Pointer(ASource.Files[LFileId].Source)) +
+    ASource.Files[LFileId].Tokens[LTokIdx].Start;
+  ALen := ASource.Files[LFileId].Tokens[LTokIdx].Len;
+end;
+
 function TPasTree.KindName(AKind: TPasNodeKind): string;
 begin
   Result := GetEnumName(TypeInfo(TPasNodeKind), Ord(AKind));
@@ -838,7 +871,7 @@ begin
   if (Nodes[AIndex].FirstToken < 0) or
      (Nodes[AIndex].FirstToken > High(Source.Visible)) then
     Exit('');
-  Source.VisibleSlice(Nodes[AIndex].FirstToken, LText, LLen);
+  SliceOf(Source, Nodes[AIndex].FirstToken, LText, LLen);
   if (LLen > 0) and (LText^ = '&') then
   begin
     Inc(LText);
@@ -862,7 +895,7 @@ begin
   if (Nodes[AIndex].FirstToken < 0) or
      (Nodes[AIndex].FirstToken > High(Source.Visible)) then
     Exit(False);
-  Source.VisibleSlice(Nodes[AIndex].FirstToken, LText, LLen);
+  SliceOf(Source, Nodes[AIndex].FirstToken, LText, LLen);
   Result := SliceEqualsWord(LText, LLen, AWord);
 end;
 
@@ -878,7 +911,7 @@ begin
     ALen := 0;
   end
   else
-    Source.VisibleSlice(Nodes[AIndex].FirstToken, AText, ALen);
+    SliceOf(Source, Nodes[AIndex].FirstToken, AText, ALen);
 end;
 
 function TPasTree.DottedText(AIndex: Integer): string;
@@ -1103,8 +1136,8 @@ begin
     Exit;
   for LIdx := 0 to LLast - LFirst do
   begin
-    Source.VisibleSlice(LFirst + LIdx, LText, LLen);
-    AOther.Source.VisibleSlice(LOtherFirst + LIdx, LOtherText, LOtherLen);
+    SliceOf(Source, LFirst + LIdx, LText, LLen);
+    SliceOf(AOther.Source, LOtherFirst + LIdx, LOtherText, LOtherLen);
     if (LLen <> LOtherLen) or
        not CompareMem(LText, LOtherText, LLen * SizeOf(Char)) then
       Exit;
@@ -1155,8 +1188,8 @@ begin
       Exit;   // one side ran out first
     if LIdx >= LLast - LFirst + 1 then
       Break;  // both exhausted together
-    Source.VisibleSlice(LFirst + LIdx, LText, LLen);
-    AOther.Source.VisibleSlice(LOtherFirst + LOtherIdx, LOtherText, LOtherLen);
+    SliceOf(Source, LFirst + LIdx, LText, LLen);
+    SliceOf(AOther.Source, LOtherFirst + LOtherIdx, LOtherText, LOtherLen);
     if (LLen <> LOtherLen) or
        not CompareMem(LText, LOtherText, LLen * SizeOf(Char)) then
       Exit;
@@ -1507,7 +1540,8 @@ end;
 
 { TPasTreeBuilder }
 
-procedure TPasTreeBuilder.Init(ACapacityHint: Integer);
+procedure TPasTreeBuilder.Init(ACapacityHint: Integer;
+  AScratch: TPasNodeScratch);
 begin
   // The parser passes 3/4 of its visible-token count - nodes run about 0.7x
   // the visible tokens (0.70 over the RTL, audit C1-01; at half, nearly every
@@ -1519,8 +1553,20 @@ begin
   FNodes := nil;
   FLastChild := nil;
   FCount := 0;
-  SetLength(FNodes, ACapacityHint);
-  SetLength(FLastChild, ACapacityHint);
+  FScratch := AScratch;
+  if (AScratch <> nil) and (Length(AScratch.Nodes) >= ACapacityHint) then
+  begin
+    // Taken over rather than shared: Grow then reallocates in place.
+    FNodes := AScratch.Nodes;
+    FLastChild := AScratch.LastChild;
+    AScratch.Nodes := nil;
+    AScratch.LastChild := nil;
+  end
+  else
+  begin
+    SetLength(FNodes, ACapacityHint);
+    SetLength(FLastChild, ACapacityHint);
+  end;
 end;
 
 procedure TPasTreeBuilder.Grow;
@@ -1654,14 +1700,31 @@ begin
 end;
 
 function TPasTreeBuilder.Build(const ASource: TPasPreprocessed): TPasTree;
+const
+  // 3.6 MB of nodes: every tree but the few largest, which allocate as before.
+  MAX_KEPT_NODES = 1 shl 17;
 begin
-  // Not SetLength: a shrink by less than half keeps the block (TPasArrayTrim).
-  TPasArrayTrim.Exact<TPasNode>(FNodes, FCount);
-  Result.Nodes := FNodes;
+  if FScratch <> nil then
+  begin
+    Result.Nodes := Copy(FNodes, 0, FCount);
+    if Length(FNodes) <= MAX_KEPT_NODES then
+    begin
+      FScratch.Nodes := FNodes;
+      FScratch.LastChild := FLastChild;
+    end;
+  end
+  else
+  begin
+    // Not SetLength: a shrink by less than half keeps the block
+    // (TPasArrayTrim).
+    TPasArrayTrim.Exact<TPasNode>(FNodes, FCount);
+    Result.Nodes := FNodes;
+  end;
   Result.Source := ASource;
   FNodes := nil;
   FLastChild := nil;
   FCount := 0;
+  FScratch := nil;
 end;
 
 end.

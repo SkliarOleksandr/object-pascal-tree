@@ -8426,8 +8426,8 @@ begin
   if (LFrom < 0) or (LTo > High(LM.Tree.Source.Visible)) then
     Exit;
   for var LVis := LFrom to LTo - 1 do
-    if (LM.Tree.Source.VisibleToken(LVis).Kind = tkInherited) and
-       (LM.Tree.Source.VisibleToken(LVis + 1).Kind <> tkIdentifier) then
+    if (LM.Tree.Source.VisibleKind(LVis) = tkInherited) and
+       (LM.Tree.Source.VisibleKind(LVis + 1) <> tkIdentifier) then
       Exit(True);
 end;
 

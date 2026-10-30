@@ -367,6 +367,11 @@ type
     // see TPasOptionRef. Retained across DemoteText too.
     OptionRefs: TArray<TPasOptionRef>;
     function VisibleToken(AIndex: Integer): TPasToken;
+    { VisibleToken(AIndex).Kind without copying the token: the parser asks
+      at every step (CurKind), and VisibleToken returns the whole record
+      through a hidden result - 2.6% of a load's CPU, most of it from there
+      (perf audit 2026-10, C17). }
+    function VisibleKind(AIndex: Integer): TPasTokenKind; inline;
     function VisibleText(AIndex: Integer): string;
     { SameText(VisibleText(AIndex), AWord) without materializing the text -
       the parser's word tests run through here (see PasTree.Types.
@@ -376,7 +381,7 @@ type
       the same token against SEVERAL words (IsDirectiveWord's 30-word loop
       would otherwise re-resolve file and token per word). }
     procedure VisibleSlice(AIndex: Integer; out AText: PChar;
-      out ALen: Integer);
+      out ALen: Integer); inline;
     function IsSkipped(AFileId, AOffset: Integer): Boolean;
     // The SCOPEDENUMS state in effect at visible-stream position AVisIndex
     // (False = unscoped, the default). Binary search over the event list.
@@ -539,6 +544,10 @@ type
     FUnresolvedDeclared: TList<string>;
     FDeclaredAsks: TList<TPasDeclaredAsk>;
     FUnresolvedSymbols: TList<TPasUnresolvedSymbol>;
+    // The lexer's working array, kept for the next file like FVisible's
+    // capacity (TPasLexer.Tokenize's scratch overload).
+    FTokScratch: TArray<TPasToken>;
+    FParseScratch: TObject;
     function Active: Boolean;
     procedure Diag(ACode: TPasPPDiagCode; AFileId, AStart, ALen: Integer;
       const ADetail: string = '');
@@ -588,6 +597,11 @@ type
       APointerBytes: Integer = 8; AExtendedBytes: Integer = 8;
       ALongBytes: Integer = 4; AExtendedAlign: Integer = 8);
     destructor Destroy; override;
+    { Working memory a parser keeps with this preprocessor for the next unit
+      it prepares - the project's TPasNodeScratch (PasTree.Ast), which this
+      unit cannot name. Owned: freed with the preprocessor, which a project
+      rents one per worker and drops at the end of a run. }
+    property ParseScratch: TObject read FParseScratch write FParseScratch;
     { Preprocesses a main file loaded via the source manager. The instance
       can be reused for another file afterwards. }
     function Process(const AFileName: string): TPasPreprocessed;
@@ -829,6 +843,12 @@ end;
 function TPasPreprocessed.VisibleToken(AIndex: Integer): TPasToken;
 begin
   Result := Files[Visible[AIndex].FileId].Tokens[Visible[AIndex].TokenIndex];
+end;
+
+function TPasPreprocessed.VisibleKind(AIndex: Integer): TPasTokenKind;
+begin
+  Result :=
+    Files[Visible[AIndex].FileId].Tokens[Visible[AIndex].TokenIndex].Kind;
 end;
 
 function TPasPreprocessed.VisibleText(AIndex: Integer): string;
@@ -1369,6 +1389,7 @@ begin
   FIfNameRefs.Free;
   FOptionRefs.Free;
   FSwitchStack.Free;
+  FParseScratch.Free;
   inherited;
 end;
 
@@ -1481,7 +1502,7 @@ begin
   FStopped := False;
   FStopPhase := 0;
 
-  LStream := TPasLexer.Tokenize(ASource, FStopAtImpl);
+  LStream := TPasLexer.Tokenize(ASource, FStopAtImpl, FTokScratch);
   // Visible tokens <= the main file's raw tokens (trivia and skipped regions
   // only subtract; includes add, and then the list grows the ordinary way).
   if FVisible.Capacity < Length(LStream.Tokens) then

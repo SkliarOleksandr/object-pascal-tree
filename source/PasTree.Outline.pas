@@ -320,7 +320,7 @@ begin
   Result := tkEndOfFile;
   LNext := FTree.Nodes[ANode].LastToken + 1;
   if (LNext >= 0) and (LNext <= High(FTree.Source.Visible)) then
-    Result := FTree.Source.VisibleToken(LNext).Kind;
+    Result := FTree.Source.VisibleKind(LNext);
 end;
 
 function TOutlineWalker.TokenKindBefore(ANode: Integer): TPasTokenKind;
@@ -330,7 +330,7 @@ begin
   Result := tkEndOfFile;
   LPrev := FTree.NodeLeftmostVis(ANode) - 1;
   if (LPrev >= 0) and (LPrev <= High(FTree.Source.Visible)) then
-    Result := FTree.Source.VisibleToken(LPrev).Kind;
+    Result := FTree.Source.VisibleKind(LPrev);
 end;
 
 // AChild, or the first sibling after it that is not an attribute group.

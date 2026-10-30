@@ -95,6 +95,15 @@ type
       the whole text, so Resume can go on from the EOF token. }
     class function Tokenize(const ASource: string;
       AStopAtImpl: Boolean): TPasTokenStream; overload; static;
+    { The same with AScratch as the lexer's working array, for a caller that
+      lexes file after file (TPasPreprocessor): grown to the size estimate
+      when smaller, never zero-filled again, and handed back for the next
+      file unless it grew past MAX_KEPT_TOKENS. The result's tokens are an
+      exact copy, as ever. Allocating and zero-filling that array per file,
+      then copying it to size, was the largest single CPU leaf of a load
+      (perf audit 2026-10, S7). }
+    class function Tokenize(const ASource: string; AStopAtImpl: Boolean;
+      var AScratch: TArray<TPasToken>): TPasTokenStream; overload; static;
     { Pull lexing, for a caller that knows which text is live - the
       preprocessor (F26): Tokenize has to guess where an `asm` body ends
       before any branch is decided. Resume continues AStream at its token
@@ -165,7 +174,19 @@ end;
 class function TPasLexer.Tokenize(const ASource: string;
   AStopAtImpl: Boolean): TPasTokenStream;
 var
+  LScratch: TArray<TPasToken>;
+begin
+  Result := Tokenize(ASource, AStopAtImpl, LScratch);
+end;
+
+class function TPasLexer.Tokenize(const ASource: string; AStopAtImpl: Boolean;
+  var AScratch: TArray<TPasToken>): TPasTokenStream;
+const
+  // 3 MB: every unit but the few largest, which allocate as before.
+  MAX_KEPT_TOKENS = 1 shl 18;
+var
   LLexer: TPasLexer;
+  LHint: Integer;
 begin
   LLexer := Default(TPasLexer);
   LLexer.FStopAtImpl := AStopAtImpl;
@@ -176,14 +197,26 @@ begin
   else
     LLexer.FBase := nil;
   // Pre-size: Delphi source averages ~1 token per 4 chars incl. trivia.
-  SetLength(LLexer.FTokens, (LLexer.FLen div 4) + 16);
+  // The lexer writes every slot it counts and reads none past the count, so
+  // the scratch's stale tokens are never seen. Taken over rather than shared:
+  // Emit's growth then reallocates it in place.
+  LHint := (LLexer.FLen div 4) + 16;
+  LLexer.FTokens := AScratch;
+  AScratch := nil;
+  if Length(LLexer.FTokens) < LHint then
+  begin
+    LLexer.FTokens := nil;   // a fresh block - its stale content needs no copy
+    SetLength(LLexer.FTokens, LHint);
+  end;
   LLexer.Run;
 
   Result.Source := LLexer.FSource;
-  // The estimate runs ~1.5x the real count: a SetLength shrink would keep
-  // that whole block (see TPasArrayTrim).
-  TPasArrayTrim.Exact<TPasToken>(LLexer.FTokens, LLexer.FTokenCount);
-  Result.Tokens := LLexer.FTokens;
+  // The estimate runs ~1.3x the real count, and the scratch more: the result
+  // is a copy of exactly the tokens (see TPasArrayTrim).
+  Result.Tokens := Copy(LLexer.FTokens, 0, LLexer.FTokenCount);
+  if Length(LLexer.FTokens) <= MAX_KEPT_TOKENS then
+    AScratch := LLexer.FTokens;
+  LLexer.FTokens := nil;
   SetLength(LLexer.FDiags, LLexer.FDiagCount);
   Result.Diagnostics := LLexer.FDiags;
   Result.LineStarts := BuildLineStarts(LLexer.FSource);

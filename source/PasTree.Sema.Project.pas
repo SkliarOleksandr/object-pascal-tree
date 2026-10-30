@@ -1415,6 +1415,9 @@ type
       const AArgTypes: TArray<TSemaXType>; ACtx: Integer): Integer;
     function ExplicitMethodFrame(AId, AMid, ASym, ATypeArgs,
       ACtx: Integer): Integer;
+    // SubstX past its early answers - see there.
+    function SubstXInFrame(const AX: TSemaXType;
+      AInst, ADepth: Integer): TSemaXType;
     // The declared-type pass over AIds - see the implementation.
     procedure BindTypesX(const AIds: TArray<Integer>);
     procedure BindTypesXCompute(AId: Integer; out ASyms: TArray<Integer>;
@@ -3488,14 +3491,19 @@ begin
   // A light unit (LightPaths) parses interface-only in EVERY driver, AIntf
   // or not.
   LLight := IsLightFile(AFull);
+  // The tree builder's arrays stay with the preprocessor for its next unit,
+  // as the lexer's do (TPasNodeScratch).
+  if APP.ParseScratch = nil then
+    APP.ParseScratch := TPasNodeScratch.Create;
   // A light unit keeps its implementation's `uses` clause too: the units it
   // imports there are known (UNIT_NOT_LOADED, or loaded when they are own).
   if LLight then
     // ... and its text is lexed and preprocessed only that far.
     LTree := TPasParser.ParseFile(ProcessUnit(APP, AFull, True), LDiags,
-      pmInterfaceAndImplUses)
+      pmInterfaceAndImplUses, TPasNodeScratch(APP.ParseScratch))
   else
-    LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags, AIntf);
+    LTree := TPasParser.ParseFile(APP.Process(AFull), LDiags, AIntf,
+      TPasNodeScratch(APP.ParseScratch));
   LIsUnit := (Length(LTree.Nodes) > 0) and (LTree.Nodes[0].Kind = nkUnit);
   // A model whose parse really did stop at the interface skips the
   // expression typer, as the interface wave's transient models did. Such a
@@ -9410,6 +9418,7 @@ begin
       EmitAt(LModel, LNode, 'E2034', SE2034_TooManyActualParams);
   end;
   finally
+    LNamePool.Clear;   // its strings' references go only with Clear
     LSweeps.Free;
   end;
 end;
@@ -10412,6 +10421,18 @@ end;
 // mention open parameters is re-instantiated with them closed.
 function TPasSemaProject.SubstX(const AX: TSemaXType;
   AInst, ADepth: Integer): TSemaXType;
+begin
+  // The common answer - no frame (AInst NIL_INST, most calls) - from a
+  // routine with no managed locals: SubstXInFrame's four are initialized and
+  // finalized on every entry, which was three quarters of SubstX's cost
+  // (perf audit 2026-10, C9).
+  if (AInst = NIL_INST) or (ADepth > 16) or not XValid(AX) then
+    Exit(AX);
+  Result := SubstXInFrame(AX, AInst, ADepth);
+end;
+
+function TPasSemaProject.SubstXInFrame(const AX: TSemaXType;
+  AInst, ADepth: Integer): TSemaXType;
 var
   LInst: TSemaInstance;
   LIdents: TArray<Integer>;
@@ -10419,8 +10440,6 @@ var
   LArgs: TArray<TSemaXType>;
 begin
   Result := AX;
-  if (AInst = NIL_INST) or (ADepth > 16) or not XValid(AX) then
-    Exit;
   LInst := InstanceRead(AInst);
   if (AX.UnitId = LInst.UnitId) and
      (FModels[AX.UnitId].Symbols[AX.Sym].Kind = skGenericParam) then
@@ -13099,7 +13118,7 @@ begin
   if (LTok > High(LM.Tree.Source.Visible)) and LM.Demoted then
     EnsureHydrated(AId);
   Result := (LTok <= High(LM.Tree.Source.Visible)) and
-    (LM.Tree.Source.VisibleToken(LTok).Kind = tkAs);
+    (LM.Tree.Source.VisibleKind(LTok) = tkAs);
 end;
 
 { 3.2.2 (dcc64 37.0, local/probe-b66 P1-P3): an aggregate's labels name
@@ -14093,9 +14112,10 @@ var
           // "nothing in the type's own chain fits, so this means an
           // INHERITED routine" fallback do its job. `nil` and untyped
           // arguments never reach here - they are tcNil/tcUnknown.
-          else if ArgStructRejects(LParCat, XCatOf(LCanonArg),
-                  HasConversionOperator(LCanonPar),
-                  HasConversionOperator(LCanonArg)) then
+          else if ArgStructNeedsConv(LParCat, XCatOf(LCanonArg)) and
+                  ArgStructRejects(LParCat, XCatOf(LCanonArg),
+                    HasConversionOperator(LCanonPar),
+                    HasConversionOperator(LCanonArg)) then
             Exit(-1)
           // A static array where a dynamic one is wanted: no conversion
           // (`Image.Read(List^, N)` with List^ a static array takes TStream's
@@ -16042,6 +16062,7 @@ var
   LM: TPasSemaModel;
 begin
   LM := FModels[AId];
+  LM.ExprTypeX.Reserve(FXNewExprType[AId].Count);
   for var LPair in FXNewExprType[AId] do
     LM.ExprTypeX.Add(LPair.Key, LPair.Value);
 end;
@@ -19183,7 +19204,7 @@ begin
        (LM.Tree.Nodes[ANode].Aux < 0) or
        (LM.Tree.Nodes[ANode].Aux > High(LM.Tree.Source.Visible)) then
       Exit;
-    case LM.Tree.Source.VisibleToken(LM.Tree.Nodes[ANode].Aux).Kind of
+    case LM.Tree.Source.VisibleKind(LM.Tree.Nodes[ANode].Aux) of
       tkMinus: ANegated := True;
       tkPlus: ;
     else
@@ -19261,7 +19282,7 @@ begin
   if (LM.Tree.Nodes[AOpNode].Aux < 0) or
      (LM.Tree.Nodes[AOpNode].Aux > High(LM.Tree.Source.Visible)) then
     Exit;
-  LOp := LM.Tree.Source.VisibleToken(LM.Tree.Nodes[AOpNode].Aux).Kind;
+  LOp := LM.Tree.Source.VisibleKind(LM.Tree.Nodes[AOpNode].Aux);
   LUnary := LM.Tree.Nodes[AOpNode].Kind = nkUnaryOp;
   LL := CanonTypeX(AL);
   LR := CanonTypeX(AR);
@@ -20235,7 +20256,7 @@ function TPasSemaProject.ForInElementX(AMid, ACollNode: Integer;
           Result := ForInElementX(AMid, LTm.Tree.Nodes[ANode].FirstChild, XNil);
       nkBinaryOp:
         begin
-          if not (LTm.Tree.Source.VisibleToken(LTm.Tree.Nodes[ANode].Aux).Kind
+          if not (LTm.Tree.Source.VisibleKind(LTm.Tree.Nodes[ANode].Aux)
                in [tkPlus, tkMinus, tkStar]) then
             Exit;
           LKid := LTm.Tree.Nodes[ANode].FirstChild;
@@ -20601,6 +20622,7 @@ begin
   if FWorkBuilt[AId] then
     Exit;
   LPool.Clear;   // a local record: FCount is not initialized
+  try
   LM := FModels[AId];
   // High(RefMap) is the node count; both lists are far smaller, but sizing to
   // it once beats growing them incrementally.
@@ -20688,6 +20710,9 @@ begin
   FInhWorkNames[AId] := LInhNames;
   FWithWorkNames[AId] := LWithNames;
   FWorkBuilt[AId] := True;
+  finally
+    LPool.Clear;   // its strings' references go only with Clear
+  end;
 end;
 
 // One empty slot per model, BEFORE the parallel CrossResolve workers start

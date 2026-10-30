@@ -839,7 +839,7 @@ var
   LWord: SmallInt;
   LMatch: Boolean;
 begin
-  LKind := ASource.VisibleToken(AVisIndex).Kind;
+  LKind := ASource.VisibleKind(AVisIndex);
   if LKind <> tkIdentifier then
     Exit(Ord(LKind));
   ASource.VisibleSlice(AVisIndex, LText, LLen);
@@ -1187,7 +1187,7 @@ begin
     Exit;
   LOp := ATree.Nodes[ANode].Aux;
   if (LOp < 1) or (LOp > High(ATree.Source.Visible)) or
-     (ATree.Source.VisibleToken(LOp).Kind <> tkGreaterEqual) then
+     (ATree.Source.VisibleKind(LOp) <> tkGreaterEqual) then
     Exit;
   LNode := ATree.Nodes[ANode].FirstChild;
   LSteps := 0;
@@ -1218,7 +1218,7 @@ begin
     LAfter := ATree.Nodes[LNode].LastToken + 1;
     if (LAfter < 1) or (LAfter > High(Result)) or
        (ATree.Nodes[LNode].LastToken < ATree.Nodes[LNode].FirstToken) or
-       (ATree.Source.VisibleToken(LAfter).Kind <> tkGreaterEqual) then
+       (ATree.Source.VisibleKind(LAfter) <> tkGreaterEqual) then
       Continue;
     LLast := NIL_NODE;
     LKid := ATree.Nodes[LNode].FirstChild;
@@ -1329,7 +1329,7 @@ var
   begin
     if (AVis < 0) or (AVis > LLastVis) then
       Exit(tkUnknown);
-    Result := ATree.Source.VisibleToken(AVis).Kind;
+    Result := ATree.Source.VisibleKind(AVis);
   end;
 
   // TokKind, but a fused `>=` after type arguments is the `=` it ends in:

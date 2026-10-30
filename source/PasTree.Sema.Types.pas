@@ -266,6 +266,11 @@ function ArgShapeRejects(ACoreKind: TPasNodeKind; AIsProcDesig: Boolean;
 function ArgCatRejects(AParCat, AArgCat: TSemaTypeCat): Boolean;
 function ArgStructRejects(AParCat, AArgCat: TSemaTypeCat;
   AParConv, AArgConv: Boolean): Boolean;
+{ Whether ArgStructRejects' answer for these categories can turn on a
+  conversion operator at all: when not, it is False whatever AParConv and
+  AArgConv say, and the operators need not be looked for - a member search
+  per argument of every candidate scored (perf audit 2026-10, C11). }
+function ArgStructNeedsConv(AParCat, AArgCat: TSemaTypeCat): Boolean;
 
 { The present arguments of the nkCall ACall - its children after the callee,
   the nkMissing slot a trailing comma leaves (`F(1, 2,)`, ParseArgList) not
@@ -570,6 +575,16 @@ begin
              (AArgCat in [tcRecord, tcClass, tcInterface]) and not AArgConv) or
             ((AArgCat = tcArray) and
              (AParCat in [tcRecord, tcClass, tcInterface]) and not AParConv);
+end;
+
+function ArgStructNeedsConv(AParCat, AArgCat: TSemaTypeCat): Boolean;
+begin
+  // ArgStructRejects' three cases, without the operators.
+  Result := ((AParCat = tcRecord) and (AArgCat = tcRecord)) or
+            ((AParCat = tcArray) and
+             (AArgCat in [tcRecord, tcClass, tcInterface])) or
+            ((AArgCat = tcArray) and
+             (AParCat in [tcRecord, tcClass, tcInterface]));
 end;
 
 function CallArgCount(const ATree: TPasTree; ACall: Integer;
@@ -1066,12 +1081,12 @@ begin
   if (ATree.Nodes[ANode].Kind = nkUnaryOp) and
      (ATree.Nodes[ANode].Aux >= 0) and
      (ATree.Nodes[ANode].Aux <= High(ATree.Source.Visible)) and
-     (ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind in
+     (ATree.Source.VisibleKind(ATree.Nodes[ANode].Aux) in
       [tkMinus, tkPlus]) then
   begin
     if not IntLiteralValue(ATree, ATree.Nodes[ANode].FirstChild, AValue) then
       Exit;
-    if ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind = tkMinus then
+    if ATree.Source.VisibleKind(ATree.Nodes[ANode].Aux) = tkMinus then
       AValue := -AValue;
     Exit(True);
   end;
@@ -1119,7 +1134,7 @@ begin
         if not Result and (ATree.Nodes[ANode].Kind = nkUnaryOp) and
            (ATree.Nodes[ANode].Aux >= 0) and
            (ATree.Nodes[ANode].Aux <= High(ATree.Source.Visible)) and
-           (ATree.Source.VisibleToken(ATree.Nodes[ANode].Aux).Kind =
+           (ATree.Source.VisibleKind(ATree.Nodes[ANode].Aux) =
             tkMinus) and
            OrdinalNodeValue(ATree, ATree.Nodes[ANode].FirstChild, ADepth + 1,
              AName, AValue) then
@@ -1306,7 +1321,7 @@ begin
   while (Result <> NIL_NODE) and (ATree.Nodes[Result].Kind = nkUnaryOp) and
         (ATree.Nodes[Result].Aux >= 0) and
         (ATree.Nodes[Result].Aux <= High(ATree.Source.Visible)) and
-        (ATree.Source.VisibleToken(ATree.Nodes[Result].Aux).Kind in
+        (ATree.Source.VisibleKind(ATree.Nodes[Result].Aux) in
          [tkMinus, tkPlus]) do
     Result := PeelParens(ATree, ATree.Nodes[Result].FirstChild);
   if (Result <> NIL_NODE) and (ATree.Nodes[Result].Kind <> nkRealLit) then
@@ -1462,7 +1477,7 @@ end;
 function TPasSemaTyper.OpKind(N: Integer): TPasTokenKind;
 begin
   if (T.Nodes[N].Aux >= 0) and (T.Nodes[N].Aux <= High(T.Source.Visible)) then
-    Result := T.Source.VisibleToken(T.Nodes[N].Aux).Kind
+    Result := T.Source.VisibleKind(T.Nodes[N].Aux)
   else
     Result := tkUnknown;
 end;
@@ -2574,8 +2589,10 @@ begin
         if (LAt = LPt) or (LCAt = LCPt) then
           Inc(Result, 2)
         else if ArgCatRejects(LParCat, CatOf(LAt)) or
-           ArgStructRejects(LParCat, CatOf(LAt),
-             DeclaresConversion(LPt, True), DeclaresConversion(LAt, True)) then
+           (ArgStructNeedsConv(LParCat, CatOf(LAt)) and
+            ArgStructRejects(LParCat, CatOf(LAt),
+              DeclaresConversion(LPt, True),
+              DeclaresConversion(LAt, True))) then
           Exit(-1)
         else if Assignable(LPt, LAt) then
           Inc(Result, 1);
