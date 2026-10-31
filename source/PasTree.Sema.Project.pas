@@ -24110,6 +24110,13 @@ var
   LAnyFrontier, LMatch: Boolean;
   LDemandedNL: Integer;
   LCond: TArray<TArray<Cardinal>>;
+  // Per node, once per call: its word entry and whether it is a candidate
+  // (see below the volume), and the ask scopes' unit sets by (scope, unit).
+  LEnt: TArray<TPasWordEntry>;
+  LHasEnt, LCandN: TArray<Boolean>;
+  LPE: ^TPasWordEntry;
+  LInMemo: TDictionary<Int64, TArray<Boolean>>;
+  LInKey: Int64;
 
   function SizeOf_(ANode: Integer): Int64;
   var
@@ -24206,12 +24213,10 @@ var
   function DeclaresMatch(ANode: Integer; const AAsk: TPasDemandAsk;
     const ACond: TArray<TArray<Cardinal>>): Boolean;
   var
-    LE: TPasWordEntry;
     LSegs: TArray<string>;
     LQ: Integer;
   begin
-    if not FWordIdx.TryGetValue(LowerCase(LPaths[ANode]), LE) or
-       LE.Unreadable then
+    if not LHasEnt[ANode] or LEnt[ANode].Unreadable then
       Exit(True);
     LSegs := PasFoldName(TPath.GetFileNameWithoutExtension(LPaths[ANode])).
       Split(['.']);
@@ -24225,7 +24230,7 @@ var
         Inc(LQ);
     for var LC := 0 to High(AAsk.Declares) do
       if (not AAsk.Declares[LC].UnitSegment or (LC >= LQ)) and
-         not Intersects(LE.DeclWords, ACond[LC]) then
+         not Intersects(LEnt[ANode].DeclWords, ACond[LC]) then
         Exit(False);
     Result := True;
   end;
@@ -24246,6 +24251,7 @@ begin
   LNL := TDictionary<string, Integer>.Create;
   LFrontier := TList<Boolean>.Create;
   LEdges := TList<TEdge>.Create;
+  LInMemo := TDictionary<Int64, TArray<Boolean>>.Create;
   try
     for LMid := 0 to LCount - 1 do
     begin
@@ -24336,6 +24342,21 @@ begin
     if Result.TotalVolume < FLightTotal then
       Result.TotalVolume := FLightTotal;
     FLightTotal := Result.TotalVolume;
+    // Each candidate's word entry, once: the asks below looked it up per ask
+    // per node - a LowerCase, a string-keyed lookup and a copy of the whole
+    // entry - and a hierarchy demand asks for every type below its seed, two
+    // asks each, thousands under TComponent (perf audit 2026-10, I3). Nothing
+    // below writes the word index.
+    SetLength(LEnt, LN);
+    SetLength(LHasEnt, LN);
+    SetLength(LCandN, LN);
+    for LNode := 0 to LN - 1 do
+    begin
+      LCandN[LNode] := IsCandidate(LNode);
+      if LCandN[LNode] then
+        LHasEnt[LNode] := FWordIdx.TryGetValue(LowerCase(LPaths[LNode]),
+          LEnt[LNode]);
+    end;
     SetLength(LWanted, LN);
     SetLength(LWantedPP, LN);
     // A wildcard of a declaration search needs the spellings behind the
@@ -24377,52 +24398,63 @@ begin
            ((FModels[LAsk.UnitId].UnitNameLower = 'system') or
             (FModels[LAsk.UnitId].UnitNameLower = 'sysinit')) then
           LScope := dsAll;
-        SetLength(LIn, 0);
-        SetLength(LIn, LN);
-        case LScope of
-          dsSelf:
-            LIn[LAsk.UnitId] := True;
-          dsUnit:
-            begin
+        // One set per (scope, unit): the asks of one demand share units, and
+        // dsMember's is a walk over the graph (I3, as above). Only read once
+        // built.
+        if LScope = dsAll then
+          LInKey := -1
+        else
+          LInKey := (Int64(Ord(LScope)) shl 32) or Cardinal(LAsk.UnitId);
+        if not LInMemo.TryGetValue(LInKey, LIn) then
+        begin
+          SetLength(LIn, 0);
+          SetLength(LIn, LN);
+          case LScope of
+            dsSelf:
               LIn[LAsk.UnitId] := True;
-              for LIdx := LRevAllStart[LAsk.UnitId] to
-                  LRevAllStart[LAsk.UnitId + 1] - 1 do
-                LIn[LRevAll[LIdx]] := True;
-            end;
-          dsMember:
-            begin
-              // I(U): backwards over interface edges alone.
-              SetLength(LInI, 0);
-              SetLength(LInI, LN);
-              SetLength(LQueue, LN);
-              LInI[LAsk.UnitId] := True;
-              LQueue[0] := LAsk.UnitId;
-              LQLen := 1;
-              LSet := 0;
-              while LSet < LQLen do
+            dsUnit:
               begin
-                LNode := LQueue[LSet];
-                Inc(LSet);
-                for LIdx := LRevIntfStart[LNode] to LRevIntfStart[LNode + 1] - 1 do
-                  if not LInI[LRevIntf[LIdx]] then
-                  begin
-                    LInI[LRevIntf[LIdx]] := True;
-                    LQueue[LQLen] := LRevIntf[LIdx];
-                    Inc(LQLen);
-                  end;
-              end;
-              // ... and every unit with an edge into it.
-              for LSet := 0 to LQLen - 1 do
-              begin
-                LNode := LQueue[LSet];
-                LIn[LNode] := True;
-                for LIdx := LRevAllStart[LNode] to LRevAllStart[LNode + 1] - 1 do
+                LIn[LAsk.UnitId] := True;
+                for LIdx := LRevAllStart[LAsk.UnitId] to
+                    LRevAllStart[LAsk.UnitId + 1] - 1 do
                   LIn[LRevAll[LIdx]] := True;
               end;
-            end;
-          dsAll:
-            for LNode := 0 to LN - 1 do
-              LIn[LNode] := True;
+            dsMember:
+              begin
+                // I(U): backwards over interface edges alone.
+                SetLength(LInI, 0);
+                SetLength(LInI, LN);
+                SetLength(LQueue, LN);
+                LInI[LAsk.UnitId] := True;
+                LQueue[0] := LAsk.UnitId;
+                LQLen := 1;
+                LSet := 0;
+                while LSet < LQLen do
+                begin
+                  LNode := LQueue[LSet];
+                  Inc(LSet);
+                  for LIdx := LRevIntfStart[LNode] to LRevIntfStart[LNode + 1] - 1 do
+                    if not LInI[LRevIntf[LIdx]] then
+                    begin
+                      LInI[LRevIntf[LIdx]] := True;
+                      LQueue[LQLen] := LRevIntf[LIdx];
+                      Inc(LQLen);
+                    end;
+                end;
+                // ... and every unit with an edge into it.
+                for LSet := 0 to LQLen - 1 do
+                begin
+                  LNode := LQueue[LSet];
+                  LIn[LNode] := True;
+                  for LIdx := LRevAllStart[LNode] to LRevAllStart[LNode + 1] - 1 do
+                    LIn[LRevAll[LIdx]] := True;
+                end;
+              end;
+            dsAll:
+              for LNode := 0 to LN - 1 do
+                LIn[LNode] := True;
+          end;
+          LInMemo.Add(LInKey, LIn);
         end;
       end;
       LHashes := nil;
@@ -24430,7 +24462,7 @@ begin
         LHashes := LHashes + [PasWordHash(LWord)];
       for LNode := 0 to LN - 1 do
       begin
-        if not LIn[LNode] or LWanted[LNode] or not IsCandidate(LNode) then
+        if not LIn[LNode] or LWanted[LNode] or not LCandN[LNode] then
           Continue;
         // A declaration search: a light unit matched made full, a unit
         // nobody loaded loaded light (its implementation tested once it is
@@ -24464,17 +24496,18 @@ begin
            ((LNode < LCount) and HasDefineSide(LNode))) then
           Continue;
         LMatch := LAsk.Words = nil;
+        LPE := @LEnt[LNode];
         if not LMatch then
         begin
-          if not FWordIdx.TryGetValue(LowerCase(LPaths[LNode]), LEntry) then
+          if not LHasEnt[LNode] then
             // Never scanned (a light unit loaded since): the safe side.
             LMatch := True
-          else if LEntry.Unreadable then
+          else if LPE.Unreadable then
             LMatch := True
           else if LAsk.Directives then
           begin
             for var LH in LHashes do
-              if PasWordSetHas(LEntry.DirWords, LH) then
+              if PasWordSetHas(LPE.DirWords, LH) then
               begin
                 LMatch := True;
                 Break;
@@ -24483,7 +24516,7 @@ begin
           else if LAsk.Heritage then
           begin
             for var LH in LHashes do
-              if PasWordSetHas(LEntry.HeritWords, LH) then
+              if PasWordSetHas(LPE.HeritWords, LH) then
               begin
                 LMatch := True;
                 Break;
@@ -24491,20 +24524,19 @@ begin
           end
           else
             for var LH in LHashes do
-              if PasWordSetHas(LEntry.Words, LH) then
+              if PasWordSetHas(LPE.Words, LH) then
               begin
                 LMatch := True;
                 Break;
               end;
         end;
         // ... and one of AlsoWords anywhere in its code.
-        if LMatch and (LAsk.AlsoWords <> nil) and
-           FWordIdx.TryGetValue(LowerCase(LPaths[LNode]), LEntry) and
-           not LEntry.Unreadable then
+        if LMatch and (LAsk.AlsoWords <> nil) and LHasEnt[LNode] and
+           not LPE.Unreadable then
         begin
           LMatch := False;
           for var LAlso in LAsk.AlsoWords do
-            if PasWordSetHas(LEntry.Words, PasWordHash(LAlso)) then
+            if PasWordSetHas(LPE.Words, PasWordHash(LAlso)) then
             begin
               LMatch := True;
               Break;
@@ -24580,6 +24612,7 @@ begin
     if LAnyFrontier then
       Inc(Result.NotSearched, LDemandedNL);
   finally
+    LInMemo.Free;
     LEdges.Free;
     LFrontier.Free;
     LNL.Free;

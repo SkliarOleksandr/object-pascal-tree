@@ -476,6 +476,8 @@ type
     // The project's form files, bound - created on the first search that can
     // reach one (FormBinder), dropped when LibraryPaths changes.
     FForms: TPasFormBinder;
+    // The whole reverse-heritage index, built on first use (TypeEdges).
+    FTypeEdges: TOvIndex;
     // FProj.ModelGeneration at Create - see Create's lifetime rule.
     FGeneration: Integer;
     // See NotSearched.
@@ -613,6 +615,8 @@ type
     function OvRefOfHeritageItem(AMid, AItemNode: Integer;
       out ABMid, ABSym: Integer): Boolean;
     function OvBuildTypeEdges(ATarget: Int64 = -1): TOvIndex;
+    // OvBuildTypeEdges' whole index, kept by the navigator: not to be freed.
+    function TypeEdges: TOvIndex;
     procedure OvWalkDescendants(AIndex: TOvIndex; AMid, AStruct: Integer;
       AAxis: TOvAxis; const AVisit: TOvVisit);
     function OvAncestorClass(var AMid, AStruct: Integer): Boolean;
@@ -1703,6 +1707,7 @@ end;
 
 destructor TPasNavigator.Destroy;
 begin
+  FTypeEdges.Free;
   FForms.Free;
   FCaches.Free;
   inherited;
@@ -2986,11 +2991,10 @@ end;
   anything that is not a class property, for a property nothing redeclares,
   and for the ordinary typed property - so callers can take the chain
   unconditionally and pay nothing extra in the common case... except the
-  reverse-heritage index (OvBuildTypeEdges), which every class property pays
-  for once per call: whether a DESCENDANT redeclares the name cannot be known
-  without looking at the descendants, and FindOverrides already accepts that
-  cost for an interactive command. Not cached: the navigator's caches are
-  per model and this spans the project.
+  reverse-heritage index, which every class property needs: whether a
+  DESCENDANT redeclares the name cannot be known without looking at the
+  descendants. The navigator keeps it (TypeEdges), so only its first query
+  pays for it.
 
   UP: PropertyRedeclPrev link by link while the current link is bare (a typed
   declaration is the root, wherever the click was). DOWN: breadth-first over
@@ -3020,10 +3024,9 @@ begin
     Exit;   // the chain climbed into something that is not a class - keep
             // the clicked symbol alone rather than half a chain
   LList := TList<TPasExtRef>.Create;
-  LIndex := nil;
   try
     LList.Add(LRoot);
-    LIndex := OvBuildTypeEdges;
+    LIndex := TypeEdges;
     OvWalkDescendants(LIndex, LRoot.UnitId, LStruct, oaClass,
       function(const AParent, AKid: TPasExtRef; ADepth: Integer): Boolean
       var
@@ -3042,7 +3045,6 @@ begin
       end);
     Result := LList.ToArray;
   finally
-    LIndex.Free;
     LList.Free;
   end;
 end;
@@ -4513,10 +4515,9 @@ end;
   `Destroy; override;` included (audit A2-23). The written items after the
   first are the implements list.
 
-  Built per call: a search is a user gesture, caching would need an
-  invalidation story against incremental reanalysis, and the pass is one
-  symbol sweep per model that reads no text at all (measured: single-digit ms
-  over the RTL). Keyed by OvKey with one list per type: a string key per
+  One symbol sweep per model that reads no text at all, kept whole by the
+  navigator (TypeEdges, which says why that is safe); a filtered build stays
+  for a one-type question. Keyed by OvKey with one list per type: a string key per
   edge and an array copy per append made it quadratic in a base's fan-in
   (audit C1-28). ATarget (an OvKey) keeps only the edges filed under that
   one type - FindImplementations and FindInterfaceImplementors read no
@@ -4596,6 +4597,21 @@ begin
     LIndex.Free;
     raise;
   end;
+end;
+
+{ The whole index for this navigator's life. Built per call it was paid by
+  every class-property reference search (PropertyChain - a documentHighlight
+  on `Caption`) and again by each hierarchy demand, Find Overrides and Find
+  Descendants (perf audit 2026-10, I4). The navigator is the invalidation
+  story the per-call build was waiting for: it serves one model generation
+  (CheckGeneration), and every change of a symbol or a heritage clause is a
+  model replaced, which a new generation and a new navigator follow. }
+function TPasNavigator.TypeEdges: TOvIndex;
+begin
+  CheckGeneration;
+  if FTypeEdges = nil then
+    FTypeEdges := OvBuildTypeEdges;
+  Result := FTypeEdges;
 end;
 
 { The ONE downward walk over the index (audit D1-25: PropertyChain,
@@ -5024,10 +5040,9 @@ begin
   OvClimbToRoot(LMid, LStruct, ASym, LNameLower);
 
   LHits := TList<TPasOverrideHit>.Create;
-  LIndex := nil;
   try
     OvCollectFrom(LMid, LStruct, LNameLower, True, LHits);
-    LIndex := OvBuildTypeEdges;
+    LIndex := TypeEdges;
     OvWalkDescendants(LIndex, LMid, LStruct, oaClass,
       function(const AParent, AKid: TPasExtRef; ADepth: Integer): Boolean
       begin
@@ -5039,7 +5054,6 @@ begin
       end);
     Result := LHits.ToArray;
   finally
-    LIndex.Free;
     LHits.Free;
   end;
   // The root row stays first (it is the chain's own head, and a host pins it
@@ -5345,13 +5359,12 @@ begin
   else
     Exit;
   LHits := TList<TPasDescendantHit>.Create;
-  LIndex := nil;
   try
     LStart.UnitId := ATMid;
     LStart.Sym := ASym;
     if DescendantRow(LStart, 0, '', LRow) then
       LHits.Add(LRow);
-    LIndex := OvBuildTypeEdges;
+    LIndex := TypeEdges;
     // Breadth-first IS hierarchy order (all depth-1 rows, then depth-2...);
     // no sort, so a host indenting by Depth gets the tree it expects.
     OvWalkDescendants(LIndex, ATMid, ASym, LAxis,
@@ -5366,7 +5379,6 @@ begin
       end);
     Result := LHits.ToArray;
   finally
-    LIndex.Free;
     LHits.Free;
   end;
 end;
@@ -7383,7 +7395,7 @@ begin
   CheckGeneration;
   if FProj.LightCount = 0 then
     Exit(Default(TPasDemand));
-  LIndex := OvBuildTypeEdges;
+  LIndex := TypeEdges;
   LSeen := TDictionary<Int64, Boolean>.Create;
   LTypes := TList<TPasExtRef>.Create;
   LAliases := TDictionary<Int64, TArray<string>>.Create;
@@ -7471,7 +7483,6 @@ begin
     LAliases.Free;
     LTypes.Free;
     LSeen.Free;
-    LIndex.Free;
   end;
 end;
 
@@ -8776,7 +8787,7 @@ begin
   LWork := TQueue<TPasExtRef>.Create;
   LList := TList<TPasRenameFamilyMember>.Create;
   try
-    LIndex := OvBuildTypeEdges;
+    LIndex := TypeEdges;
     // The forward direction of the edges into an interface: who lists it,
     // and what it extends.
     for var LPair in LIndex do
@@ -8956,7 +8967,6 @@ begin
     LIn.Free;
     LParent.Free;
     LListed.Free;
-    LIndex.Free;
   end;
 end;
 
