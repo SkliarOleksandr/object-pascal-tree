@@ -3197,7 +3197,7 @@ const
   MSG_A =
     'unit MsgA;'#10 +                                           // 1
     'interface'#10 +                                            // 2
-    'const MBase = $400;'#10 +                                  // 3
+    'const MRoot = $300; MBase = MRoot + $100;'#10 +            // 3
     'type'#10 +                                                 // 4
     '  TMsg = record Msg: Cardinal; end;'#10 +                  // 5
     '  TBase = class'#10 +                                      // 6
@@ -3260,6 +3260,14 @@ begin
         Kw(12) = 'MsgA:7 WMFoo');
       Ok('inhmsg: no ancestor handler - DefaultHandler [' + Kw(16) + ']',
         Kw(16) = 'System:5 DefaultHandler');
+      // The id's constant in a DEMOTED unit: the oracle cannot read its
+      // text, so the id does not fold and the name rule answers. It once
+      // read the released token layer for MBase's `+` - an ERangeError in a
+      // checked build, and in a module run's cross-type pass (`message
+      // CM_EXIT`, CM_EXIT = CM_BASE + 27).
+      LProj.DemoteText([TPath.Combine(LDir, 'MsgB.pas')]);
+      Ok('inhmsg: the id''s constant demoted - the name rule [' + Kw(12) + ']',
+        Kw(12) = '-');
     finally
       LNav.Free;
     end;

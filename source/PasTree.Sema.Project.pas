@@ -455,8 +455,9 @@ type
     FSeedScope: Integer;
     FModels: TObjectList<TPasSemaModel>;
     // Set by TypeSizeOf alone: the oracle's hops into another model
-    // rehydrate it (OracleReadable). Never during an analysis, which runs
-    // before anything is demoted and on many threads.
+    // rehydrate it (OracleReadable). Never during an analysis, which runs on
+    // many threads - a module run's over an already demoted closure, whose
+    // demoted models the oracle then cannot read.
     FOracleHydrate: Boolean;
     // Set by the walk when it laid out a pskOpenMin parameter: the answer is
     // a minimum. Only TypeSizeOf / TypeInstanceSize bind one, and read it.
@@ -4329,15 +4330,21 @@ begin
   Result := OracleLayout(AMid, ASym, ADepth, nil, ABytes, LAlign);
 end;
 
-{ Whether the oracle may read AMid's text (NodeText, AlignAt). Always during
-  an analysis; under TypeSizeOf a demoted model is rehydrated first - the
-  layout walk hops into library units, which the host demotes after every
-  build. The flag is off while EnsureHydrated re-preprocesses: its own
-  oracle questions must not hydrate further models from inside it. }
+{ Whether the oracle may read AMid's text (NodeText, AlignAt). A model that
+  is not demoted always; under TypeSizeOf a demoted one is rehydrated first -
+  the layout walk hops into library units, which the host demotes after every
+  build. Anywhere else a demoted model is unreadable and the question goes
+  unanswered: a module run (AnalyzeModuleOnly) analyzes one unit over a
+  closure that is already demoted, on many threads, and its cross-type pass
+  folds a `message` id through here (MessageIdOf) - reading the released
+  token layer there was an ERangeError (VisibleKind) on a handler whose id
+  names a library constant, `message CM_EXIT`. The flag is off while
+  EnsureHydrated re-preprocesses: its own oracle questions must not hydrate
+  further models from inside it. }
 function TPasSemaProject.OracleReadable(AMid: Integer): Boolean;
 begin
-  Result := True;
-  if not FOracleHydrate or not FModels[AMid].Demoted then
+  Result := not FModels[AMid].Demoted;
+  if Result or not FOracleHydrate then
     Exit;
   FOracleHydrate := False;
   try
