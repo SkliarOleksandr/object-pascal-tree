@@ -617,6 +617,8 @@ type
     function OvBuildTypeEdges(ATarget: Int64 = -1): TOvIndex;
     // OvBuildTypeEdges' whole index, kept by the navigator: not to be freed.
     function TypeEdges: TOvIndex;
+    procedure PrehydrateBelow(AMid, AStruct: Integer; AAxis: TOvAxis;
+      const ANameLower: string);
     procedure OvWalkDescendants(AIndex: TOvIndex; AMid, AStruct: Integer;
       AAxis: TOvAxis; const AVisit: TOvVisit);
     function OvAncestorClass(var AMid, AStruct: Integer): Boolean;
@@ -2702,9 +2704,12 @@ var
   LWanted: TArray<TArray<Integer>>;   // model id -> wanted symbols; nil none
   LAllPrivate: Boolean;
   LM: TPasSemaModel;
-  LMi, LNode, LSym, LCount: Integer;
+  LMi, LNode, LSym, LCount, LFirst: Integer;
   LPair: TPair<Integer, TPasExtRef>;
   LHit: TPasRefHit;
+  LCands: TList<TPasExtRef>;
+  LCand: TPasExtRef;
+  LTodo: TArray<Integer>;
 
   function Wants(const AList: TArray<Integer>; ASym: Integer): Boolean;
   var
@@ -2730,30 +2735,56 @@ begin
       if LAllPrivate and not UnitPrivate(LRef.UnitId, LRef.Sym) then
         LAllPrivate := False;
     end;
-  for LMi := 0 to LCount - 1 do
-  begin
-    if (AOnlyMid >= 0) and (LMi <> AOnlyMid) then
-      Continue;
-    if LAllPrivate and (LWanted[LMi] = nil) then
-      Continue;
-    LM := FProj.Model(LMi);
-    if LWanted[LMi] <> nil then
-      for LNode := 0 to High(LM.RefMap) do
-      begin
-        LSym := LM.RefMap[LNode];
-        if (LSym <> NIL_SYM) and Wants(LWanted[LMi], LSym) and
-           (not AAssignOnly or IsAssignTarget(LM, LNode)) and
-           not IsDeclSelfName(LM, LSym, LNode) and
-           FProj.EnsureHydrated(LMi) and HitFromNode(LM, LNode, LHit) then
-          AHits.Add(LHit);
-      end;
-    for LPair in LM.ExtRefMap do
-      if (Cardinal(LPair.Value.UnitId) < Cardinal(LCount)) and
-         (LWanted[LPair.Value.UnitId] <> nil) and
-         Wants(LWanted[LPair.Value.UnitId], LPair.Value.Sym) and
-         (not AAssignOnly or IsAssignTarget(LM, LPair.Key)) and
-         FProj.EnsureHydrated(LMi) and HitFromNode(LM, LPair.Key, LHit) then
+  // Two passes (perf audit 2026-10, I2): the candidates first, by the tests
+  // that read no text, in the order the hits are made; then their demoted
+  // models rehydrated in parallel; then each candidate hydrated and hit, as
+  // one loop did it - one model at a time, a re-preprocess each.
+  LCands := TList<TPasExtRef>.Create;   // UnitId = model, Sym = node
+  try
+    LTodo := nil;
+    for LMi := 0 to LCount - 1 do
+    begin
+      if (AOnlyMid >= 0) and (LMi <> AOnlyMid) then
+        Continue;
+      if LAllPrivate and (LWanted[LMi] = nil) then
+        Continue;
+      LM := FProj.Model(LMi);
+      LFirst := LCands.Count;
+      LCand.UnitId := LMi;
+      if LWanted[LMi] <> nil then
+        for LNode := 0 to High(LM.RefMap) do
+        begin
+          LSym := LM.RefMap[LNode];
+          if (LSym <> NIL_SYM) and Wants(LWanted[LMi], LSym) and
+             (not AAssignOnly or IsAssignTarget(LM, LNode)) and
+             not IsDeclSelfName(LM, LSym, LNode) then
+          begin
+            LCand.Sym := LNode;
+            LCands.Add(LCand);
+          end;
+        end;
+      for LPair in LM.ExtRefMap do
+        if (Cardinal(LPair.Value.UnitId) < Cardinal(LCount)) and
+           (LWanted[LPair.Value.UnitId] <> nil) and
+           Wants(LWanted[LPair.Value.UnitId], LPair.Value.Sym) and
+           (not AAssignOnly or IsAssignTarget(LM, LPair.Key)) then
+        begin
+          LCand.Sym := LPair.Key;
+          LCands.Add(LCand);
+        end;
+      if (LCands.Count > LFirst) and LM.Demoted then
+        LTodo := LTodo + [LMi];
+    end;
+    FProj.HydrateModels(LTodo);
+    for LCand in LCands do
+    begin
+      LM := FProj.Model(LCand.UnitId);
+      if FProj.EnsureHydrated(LCand.UnitId) and
+         HitFromNode(LM, LCand.Sym, LHit) then
         AHits.Add(LHit);
+    end;
+  finally
+    LCands.Free;
   end;
 end;
 
@@ -3217,6 +3248,21 @@ var
   LM: TPasSemaModel;
   LHit: TPasRefHit;
 begin
+  // The models the loop below hydrates - the target and every importer -
+  // rehydrated in parallel first (perf audit 2026-10, I2).
+  var LTodo: TArray<Integer> := nil;
+  for LMi := 0 to FProj.ModelCount - 1 do
+    if ((AOnlyMid < 0) or (LMi = AOnlyMid)) and FProj.Model(LMi).Demoted then
+    begin
+      LM := FProj.Model(LMi);
+      var LNames := LMi = ATargetMid;
+      for LIdx := 0 to High(LM.UsesList) do
+        if LM.UsesList[LIdx].UnitId = ATargetMid then
+          LNames := True;
+      if LNames then
+        LTodo := LTodo + [LMi];
+    end;
+  FProj.HydrateModels(LTodo);
   LHits := TList<TPasRefHit>.Create;
   try
     for LMi := 0 to FProj.ModelCount - 1 do
@@ -4994,6 +5040,38 @@ begin
   Result := True;
 end;
 
+{ The demoted models a descendant walk from (AMid, AStruct) along AAxis is
+  about to hydrate one by one - every kid's, or with ANameLower only the
+  kids declaring a method of that name - rehydrated in parallel ahead of it
+  (perf audit 2026-10, I2). The walk itself runs as before: its per-model
+  EnsureHydrated calls are then no-ops, or report a failure as they did. }
+procedure TPasNavigator.PrehydrateBelow(AMid, AStruct: Integer;
+  AAxis: TOvAxis; const ANameLower: string);
+var
+  LTodo: TArray<Integer>;
+  LSeen: TDictionary<Integer, Boolean>;
+  LName: string;
+begin
+  LTodo := nil;
+  LName := ANameLower;
+  LSeen := TDictionary<Integer, Boolean>.Create;
+  try
+    OvWalkDescendants(TypeEdges, AMid, AStruct, AAxis,
+      function(const AParent, AKid: TPasExtRef; ADepth: Integer): Boolean
+      begin
+        Result := True;
+        if FProj.Model(AKid.UnitId).Demoted and
+           ((LName = '') or
+            (Length(OvMethodsNamed(AKid.UnitId, AKid.Sym, LName)) > 0)) and
+           LSeen.TryAdd(AKid.UnitId, True) then
+          LTodo := LTodo + [AKid.UnitId];
+      end);
+  finally
+    LSeen.Free;
+  end;
+  FProj.HydrateModels(LTodo);
+end;
+
 function TPasNavigator.FindOverrides(ATMid,
   ASym: Integer): TArray<TPasOverrideHit>;
 var
@@ -5038,6 +5116,7 @@ begin
   LNameLower := FProj.Model(ATMid).Symbols[ASym].NameLower;
   LMid := ATMid;
   OvClimbToRoot(LMid, LStruct, ASym, LNameLower);
+  PrehydrateBelow(LMid, LStruct, oaClass, LNameLower);
 
   LHits := TList<TPasOverrideHit>.Create;
   try
@@ -5358,6 +5437,7 @@ begin
     LAxis := oaClass
   else
     Exit;
+  PrehydrateBelow(ATMid, ASym, LAxis, '');
   LHits := TList<TPasDescendantHit>.Create;
   try
     LStart.UnitId := ATMid;
@@ -7834,6 +7914,10 @@ var
   LRow: TPasDeclHit;
   LHit: TPasRefHit;
   LAt: Integer;
+  LMatches: TList<TPasExtRef>;   // UnitId = model, Sym = symbol
+  LMatch: TPasExtRef;
+  LTodo: TArray<Integer>;
+  LTodoSeen: TDictionary<Integer, Boolean>;
 
   // The owner chain of a declaration made in AScope of AM, outer first.
   function OwnerOf(AM: TPasSemaModel; AScope: Integer): string;
@@ -7921,6 +8005,7 @@ begin
     LAnyWild := LAnyWild or PasIsWildPattern(LQ);
   LSeen := TDictionary<string, Boolean>.Create;
   LList := TList<TPasDeclHit>.Create;
+  LMatches := TList<TPasExtRef>.Create;
   try
     LAny := False;
     for var LRelaxed := False to True do
@@ -7976,10 +8061,28 @@ begin
               Continue;
           end;
           LAny := True;
-          AddRow(LMid, LSym, '');
+          LMatch.UnitId := LMid;
+          LMatch.Sym := LSym;
+          LMatches.Add(LMatch);
         end;
       end;
     end;
+    // The rows, in match order, after the matches' demoted models are
+    // rehydrated in parallel - AddRow's DeclHit hydrated them one by one
+    // (perf audit 2026-10, I2).
+    LTodo := nil;
+    LTodoSeen := TDictionary<Integer, Boolean>.Create;
+    try
+      for LMatch in LMatches do
+        if FProj.Model(LMatch.UnitId).Demoted and
+           LTodoSeen.TryAdd(LMatch.UnitId, True) then
+          LTodo := LTodo + [LMatch.UnitId];
+    finally
+      LTodoSeen.Free;
+    end;
+    FProj.HydrateModels(LTodo);
+    for LMatch in LMatches do
+      AddRow(LMatch.UnitId, LMatch.Sym, '');
     // A member the qualifier's type inherits.
     if not LAny and (LQuals <> nil) and not LAnyWild then
     begin
@@ -8025,6 +8128,7 @@ begin
       end));
     Result := LList.ToArray;
   finally
+    LMatches.Free;
     LList.Free;
     LSeen.Free;
   end;

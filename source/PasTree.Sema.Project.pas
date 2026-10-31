@@ -776,7 +776,6 @@ type
     { Does every $I site of the donor stream ASource resolve now as it did
       when the donor parsed it - the same file, or still none? }
     function DonorIncludesUnchanged(const ASource: TPasPreprocessed): Boolean;
-    function HydrateModels(const AIds: TArray<Integer>): Boolean;
     // Clears FDonor at the end of the one run that consumed it; AReport
     // appends 'donorhits=..;donormiss=..;' to StageTimings first.
     procedure FinishDonor(AReport: Boolean);
@@ -2356,6 +2355,13 @@ type
       from the host's nav/completion thread only, like every other read of a
       finished project. }
     function EnsureHydrated(AMid: Integer): Boolean;
+    { EnsureHydrated over every demoted model among AIds, in parallel (one
+      worker per model; each writes only its own). False when any of them
+      could not be rehydrated. For a search about to hydrate many models one
+      by one: the per-model EnsureHydrated calls after it are no-ops, and a
+      failure is still reported by them, in their order. Same thread rule as
+      EnsureHydrated. }
+    function HydrateModels(const AIds: TArray<Integer>): Boolean;
     { How many EnsureHydrated calls have failed (a demoted model whose file
       changed on disk or cannot be read), and the model of the last one (-1
       before any). A read over the closure skips such a model and says
@@ -26391,7 +26397,7 @@ var
 
   function Failed: Boolean;
   begin
-    Inc(FHydrateFailures);
+    AtomicIncrement(FHydrateFailures);   // HydrateModels runs this in parallel
     FLastHydrateFailure := AMid;
     LModel.HydrateFailStamp := LStamp;
     Result := False;
@@ -26410,7 +26416,7 @@ begin
   LStamp := Stamp;
   if (LModel.HydrateFailStamp <> '') and (LModel.HydrateFailStamp = LStamp) then
   begin
-    Inc(FHydrateFailures);
+    AtomicIncrement(FHydrateFailures);   // HydrateModels runs this in parallel
     FLastHydrateFailure := AMid;
     Exit(False);
   end;
@@ -26433,7 +26439,7 @@ begin
     // flipping branches and failing the identity check below.
     LPP.OnDeclared := SeedDeclaredQuery();
     try
-      Inc(FHydrateRuns);
+      AtomicIncrement(FHydrateRuns);
       // The same stop as the load: a light model's stream ended after its
       // implementation `uses`, and the identity check compares streams.
       LPre := ProcessUnit(LPP, FFiles[AMid], LModel.Light);
