@@ -167,10 +167,15 @@ Enums keep the whole-declaration comparison - a value added in the middle
 moves the ordinals after it. The one consumer that can depend on a record's
 LAYOUT without naming a field is a `$IF` that asks the oracle for `SizeOf`;
 such a consumer's stream cannot be re-decided by a redo that keeps its tree,
-so an oracle-built stream in the reach refuses (`consumer-oracle`) when the
-edit touches a name its oracle was asked (0.16.5; before that, any such
-stream refused),
-which also covers a constant's value folded the same way. `SelectConsumers`
+so a stream in the reach that asked the oracle refuses (`consumer-oracle`)
+when the edit touches a name it asked (0.16.5; before that, any oracle-built
+stream refused), which also covers a constant's value folded the same way.
+"Asked" is an oracle-built stream (its `OracleNames`) or, since 0.146.2, a
+first-pass stream whose questions kept the seed's guess (its open questions):
+the declared pass found no other answer for it then, and the portability
+shim `{$IF not Declared(TShim)} type TShim = Integer; {$IFEND}` is such a
+stream - an edit declaring `TShim` in an import was accepted before, the
+consumer keeping the shim the full analysis drops. `SelectConsumers`
 then keeps, out of the reach, only:
 
 - a model holding a pair (unit, changed-or-removed symbol) in any of its
@@ -254,20 +259,20 @@ from a slow analyzer.
 | `incomplete-run` | the full run that built the project raised or was cancelled (`RunComplete` is False): its models sit at `msFullReady` with the cross passes half done, which the `not-full` gate cannot tell from a finished run |
 | `demoted` | the edited unit is text-demoted and its old stream cannot come back: the file changed with no `SetBuffer` before it (see the memory dial below) |
 | `parse-failed` | unparsable now; the closure changed, a rebuild's job |
-| `unresolved-if` | the stream depends on the `$IF` oracle, i.e. on the whole generation's symbol state - never reproducible per module |
+| `unresolved-if(<why>)` | the edited unit's `$IF` questions could not be re-decided exactly here (`RedecideStream`, see 2c): `new-import` - its decided stream, or the edit, imports a unit the closure never loaded, and loading one would register a model before the commit point - or `unresolved-uses`. Until 0.146.2 ANY unanswered question refused here as plain `unresolved-if`, so every edit of such a unit rebuilt the closure |
 | `new-dependency-failed(<file>: <error>)` | a unit the edit newly imports (or one it pulls in) could not be parsed - the full pipeline records it as known-bad, a rebuild's job (see 2b) |
-| `new-dependency-oracle(<unit>)` | a newly imported unit's stream holds unanswered `$IF` questions - the declared pass would re-decide it against the whole generation: the edited unit's own `unresolved-if`, applied to the newcomer |
+| `new-dependency-oracle(<unit>)` | a newly imported unit's stream holds unanswered `$IF` questions - the declared pass would re-decide it against the whole generation, and a newcomer is registered only past the commit point, too late to refuse a re-decision that cannot be exact |
 | `new-dependency-name(<name>)` | a newly imported unit declares a unit name the closure already has - first loaded wins the by-name index, and a rebuild loads in another order |
 | `new-dependency-seen(<unit> uses <name>)` | another model already names the newcomer in its `uses` (unresolved, or through a spelling a program's `in` pins): a rebuild would resolve that entry to it, so that model would have to be redone too |
 | `no-clean-boundary-*` | no implementation scope, or the arena is not split cleanly at it |
 | `intf-sym#N`, `intf-scope#N` | the interface prefix moved in a way the redo cannot express |
 | `too-many-consumers(N>L)` | the SELECTED redo set N exceeds `ModuleRedoLimit` (only when a host set one; the default is no ceiling). The number is reported because "too many" alone says nothing about whether the limit is set sensibly |
 | `consumer-demoted` | a text-demoted consumer to redo or to scan could not be rehydrated - its file changed under it (see the memory dial) |
-| `consumer-oracle(<unit>)` | a consumer in the reach has an oracle-built token stream and the edit touches a name its oracle was asked: its `$IF`s may have folded this unit's constants or record sizes, and only a re-preprocess can re-decide them |
+| `consumer-oracle(<unit>)` | a consumer in the reach asked the oracle - an oracle-built stream, or (0.146.2) a first-pass one whose questions kept the seed's guess - and the edit touches a name it asked: its `$IF`s may have folded this unit's constants or record sizes, or a `Declared` may flip, and only a re-preprocess can re-decide them |
 | `instance-unmatched-sym(<name>)` | an instance names a symbol of this unit that the new text no longer declares (a deleted generic, or an overload whose ordinal moved) - see guard 2 |
 | `in-path-changed(<unit>)` | an `in` clause of the edited unit changed or dropped its path, or a new one names another file than the unit's pin: the pin is the project's, every importer of the unit resolves through it, and only a rebuild re-reads every `in` clause |
 | `apptype-changed` | the edited unit is the main program and its last `{$APPTYPE}` before `uses` now decides CONSOLE the other way for every unit - a re-preprocess of the closure |
-| `implicit-unit(<unit>)` | an interface edit of System or SysInit: every model binds into them with no `uses` edge, so the reach cannot be computed (the real RTL refuses earlier, `unresolved-if`) |
+| `implicit-unit(<unit>)` | an interface edit of System or SysInit: every model binds into them with no `uses` edge, so the reach cannot be computed (the real System's questions are re-decided first; before 0.146.2 it refused earlier, `unresolved-if`) |
 
 ### What the disk did between two runs
 
@@ -465,14 +470,21 @@ differ from an edit:
   every promotion was an interface change - one hub unit redid 476 consumers
   in the light-mode probe. A light model is never the old model of an edit, so
   `mpEdit` compares exactly as before.
-- **An unanswered `$IF` question is re-decided, not refused.** `RedecideStream`
-  runs the declared pass for the one unit: its first-pass model stands in for
-  the registered (light) one, `uses` linked, through `RedecideRounds` - the
-  per-candidate body of `RunDeclaredPass`, shared - and the pass's symbol
-  iterations. It refuses (`promote-needs-rebuild(new-import)`,
-  `(unresolved-uses)`) where the full pass would have loaded a unit first,
-  because loading one would register a model before the commit point; the
-  file then joins `PromotedFiles`, and the host's rebuild loads it full.
+- **A `$IF` question that cannot be re-decided here keeps the unit full.**
+  Both modes re-decide an unanswered question (an edit since 0.146.2):
+  `RedecideStream` runs the declared pass for the one unit - its first-pass
+  model stands in for the registered one (light, for a promotion), `uses`
+  linked, through `RedecideRounds` - the per-candidate body of
+  `RunDeclaredPass`, shared - and the pass's symbol iterations. It refuses
+  (`new-import`, `unresolved-uses`) where the full pass would have loaded a
+  unit first, because loading one would register a model before the commit
+  point. An edit then refuses (`unresolved-if(<why>)`); a promotion refuses
+  with `promote-needs-rebuild(<why>)` and the file joins `PromotedFiles`, so
+  the host's rebuild loads it full. Like the full run's declared pass, which
+  reads its imports' first-pass models, the re-decision assumes no fixpoint
+  ACROSS units - but it reads the imports' final models, so where an
+  import's own guard flipped a declaration this unit asks about, the module
+  path answers as dcc does and a rebuild would not.
 - **Newcomers are loaded light** when they lie under a light tree
   (`LoadNewcomers` -> `ComputeLoad` -> `ParseAnalyze`) and registered
   `msIntfReady` like any light load; the commit puts the file into
@@ -530,7 +542,16 @@ The corpus suites only ever prove the full path.
   implementation symbol shift; `enumerator`, `current`, `attribute` - a
   dependency reached by a rule (for-in enumerator, default property,
   attribute suffix) rather than by a spelled name. Each was a mismatch under
-  `-module` until 0.95.12 and is the gate for the consumer redo;
+  `-module` until 0.95.12 and is the gate for the consumer redo. `ownconst`
+  and `owndecl` edit a unit whose stream asked the oracle (an import's
+  constant; a `Declared` of a name nobody declares - the client's shape): a
+  fallback until 0.146.2, a module run since. `ndecl` and `nshim` declare in
+  an import the name a consumer's `Declared` guard asks about: both must fall
+  back (`consumer-oracle`); `nshim`, the `not Declared` shim idiom, was a
+  mismatch until 0.146.2. `incbody` and `incintf` edit an include - spliced
+  into a routine body, and into an interface a consumer reads: under
+  `-module` the harness runs the module path on the ONE unit that includes
+  it, the rule a host follows (no includer or several: the fallback);
 
 - `-script:<file>` replaces the synthetic sampling: one `kind <path>` per
   line, kind = `body`, `intf`, `blank`, `comment`, `const`, `type` (the last

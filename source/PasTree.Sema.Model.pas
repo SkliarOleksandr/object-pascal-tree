@@ -673,7 +673,9 @@ type
       touches none of these names cannot flip a branch of this stream, so the
       model stays an ordinary consumer instead of forcing a rebuild (one
       project unit guarding on `Declared(RTLVersion131)` used to turn every
-      edit of the hub unit it imports into a 7 s rebuild). }
+      edit of the hub unit it imports into a 7 s rebuild). A first-pass
+      stream that asked is checked the same way, by its open questions
+      (TPasSemaProject.OracleNamesOf), not by this field. }
     OracleNames: TArray<string>;
     DemotedVisCount: Integer;
     DemotedFileSizes: TArray<Integer>;    // Length(Files[i].Source)

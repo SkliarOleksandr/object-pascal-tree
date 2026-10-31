@@ -971,6 +971,11 @@ type
       a name test is needed on a consumer whose text is demoted (no tree to
       scan) - AWhy names it, and the caller refuses. }
     class function OracleNamesOf(AModel: TPasSemaModel): TArray<string>;
+    { True when AModel's stream depended on an `$IF` answer that another
+      unit's declarations decide: an oracle-built stream, or a first-pass one
+      whose questions kept the seed's guess (the declared pass found no other
+      answer then - which an edit elsewhere can still change). }
+    class function StreamAskedOracle(AModel: TPasSemaModel): Boolean;
     class function OracleConsumerAffected(ACons, AOld, ANew: TPasSemaModel;
       AOldSymN: Integer; const AMap: TArray<Integer>;
       const AChanged: TArray<Boolean>;
@@ -23913,17 +23918,28 @@ begin
     Add(Result, LSym.Name);
 end;
 
+class function TPasSemaProject.StreamAskedOracle(
+  AModel: TPasSemaModel): Boolean;
+begin
+  Result := (AModel <> nil) and (AModel.OracleStream or
+    (Length(AModel.Tree.Source.UnresolvedDeclared) > 0) or
+    (Length(AModel.Tree.Source.UnresolvedSymbols) > 0));
+end;
+
 // True when the interface edit AOld -> ANew could change an answer the oracle
 // gave ACons: a name it asked about appeared (Declared flips to True), or a
 // symbol of that name changed or disappeared. The member mask DiffInterface
 // applies to a class or record does not apply here - `SizeOf` is a question
-// about the LAYOUT, so a record's declaration is compared whole.
+// about the LAYOUT, so a record's declaration is compared whole. The names
+// are OracleNames for an oracle-built stream; a first-pass stream's are its
+// open questions (OracleNamesOf), which OracleNames only fills for the former.
 class function TPasSemaProject.OracleConsumerAffected(ACons, AOld,
   ANew: TPasSemaModel; AOldSymN: Integer; const AMap: TArray<Integer>;
   const AChanged: TArray<Boolean>;
   AAdded: TDictionary<string, Byte>): Boolean;
 var
   LName: string;
+  LNames: TArray<string>;
   LIdx, LNewIdx, LDeclOld, LDeclNew: Integer;
   // See DiffInterface: an enum's values share one root, compared once.
   LMemoOld, LMemoNew: Integer;
@@ -23931,7 +23947,11 @@ begin
   Result := False;
   LMemoOld := NIL_NODE;
   LMemoNew := NIL_NODE;
-  for LName in ACons.OracleNames do
+  if ACons.OracleStream then
+    LNames := ACons.OracleNames
+  else
+    LNames := OracleNamesOf(ACons);
+  for LName in LNames do
   begin
     if AAdded.ContainsKey(LName) then
       Exit(True);
@@ -25948,9 +25968,9 @@ begin
   // A light unit, before anything else: after the finalizer it is
   // msCrossReady like any other, so the status gate below would let it
   // through, and an edit would parse it FULLY - a promotion, which is the
-  // other mode's job (the interface diff's body-derived flags, the `$IF`
-  // re-decision). PromoteUnit answers a full unit itself; one reaching here
-  // anyway is not this mode's either.
+  // other mode's job (the interface diff's body-derived flags). PromoteUnit
+  // answers a full unit itself; one reaching here anyway is not this mode's
+  // either.
   if (AMode = mpEdit) and (LId < FModels.Count) and (FModels[LId] <> nil) and
      FModels[LId].Light then
     Exit(Refuse('light'));
@@ -25990,21 +26010,28 @@ begin
   LAddIds := nil;
   try
     LAdded := TDictionary<string, Byte>.Create;
-    // A stream with unanswered $IF questions is re-decided against the WHOLE
-    // generation by RunDeclaredPass (which may pull in new units) - the same
-    // exclusion the parse donor makes, for the same reason.
+    // A stream with unanswered $IF questions - a `Declared(X)`, a constant's
+    // value or a `SizeOf` the seed cannot answer - is re-decided for this one
+    // unit as the full analysis's declared pass decides it: its imports are
+    // analyzed and answer (System.pas and System.Classes ask, and so does a
+    // project unit with `{$IF AppConst > 1}`). An EDIT refused here until
+    // 0.146.2 - every keystroke in such a unit rebuilt the closure, whatever
+    // it touched: one client unit guarding on `not Declared(RTLVersion131)`
+    // paid a 1.3 s rebuild for an enum value (LSP log, 2026-10-31); it is a
+    // 16-49 ms module run now (checked build, redecide 6 ms of it). Where
+    // the re-decision cannot be exact here (it would load a unit first), an
+    // edit refuses and a promotion keeps the unit full for the host's
+    // rebuild (PromotedFiles) - never a guessed stream.
     if (Length(LNew.Tree.Source.UnresolvedDeclared) > 0) or
        (Length(LNew.Tree.Source.UnresolvedSymbols) > 0) then
     begin
-      if AMode = mpEdit then
-        Exit(Refuse('unresolved-if'));
-      // A promotion re-decides them for this one unit, as the full
-      // analysis's declared pass would (System.pas, System.Classes ask).
-      // Where that cannot be exact here, the host rebuilds with the unit in
-      // PromotedFiles - never a guessed stream.
       LRedecided := RedecideStream(LId, LNew, LWhy);
       if LWhy <> '' then
+      begin
+        if AMode = mpEdit then
+          Exit(Refuse('unresolved-if(' + LWhy + ')'));
         Exit(NeedsRebuild(LWhy));
+      end;
       if LRedecided <> nil then
       begin
         LNew.Free;
@@ -26119,8 +26146,8 @@ begin
       // implicit units, the implicit TObject), so the reach below - built
       // from `uses` edges - is 1 for them, and an accepted interface edit
       // left every binding past the edit point off by its shift (audit
-      // B4-38). The real RTL's units refuse earlier (`unresolved-if`); a
-      // hand-written System reaches here.
+      // B4-38). The real System asks `$IF` questions and is re-decided above
+      // (it refused there before 0.146.2); a hand-written one asks none.
       if (LId = FSystemUnitId) or (LId = FSysInitUnitId) then
         Exit(Refuse('implicit-unit(' + LOld.UnitNameLower + ')'));
       AffectedConsumers(LId, 0, LReach, LRadius);   // no ceiling: the bound
@@ -26133,9 +26160,15 @@ begin
       // oracle was ASKED can flip a branch: a project unit guarding on
       // `Declared(RTLVersion131)` is an ordinary consumer of every other edit
       // (measured: it turned each edit of the hub unit it imports into a 7 s
-      // rebuild).
+      // rebuild). A FIRST-PASS stream that asked is just as dependent: the
+      // declared pass found no other answer for it, so it is no oracle
+      // stream, yet an edit can still flip the answer. The portability shim
+      // `{$IF not Declared(TShim)} type TShim = Integer; {$IFEND}` is exactly
+      // that, and until 0.146.2 an edit declaring TShim in an import was
+      // accepted with the consumer keeping the shim the full analysis drops
+      // (harness scenario nshim).
       for LIdx := 1 to High(LReach) do
-        if FModels[LReach[LIdx]].OracleStream and
+        if StreamAskedOracle(FModels[LReach[LIdx]]) and
            OracleConsumerAffected(FModels[LReach[LIdx]], LOld, LNew, LOldSymN,
              LMap, LChanged, LAdded) then
           Exit(Refuse('consumer-oracle(' +

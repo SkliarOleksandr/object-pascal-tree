@@ -171,10 +171,11 @@ What makes it a one-unit step:
   parse is a prefix of the full one.
 - **The unit's `$IF` questions are re-decided** as the full analysis's declared
   pass decides them - `System.pas` and `System.Classes` ask (`Length` of a
-  constant array, `SizeOf` of an interface type), and the module path refuses
-  such a stream for an edit (`unresolved-if`). For a promotion the first-pass
-  model stands in for the unit while the declared pass's rounds and symbol
-  iterations run over it, its `uses` linked. That is exact only when every
+  constant array, `SizeOf` of an interface type); the module path does the
+  same for an edit since 0.146.2 (it refused such a stream before). For a
+  promotion the first-pass model stands in for the unit while the declared
+  pass's rounds and symbol iterations run over it, its `uses` linked. That
+  is exact only when every
   unit its `uses` names is loaded already: an import that is not
   (`new-import`) or does not resolve (`unresolved-uses`) refuses with
   `promote-needs-rebuild(<why>)` and puts the file into `PromotedFiles`, so the

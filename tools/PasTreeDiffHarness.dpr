@@ -58,8 +58,14 @@ program PasTreeDiffHarness;
   declared (a selected consumer's parse rows and oracle stream, A3-36),
   instrepoint (a same-shape interface change with an implementation symbol
   shift, A3-37), enumerator, current and attribute (dependencies reached by
-  a rule, not a spelled name, A3-38). `-scenario:list` names them; run them
-  with -module.
+  a rule, not a spelled name, A3-38), ownconst and owndecl (an edit of a
+  unit whose stream asked the `$IF` oracle), ndecl and nshim (a consumer's
+  `Declared` guard flipped by an import's edit), incbody and incintf (an
+  include edited). `-scenario:list` names them; run them with -module.
+
+  Under -module an edited file the project has no model for - an include -
+  goes to the module path as the ONE unit that includes it, the rule a host
+  follows; with no includer or several, the step falls back.
 
   -selftest inverts the exercise to prove the COMPARATOR can see: the
   incremental side is deliberately fed the PRE-EDIT text of each step's
@@ -1048,6 +1054,34 @@ begin
   end;
 end;
 
+{ The file AnalyzeModuleOnly is handed for an edit of APath, as a host picks
+  it: APath itself when it is a unit of the project, else - an include - the
+  ONE unit whose stream read it, which the module path re-preprocesses with
+  the include's new text. No includer, or several: APath, which the module
+  path refuses (unknown-file), and the step falls back to a rebuild. }
+function ModuleFor(AProj: TPasSemaProject; const APath: string): string;
+var
+  LFull: string;
+  LHits: Integer;
+begin
+  Result := APath;
+  if AProj.ModelIdOf(APath) >= 0 then
+    Exit;
+  LFull := TPath.GetFullPath(APath);
+  LHits := 0;
+  for var LId := 0 to AProj.ModelCount - 1 do
+    if AProj.Model(LId) <> nil then
+      for var LName in AProj.Model(LId).Tree.Source.FileNames do
+        if SameText(TPath.GetFullPath(LName), LFull) then
+        begin
+          Inc(LHits);
+          Result := AProj.ModelFile(LId);
+          Break;
+        end;
+  if LHits <> 1 then
+    Result := APath;
+end;
+
 { ---- built-in scenarios ---------------------------------------------------- }
 
 { -scenario:<name> writes a small project into %TEMP%\pastree_diffharness\
@@ -1057,8 +1091,9 @@ end;
   gate afterwards. `-scenario:list` prints the names. }
 
 const
-  SCENARIOS: array[0..6] of string = ('syntax', 'oracle', 'declared',
-    'instrepoint', 'enumerator', 'current', 'attribute');
+  SCENARIOS: array[0..12] of string = ('syntax', 'oracle', 'declared',
+    'instrepoint', 'enumerator', 'current', 'attribute', 'ownconst',
+    'owndecl', 'ndecl', 'nshim', 'incbody', 'incintf');
 
 var
   GScenarioDir: string;
@@ -1247,6 +1282,111 @@ begin
       '  TBaseThing = class end;',
       '  FooAttribute = class(TCustomAttribute) end;', 'implementation',
       'end.']));
+  end
+  // The edited unit asks an import's CONST (an oracle-built stream): a body
+  // edit, then an enum value added - each a module run since 0.146.2, a
+  // fallback (unresolved-if) before.
+  else if SameText(AName, 'ownconst') then
+  begin
+    ScenarioFile('UnitKA.pas', Lines(['unit UnitKA;', 'interface',
+      'const KC = 2;', 'implementation', 'end.']));
+    ScenarioFile('UnitKB.pas', Lines(['unit UnitKB;', 'interface',
+      'uses UnitKA;', '{$IF KC > 1}', 'const B1 = 1;', '{$ELSE}',
+      'const B2 = 2;', '{$IFEND}', 'type TE = (e1, e2);', 'procedure P;',
+      'implementation', 'procedure P; begin end;', 'end.']));
+    ScenarioFile('UnitKC.pas', Lines(['unit UnitKC;', 'interface',
+      'uses UnitKB;', 'const UsesE = e2;', 'implementation', 'end.']));
+    ScenarioFile('AppK.dpr', Lines(['program AppK;',
+      'uses UnitKA, UnitKB, UnitKC;', 'begin', 'end.']));
+    ScenarioStep('UnitKB.pas', Lines(['unit UnitKB;', 'interface',
+      'uses UnitKA;', '{$IF KC > 1}', 'const B1 = 1;', '{$ELSE}',
+      'const B2 = 2;', '{$IFEND}', 'type TE = (e1, e2);', 'procedure P;',
+      'implementation', 'procedure P; begin end;',
+      'procedure Q; begin end;', 'end.']));
+    ScenarioStep('UnitKB.pas', Lines(['unit UnitKB;', 'interface',
+      'uses UnitKA;', '{$IF KC > 1}', 'const B1 = 1;', '{$ELSE}',
+      'const B2 = 2;', '{$IFEND}', 'type TE = (e1, e2, e3);',
+      'procedure P;', 'implementation', 'procedure P; begin end;',
+      'procedure Q; begin end;', 'end.']));
+  end
+  // The client's shape: a `Declared()` of a name nobody declares in a
+  // routine body, then an enum value added to the unit's interface.
+  else if SameText(AName, 'owndecl') then
+  begin
+    ScenarioFile('UnitWB.pas', Lines(['unit UnitWB;', 'interface',
+      'type TAct = (aOne, aTwo);', 'procedure P;', 'implementation',
+      'procedure P;', 'begin',
+      '  {$IF (CompilerVersion <= 37.0) and not Declared(RTLVersion131)}',
+      '  P;', '  {$IFEND}', 'end;', 'end.']));
+    ScenarioFile('UnitWC.pas', Lines(['unit UnitWC;', 'interface',
+      'uses UnitWB;', 'const UsesA = aTwo;', 'implementation', 'end.']));
+    ScenarioFile('AppW.dpr', Lines(['program AppW;', 'uses UnitWB, UnitWC;',
+      'begin', 'end.']));
+    ScenarioStep('UnitWB.pas', Lines(['unit UnitWB;', 'interface',
+      'type TAct = (aOne, aTwo, aThree);', 'procedure P;', 'implementation',
+      'procedure P;', 'begin',
+      '  {$IF (CompilerVersion <= 37.0) and not Declared(RTLVersion131)}',
+      '  P;', '  {$IFEND}', 'end;', 'end.']));
+  end
+  // A consumer's `Declared(TNew)` of a name declared nowhere, which it
+  // never names in code: the edit declares TNew in its import. A fallback
+  // (consumer-oracle).
+  else if SameText(AName, 'ndecl') then
+  begin
+    ScenarioFile('UnitNA.pas', Lines(['unit UnitNA;', 'interface',
+      'const KN = 1;', 'implementation', 'end.']));
+    ScenarioFile('UnitNB.pas', Lines(['unit UnitNB;', 'interface',
+      'uses UnitNA;', '{$IF Declared(TNew)}', 'const X1 = Undeclared1;',
+      '{$ELSE}', 'const X2 = 2;', '{$IFEND}', 'const HN = KN;',
+      'implementation', 'end.']));
+    ScenarioFile('AppN.dpr', Lines(['program AppN;', 'uses UnitNA, UnitNB;',
+      'begin', 'end.']));
+    ScenarioStep('UnitNA.pas', Lines(['unit UnitNA;', 'interface',
+      'const KN = 1;', 'type TNew = class end;', 'implementation', 'end.']));
+  end
+  // The portability shim: the consumer's stream is a first-pass one (its own
+  // TShim answers the candidate test), it names TShim and is selected, and
+  // the redo would keep the shim the full analysis drops - a mismatch until
+  // 0.146.2, a fallback (consumer-oracle) since.
+  else if SameText(AName, 'nshim') then
+  begin
+    ScenarioFile('UnitHA.pas', Lines(['unit UnitHA;', 'interface',
+      'const KH = 1;', 'implementation', 'end.']));
+    ScenarioFile('UnitHB.pas', Lines(['unit UnitHB;', 'interface',
+      'uses UnitHA;', '{$IF not Declared(TShim)}', 'type TShim = Integer;',
+      '{$IFEND}', 'var VS: TShim;', 'implementation', 'end.']));
+    ScenarioFile('AppH.dpr', Lines(['program AppH;', 'uses UnitHA, UnitHB;',
+      'begin', 'end.']));
+    ScenarioStep('UnitHA.pas', Lines(['unit UnitHA;', 'interface',
+      'const KH = 1;', 'type TShim = string;', 'implementation', 'end.']));
+  end
+  // An include spliced into a routine body: its edit is a body edit of the
+  // one unit that includes it.
+  else if SameText(AName, 'incbody') then
+  begin
+    ScenarioFile('bodyib.inc', 'X := 1;'#13#10);
+    ScenarioFile('UnitIB.pas', Lines(['unit UnitIB;', 'interface',
+      'procedure P;', 'implementation', 'procedure P;', 'var X: Integer;',
+      'begin', '  {$I bodyib.inc}', 'end;', 'end.']));
+    ScenarioFile('AppIB.dpr', Lines(['program AppIB;', 'uses UnitIB;',
+      'begin', 'end.']));
+    ScenarioStep('bodyib.inc', 'X := Undeclared9;'#13#10);
+    ScenarioStep('bodyib.inc', 'X := 2;'#13#10);
+  end
+  // An include in an interface: its edit retypes a constant a consumer
+  // holds, then adds one.
+  else if SameText(AName, 'incintf') then
+  begin
+    ScenarioFile('declja.inc', 'const JK = 1;'#13#10);
+    ScenarioFile('UnitJA.pas', Lines(['unit UnitJA;', 'interface',
+      '{$I declja.inc}', 'implementation', 'end.']));
+    ScenarioFile('UnitJB.pas', Lines(['unit UnitJB;', 'interface',
+      'uses UnitJA;', 'const JB = JK;', 'var VJ: Integer = JB;',
+      'implementation', 'end.']));
+    ScenarioFile('AppJ.dpr', Lines(['program AppJ;', 'uses UnitJA, UnitJB;',
+      'begin', 'end.']));
+    ScenarioStep('declja.inc', 'const JK = ''a'';'#13#10);
+    ScenarioStep('declja.inc', 'const JK = 1; JK2 = 2;'#13#10);
   end;
 
   for var LFile in TDirectory.GetFiles(GScenarioDir, '*.dpr') do
@@ -1431,7 +1571,7 @@ begin
         LCand.SetBuffer(LStep.Path, GStaleText, GVersion)
       else
         LCand.SetBuffer(LStep.Path, GTexts[LKey], GVersion);
-      if LCand.AnalyzeModuleOnly(LStep.Path) then
+      if LCand.AnalyzeModuleOnly(ModuleFor(LCand, LStep.Path)) then
       begin
         // Carry the accepted run's own report too: it names the redo SIZE
         // (module=N) and whether the interface moved, which is the number to
@@ -1476,7 +1616,7 @@ begin
     if GModuleMode and (GStaleKey <> '') then
     begin
       LCand.SetBuffer(LStep.Path, GTexts[LKey], GVersion);
-      if not LCand.AnalyzeModuleOnly(LStep.Path) then
+      if not LCand.AnalyzeModuleOnly(ModuleFor(LCand, LStep.Path)) then
       begin
         LNext := AnalyzeOne(LCand);
         LCand.Free;

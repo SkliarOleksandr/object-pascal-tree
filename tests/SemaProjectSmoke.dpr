@@ -6486,6 +6486,113 @@ begin
   end;
 end;
 
+{ The module path and the `$IF` oracle (the differential harness runs the
+  same shapes as -scenario:ownconst, owndecl, ndecl, nshim). An edit of a unit
+  whose stream asked the oracle - an import's constant, a `Declared()` of a
+  name nobody declares - is re-decided as the full run's declared pass
+  decides it, its own branch flips included, and the project is the one a
+  fresh build makes: until 0.146.2 every such edit refused (unresolved-if)
+  and the host rebuilt the closure. A consumer whose FIRST-PASS stream asked
+  about a name the edit declares refuses (consumer-oracle): it was accepted
+  before, keeping the `not Declared` shim the full analysis drops; an edit
+  touching no name it asked stays a module run. }
+procedure TestModuleOracle;
+var
+  LDir, LApp, LUnitB, LUnitW, LUnitH: string;
+  LOk: Boolean;
+begin
+  LDir := FreshDir('pastree_sema_modoracle');
+  LApp := TPath.Combine(LDir, 'MoApp.dpr');
+  LUnitB := TPath.Combine(LDir, 'MoB.pas');
+  LUnitW := TPath.Combine(LDir, 'MoW.pas');
+  LUnitH := TPath.Combine(LDir, 'MoH.pas');
+  TFile.WriteAllText(TPath.Combine(LDir, 'MoA.pas'),
+    'unit MoA;'#10'interface'#10'const KC = 2;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(LUnitB, 'unit MoB;'#10'interface'#10'uses MoA;'#10 +
+    '{$IF KC > 1}'#10'const B1 = 1;'#10'{$ELSE}'#10'const B2 = 2;'#10 +
+    '{$IFEND}'#10'type TE = (e1, e2);'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MoC.pas'),
+    'unit MoC;'#10'interface'#10'uses MoB;'#10 +
+    'const UsesE = e2; UsesB = B1;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(LUnitW, 'unit MoW;'#10'interface'#10 +
+    'type TAct = (aOne, aTwo);'#10'procedure P;'#10'implementation'#10 +
+    'procedure P;'#10'begin'#10'  {$IF not Declared(RTLVersion131)}'#10 +
+    '  P;'#10'  {$IFEND}'#10'end;'#10'end.'#10);
+  TFile.WriteAllText(LUnitH,
+    'unit MoH;'#10'interface'#10'const KH = 1;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MoS.pas'),
+    'unit MoS;'#10'interface'#10'uses MoH;'#10 +
+    '{$IF not Declared(TShim)}'#10'type TShim = Integer;'#10'{$IFEND}'#10 +
+    'var VS: TShim;'#10'implementation'#10'end.'#10);
+  TFile.WriteAllText(LApp, 'program MoApp;'#10 +
+    'uses MoA, MoB, MoC, MoW, MoH, MoS;'#10'begin'#10'end.'#10);
+  const MO_B_E3 =
+    'unit MoB;'#10'interface'#10'uses MoA;'#10 +
+    '{$IF KC > 1}'#10'const B1 = 1;'#10'{$ELSE}'#10'const B2 = 2;'#10 +
+    '{$IFEND}'#10'type TE = (e1, e2, e3);'#10'implementation'#10'end.'#10;
+  const MO_B_FLIP =
+    'unit MoB;'#10'interface'#10'uses MoA;'#10 +
+    '{$IF KC > 5}'#10'const B1 = 1;'#10'{$ELSE}'#10'const B2 = 2;'#10 +
+    '{$IFEND}'#10'type TE = (e1, e2, e3);'#10'implementation'#10'end.'#10;
+  const MO_W_NEW =
+    'unit MoW;'#10'interface'#10 +
+    'type TAct = (aOne, aTwo, aThree);'#10'procedure P;'#10'implementation'#10 +
+    'procedure P;'#10'begin'#10'  {$IF not Declared(RTLVersion131)}'#10 +
+    '  P;'#10'  {$IFEND}'#10'end;'#10'end.'#10;
+  const MO_H_KH2 =
+    'unit MoH;'#10'interface'#10'const KH = 1; KH2 = 2;'#10 +
+    'implementation'#10'end.'#10;
+  const MO_H_SHIM =
+    'unit MoH;'#10'interface'#10'const KH = 1; KH2 = 2;'#10 +
+    'type TShim = string;'#10'implementation'#10'end.'#10;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeProject(LApp);
+    // The edited unit asks an import's constant.
+    GProj.SetBuffer(LUnitB, MO_B_E3, 1);
+    LOk := GProj.AnalyzeModuleOnly(LUnitB);
+    Ok('module oracle: an enum value added beside a `$IF KC > 1` is a ' +
+      're-decided module run [' + GProj.StageTimings + ']',
+      LOk and (Pos('redecide=', GProj.StageTimings) > 0));
+    Ok('module oracle: ...the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LApp, [LDir], [LUnitB], [MO_B_E3]));
+    GProj.SetBuffer(LUnitB, MO_B_FLIP, 2);
+    LOk := GProj.AnalyzeModuleOnly(LUnitB);
+    Ok('module oracle: an edit flipping the unit''s own branch [' +
+      GProj.StageTimings + ']', LOk and
+      DiagHasText(ModelByName('moc'), 'E2003', 'B1'));
+    Ok('module oracle: ...the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LApp, [LDir], [LUnitB], [MO_B_FLIP]));
+    // The edited unit asks `Declared()` of a name nobody declares.
+    GProj.SetBuffer(LUnitW, MO_W_NEW, 3);
+    LOk := GProj.AnalyzeModuleOnly(LUnitW);
+    Ok('module oracle: an enum value added beside a `not Declared(' +
+      'RTLVersion131)` is a module run [' + GProj.StageTimings + ']', LOk);
+    Ok('module oracle: ...the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LApp, [LDir], [LUnitB, LUnitW],
+        [MO_B_FLIP, MO_W_NEW]));
+    // A consumer's first-pass `not Declared(TShim)`: an edit of its import
+    // that touches no name it asked stays a module run...
+    GProj.SetBuffer(LUnitH, MO_H_KH2, 4);
+    LOk := GProj.AnalyzeModuleOnly(LUnitH);
+    Ok('module oracle: an import edit beside a shim consumer is a module ' +
+      'run [' + GProj.StageTimings + ']', LOk);
+    Ok('module oracle: ...the project is the one a fresh build makes',
+      ProjSig(GProj) = FreshSig(LApp, [LDir], [LUnitB, LUnitW, LUnitH],
+        [MO_B_FLIP, MO_W_NEW, MO_H_KH2]));
+    // ...one that declares the shimmed name refuses.
+    GProj.SetBuffer(LUnitH, MO_H_SHIM, 5);
+    LOk := GProj.AnalyzeModuleOnly(LUnitH);
+    Ok('module oracle: declaring the shimmed name in the import refuses [' +
+      GProj.StageTimings + ']', not LOk and
+      (Pos('consumer-oracle(mos)', GProj.StageTimings) > 0));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 procedure TestBadPathText;
 var
   LDir, LErr: string;
@@ -17071,6 +17178,7 @@ begin
   TestLoadFailures;
   TestSourceManagerRuns;
   TestConsumerRedo;
+  TestModuleOracle;
   TestModuleLifecycle;
   TestHeritageStep;
   TestPoolContract;
