@@ -102,6 +102,10 @@ type
     // is dropped at the next ResolveUnit (not inside the memo build that
     // noticed it).
     FRunEpoch: Integer;
+    // Moves whenever ResolveUnit's answer for some name may change - a pin
+    // added or dropped, a listing or the memo forgotten, a new run (see
+    // ResolveEpoch).
+    FResolveEpoch: Integer;
     FListingsEpoch: Integer;
     FDirChecked: TDictionary<string, Integer>;
     FMemoStale: Boolean;
@@ -306,6 +310,10 @@ type
     procedure PrepareIndexes;
     { True once PrepareIndexes (or a resolution) built the index. }
     function IndexesReady: Boolean;
+    { Two ResolveUnit calls with the same arguments and the same ResolveEpoch
+      between them answer the same: a caller may keep an answer and reuse it
+      while the epoch has not moved (TPasSemaProject's discovery cache). }
+    property ResolveEpoch: Integer read FResolveEpoch;
     { Starts an analysis on this manager - TPasSemaProject calls it at every
       Analyze* entry, AnalyzeModuleOnly's included, on the driver before any
       engine starts. The manager lives as long as its project, and a module
@@ -740,6 +748,7 @@ begin
       FMemoFrom := '';
     end;
     FDirIndexes.Remove(LKey);   // owned: freed here
+    Inc(FResolveEpoch);
     if SameText(ExcludeTrailingPathDelimiter(ADir), FProjectDir) then
       FMemoStale := True;
     FSearchNamesBuilt := False;
@@ -785,7 +794,8 @@ begin
     Exit;
   if FPinned = nil then
     FPinned := TDictionary<string, string>.Create;
-  FPinned.TryAdd(PasFoldName(AUnitName), TPath.GetFullPath(APath));
+  if FPinned.TryAdd(PasFoldName(AUnitName), TPath.GetFullPath(APath)) then
+    Inc(FResolveEpoch);
 end;
 
 // An in-path's pin (ResolveUnit step 1): PinUnit's first-wins rule, and the
@@ -801,6 +811,7 @@ begin
   LKey := PasFoldName(AUnitName);
   if FPinned.TryAdd(LKey, TPath.GetFullPath(APath)) then
   begin
+    Inc(FResolveEpoch);
     if FInPathPins = nil then
       FInPathPins := TDictionary<string, Boolean>.Create;
     FInPathPins.AddOrSetValue(LKey, True);
@@ -835,6 +846,7 @@ begin
     Exit(True);
   end;
   FPinned.Remove(AKey);
+  Inc(FResolveEpoch);
   if FInPathPins <> nil then
     FInPathPins.Remove(AKey);
   AResolved := '';
@@ -1167,6 +1179,7 @@ var
   LFile: string;
   LIdx: Integer;
 begin
+  Inc(FResolveEpoch);
   FreeAndNil(FSearchIndex);
   FreeAndNil(FDcuIndex);
   FSearchIndex := TDictionary<string, string>.Create;
@@ -1328,6 +1341,8 @@ begin
   if FProjectDir <> '' then
     DirIndex(FProjectDir);   // checks its stamp, sets FMemoStale on a move
   Result := Result or FMemoStale;
+  if Result then
+    Inc(FResolveEpoch);
 end;
 
 procedure TPasSourceManager.BeginRun(AFullRun: Boolean);
@@ -1344,6 +1359,7 @@ begin
   // directory index on its first use, the search paths on the first miss
   // (see DirIndex, RefreshListings).
   Inc(FRunEpoch);
+  Inc(FResolveEpoch);
   FreeAndNil(FPinnedSeen);
   if AFullRun and (FInPathPins <> nil) then
   begin
@@ -1379,6 +1395,7 @@ begin
   FInPathPins := FSavedInPath;
   FSavedInPath := nil;
   FreeAndNil(FPinnedSeen);
+  Inc(FResolveEpoch);
 end;
 
 procedure TPasSourceManager.DropSavedPins;
@@ -1671,6 +1688,7 @@ procedure TPasSourceManager.ForgetUnitResolution;
 begin
   FreeAndNil(FUnitMemo);
   FreeAndNil(FPinnedSeen);
+  Inc(FResolveEpoch);
 end;
 
 function TPasSourceManager.FromDirIndex(const AFromFile: string):
@@ -1859,6 +1877,7 @@ begin
   begin
     FreeAndNil(FUnitMemo);
     FMemoStale := False;
+    Inc(FResolveEpoch);
   end;
   if FUnitMemo = nil then
     FUnitMemo := TDictionary<string, TUnitMemo>.Create;

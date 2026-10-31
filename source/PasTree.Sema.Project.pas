@@ -373,6 +373,15 @@ type
     from the path, a depth cap) - a diagnostic acts on xdNo only. }
   TPasDescent = (xdYes, xdNo, xdUnknown);
 
+  { One `uses` entry's ResolveUnit answer as the load engine's discovery got
+    it, with the arguments and the source manager's ResolveEpoch then: what
+    ResolveUses reuses while the epoch has not moved. }
+  TPasUsesRes = record
+    Name, InPath, Path, Key: string;
+    Epoch: Integer;
+    Ok, Valid: Boolean;
+  end;
+
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
@@ -469,6 +478,10 @@ type
     // passes have run. The async driver (later) uses the finer transitions.
     FStatus: TList<TPasModuleStatus>;
     FByPath: TDictionary<string, Integer>; // full path (lower) -> model id
+    // Per model, per `uses` entry: the load engine's ResolveUnit answers,
+    // for ResolveUses (see ResolveUsesOf). Written on the driver only;
+    // dropped as ResolveUses consumes them and at the end of a run.
+    FUsesRes: TArray<TArray<TPasUsesRes>>;
     // Declared unit name (lower) -> model id, registered as files load. The
     // dcc rule this serves: a program's `uses X in 'path'` locates X for the
     // WHOLE project - other units say just `uses X` with the file nowhere on
@@ -562,6 +575,9 @@ type
     // The model a pass is splitting over several workers (RunInheritedOver),
     // -1 otherwise: its per-model memos are then shared and locked.
     FShardMid: Integer;
+    // Set while BindTypesX's parallel half runs: DeclTypeX then notes a
+    // SymTypeX read in GSymTypeXRead (see BindTypesXCompute).
+    FTrackSymTypeX: Boolean;
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
     FSysInitUnitId: Integer;               // memoized EnsureSysInitUnit result
@@ -786,6 +802,10 @@ type
     procedure RecheckDonorProjectDir;
     function LoadedUnitByName(const AName: string): Integer;
     procedure ResolveUses(AId: Integer);
+    function ResolveUsesOf(AId, AIdx: Integer; out APath,
+      AKey: string): Boolean;
+    procedure KeepUsesRes(AId, AIdx: Integer; AOk: Boolean; const APath,
+      AKey: string);
     function SeedDeclaredQuery: TPasDeclaredQuery;
     function DeclaredQueryFor(AId: Integer; AOwn: TPasSemaModel = nil;
       ALog: TList<TPasOwnAnswer> = nil): TPasDeclaredQuery;
@@ -7533,13 +7553,17 @@ var
   var
     LU: Integer;
     LPath, LKey: string;
+    LOk: Boolean;
   begin
     for LU := 0 to High(FModels[AMid].UsesList) do
-      if not (AIntfOnly and FModels[AMid].UsesList[LU].InImpl) and
-         FSM.ResolveUnit(FModels[AMid].UsesList[LU].NameFull,
-           FModels[AMid].UsesList[LU].InPath, FFiles[AMid], LPath, LKey) and
-         FollowsUse(FModels[AMid], LU, LPath) then
-        EnqueueKeyed(LPath, LKey);
+      if not (AIntfOnly and FModels[AMid].UsesList[LU].InImpl) then
+      begin
+        LOk := FSM.ResolveUnit(FModels[AMid].UsesList[LU].NameFull,
+          FModels[AMid].UsesList[LU].InPath, FFiles[AMid], LPath, LKey);
+        KeepUsesRes(AMid, LU, LOk, LPath, LKey);
+        if LOk and FollowsUse(FModels[AMid], LU, LPath) then
+          EnqueueKeyed(LPath, LKey);
+      end;
   end;
 
   // Jobs for deferred unit AMid's implementation `uses`, ahead of the sweep
@@ -7881,6 +7905,51 @@ begin
   Result := -1;
 end;
 
+{ The load engine's discovery resolves every `uses` entry of every model it
+  commits, and ResolveUses resolved them all again, on the driver alone:
+  ~70 ms of a 3750-unit build, nearly all of it ResolveUnit's dictionary
+  lookups (perf audit 2026-10, S9). The discovery's answer is kept with the
+  source manager's ResolveEpoch, and reused while that has not moved - a pin
+  added by a later unit's `in` clause, a listing that moved, a new run all
+  move it, and the entry is resolved again. The arguments are kept too, so
+  an entry of another list under the same index never matches. }
+procedure TPasSemaProject.KeepUsesRes(AId, AIdx: Integer; AOk: Boolean;
+  const APath, AKey: string);
+begin
+  if AId > High(FUsesRes) then
+    SetLength(FUsesRes, FModels.Count);
+  if Length(FUsesRes[AId]) <> Length(FModels[AId].UsesList) then
+    SetLength(FUsesRes[AId], Length(FModels[AId].UsesList));
+  FUsesRes[AId][AIdx].Name := FModels[AId].UsesList[AIdx].NameFull;
+  FUsesRes[AId][AIdx].InPath := FModels[AId].UsesList[AIdx].InPath;
+  FUsesRes[AId][AIdx].Path := APath;
+  FUsesRes[AId][AIdx].Key := AKey;
+  FUsesRes[AId][AIdx].Ok := AOk;
+  FUsesRes[AId][AIdx].Epoch := FSM.ResolveEpoch;
+  FUsesRes[AId][AIdx].Valid := True;
+end;
+
+function TPasSemaProject.ResolveUsesOf(AId, AIdx: Integer; out APath,
+  AKey: string): Boolean;
+var
+  LR: ^TPasUsesRes;
+begin
+  if (AId <= High(FUsesRes)) and (AIdx <= High(FUsesRes[AId])) then
+  begin
+    LR := @FUsesRes[AId][AIdx];
+    if LR.Valid and (LR.Epoch = FSM.ResolveEpoch) and
+       (LR.Name = FModels[AId].UsesList[AIdx].NameFull) and
+       (LR.InPath = FModels[AId].UsesList[AIdx].InPath) then
+    begin
+      APath := LR.Path;
+      AKey := LR.Key;
+      Exit(LR.Ok);
+    end;
+  end;
+  Result := FSM.ResolveUnit(FModels[AId].UsesList[AIdx].NameFull,
+    FModels[AId].UsesList[AIdx].InPath, FFiles[AId], APath, AKey);
+end;
+
 procedure TPasSemaProject.ResolveUses(AId: Integer);
 var
   LModel: TPasSemaModel;
@@ -7899,8 +7968,7 @@ begin
   for LIdx := 0 to High(LModel.UsesList) do
   begin
     LPath := '';
-    if FSM.ResolveUnit(LModel.UsesList[LIdx].NameFull,
-      LModel.UsesList[LIdx].InPath, FFiles[AId], LPath, LKey) then
+    if ResolveUsesOf(AId, LIdx, LPath, LKey) then
     begin
       // A light unit's implementation import that is light too and not
       // loaded stays so: resolved, on purpose not loaded.
@@ -10632,6 +10700,11 @@ begin
   end;
 end;
 
+threadvar
+  // Did this thread read a SymTypeX since BindTypesXCompute cleared it? Only
+  // written while FTrackSymTypeX is set.
+  GSymTypeXRead: Boolean;
+
 // The declared type of any symbol as a cross-model descriptor: the model's
 // SymTypeX refinement when present, else its locally-bound TypeSym.
 function TPasSemaProject.DeclTypeX(AMid, ASym: Integer): TSemaXType;
@@ -10639,6 +10712,8 @@ var
   LM: TPasSemaModel;
 begin
   LM := FModels[AMid];
+  if FTrackSymTypeX then
+    GSymTypeXRead := True;
   if LM.SymTypeX.TryGetValue(ASym, Result) then
     Exit;
   if LM.Symbols[ASym].TypeSym <> NIL_SYM then
@@ -13338,9 +13413,11 @@ end;
   SymDeclTypeX, which never reads SymTypeX, so every model's are computed in
   parallel (BindTypesXCompute). The ordered half (BindTypesXCommit) then
   writes them model by model and, within a model, symbol by symbol, inferring
-  each true constant at its turn: a constant's inference DOES read SymTypeX,
+  each true constant at its turn: a constant's inference CAN read SymTypeX,
   its own model's and other units', and finds there exactly what the old
-  single sequential loop had written by then. }
+  single sequential loop had written by then. A constant whose inference
+  reads no SymTypeX at all (DeclTypeX notes every read while FTrackSymTypeX
+  is set) cannot see that order, and is inferred in the parallel half (S11). }
 procedure TPasSemaProject.BindTypesX(const AIds: TArray<Integer>);
 var
   LSyms, LConsts: TArray<TArray<Integer>>;
@@ -13350,16 +13427,21 @@ begin
   SetLength(LSyms, Length(AIds));
   SetLength(LXs, Length(AIds));
   SetLength(LConsts, Length(AIds));
-  ForEachIndex(High(AIds), 'bindx',
-    procedure(ASlot: Integer)
-    begin
-      BindTypesXCompute(AIds[ASlot], LSyms[ASlot], LXs[ASlot],
-        LConsts[ASlot]);
-    end,
-    function(ASlot: Integer): Integer
-    begin
-      Result := AIds[ASlot];
-    end);
+  FTrackSymTypeX := True;
+  try
+    ForEachIndex(High(AIds), 'bindx',
+      procedure(ASlot: Integer)
+      begin
+        BindTypesXCompute(AIds[ASlot], LSyms[ASlot], LXs[ASlot],
+          LConsts[ASlot]);
+      end,
+      function(ASlot: Integer): Integer
+      begin
+        Result := AIds[ASlot];
+      end);
+  finally
+    FTrackSymTypeX := False;
+  end;
   for LSlot := 0 to High(AIds) do
   begin
     // A cancelled staged run stops between models (see RunCrossPipeline).
@@ -13435,10 +13517,25 @@ begin
             (LM.Tree.Nodes[LM.Tree.Nodes[LM.Symbols[LSym].DeclNode].Parent].Kind
              = nkConstDecl) then
     begin
-      if LC = Length(LConsts) then
-        SetLength(LConsts, LC * 2 + 16);
-      LConsts[LC] := LSym;
-      Inc(LC);
+      // Inferred here when the inference reads no SymTypeX at all - a
+      // literal or operator initializer, most of them: then nothing the
+      // ordered half writes could change its answer. Otherwise it waits for
+      // that half, as before (perf audit 2026-10, S11: the ordered half ran
+      // ~100 ms on one thread).
+      GSymTypeXRead := False;
+      LX := InferredDeclTypeX(AId, LSym, {AFollowForeign} True);
+      if not GSymTypeXRead then
+      begin
+        if XValid(LX) then
+          Add(LSym, LX);
+      end
+      else
+      begin
+        if LC = Length(LConsts) then
+          SetLength(LConsts, LC * 2 + 16);
+        LConsts[LC] := LSym;
+        Inc(LC);
+      end;
     end
     // A bare property REDECLARATION - `property Items;` promoting visibility,
     // no type written - has no TypeNode and so was skipped above, and
@@ -13476,6 +13573,8 @@ var
   LX: TSemaXType;
 begin
   LM := FModels[AId];
+  // One table rebuild, not a doubling per few writes.
+  LM.SymTypeX.Reserve(Length(ASyms));
   LK := 0;
   for LC := 0 to High(AConsts) do
   begin
@@ -26573,7 +26672,7 @@ begin
     // by one was most of the source manager's release.
     LDcu := FSM.DetachDcuUnits;
     LHi := Max(Max(Max(High(FUsesMemo), High(FArityMemo)),
-      Max(High(FInhWork), High(FWithWork))), High(LDcu));
+      Max(High(FInhWork), High(FWithWork))), Max(High(LDcu), High(FUsesRes)));
     LNext := -1;
     SetLength(LTasks, Min(Max(2, TThreadPool.Default.MaxWorkerThreads),
       LHi + 2));
@@ -26607,6 +26706,8 @@ begin
               FWithWorkNames[LMine] := nil;
             if LMine <= High(LDcu) then
               FreeAndNil(LDcu[LMine]);
+            if LMine <= High(FUsesRes) then
+              FUsesRes[LMine] := nil;
             LMine := AtomicIncrement(LNext);
           end;
         end);
@@ -26617,6 +26718,7 @@ begin
   // What is left of these is the outer arrays.
   ReleaseCrossWork;
   ReleaseUsesMemo;
+  FUsesRes := nil;   // discovery's answers (see KeepUsesRes)
   TrimPreprocessors;
 end;
 
