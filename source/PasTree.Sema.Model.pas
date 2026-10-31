@@ -1061,6 +1061,22 @@ function SemaRawKeyEquals(AName: PChar; const AKey: TSemaKey): Boolean;
   or concatenate it. }
 function SemaKeyText(const AKey: TSemaKey): string;
 
+type
+  { Where a thread's AddDiag calls on one model go instead of the model: a
+    pass that splits ONE model's work over several workers gives each its
+    own sink and appends the sinks to the model in work order afterwards, so
+    the model's rows come out as one worker would have written them. }
+  TSemaDiagSink = record
+    Model: TPasSemaModel;
+    Diags: TArray<TSemaDiag>;
+    Count: Integer;
+  end;
+  PSemaDiagSink = ^TSemaDiagSink;
+
+threadvar
+  // The calling thread's sink, nil when it writes to the models directly.
+  GSemaDiagSink: PSemaDiagSink;
+
 implementation
 
 uses
@@ -3469,7 +3485,18 @@ begin
 end;
 
 procedure TPasSemaModel.AddDiag(const ADiag: TSemaDiag);
+var
+  LSink: PSemaDiagSink;
 begin
+  LSink := GSemaDiagSink;
+  if (LSink <> nil) and (LSink.Model = Self) then
+  begin
+    if LSink.Count = Length(LSink.Diags) then
+      SetLength(LSink.Diags, LSink.Count * 2 + 8);
+    LSink.Diags[LSink.Count] := ADiag;
+    Inc(LSink.Count);
+    Exit;
+  end;
   if FDiagCount = Length(Diags) then
     SetLength(Diags, FDiagCount * 2 + 8);
   Diags[FDiagCount] := ADiag;

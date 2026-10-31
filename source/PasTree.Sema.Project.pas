@@ -559,6 +559,9 @@ type
     FReportMembers: Boolean;   // see ReportUnresolvedMembers
     FReportGuessedIfs: Boolean;   // see ReportGuessedIfs
     FReportVisibility: Boolean;   // see ReportVisibility
+    // The model a pass is splitting over several workers (RunInheritedOver),
+    // -1 otherwise: its per-model memos are then shared and locked.
+    FShardMid: Integer;
     FSystemUnitId: Integer;                // memoized EnsureSystemUnit result
     FSystemUnitResolved: Boolean;
     FSysInitUnitId: Integer;               // memoized EnsureSysInitUnit result
@@ -1170,6 +1173,10 @@ type
       ANode: Integer): Boolean;
     procedure CrossResolveInherited(AId: Integer;
       var APending: TArray<TPasInhPending>);
+    procedure CrossResolveInheritedRange(AId, AFrom, ATo: Integer;
+      const AShadows: TArray<string>; var APending: TArray<TPasInhPending>);
+    procedure CrossResolveInheritedSplit(AId: Integer;
+      var APending: TArray<TPasInhPending>);
     procedure EnsureCrossWork(AId: Integer);
     procedure SizeCrossWork(ACount: Integer);
     procedure PrepareDeclWork(ACount: Integer);
@@ -1248,6 +1255,9 @@ type
     function CalleeShadowsUses(AModel: TPasSemaModel;
       ACallee, ALocalSym: Integer): Boolean;
     procedure CheckCalls(AId: Integer);
+    procedure CheckCallsRange(AId, AFrom, ATo: Integer);
+    function CheckCallsSplit(AId: Integer; out AErrClass,
+      AErrMsg: string): Boolean;
     procedure RunCallChecksPass(ACount: Integer);
     // Phase 3c: cross-model typing.
     function InstanceRead(AInst: Integer): TSemaInstance;
@@ -2645,6 +2655,7 @@ begin
   inherited Create;
   ConfigureThreadPool(0);
   FInternalLock := TObject.Create;
+  FShardMid := -1;
   FPlatform := APlatform;
   FInfo := PlatformInfo(APlatform);
   FTarget := PasBuiltinTargetOf(FInfo.PointerBytes, FInfo.ExtendedBytes,
@@ -8115,6 +8126,44 @@ begin
   // over and over. Measured on such a unit: 6952 probes, 1142 ms of a 1475 ms
   // inherited pass - the walk was the pass. The memo turns a repeat into one
   // string hash.
+  //
+  // A model split over workers (FShardMid) shares its memo, created before
+  // the split: the lookup and the add under its monitor, the walk outside it
+  // - two workers may walk one name, and the second add keeps the first.
+  if (AId = FShardMid) and (AId <= High(FUsesMemo)) and
+     (FUsesMemo[AId] <> nil) then
+  begin
+    TMonitor.Enter(FUsesMemo[AId]);
+    try
+      Result := FUsesMemo[AId].TryGetValue(ANameLower, LExt);
+    finally
+      TMonitor.Exit(FUsesMemo[AId]);
+    end;
+    if Result then
+    begin
+      AUnit := LExt.UnitId;
+      ASym := LExt.Sym;
+      Exit(AUnit >= 0);
+    end;
+    Result := FindInUses(AId, ANameLower, AUnit, ASym);
+    if Result then
+    begin
+      LExt.UnitId := AUnit;
+      LExt.Sym := ASym;
+    end
+    else
+    begin
+      LExt.UnitId := -1;
+      LExt.Sym := NIL_SYM;
+    end;
+    TMonitor.Enter(FUsesMemo[AId]);
+    try
+      FUsesMemo[AId].TryAdd(ANameLower, LExt);
+    finally
+      TMonitor.Exit(FUsesMemo[AId]);
+    end;
+    Exit;
+  end;
   if (AId > High(FUsesMemo)) or (FUsesMemo[AId] = nil) then
   begin
     Result := FindInUses(AId, ANameLower, AUnit, ASym);
@@ -8441,14 +8490,23 @@ begin
   LKey := (Int64(AUnit) shl 40) or (Int64(ASym) shl 8) or (LWant and $FF);
   if AId <= High(FArityMemo) then
   begin
+    // A model split over workers (FShardMid) has its memo created before the
+    // split, and reads and adds under its monitor (see FindInUsesMemo).
     if FArityMemo[AId] = nil then
       FArityMemo[AId] := TDictionary<Int64, TPasExtRef>.Create;
     LMemo := FArityMemo[AId];
-    if LMemo.TryGetValue(LKey, LExt) then
-    begin
-      AUnit := LExt.UnitId;
-      ASym := LExt.Sym;
-      Exit;
+    if AId = FShardMid then
+      TMonitor.Enter(LMemo);
+    try
+      if LMemo.TryGetValue(LKey, LExt) then
+      begin
+        AUnit := LExt.UnitId;
+        ASym := LExt.Sym;
+        Exit;
+      end;
+    finally
+      if AId = FShardMid then
+        TMonitor.Exit(LMemo);
     end;
   end;
   LProbe := TypeOfArityInChain(AUnit, FModels[AUnit].Symbols[ASym].NextOverload,
@@ -8465,7 +8523,17 @@ begin
   begin
     LExt.UnitId := AUnit;
     LExt.Sym := ASym;
-    LMemo.Add(LKey, LExt);
+    if AId = FShardMid then
+    begin
+      TMonitor.Enter(LMemo);
+      try
+        LMemo.TryAdd(LKey, LExt);
+      finally
+        TMonitor.Exit(LMemo);
+      end;
+    end
+    else
+      LMemo.Add(LKey, LExt);
   end;
 end;
 
@@ -9175,6 +9243,12 @@ end;
 // E2035/E2034 only if no candidate's arity admits the argument count. Runs only
 // for units with resolved uses (complete candidate visibility).
 procedure TPasSemaProject.CheckCalls(AId: Integer);
+begin
+  CheckCallsRange(AId, 0, High(FModels[AId].RefMap));
+end;
+
+// CheckCalls over the call nodes AFrom..ATo of model AId, in node order.
+procedure TPasSemaProject.CheckCallsRange(AId, AFrom, ATo: Integer);
 type
   // One candidate's arity facts, cached per callee NAME (below).
   TCallArity = record
@@ -9328,7 +9402,7 @@ begin
   LSweeps := nil;
   LNamePool.Clear;   // a local record: FCount is not initialized
   try
-  for LNode := 0 to High(LModel.RefMap) do
+  for LNode := AFrom to ATo do
   begin
     if LModel.Tree.Nodes[LNode].Kind <> nkCall then
       Continue;
@@ -9460,8 +9534,18 @@ begin
       // Own model only, and DEFERRED while the pass runs in parallel: a live
       // AddOrSetValue can rehash the dictionary under a sibling worker's
       // ResolveTypeExpr read of this same model - see RunCallChecksPass.
+      // A model split over workers shares its overlay (FShardMid).
       if (AId <= High(FCallNewExt)) and (FCallNewExt[AId] <> nil) then
-        FCallNewExt[AId].AddOrSetValue(LCallee, LExt)
+      begin
+        if AId = FShardMid then
+          TMonitor.Enter(FCallNewExt[AId]);
+        try
+          FCallNewExt[AId].AddOrSetValue(LCallee, LExt);
+        finally
+          if AId = FShardMid then
+            TMonitor.Exit(FCallNewExt[AId]);
+        end;
+      end
       else
         LModel.ExtRefMap.AddOrSetValue(LCallee, LExt);
       Continue;
@@ -9483,6 +9567,88 @@ begin
   finally
     LNamePool.Clear;   // its strings' references go only with Clear
     LSweeps.Free;
+  end;
+end;
+
+{ CheckCalls for ONE model split over the workers by node range (I1, as
+  CrossResolveInheritedSplit): each shard keeps its own name cache and
+  diagnostic sink, the sinks are appended in node order, the model's
+  re-point overlay is shared and locked. A call's check reads its own
+  callee's binding and writes only that one (a re-point), so no shard reads
+  what another writes. A shard that raises ends the check where the single
+  loop would have: the rows before it stand, and False hands its exception's
+  class and message back. }
+function TPasSemaProject.CheckCallsSplit(AId: Integer; out AErrClass,
+  AErrMsg: string): Boolean;
+const
+  CPerShard = 4096;   // nodes below which a shard is not worth a task
+var
+  LN, LK, LS, LI, LFailed, LLast: Integer;
+  LSinks: TArray<TSemaDiagSink>;
+  LErrClass, LErrMsg: TArray<string>;
+begin
+  Result := True;
+  AErrClass := '';
+  AErrMsg := '';
+  LN := Length(FModels[AId].RefMap);
+  LK := Min(Max(1, TThreadPool.Default.MaxWorkerThreads), LN div CPerShard);
+  if FSingleThreaded or (LK < 2) then
+  begin
+    CheckCalls(AId);
+    Exit;
+  end;
+  SetLength(LSinks, LK);
+  SetLength(LErrClass, LK);
+  SetLength(LErrMsg, LK);
+  FShardMid := AId;
+  try
+    ForEachIndex(LK - 1, 'calls',
+      procedure(AShard: Integer)
+      begin
+        LSinks[AShard].Model := FModels[AId];
+        GSemaDiagSink := @LSinks[AShard];
+        try
+          try
+            CheckCallsRange(AId, LN * AShard div LK,
+              LN * (AShard + 1) div LK - 1);
+          except
+            on E: Exception do
+            begin
+              LErrClass[AShard] := E.ClassName;
+              LErrMsg[AShard] := E.Message;
+            end;
+          end;
+        finally
+          GSemaDiagSink := nil;
+        end;
+      end,
+      function(AShard: Integer): Integer
+      begin
+        Result := AId;
+      end);
+  finally
+    FShardMid := -1;
+  end;
+  if CancelRequested then
+    Exit;
+  LFailed := -1;
+  for LS := 0 to LK - 1 do
+    if LErrClass[LS] <> '' then
+    begin
+      LFailed := LS;
+      Break;
+    end;
+  LLast := LK - 1;
+  if LFailed >= 0 then
+    LLast := LFailed;
+  for LS := 0 to LLast do
+    for LI := 0 to LSinks[LS].Count - 1 do
+      FModels[AId].AddDiag(LSinks[LS].Diags[LI]);
+  if LFailed >= 0 then
+  begin
+    AErrClass := LErrClass[LFailed];
+    AErrMsg := LErrMsg[LFailed];
+    Result := False;
   end;
 end;
 
@@ -9512,6 +9678,26 @@ begin
   for LId in AIds do
     FCallNewExt[LId] := TDictionary<Integer, TPasExtRef>.Create;
   try
+    // One model - a module run's usual set - is split over the workers, as
+    // the inherited pass is (see CrossResolveInheritedSplit).
+    if Length(AIds) = 1 then
+    begin
+      if not CancelRequested then
+        try
+          var LErrClass, LErrMsg: string;
+          if not CheckCallsSplit(AIds[0], LErrClass, LErrMsg) then
+            NoteInternalError(AIds[0], 'calls', LErrClass, LErrMsg)
+          else
+          begin
+            CheckConstraints(AIds[0]);
+            CheckAttributes(AIds[0]);
+          end;
+        except
+          on E: Exception do
+            NoteInternalError(AIds[0], 'calls', E);
+        end;
+    end
+    else
     ForEachIndex(High(AIds), 'calls',
       procedure(ASlot: Integer)
       begin
@@ -21489,6 +21675,115 @@ end;
 // depend on another worker's pending (uncommitted) entries.
 procedure TPasSemaProject.CrossResolveInherited(AId: Integer;
   var APending: TArray<TPasInhPending>);
+begin
+  APending := nil;
+  EnsureCrossWork(AId);
+  CrossResolveInheritedRange(AId, 0, High(FInhWork[AId]),
+    UsesBuiltinShadows(AId), APending);
+end;
+
+{ CrossResolveInherited for ONE model split over the workers, for a set too
+  small to keep them busy - a module run over a big unit is one model, and
+  its inherited pass ran on one worker while the rest idled (32 ms of a
+  128 ms keystroke run on the client's main form; perf audit 2026-10, I1).
+
+  The work list is cut into contiguous ranges, one per shard. A shard writes
+  only its own pendings and, through its own diagnostic sink
+  (TSemaDiagSink), its own rows; both are joined in range order, which is
+  the order the single loop produced them in. The model's two memos the
+  compute step writes (FindInUsesMemo, FixCrossArity) are shared and locked
+  while FShardMid names it - their answers do not depend on who asks first.
+  Everything else the step touches is read-only here, as in the full
+  pipeline's one-worker-per-model pass. A shard that raises ends the model's
+  pass as a raise ended the loop: the rows up to it stand, no pending is
+  committed, one internal-error row. }
+procedure TPasSemaProject.CrossResolveInheritedSplit(AId: Integer;
+  var APending: TArray<TPasInhPending>);
+const
+  CPerShard = 256;   // work entries below which a shard is not worth a task
+var
+  LShadows: TArray<string>;
+  LN, LK, LS, LI, LFailed, LLast: Integer;
+  LParts: TArray<TArray<TPasInhPending>>;
+  LSinks: TArray<TSemaDiagSink>;
+  LErrClass, LErrMsg: TArray<string>;
+begin
+  APending := nil;
+  EnsureCrossWork(AId);
+  LShadows := UsesBuiltinShadows(AId);
+  LN := Length(FInhWork[AId]);
+  LK := Min(Max(1, TThreadPool.Default.MaxWorkerThreads), LN div CPerShard);
+  if FSingleThreaded or (LK < 2) then
+  begin
+    CrossResolveInheritedRange(AId, 0, LN - 1, LShadows, APending);
+    Exit;
+  end;
+  if (AId <= High(FUsesMemo)) and (FUsesMemo[AId] = nil) then
+    FUsesMemo[AId] := TDictionary<string, TPasExtRef>.Create;
+  if (AId <= High(FArityMemo)) and (FArityMemo[AId] = nil) then
+    FArityMemo[AId] := TDictionary<Int64, TPasExtRef>.Create;
+  SetLength(LParts, LK);
+  SetLength(LSinks, LK);
+  SetLength(LErrClass, LK);
+  SetLength(LErrMsg, LK);
+  FShardMid := AId;
+  try
+    ForEachIndex(LK - 1, 'inherited',
+      procedure(AShard: Integer)
+      begin
+        LSinks[AShard].Model := FModels[AId];
+        GSemaDiagSink := @LSinks[AShard];
+        try
+          try
+            CrossResolveInheritedRange(AId, LN * AShard div LK,
+              LN * (AShard + 1) div LK - 1, LShadows, LParts[AShard]);
+          except
+            on E: Exception do
+            begin
+              LErrClass[AShard] := E.ClassName;
+              LErrMsg[AShard] := E.Message;
+            end;
+          end;
+        finally
+          GSemaDiagSink := nil;
+        end;
+      end,
+      function(AShard: Integer): Integer
+      begin
+        Result := AId;
+      end);
+  finally
+    FShardMid := -1;
+  end;
+  if CancelRequested then
+    Exit;   // the run is discarded whole
+  LFailed := -1;
+  for LS := 0 to LK - 1 do
+    if LErrClass[LS] <> '' then
+    begin
+      LFailed := LS;
+      Break;
+    end;
+  LLast := LK - 1;
+  if LFailed >= 0 then
+    LLast := LFailed;
+  for LS := 0 to LLast do
+    for LI := 0 to LSinks[LS].Count - 1 do
+      FModels[AId].AddDiag(LSinks[LS].Diags[LI]);
+  if LFailed >= 0 then
+  begin
+    NoteInternalError(AId, 'inherited', LErrClass[LFailed], LErrMsg[LFailed]);
+    Exit;
+  end;
+  for LS := 0 to LK - 1 do
+    APending := APending + LParts[LS];
+end;
+
+{ CrossResolveInherited over work-list entries AFrom..ATo of model AId (its
+  cross work built, AShadows its UsesBuiltinShadows): the pendings of those
+  entries, in work order. }
+procedure TPasSemaProject.CrossResolveInheritedRange(AId, AFrom, ATo: Integer;
+  const AShadows: TArray<string>; var APending: TArray<TPasInhPending>);
 var
   LOut: TArray<TPasInhPending>;   // APending, until the end
   LModel: TPasSemaModel;
@@ -21503,18 +21798,17 @@ var
 begin
   APending := nil;
   LModel := FModels[AId];
-  LShadows := UsesBuiltinShadows(AId);
-  EnsureCrossWork(AId);
+  LShadows := AShadows;
   // Pre-size to the work list (each entry pends at most once), truncate at
   // the end - the same idiom EnsureCrossWork itself uses; the old `+ [x]`
   // re-copied the managed-record array per append, per fixpoint round.
-  SetLength(LOut, Length(FInhWork[AId]));
+  SetLength(LOut, Max(0, ATo - AFrom + 1));
   LPendCount := 0;
   LMiss := TDictionary<Int64, Byte>.Create;
   try
   // Candidates only - kind, scope, A.B-member and not-in-a-with-body were all
   // decided by that single scan (see EnsureCrossWork).
-  for LWIdx := 0 to High(FInhWork[AId]) do
+  for LWIdx := AFrom to ATo do
   begin
     LNode := FInhWork[AId][LWIdx];
     // NB a with BODY is deliberately absent from this list and handled by the
@@ -21710,15 +22004,32 @@ begin
   FStatsPass := 'inherited';   // RunDeclPass retagged it
 {$ENDIF}
   SetLength(LPending, Length(AIds));
-  ForEachIndex(High(AIds), 'inherited',
-    procedure(ASlot: Integer)
-    begin
-      CrossResolveInherited(AIds[ASlot], LPending[ASlot]);
-    end,
-    function(ASlot: Integer): Integer
-    begin
-      Result := AIds[ASlot];
-    end);
+  // One model - a module run's usual set - is split over the workers.
+  // On this thread, as ForEachIndex's own body would be guarded: a raise is
+  // the model's internal-error row, and the run goes on.
+  if Length(AIds) = 1 then
+  begin
+    if not CancelRequested then
+      try
+        CrossResolveInheritedSplit(AIds[0], LPending[0]);
+      except
+        on E: Exception do
+        begin
+          LPending[0] := nil;
+          NoteInternalError(AIds[0], 'inherited', E);
+        end;
+      end;
+  end
+  else
+    ForEachIndex(High(AIds), 'inherited',
+      procedure(ASlot: Integer)
+      begin
+        CrossResolveInherited(AIds[ASlot], LPending[ASlot]);
+      end,
+      function(ASlot: Integer): Integer
+      begin
+        Result := AIds[ASlot];
+      end);
   // The frame-substituted member type too, when the compute step had a
   // frame at all - as the with pass's commit.
   CommitPending(AIds, LPending, {AClearRef} True);
