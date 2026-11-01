@@ -937,32 +937,35 @@ end;
 function TPasTree.NodeTextEquals(AIndex: Integer; const AWord: string): Boolean;
 var
   LText: PChar;
-  LLen: Integer;
+  LLen, LTok: Integer;
 begin
   // Same bounds backstop as NodeText; same '&' semantics as SameText on the
   // copied text (an escaped identifier keeps its '&' and never matches).
   if (AIndex < 0) or (AIndex > High(Nodes)) then
     Exit(False);
-  if (Nodes[AIndex].FirstToken < 0) or
-     (Nodes[AIndex].FirstToken > High(Source.Visible)) then
+  LTok := Nodes[AIndex].FirstToken;
+  if (LTok < 0) or (LTok > High(Source.Visible)) then
     Exit(False);
-  SliceOf(Source, Nodes[AIndex].FirstToken, LText, LLen);
+  SliceOf(Source, LTok, LText, LLen);
   Result := SliceEqualsWord(LText, LLen, AWord);
 end;
 
 procedure TPasTree.NodeSlice(AIndex: Integer; out AText: PChar;
   out ALen: Integer);
+var
+  LTok: Integer;
 begin
-  // Same bounds backstop as NodeText.
-  if (AIndex < 0) or (AIndex > High(Nodes)) or
-     (Nodes[AIndex].FirstToken < 0) or
-     (Nodes[AIndex].FirstToken > High(Source.Visible)) then
+  // Same bounds backstop as NodeText - a node out of range leaves LTok -1.
+  LTok := -1;
+  if (AIndex >= 0) and (AIndex <= High(Nodes)) then
+    LTok := Nodes[AIndex].FirstToken;
+  if (LTok >= 0) and (LTok <= High(Source.Visible)) then
+    SliceOf(Source, LTok, AText, ALen)
+  else
   begin
     AText := nil;
     ALen := 0;
-  end
-  else
-    SliceOf(Source, Nodes[AIndex].FirstToken, AText, ALen);
+  end;
 end;
 
 function TPasTree.DottedText(AIndex: Integer): string;
@@ -1683,13 +1686,14 @@ end;
 
 procedure TPasTreeBuilder.Adopt(ANewParent, ANode: Integer);
 var
-  LPrev, LCur: Integer;
+  LOld, LPrev, LCur: Integer;
 begin
   // Detach from the old parent's child list.
-  if FNodes[ANode].Parent <> NIL_NODE then
+  LOld := FNodes[ANode].Parent;
+  if LOld <> NIL_NODE then
   begin
     LPrev := NIL_NODE;
-    LCur := FNodes[FNodes[ANode].Parent].FirstChild;
+    LCur := FNodes[LOld].FirstChild;
     while (LCur <> NIL_NODE) and (LCur <> ANode) do
     begin
       LPrev := LCur;
@@ -1698,11 +1702,11 @@ begin
     if LCur = ANode then
     begin
       if LPrev = NIL_NODE then
-        FNodes[FNodes[ANode].Parent].FirstChild := FNodes[ANode].NextSibling
+        FNodes[LOld].FirstChild := FNodes[ANode].NextSibling
       else
         FNodes[LPrev].NextSibling := FNodes[ANode].NextSibling;
-      if FLastChild[FNodes[ANode].Parent] = ANode then
-        FLastChild[FNodes[ANode].Parent] := LPrev;
+      if FLastChild[LOld] = ANode then
+        FLastChild[LOld] := LPrev;
     end;
   end;
   FNodes[ANode].NextSibling := NIL_NODE;

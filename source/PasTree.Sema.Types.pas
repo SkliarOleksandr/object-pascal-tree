@@ -152,9 +152,7 @@ type
     function IsDynArrayDef(ADef: Integer): Boolean;
     function ArrayBoundType(ADef: Integer): Integer;
     function ParamsOf(AScope: Integer): TArray<Integer>;
-    function ArgCount(ACall: Integer): Integer;
     function ArgListTruncated(ACall: Integer): Boolean;
-    function TrailingSlot(ACall: Integer): Boolean;
     function WeakAliasEnd(ASym: Integer): Integer;
     function IsProcDesignator(N: Integer): Boolean;
     function ClassRefTarget(ASym: Integer): Integer;
@@ -1505,9 +1503,12 @@ end;
 // full text, so that is a caller outside the pipeline; answering "unknown"
 // beats reading a nil token array, see TPasSemaProject.BinaryOpIsAs).
 function TPasSemaTyper.OpKind(N: Integer): TPasTokenKind;
+var
+  LOpTok: Integer;
 begin
-  if (T.Nodes[N].Aux >= 0) and (T.Nodes[N].Aux <= High(T.Source.Visible)) then
-    Result := T.Source.VisibleKind(T.Nodes[N].Aux)
+  LOpTok := T.Nodes[N].Aux;
+  if (LOpTok >= 0) and (LOpTok <= High(T.Source.Visible)) then
+    Result := T.Source.VisibleKind(LOpTok)
   else
     Result := tkUnknown;
 end;
@@ -1819,11 +1820,15 @@ end;
   says nothing. `Diag` additionally withholds anything inside an unresolved
   `with` body, where a binding - and so a type - is only a guess. }
 procedure TPasSemaTyper.CheckConditionTypes;
+const
+  // The statements CheckCondition judges - it ignores every other kind, so
+  // the sweep does not call it per node. Keep in step with its case.
+  CCondStmts = [nkIfStmt, nkWhileStmt, nkRepeatStmt, nkCaseStmt];
 var
   LIdx: Integer;
 begin
   for LIdx := 0 to High(T.Nodes) do
-    if SweepKind(LIdx) <> nkMissing then
+    if SweepKind(LIdx) in CCondStmts then
       CheckCondition(LIdx);
 end;
 
@@ -2336,25 +2341,26 @@ function TPasSemaTyper.BinaryResult(N: Integer): Integer;
 const
   CScalar = [tcInteger, tcFloat, tcBoolean, tcChar, tcString];
 var
-  LL, LR: Integer;
+  LLeft, LRight, LL, LR: Integer;
   LOp: TPasTokenKind;
   LAns: TSemaOpAnswer;
 begin
-  LL := M.ExprType[Child(N)];
-  LR := M.ExprType[Sib(Child(N))];
+  LLeft := Child(N);
+  LRight := Sib(LLeft);
+  LL := M.ExprType[LLeft];
+  LR := M.ExprType[LRight];
   Result := NIL_SYM;
   // A `[...]` right operand has no type, but `St + [e1]` is St's (E3-43).
   if (LL = NIL_SYM) or ((LR = NIL_SYM) and
-     (Kind(PeelParens(T, Sib(Child(N)))) <> nkSetCtor)) then
+     (Kind(PeelParens(T, LRight)) <> nkSetCtor)) then
     Exit;
   LOp := OpKind(N);
   if LOp in [tkEqual, tkNotEqual, tkLess, tkLessEqual, tkGreater,
      tkGreaterEqual, tkIn, tkIs] then
     Exit(Bool);
-  if IsTypeNameOperand(Child(N)) or IsTypeNameOperand(Sib(Child(N))) then
+  if IsTypeNameOperand(LLeft) or IsTypeNameOperand(LRight) then
     Exit;
-  LAns := OperatorAnswer(LOp, False, OpFacts(LL, Child(N)),
-    OpFacts(LR, Sib(Child(N))),
+  LAns := OperatorAnswer(LOp, False, OpFacts(LL, LLeft), OpFacts(LR, LRight),
     WeakAliasEnd(LL) = WeakAliasEnd(LR), FIs64);
   if LAns = oaNone then
   begin
@@ -2385,18 +2391,19 @@ end;
 
 function TPasSemaTyper.UnaryResult(N: Integer): Integer;
 var
-  LO: Integer;
+  LOperand, LO: Integer;
   LOp: TPasTokenKind;
   LAns: TSemaOpAnswer;
 begin
-  LO := M.ExprType[Child(N)];
+  LOperand := Child(N);
+  LO := M.ExprType[LOperand];
   Result := NIL_SYM;
   LOp := OpKind(N);
   if LOp = tkAt then
     Exit(Ptr);
-  if (LO = NIL_SYM) or IsTypeNameOperand(Child(N)) then
+  if (LO = NIL_SYM) or IsTypeNameOperand(LOperand) then
     Exit;
-  LAns := OperatorAnswer(LOp, True, OpFacts(LO, Child(N)),
+  LAns := OperatorAnswer(LOp, True, OpFacts(LO, LOperand),
     Default(TSemaOpFacts),
     False, FIs64);
   if LAns = oaNone then
@@ -2434,21 +2441,6 @@ begin
       Result[LCount] := LList[LIdx];
       Inc(LCount);
     end;
-end;
-
-// Present arguments only: the nkMissing a trailing comma leaves as the last
-// child (`F(1, 2,)`, see ParseArgList) is not an argument - TrailingSlot
-// reports it, and the arity rule changes with it.
-function TPasSemaTyper.ArgCount(ACall: Integer): Integer;
-var
-  LTrailing: Boolean;
-begin
-  Result := CallArgCount(M, ACall, LTrailing);
-end;
-
-function TPasSemaTyper.TrailingSlot(ACall: Integer): Boolean;
-begin
-  CallArgCount(M, ACall, Result);
 end;
 
 // Does a candidate with (AReq, ATot) parameters admit AArgs present arguments?
@@ -2723,12 +2715,11 @@ var
   LTrailing, LAnyOverload: Boolean;
 begin
   LAnyOverload := False;
-  LArgs := ArgCount(ACall);
+  LArgs := CallArgCount(M, ACall, LTrailing);
   // An nkAmbiguous argument whose head nothing has bound yet (16.3.1): one
   // argument or several, so no overload can be chosen and no count judged.
   if LArgs < 0 then
     Exit(NIL_SYM);
-  LTrailing := TrailingSlot(ACall);
   LBest := AHead; LBestScore := -1;
   LAnyFit := False; LAllHaveParams := True; LAnyVariadic := False;
   LMinReq := MaxInt; LMaxTot := -1;
@@ -3549,7 +3540,7 @@ end;
 
 procedure TPasSemaTyper.CheckAssign(N: Integer);
 var
-  LDst, LSrc: Integer;
+  LDst, LSrc, LDstT, LSrcT: Integer;
 begin
   LDst := Child(N);
   if LDst = NIL_NODE then
@@ -3557,14 +3548,16 @@ begin
   LSrc := Sib(LDst);
   if LSrc = NIL_NODE then
     Exit;
-  if (M.ExprType[LDst] = NIL_SYM) or (M.ExprType[LSrc] = NIL_SYM) then
+  LDstT := M.ExprType[LDst];
+  LSrcT := M.ExprType[LSrc];
+  if (LDstT = NIL_SYM) or (LSrcT = NIL_SYM) then
     Exit;
   // A string literal is char-compatible (C := 'x'); don't flag it - nor one
   // in parentheses, nor an inline `if` whose branches are each such a
   // literal or a Char (`if B then 'a' else Ch`): the node takes the
   // then-branch's `string` (audit A4-10, probe-b32 P1). Lenient on purpose:
   // `C := 'abc'` passes too.
-  if (CatOf(M.ExprType[LDst]) = tcChar) and CharCompatibleSource(LSrc) then
+  if (CatOf(LDstT) = tcChar) and CharCompatibleSource(LSrc) then
     Exit;
   // An operand that resolved to a TYPE NAME is a mis-binding, not a type
   // mismatch, so this is the wrong diagnostic for it and the numbers say so:
@@ -3578,14 +3571,14 @@ begin
   // named `Word`.
   if IsTypeNameOperand(LDst) or IsTypeNameOperand(LSrc) then
     Exit;
-  if not Assignable(M.ExprType[LDst], M.ExprType[LSrc]) then
+  if not Assignable(LDstT, LSrcT) then
   begin
     // dcc names the nil literal's type `Pointer`; the seed is `_nil`.
-    var LSrcName := M.Symbols[M.ExprType[LSrc]].Name;
-    if CatOf(M.ExprType[LSrc]) = tcNil then
+    var LSrcName := M.Symbols[LSrcT].Name;
+    if CatOf(LSrcT) = tcNil then
       LSrcName := 'Pointer';
     Diag('E2010', Format(SE2010_IncompatibleTypes,
-      [M.Symbols[M.ExprType[LDst]].Name, LSrcName]), LSrc);
+      [M.Symbols[LDstT].Name, LSrcName]), LSrc);
   end;
 end;
 
@@ -3618,15 +3611,18 @@ end;
 function TPasSemaTyper.TypeNode(N: Integer): Integer;
 var
   LChild, LNode: Integer;
+  LKind: TPasNodeKind;
 begin
   if N = NIL_NODE then
     Exit(NIL_SYM);
+  LKind := Kind(N);
+  LChild := Child(N);
   // An operator chain's left spine is as deep as the chain is long (audit
   // A1-01, see TPasSemaResolver.WalkOperatorChain): walked in a loop, the
   // operands recursively, each operator typed after its operands - the
   // order the recursion had.
-  if (Kind(N) = nkBinaryOp) and (Child(N) <> NIL_NODE) and
-     (Kind(Child(N)) = nkBinaryOp) then
+  if (LKind = nkBinaryOp) and (LChild <> NIL_NODE) and
+     (Kind(LChild) = nkBinaryOp) then
   begin
     LNode := N;
     while (Child(LNode) <> NIL_NODE) and (Kind(Child(LNode)) = nkBinaryOp) do
@@ -3649,14 +3645,13 @@ begin
     until False;
     Exit;
   end;
-  LChild := Child(N);
   while LChild <> NIL_NODE do   // type children first (bottom-up)
   begin
     TypeNode(LChild);
     LChild := Sib(LChild);
   end;
 
-  case Kind(N) of
+  case LKind of
     nkIntLit: Result := Int;
     nkRealLit: Result := Ext;
     nkStrLit: Result := Str;
@@ -3684,7 +3679,7 @@ begin
   end;
   M.ExprType[N] := Result;
 
-  if Kind(N) = nkAssign then
+  if LKind = nkAssign then
     CheckAssign(N);
 end;
 

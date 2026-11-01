@@ -1748,6 +1748,7 @@ procedure TPasSemaResolver.CollectTypeDecl(ANode, AScope: Integer);
 var
   LName, LChild, LSym, LExisting, LGen, LBody: Integer;
   LMatch: Integer;
+  LNameKey: TSemaKey;
 begin
   LChild := FirstChild(ANode);
   if (LChild <> NIL_NODE) and (KindOf(LChild) = nkAttrGroup) then
@@ -1775,8 +1776,12 @@ begin
   // empty member scope, and every method body of the real class lost its own
   // fields and its inherited members. ~60 false E2003 in that one unit, and it
   // did not reproduce until the fixture also had the non-generic sibling.
-  LExisting := FModel.FindLocal(AScope, NodeKey(LName));
-  LMatch := ArityOnChain(LExisting, GenericArityOfDecl(ANode));
+  // The name's key and the generic parameters, each looked up once: the match
+  // here, the generic scope and the alias test below share them.
+  LNameKey := NodeKey(LName);
+  LGen := FindChildKind(ANode, nkGenericParams);
+  LExisting := FModel.FindLocal(AScope, LNameKey);
+  LMatch := ArityOnChain(LExisting, GenericArityOfParamsNode(LGen));
   // Only a FORWARD is completed: `TX = Integer; TX = string;`, a complete
   // class followed by another, `TE = class(TObject);` and then a body, a
   // forward completed twice - each is E2004 (dcc64 37.0; audit B4-19).
@@ -1794,7 +1799,7 @@ begin
     FModel.Symbols[LSym].DeclNode := LName;
     // Not a new symbol, but a declaration all the same: `type U = class; U =
     // class end;` in unit U is two E2004, one per half.
-    if RedeclaresOwnName(AScope, skType, LName, NodeKey(LName)) then
+    if RedeclaresOwnName(AScope, skType, LName, LNameKey) then
       ReportRedeclared(LName);
   end
   else if (LExisting <> NIL_SYM) and
@@ -1813,7 +1818,6 @@ begin
   // Generic type params live in a per-type scope so identical names (T, TKey...)
   // across different generic types don't collide in the unit scope.
   LBody := AScope;
-  LGen := FindChildKind(ANode, nkGenericParams);
   if LGen <> NIL_NODE then
   begin
     // Recorded on the SYMBOL: the project's type-reference resolution needs
@@ -1851,7 +1855,7 @@ begin
           // Compared as keys: every `type X = Y` alias asked, and two
           // lower-cased strings per alias only to compare them (audit C2-05).
           if (KindOf(LChild) = nkIdent) and
-             SameNodeKey(NodeKey(LChild), NodeKey(LName)) then
+             SameNodeKey(NodeKey(LChild), LNameKey) then
             FModel.RefMap[LChild] := ResolveSkipping(LBody,
               NodeNameLower(LChild), LSym);
           Collect(LChild, LBody);  // alias target, array, pointer...
@@ -1946,10 +1950,7 @@ begin
     // visibility. Counted rather than returned, because a single child can
     // declare several (a `A, B: Integer` field group, a property's accessors,
     // a nested type and its enum values). Symbols is lazy - nil counts as 0.
-    if FModel.Scopes[LMembers].Symbols.Count > 0 then
-      LFirstNew := FModel.Scopes[LMembers].Symbols.Count
-    else
-      LFirstNew := 0;
+    LFirstNew := FModel.Scopes[LMembers].Symbols.Count;
     case KindOf(LChild) of
       // ancestor / implemented-interface references: resolve in the outer scope
       nkIdent, nkMember, nkTypeArgs:
@@ -2012,7 +2013,7 @@ begin
     else
       Collect(LChild, LMembers);   // var/const/type sections, variant parts...
     end;
-    if (LVis <> svDefault) and (FModel.Scopes[LMembers].Symbols.Count > 0) then
+    if LVis <> svDefault then
       for var LNew := LFirstNew to FModel.Scopes[LMembers].Symbols.Count - 1 do
         FModel.Symbols[FModel.Scopes[LMembers].Symbols[LNew]].Visibility := LVis;
     LChild := NextSib(LChild);
@@ -2497,12 +2498,14 @@ begin
     // `forward` is a declaration, and completes nothing.
     var LLink := NIL_SYM;
     var LIsForward := HasDirective(ANode, 'forward');
+    // One key for both lookups and the own-name check below.
+    var LNameKey := NodeKey(LNameNode);
     if not LIsForward then
     begin
-      LLink := CompletionOf(FModel.FindLocal(AScope, NodeKey(LNameNode)),
+      LLink := CompletionOf(FModel.FindLocal(AScope, LNameKey),
         ANode, AScope, True);
       if (LLink = NIL_SYM) and (AScope = FImpl) then
-        LLink := CompletionOf(FModel.FindLocal(FIntf, NodeKey(LNameNode)),
+        LLink := CompletionOf(FModel.FindLocal(FIntf, LNameKey),
           ANode, AScope, False);
     end;
     if LLink <> NIL_SYM then
@@ -2515,8 +2518,7 @@ begin
       MarkDeclName(LNameNode, LLink);
       // No new symbol, but dcc reports the module's own name at this header
       // too - `procedure U;` in both sections of unit U is two E2004.
-      if RedeclaresOwnName(AScope, skRoutine, LNameNode,
-         NodeKey(LNameNode)) then
+      if RedeclaresOwnName(AScope, skRoutine, LNameNode, LNameKey) then
         ReportRedeclared(LNameNode);
       // Same gap as the qualified branch above, for a global routine: params
       // omitted here means nothing else ever declares them for THIS body -
@@ -2595,7 +2597,7 @@ end;
   Collect belongs here too. }
 function TPasSemaResolver.DeclaresInOwnScope(ANode: Integer): Boolean;
 var
-  LNode: Integer;
+  LNode, LNext: Integer;
 begin
   // A search of the subtree in a loop over the tree's links, not a recursion
   // per level: a block holding an operator chain of a few thousand terms
@@ -2613,19 +2615,24 @@ begin
       nkBlock, nkForStmt, nkForInStmt, nkExceptOn, nkAnonMethod, nkProcType:
         ;
     else
-      if FirstChild(LNode) <> NIL_NODE then
       begin
-        LNode := FirstChild(LNode);
-        Continue;
+        LNext := FirstChild(LNode);
+        if LNext <> NIL_NODE then
+        begin
+          LNode := LNext;
+          Continue;
+        end;
       end;
     end;
-    while NextSib(LNode) = NIL_NODE do
+    LNext := NextSib(LNode);
+    while LNext = NIL_NODE do
     begin
       LNode := FTree.Nodes[LNode].Parent;
       if LNode = ANode then
         Exit(False);
+      LNext := NextSib(LNode);
     end;
-    LNode := NextSib(LNode);
+    LNode := LNext;
   end;
   Result := False;
 end;
@@ -2633,17 +2640,19 @@ end;
 procedure TPasSemaResolver.Collect(ANode, AScope: Integer);
 var
   LChild, LName: Integer;
+  LNodeKind: TPasNodeKind;
 begin
   if ANode = NIL_NODE then
     Exit;
-  if KindOf(ANode) = nkBinaryOp then
+  LNodeKind := KindOf(ANode);
+  if LNodeKind = nkBinaryOp then
   begin
     WalkOperatorChain(ANode, cwCollect, AScope);
     Exit;
   end;
   FNodeScope[ANode] := AScope;
 
-  case KindOf(ANode) of
+  case LNodeKind of
     nkUsesClause:
       // Aux = 1 is a package `requires` clause - references to PACKAGES,
       // not units; resolving those as units would only poison the graph.
@@ -2727,7 +2736,7 @@ begin
           FNodeScope[ANode] := AScope;
         end;
         var LKind := skVar;
-        if KindOf(ANode) = nkInlineConst then
+        if LNodeKind = nkInlineConst then
           LKind := skConst;
         var LSyms: TArray<Integer> := nil;
         var LSymCount := 0;
@@ -3072,7 +3081,7 @@ begin
       // procedural type does (AnonTypeSyms); the project pass records what
       // it points at (AnonPointee). Under {$T-}, the default, it stays
       // Pointer and nothing is declared (audit E3-20).
-      if (KindOf(ANode) = nkUnaryOp) and
+      if (LNodeKind = nkUnaryOp) and
          (FTree.Nodes[ANode].Aux >= 0) and
          (FTree.Nodes[ANode].Aux <= High(FTree.Source.Visible)) and
          (FTree.Source.VisibleKind(FTree.Nodes[ANode].Aux) = tkAt) and
@@ -3288,13 +3297,17 @@ begin
         // frequent lookup (6.7M per client closure, a fifth of all its heap
         // allocations while it built a string).
         var LKey := NodeKey(ANode);
+        // The node's scope and first token, read once like the key. LSym is
+        // the binding: the rules below rebind it, and it goes to RefMap once,
+        // at the end of the branch - nothing they call reads RefMap.
+        var LScope := FNodeScope[ANode];
+        var LTok := FTree.Nodes[ANode].FirstToken;
         // ResolveAt, not Resolve: this is a REFERENCE, and an inline
         // `var`/`const` is visible only from its own declaration onward
         // (3.1.3). See TPasSemaModel.ResolveAt - the position is only
         // consulted for block scopes, so a routine's classic `var` section and
         // everything above it stay order-independent.
-        FModel.RefMap[ANode] := FModel.ResolveAt(FNodeScope[ANode],
-          LKey, FTree.Nodes[ANode].FirstToken);
+        var LSym := FModel.ResolveAt(LScope, LKey, LTok);
         // ARITY is part of a type's identity (16.1.2), and BOTH directions of
         // ignoring that are real - one third-party library's base unit sets both traps:
         // `Pointer<T>` beside the builtin `Pointer` (a BARE name must skip the
@@ -3307,20 +3320,16 @@ begin
         // The conditions are tested INLINE and in this order for the reason
         // PreferNonGeneric gives: the common case must cost one set membership
         // and no call. A type hit is common, a MISMATCHED one is not.
-        if (FModel.RefMap[ANode] <> NIL_SYM) and
-           (FModel.Symbols[FModel.RefMap[ANode]].Kind = skType) then
+        if (LSym <> NIL_SYM) and (FModel.Symbols[LSym].Kind = skType) then
         begin
           var LWantGeneric := not IsBareTypeUse(ANode);
-          if (sfGeneric in FModel.Symbols[FModel.RefMap[ANode]].Flags) <>
-             LWantGeneric then
+          if (sfGeneric in FModel.Symbols[LSym].Flags) <> LWantGeneric then
           begin
-            LHead := FModel.ResolveByArityAt(FNodeScope[ANode],
-              LKey, FTree.Nodes[ANode].FirstToken,
-              LWantGeneric);
+            LHead := FModel.ResolveByArityAt(LScope, LKey, LTok, LWantGeneric);
             // NIL_SYM = only the other arity is in scope, which is dcc's error
             // and not a reason to drop the binding we have.
             if LHead <> NIL_SYM then
-              FModel.RefMap[ANode] := LHead;
+              LSym := LHead;
           end;
           // Generic-vs-not is only half of 16.1.2: the COUNT is part of the
           // identity too, and a name declared at two generic arities registers
@@ -3332,19 +3341,18 @@ begin
           // `fPair`. Same walk the qualified-implementation-name case does
           // above; reached only for a name written WITH type arguments whose
           // count does not match, so the ordinary reference pays nothing.
-          if not IsBareTypeUse(ANode) then
+          if LWantGeneric then
           begin
             var LWantArity := GenericArityOfParamsNode(
               FTree.Nodes[ANode].Parent);
-            var LBound := FModel.RefMap[ANode];
-            if (LBound <> NIL_SYM) and (LWantArity > 0) and
-               (FModel.Symbols[LBound].Kind = skType) and
-               (GenericArityOfSym(LBound) <> LWantArity) then
+            if (LSym <> NIL_SYM) and (LWantArity > 0) and
+               (FModel.Symbols[LSym].Kind = skType) and
+               (GenericArityOfSym(LSym) <> LWantArity) then
             begin
-              var LAlt := ArityOnChain(FModel.Symbols[LBound].NextOverload,
+              var LAlt := ArityOnChain(FModel.Symbols[LSym].NextOverload,
                 LWantArity);
               if LAlt <> NIL_SYM then
-                FModel.RefMap[ANode] := LAlt;
+                LSym := LAlt;
             end;
           end;
         end;
@@ -3380,11 +3388,11 @@ begin
         // end` with a unit-level TB before TOuter derives TA from that TB
         // (dcc64 37.0; audit B4-11). So past a struct member the lookup goes
         // on outward.
-        if (FModel.RefMap[ANode] <> NIL_SYM) and IsHeritageRef(ANode) and
-           DeclaredAfter(FModel.RefMap[ANode], ANode) then
+        if (LSym <> NIL_SYM) and IsHeritageRef(ANode) and
+           DeclaredAfter(LSym, ANode) then
         begin
-          var LLater := FModel.RefMap[ANode];
-          FModel.RefMap[ANode] := NIL_SYM;
+          var LLater := LSym;
+          LSym := NIL_SYM;
           for var LHop := 1 to 32 do
           begin
             var LOwner := FModel.Symbols[LLater].Scope;
@@ -3393,13 +3401,13 @@ begin
                (FModel.Scopes[LOwner].Parent = NIL_SCOPE) then
               Break;
             LLater := FModel.ResolveAt(FModel.Scopes[LOwner].Parent,
-              NodeNameLower(ANode), FTree.Nodes[ANode].FirstToken);
+              NodeNameLower(ANode), LTok);
             if LLater = NIL_SYM then
               Break;
             if not DeclaredAfter(LLater, ANode) then
             begin
               if FModel.Symbols[LLater].Kind = skType then
-                FModel.RefMap[ANode] := LLater;
+                LSym := LLater;
               Break;
             end;
           end;
@@ -3419,10 +3427,9 @@ begin
         // type to the parameter, and every `Result.fInstance` in the body was
         // a member of nothing (F46; dcc64 37.0, `function F(tfoo: Integer):
         // TFoo` compiles).
-        if (FModel.RefMap[ANode] <> NIL_SYM) and
-           (FModel.Symbols[FModel.RefMap[ANode]].Kind = skParam) then
+        if (LSym <> NIL_SYM) and (FModel.Symbols[LSym].Kind = skParam) then
         begin
-          var LDecl := FModel.Symbols[FModel.RefMap[ANode]].DeclNode;
+          var LDecl := FModel.Symbols[LSym].DeclNode;
           var LList := NIL_NODE;
           if LDecl <> NIL_NODE then
             LList := FTree.Nodes[LDecl].Parent;
@@ -3445,17 +3452,15 @@ begin
             end;
           end;
           if (LList <> NIL_NODE) and (KindOf(LList) = nkParams) and
-             (FTree.Nodes[ANode].FirstToken >= FTree.Nodes[LList].FirstToken) and
-             (FTree.Nodes[ANode].FirstToken <= LHeadEnd) then
+             (LTok >= FTree.Nodes[LList].FirstToken) and (LTok <= LHeadEnd) then
           begin
-            var LOuter := FModel.Symbols[FModel.RefMap[ANode]].Scope;
+            var LOuter := FModel.Symbols[LSym].Scope;
             if LOuter <> NIL_SCOPE then
               LOuter := FModel.Scopes[LOuter].Parent;
             if LOuter <> NIL_SCOPE then
-              FModel.RefMap[ANode] := FModel.ResolveAt(LOuter, LKey,
-                FTree.Nodes[ANode].FirstToken)
+              LSym := FModel.ResolveAt(LOuter, LKey, LTok)
             else
-              FModel.RefMap[ANode] := NIL_SYM;
+              LSym := NIL_SYM;
           end;
         end;
         // The routine's LOCALS are no more the heading's than its parameters:
@@ -3465,32 +3470,30 @@ begin
         // `TFoo` compiles). Only the routine's own generic parameters are in
         // reach there. Cheap first: a symbol of the very scope the name is
         // resolved in, that scope a routine's.
-        if (FModel.RefMap[ANode] <> NIL_SYM) and
-           (FModel.Symbols[FModel.RefMap[ANode]].Kind in
+        if (LSym <> NIL_SYM) and
+           (FModel.Symbols[LSym].Kind in
             [skVar, skConst, skType, skRoutine, skLabel]) and
-           (FModel.Symbols[FModel.RefMap[ANode]].Scope = FNodeScope[ANode]) and
-           (FModel.Scopes[FNodeScope[ANode]].Kind = sckRoutine) then
+           (FModel.Symbols[LSym].Scope = LScope) and
+           (FModel.Scopes[LScope].Kind = sckRoutine) then
         begin
-          var LRoutine := FModel.Scopes[FNodeScope[ANode]].OwnerNode;
+          var LRoutine := FModel.Scopes[LScope].OwnerNode;
           if (LRoutine <> NIL_NODE) and (KindOf(LRoutine) = nkRoutine) then
           begin
             var LBody := FindChildKind(LRoutine, nkRoutineBody);
             if (LBody <> NIL_NODE) and
-               (FTree.Nodes[ANode].FirstToken < FTree.Nodes[LBody].FirstToken) and
-               (FModel.Scopes[FNodeScope[ANode]].Parent <> NIL_SCOPE) then
-              FModel.RefMap[ANode] := FModel.ResolveAt(
-                FModel.Scopes[FNodeScope[ANode]].Parent, LKey,
-                FTree.Nodes[ANode].FirstToken);
+               (LTok < FTree.Nodes[LBody].FirstToken) and
+               (FModel.Scopes[LScope].Parent <> NIL_SCOPE) then
+              LSym := FModel.ResolveAt(FModel.Scopes[LScope].Parent, LKey,
+                LTok);
           end;
         end;
         // A member found ahead of the unit's own declarations where dcc ranks
         // it after them (spec 3.3.2; F52, F53, F54) - see RanksAfterUnit.
-        if (FModel.RefMap[ANode] <> NIL_SYM) and
-           RanksAfterUnit(ANode, FModel.RefMap[ANode]) then
+        if (LSym <> NIL_SYM) and RanksAfterUnit(ANode, LSym) then
         begin
           LHead := UnitDeclFirst(ANode, LKey);
           if LHead <> NIL_SYM then
-            FModel.RefMap[ANode] := LHead;
+            LSym := LHead;
         end;
         // 19.3.2: `[X]` is `XAttribute` wherever that is found, the bare `X`
         // only when it is found nowhere - a nearer bare name does not win
@@ -3500,11 +3503,12 @@ begin
         // System's suffixed name over it.
         if IsAttributeTypeRef(ANode) then
         begin
-          LHead := FModel.ResolveAt(FNodeScope[ANode],
-            NodeNameLower(ANode) + 'attribute', FTree.Nodes[ANode].FirstToken);
+          LHead := FModel.ResolveAt(LScope,
+            NodeNameLower(ANode) + 'attribute', LTok);
           if LHead <> NIL_SYM then
-            FModel.RefMap[ANode] := LHead;
+            LSym := LHead;
         end;
+        FModel.RefMap[ANode] := LSym;
       end;
 
     nkMethodResolution:
@@ -3575,13 +3579,11 @@ begin
           // qualified `TMatrix.Identity` must find exactly like a bare one.
           if LMemScope <> NIL_SCOPE then
           begin
-            FModel.RefMap[LName] :=
-              FModel.FindLocalDeep(LMemScope, NodeKey(LName));
+            var LCc := FModel.FindLocalDeep(LMemScope, NodeKey(LName));
             // A class constructor or destructor is never what a name means
             // (15.1.5): `TFoo.Create` past TFoo's private `class constructor
             // Create` to the next overload, unbound when none is left so the
             // project walk climbs to an ancestor's (audit E3-12).
-            var LCc := FModel.RefMap[LName];
             while (LCc <> NIL_SYM) and
                   (FModel.Symbols[LCc].Kind = skRoutine) and
                   (FModel.RoutineHead(LCc) in [rhConstructor, rhDestructor]) and
@@ -3594,7 +3596,7 @@ begin
             // parent, not the name's, so the count is read from there. Same
             // chain walk as the bare case below; a chain with no such arity
             // keeps the head.
-            var LQSym := FModel.RefMap[LName];
+            var LQSym := LCc;
             if (LQSym <> NIL_SYM) and (FModel.Symbols[LQSym].Kind = skType) then
             begin
               var LQParent := FTree.Nodes[ANode].Parent;

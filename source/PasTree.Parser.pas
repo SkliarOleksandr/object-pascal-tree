@@ -870,7 +870,7 @@ begin
         // Set/array constructor (B.9); elements may be ranges (a..b).
         LNode := FB.AddNode(nkSetCtor, NIL_NODE, LStart);
         Next;
-        while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
+        while not (CurKind in [tkRBracket, tkEndOfFile]) do
         begin
           FB.Adopt(LNode, ParseRangeElem);
           if CurKind = tkComma then
@@ -1032,7 +1032,7 @@ begin
           LNode := FB.AddNode(nkIndex, NIL_NODE, FPos);
           FB.Adopt(LNode, Result);
           Next;
-          while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
+          while not (CurKind in [tkRBracket, tkEndOfFile]) do
           begin
             // A Variant's INDEXED property takes named arguments too - see
             // MaybeNamedArg.
@@ -1132,7 +1132,7 @@ begin
   // still due) or E2034 (no default, or overloaded) - verdicts that need the
   // callee, so the parser stays silent and adopts an nkMissing as the last
   // child; SelectOverload and CheckCalls read it and decide.
-  while (CurKind <> tkRParen) and (CurKind <> tkEndOfFile) do
+  while not (CurKind in [tkRParen, tkEndOfFile]) do
   begin
     if CurKind = tkComma then
     begin
@@ -1490,10 +1490,11 @@ end;
 
 function TPasParser.AtAny(const AKinds: array of TPasTokenKind): Boolean;
 var
-  LKind: TPasTokenKind;
+  LCur, LKind: TPasTokenKind;
 begin
+  LCur := CurKind;
   for LKind in AKinds do
-    if CurKind = LKind then
+    if LCur = LKind then
       Exit(True);
   Result := False;
 end;
@@ -1503,7 +1504,14 @@ function TPasParser.ParseBlockUntil(ABlock: Integer;
 var
   LStmt, LLast: Integer;
   LAfterSemi: Boolean;
+  LKind, LTerm: TPasTokenKind;
+  LStop: set of TPasTokenKind;
 begin
+  // Everything that ends the list, as one set: a test below reads CurKind
+  // once, not once per terminator (AtAny) and once per other word.
+  LStop := SECTION_WORDS + [tkEndOfFile];
+  for LTerm in ATerminators do
+    Include(LStop, LTerm);
   Inc(FBlockDepth);
   try
   LLast := NIL_NODE;
@@ -1512,10 +1520,10 @@ begin
     LAfterSemi := CurKind = tkSemicolon;
     while CurKind = tkSemicolon do
       Next;
-    if AtAny(ATerminators) or (CurKind = tkEndOfFile) or
-       (CurKind in SECTION_WORDS) then
+    LKind := CurKind;
+    if LKind in LStop then
       Break;
-    if CurKind = tkElse then
+    if LKind = tkElse then
     begin
       // An `else` no enclosing construct of this list owns (it is not a
       // terminator here): the `;` before it ended the `if`, or there is no
@@ -1541,10 +1549,8 @@ begin
     LStmt := ParseStatement;
     FB.Adopt(ABlock, LStmt);
     LLast := LStmt;
-    if CurKind = tkSemicolon then
-      Continue;
-    if AtAny(ATerminators) or (CurKind = tkEndOfFile) or
-       (CurKind in SECTION_WORDS + [tkElse]) then
+    LKind := CurKind;
+    if (LKind in LStop) or (LKind in [tkSemicolon, tkElse]) then
       Continue;   // the loop's head decides
     // Recovery: missing separator - resync to ';' or a terminator.
     Error('";" expected');
@@ -1561,8 +1567,7 @@ begin
     if (CurKind in STMT_STARTERS) or
        ((CurKind = tkIdentifier) and TokenStartsLine(FPos)) then
       Continue;
-    while not (AtAny(ATerminators) or
-      (CurKind in SECTION_WORDS + [tkSemicolon, tkEndOfFile])) do
+    while not (CurKind in LStop + [tkSemicolon]) do
       Next;
   end;
   finally
@@ -2297,7 +2302,7 @@ begin
   while CurKind = tkLBracket do
   begin
     Next;
-    while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
+    while not (CurKind in [tkRBracket, tkEndOfFile]) do
     begin
       LAttr := FB.AddNode(nkAttribute, NIL_NODE, FPos);
       // A target before the attribute, `[Result: Tag] function F` - one
@@ -2583,7 +2588,7 @@ begin
   // 2.2.4: ( name [= const], ... )
   Result := FB.AddNode(nkEnumType, NIL_NODE, FPos);
   Next; // (
-  while (CurKind <> tkRParen) and (CurKind <> tkEndOfFile) do
+  while not (CurKind in [tkRParen, tkEndOfFile]) do
   begin
     // `TRecno = Integer;` on its own line is the next declaration, not an
     // element with an explicit ordinal: an element's value ends with `,` or
@@ -2631,7 +2636,7 @@ begin
   if CurKind = tkLBracket then
   begin
     Next;
-    while (CurKind <> tkRBracket) and (CurKind <> tkEndOfFile) do
+    while not (CurKind in [tkRBracket, tkEndOfFile]) do
     begin
       FB.Adopt(Result, ParseTypeExpr);
       if CurKind = tkComma then
@@ -2813,7 +2818,7 @@ begin
   if CurKind = tkLParen then
   begin
     Next;
-    while (CurKind <> tkRParen) and (CurKind <> tkEndOfFile) do
+    while not (CurKind in [tkRParen, tkEndOfFile]) do
     begin
       FB.Adopt(Result, ParseTypeRef);
       if CurKind = tkComma then
@@ -3271,19 +3276,23 @@ end;
 function TPasParser.ParseParamList(AClose: TPasTokenKind): Integer;
 var
   LParam, LAttrs: Integer;
+  LKind: TPasTokenKind;
 begin
   // 6.2: [attrs] [var|const|out] names [: [array of] T] [= default]
   Result := FB.AddNode(nkParams, NIL_NODE, FPos);
   Next; // ( or [
   Inc(FParamDepth);
   try
-  while (CurKind <> AClose) and (CurKind <> tkEndOfFile) do
+  while True do
   begin
+    LKind := CurKind;
+    if (LKind = AClose) or (LKind = tkEndOfFile) then
+      Break;
     // `TRecno = Integer;` on the next line is not a parameter: the list has
     // no `)` yet (`TP = procedure(` while typing). Tested at the START of a
     // parameter, where a default value cannot stand - the depth guard in
     // AtLineDeclHead is bypassed for exactly this test.
-    if (CurKind = tkIdentifier) and (PeekKind(1) = tkEqual) and
+    if (LKind = tkIdentifier) and (PeekKind(1) = tkEqual) and
        TokenStartsLine(FPos) and not IsVisibilityWord then
     begin
       Error('")" expected');
@@ -3293,11 +3302,12 @@ begin
     LAttrs := ParseAttrGroups;
     if LAttrs <> NIL_NODE then
       FB.Adopt(LParam, LAttrs);
-    if CurKind in [tkVar, tkConst] then
+    LKind := CurKind;
+    if LKind in [tkVar, tkConst] then
     begin
       // F18: the mode is a flag on the parameter - the word itself stands at
       // its left edge, or right after a leading attribute group.
-      if CurKind = tkVar then
+      if LKind = tkVar then
         FB.AddFlag(LParam, nfVar)
       else
         FB.AddFlag(LParam, nfConst);
@@ -4132,7 +4142,7 @@ begin
   Result := FB.AddNode(nkTypeSec, NIL_NODE, FPos);
   if not AHeadless then
     Next; // type
-  while (CurKind = tkIdentifier) or (CurKind = tkLBracket) do
+  while CurKind in [tkIdentifier, tkLBracket] do
   begin
     if IsVisibilityWord then
       Break;
@@ -4230,7 +4240,7 @@ begin
     FB.SetAux(Result, 1);
   if not AHeadless then
     Next;
-  while (CurKind = tkIdentifier) or (CurKind = tkLBracket) do
+  while CurKind in [tkIdentifier, tkLBracket] do
   begin
     if IsVisibilityWord then
       Break;
@@ -4327,7 +4337,7 @@ begin
     FB.SetAux(Result, 1)
   else if CurKind in [tkVar, tkThreadvar] then
     Next;
-  while (CurKind = tkIdentifier) or (CurKind = tkLBracket) do
+  while CurKind in [tkIdentifier, tkLBracket] do
   begin
     if IsVisibilityWord then
       Break;

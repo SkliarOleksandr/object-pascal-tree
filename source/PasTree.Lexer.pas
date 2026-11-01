@@ -541,12 +541,14 @@ end;
 
 procedure TPasLexer.LexWhitespace;
 var
-  LStart: Integer;
+  LStart, LPos: Integer;
 begin
   LStart := FPos;
+  LPos := LStart; // a local cursor - see LexIdentOrKeyword
   repeat
-    Inc(FPos);
-  until (FPos >= FLen) or not IsWhitespace(FBase[FPos]);
+    Inc(LPos);
+  until (LPos >= FLen) or not IsWhitespace(FBase[LPos]);
+  FPos := LPos;
   Emit(tkWhitespace, LStart);
 end;
 
@@ -959,7 +961,7 @@ end;
 
 procedure TPasLexer.LexIdentOrKeyword(AAmpersand: Boolean);
 var
-  LStart, LNameStart: Integer;
+  LStart, LNameStart, LPos: Integer;
   LKind: TPasTokenKind;
 begin
   LStart := FPos;
@@ -971,16 +973,20 @@ begin
       Inc(FPos);
   end;
   LNameStart := FPos;
+  // The scan runs on a local cursor: on FPos, a field, every character
+  // would cost a write and two reads back through Self.
+  LPos := LNameStart;
   repeat
-    Inc(FPos);
-  until (FPos >= FLen) or not IsIdentChar(FBase[FPos]);
+    Inc(LPos);
+  until (LPos >= FLen) or not IsIdentChar(FBase[LPos]);
+  FPos := LPos;
   if AAmpersand then
   begin
     // An &-escaped word is always an identifier, never a keyword (B.3).
     Emit(tkIdentifier, LStart, [tfAmpersand]);
     Exit;
   end;
-  LKind := KeywordKind(FBase + LNameStart, FPos - LNameStart);
+  LKind := KeywordKind(FBase + LNameStart, LPos - LNameStart);
   Emit(LKind, LStart);
   // A member named Asm after a dot (`TLang.Asm`, spec B.8; dcc64 37.0,
   // local/probe-b57 L1) opens no BASM block - it swallowed the code up to the

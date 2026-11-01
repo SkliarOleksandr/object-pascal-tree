@@ -520,6 +520,11 @@ type
     function FindByArityDeepK(AScope: Integer; const AKey: TSemaKey;
       AWantGeneric: Boolean; ADepth: Integer = 0): Integer;
     procedure SnapshotRoutineScopeNames;
+    { FindLocal over a scope already in hand: FindLocalDeep and its kin hold
+      the pointer for their joins anyway, and FindLocal(AScope) would index
+      Scopes a second time. }
+    function FindLocalIn(AScope: PSemaScope; const AKey: TSemaKey): Integer;
+      inline;
   public
     Tree: TPasTree;                 // referenced, not owned
     Symbols: TArray<TSemaSymbol>;
@@ -2205,6 +2210,16 @@ begin
     Result := LScope.Names.Find(AKey, Symbols);
 end;
 
+function TPasSemaModel.FindLocalIn(AScope: PSemaScope;
+  const AKey: TSemaKey): Integer;
+begin
+  // FindLocal's body - the empty test before the hash, see there.
+  if AScope.Names.Count = 0 then
+    Result := NIL_SYM
+  else
+    Result := AScope.Names.Find(AKey, Symbols);
+end;
+
 function TPasSemaModel.FindLocal(AScope: Integer;
   const ANameLower: string): Integer;
 begin
@@ -2276,7 +2291,7 @@ begin
     if Result <> NIL_SYM then
       Exit;
   end;
-  Result := FindLocal(AScope, AKey);
+  Result := FindLocalIn(LScope, AKey);
   if Result <> NIL_SYM then
     Exit;
   // Joined scopes, most-recently-added first (uses/with priority) - each
@@ -2296,10 +2311,10 @@ function TPasSemaModel.FindLocalNoHelpers(AScope: Integer;
 var
   LScope: PSemaScope;
 begin
-  Result := FindLocal(AScope, AKey);
+  LScope := Scopes[AScope];
+  Result := FindLocalIn(LScope, AKey);
   if Result <> NIL_SYM then
     Exit;
-  LScope := Scopes[AScope];
   for var LIdx := High(LScope.Additional) downto 0 do
   begin
     Result := FindLocalDeep(LScope.Additional[LIdx], AKey, 1);
@@ -2375,7 +2390,7 @@ begin
     if Result <> NIL_SYM then
       Exit;
   end;
-  Result := FindLocal(AScope, AKey);
+  Result := FindLocalIn(LScope, AKey);
   if Result <> NIL_SYM then
     Exit;
   for LIdx := High(LScope.Additional) downto 0 do

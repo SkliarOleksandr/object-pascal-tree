@@ -1570,7 +1570,7 @@ procedure TPasPreprocessor.ProcessFile(AFileId: Integer);
 var
   LTokens: TArray<TPasToken>;
   LTok: TPasToken;
-  LIdx: Integer;
+  LIdx, LLast: Integer;
   LVis: TPasVisibleToken;
   LSkipStart: Integer;
   LLexer: TPasLexer;
@@ -1581,6 +1581,7 @@ var
   LActive: Boolean;
 begin
   LTokens := FFiles[AFileId].Tokens;
+  LLast := High(LTokens);
   LSkipStart := -1;
   LPull := False;
   LIdx := 0;
@@ -1603,7 +1604,7 @@ begin
     end
     else
     begin
-      if LIdx > High(LTokens) then
+      if LIdx > LLast then
         Break;
       LTok := LTokens[LIdx];
       if (LTok.Kind <> tkEndOfFile) and ((tfAsm in LTok.Flags) <> LWantAsm)
@@ -1697,7 +1698,7 @@ end;
 procedure TPasPreprocessor.HandleDirective(AFileId: Integer;
   const AToken: TPasToken);
 var
-  LText: PChar;
+  LSrc, LText: PChar;
   LLen, LNameLen: Integer;
   LKind: TPPDirKind;
   LLong: TLongSwitch;
@@ -1722,7 +1723,7 @@ var
       Inc(AP);
       Dec(AN);
     end;
-    LArgStart := AP - PChar(Pointer(FFiles[AFileId].Source));
+    LArgStart := AP - LSrc;
   end;
 
   // The argument - materialized ONLY by the branches that consume one.
@@ -1780,7 +1781,10 @@ begin
   // TokenText -> DirectiveBody -> SplitDirective chain materialized four to
   // five strings per directive before a single branch was taken. Classify
   // from the slice; materialize only what the taken branch consumes.
-  LText := PChar(Pointer(FFiles[AFileId].Source)) + AToken.Start;
+  // FFiles.List, not the indexer: that copies the whole stream record - its
+  // text and three arrays - to read one field.
+  LSrc := PChar(Pointer(FFiles.List[AFileId].Source));
+  LText := LSrc + AToken.Start;
   LLen := AToken.Len;
   if (LLen >= 2) and (LText^ = '{') then
   begin
@@ -1811,7 +1815,10 @@ begin
   LKind := ClassifyDirective(LText, LNameLen);
 
   // Is the directive itself dead code? See TPasPreprocessed.DeadDirectives.
-  // Recorded here, before anything below can recurse into an include.
+  // Recorded here, before anything below can recurse into an include. For
+  // every kind but $ELSEIF/$ELSE/$ENDIF, LParent is Active - the state of the
+  // code around the directive, which the branches below read: nothing before
+  // them moves the conditional stack.
   LTop := FCond.Count - 1;
   if LKind in [pdElseif, pdElse, pdEndif] then
     LParent := (LTop < 0) or FCond.List[LTop].ParentActive
@@ -1828,7 +1835,6 @@ begin
   if LKind = pdIfdef then
   begin
     LArg := SymbolArg;
-    LParent := Active;
     AddSymbolRef(LArg, drIfdef, LParent);
     LTaken := LParent and FDefines.IsDefined(LArg);
     PushCond(AFileId, AToken, LParent, LTaken);
@@ -1836,14 +1842,12 @@ begin
   else if LKind = pdIfndef then
   begin
     LArg := SymbolArg;
-    LParent := Active;
     AddSymbolRef(LArg, drIfndef, LParent);
     LTaken := LParent and not FDefines.IsDefined(LArg);
     PushCond(AFileId, AToken, LParent, LTaken);
   end
   else if LKind = pdIf then
   begin
-    LParent := Active;
     LArg := Arg;
     if LParent then
       LTaken := EvalIfExpression(LArg, AFileId, LArgStart, LParent, AToken)
@@ -1857,7 +1861,6 @@ begin
   else if LKind = pdIfopt then
   begin
     LArg := Arg;
-    LParent := Active;
     LTaken := False;
     if (Length(LArg) >= 2) and CharInSet(LArg[1], ['A'..'Z', 'a'..'z']) and
        CharInSet(LArg[2], ['+', '-']) then
@@ -1931,7 +1934,6 @@ begin
   else if LKind in [pdDefine, pdUndef] then
   begin
     LArg := SymbolArg;
-    LParent := Active;
     if LKind = pdDefine then
       AddSymbolRef(LArg, drDefine, LParent)
     else
@@ -1944,7 +1946,7 @@ begin
       FDefines.Undefine(LArg);
   end
   // ---- everything below acts only in active regions ----
-  else if not Active then
+  else if not LParent then
     // ignore
   else if LKind = pdInclude then
   begin

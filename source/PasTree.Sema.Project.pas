@@ -12173,7 +12173,7 @@ function TPasSemaProject.BareInheritedTarget(AMid, ANode: Integer;
 var
   LM, LTM: TPasSemaModel;
   LNode, LRoutine, LChild, LBody, LStruct, LNameNode, LParam, LName: Integer;
-  LArity, LReq, LTot, LDecl, LScope, LCand: Integer;
+  LArity, LReq, LTot, LHead, LDecl, LScope, LCand: Integer;
   LParams: Boolean;
   LVariadic, LNoHelpers: Boolean;
   LKey: TSemaKey;
@@ -12249,20 +12249,19 @@ begin
   if LStruct = NIL_SYM then
     Exit;
   LKey := PasNodeKey(LM.Tree, LNameNode);
+  // The method's own declarations of the name, looked up once for both rules
+  // below.
+  LHead := NIL_SYM;
+  LScope := LM.Symbols[LStruct].MemberScope;
+  if LScope <> NIL_SCOPE then
+    LHead := LM.FindLocalNoHelpers(LScope, LKey);
   // No parameter list written: a non-overloaded method may be implemented
   // so, and its arguments are still the declaration's (I1: TDer.Foo with
   // `Foo(A: Integer)` declared calls TBase.Foo(A), not TBase.Foo).
-  if not LParams then
-  begin
-    LScope := LM.Symbols[LStruct].MemberScope;
-    if LScope <> NIL_SCOPE then
-    begin
-      LDecl := LM.FindLocalNoHelpers(LScope, LKey);
-      if (LDecl <> NIL_SYM) and (LM.Symbols[LDecl].NextOverload = NIL_SYM) and
-         RoutineArity(AMid, LDecl, LReq, LTot, LVariadic) then
-        LArity := LTot;
-    end;
-  end;
+  if not LParams and (LHead <> NIL_SYM) and
+     (LM.Symbols[LHead].NextOverload = NIL_SYM) and
+     RoutineArity(AMid, LHead, LReq, LTot, LVariadic) then
+    LArity := LTot;
   LStart := InheritedStartX(AMid, LStruct, True, LNoHelpers);
   if not XValid(LStart) then
     Exit;
@@ -12270,25 +12269,21 @@ begin
   // not the name: the nearest ancestor's handler of that id whatever it is
   // called, else DefaultHandler (12.1.2, 12.3.1; audit E2-44). An id that
   // does not fold keeps the name rule below.
-  LScope := LM.Symbols[LStruct].MemberScope;
-  if LScope <> NIL_SCOPE then
+  LDecl := LHead;
+  while LDecl <> NIL_SYM do
   begin
-    LDecl := LM.FindLocalNoHelpers(LScope, LKey);
-    while LDecl <> NIL_SYM do
+    if MessageIdOf(AMid, LDecl, LMsgId) = mirId then
     begin
-      if MessageIdOf(AMid, LDecl, LMsgId) = mirId then
-      begin
-        case MessageHandlerX(LStart, LMsgId, AMemMid, AMemSym, ACtx) of
-          mirId:
-            Exit(True);
-          mirNone:
-            Exit(FindMemberX(AMid, LStart, SemaKey('defaulthandler'), AMemMid,
-              AMemSym, ACtx, 0, LNoHelpers));
-        end;
-        Break;   // an ancestor's id unreadable: the name rule below
+      case MessageHandlerX(LStart, LMsgId, AMemMid, AMemSym, ACtx) of
+        mirId:
+          Exit(True);
+        mirNone:
+          Exit(FindMemberX(AMid, LStart, SemaKey('defaulthandler'), AMemMid,
+            AMemSym, ACtx, 0, LNoHelpers));
       end;
-      LDecl := LM.Symbols[LDecl].NextOverload;
+      Break;   // an ancestor's id unreadable: the name rule below
     end;
+    LDecl := LM.Symbols[LDecl].NextOverload;
   end;
   if not FindMemberX(AMid, LStart, LKey, AMemMid, AMemSym, ACtx, 0,
        LNoHelpers) then
@@ -14529,19 +14524,29 @@ var
     // -1 rejects the candidate.
     function ArgScore(AArg: Integer; const AArgX, AParX: TSemaXType): Integer;
     var
-      LArg, LCore: Integer;
+      LCore, LCoreFirst: Integer;
+      LCoreKind: TPasNodeKind;
       LArgX, LParX, LCanonParX, LCanonArgX: TSemaXType;
     begin
       Result := 0;
-      LArg := AArg;
       LArgX := AArgX;
+      // The literal tests below look through parentheses: `(procedure begin
+      // ... end)` is how a multi-line anonymous argument is often written,
+      // and the client group's own instance of the TProc case was exactly that.
+      // Peeled once and its kind read once - the tests below asked for them
+      // up to six times.
+      LCore := NIL_NODE;
+      LCoreKind := nkError; // no node: none of the kinds tested below
+      if AArg <> NIL_NODE then
+      begin
+        LCore := PeelParens(LM.Tree, AArg);
+        LCoreKind := LM.Tree.Nodes[LCore].Kind;
+      end;
       // A literal's own unnamed type (E3-39) scores nothing: LiteralFits and
       // ArgShapeRejects below decide its fit, as before it had one.
-      if (LArg <> NIL_NODE) and
-         (LM.Tree.Nodes[PeelParens(LM.Tree, LArg)].Kind = nkAnonMethod) then
+      if LCoreKind = nkAnonMethod then
         LArgX := XNil;
       LParX := AParX;
-      LCore := NIL_NODE;
       // Each side canonicalized once per argument: the tests below asked for
       // the same CanonTypeX up to four times (C11).
       LCanonParX := LParX;
@@ -14550,24 +14555,20 @@ var
       LCanonArgX := LArgX;
       if XValid(LArgX) and XValid(LParX) then
         LCanonArgX := CanonTypeX(LArgX);
-      if LArg <> NIL_NODE then
+      if LCore <> NIL_NODE then
       begin
-        // The literal tests below look through parentheses: `(procedure begin
-        // ... end)` is how a multi-line anonymous argument is often written,
-        // and the client group's own instance of the TProc case was exactly that.
-        LCore := PeelParens(LM.Tree, LArg);
         // A paren-less constructor call through its type, `Reg(TFoo.Create)`,
         // is the instance it constructs - typed as the nkCall form types it
         // (audit E3-25: it scored as nothing, and a `class of` overload
         // declared first won).
-        if (LM.Tree.Nodes[LCore].Kind = nkMember) and
-           (LM.Tree.Nodes[LCore].FirstChild <> NIL_NODE) and
-           IsTypeDesignator(LM.Tree.Nodes[LCore].FirstChild) then
+        LCoreFirst := LM.Tree.Nodes[LCore].FirstChild;
+        if (LCoreKind = nkMember) and (LCoreFirst <> NIL_NODE) and
+           IsTypeDesignator(LCoreFirst) then
         begin
           var LCMid, LCSym: Integer;
           if TargetSym(LCore, LCMid, LCSym) and IsConstructorSym(LCMid, LCSym) then
           begin
-            LArgX := CtorResultX(GetX(LM.Tree.Nodes[LCore].FirstChild));
+            LArgX := CtorResultX(GetX(LCoreFirst));
             LCanonArgX := LArgX;
             if XValid(LArgX) and XValid(LParX) then
               LCanonArgX := CanonTypeX(LArgX);
@@ -14583,25 +14584,25 @@ var
         // whose paren-less call is a value.
         else if XValid(LArgX) and XValid(LParX) and
                 (XCatOf(LCanonArgX) = tcClass) and
-                ((LM.Tree.Nodes[LCore].Kind in [nkIdent, nkMember]) and
+                ((LCoreKind in [nkIdent, nkMember]) and
                  (IsTypeDesignator(LCore) or IsClassMethodSelf(LCore)) or
-                 (LM.Tree.Nodes[LCore].Kind = nkTypeArgs) and
-                 not HeadIsRoutine(LCore)) then
+                 (LCoreKind = nkTypeArgs) and not HeadIsRoutine(LCore)) then
         begin
           var LCanonPar := LCanonParX;
           case XCatOf(LCanonPar) of
             tcClassOf:
               begin
                 var LTarget := CanonTypeX(ClassRefTargetX(LCanonPar));
-                if XValid(LTarget) and XSameType(LTarget, LCanonArgX) then
-                  Inc(Result, 2)
-                else if XValid(LTarget) and
-                        XDescendsFrom(LCanonArgX, LTarget) then
-                  Inc(Result, 1)
-                else if XValid(LTarget) and
-                        (FModels[LTarget.UnitId].Symbols[LTarget.Sym].Kind <>
-                         skGenericParam) then
-                  Exit(-1);
+                if XValid(LTarget) then
+                begin
+                  if XSameType(LTarget, LCanonArgX) then
+                    Inc(Result, 2)
+                  else if XDescendsFrom(LCanonArgX, LTarget) then
+                    Inc(Result, 1)
+                  else if FModels[LTarget.UnitId].Symbols[LTarget.Sym].Kind <>
+                          skGenericParam then
+                    Exit(-1);
+                end;
               end;
             // A class reference is no instance, record, scalar or interface.
             tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
@@ -14630,7 +14631,7 @@ var
         // The same holds for a `[...]` against a parameter it cannot be passed
         // to - a string, a scalar, a class (IsBracketToScalar). ArgShapeRejects
         // is the rule the unit's ScoreArgs applies too.
-        if XValid(LParX) and ArgShapeRejects(LM.Tree.Nodes[LCore].Kind,
+        if XValid(LParX) and ArgShapeRejects(LCoreKind,
              IsProcedureDesignator(LCore), XCatOf(LCanonParX),
              FModels[LParX.UnitId].Symbols[LParX.Sym].Kind = skGenericParam) then
           Exit(-1);
@@ -14644,7 +14645,7 @@ var
         // had no references (pastree-mcp, 2026-09-25); `Take(TProc)` beside
         // `Take(TProc<Integer>)` is the same tie between two references.
         // Provable at the node, like the rule above.
-        if (LM.Tree.Nodes[LCore].Kind = nkAnonMethod) and XValid(LParX) and
+        if (LCoreKind = nkAnonMethod) and XValid(LParX) and
            (XCatOf(LParX) = tcProc) and not LiteralFits(LCore, LParX) then
           Exit(-1);
       end;
@@ -14681,10 +14682,15 @@ var
           // already failed.
           var LCanonPar := LCanonParX;
           var LCanonArg := LCanonArgX;
+          var LSame := XSameType(LCanonPar, LCanonArg);
           var LParCat: TSemaTypeCat := tcUnknown;
-          if not XSameType(LCanonPar, LCanonArg) then
+          var LArgCat: TSemaTypeCat := tcUnknown;
+          if not LSame then
+          begin
             LParCat := ParCatOf(LParX, LCanonPar);
-          if XSameType(LCanonPar, LCanonArg) then
+            LArgCat := XCatOf(LCanonArg);
+          end;
+          if LSame then
             Inc(Result, 2)
           // Two DIFFERENT record types REJECT the candidate, and so does an
           // ARRAY parameter against a record/class/interface argument or the
@@ -14700,15 +14706,15 @@ var
           // "nothing in the type's own chain fits, so this means an
           // INHERITED routine" fallback do its job. `nil` and untyped
           // arguments never reach here - they are tcNil/tcUnknown.
-          else if ArgStructNeedsConv(LParCat, XCatOf(LCanonArg)) and
-                  ArgStructRejects(LParCat, XCatOf(LCanonArg),
+          else if ArgStructNeedsConv(LParCat, LArgCat) and
+                  ArgStructRejects(LParCat, LArgCat,
                     HasConversionOperator(LCanonPar),
                     HasConversionOperator(LCanonArg)) then
             Exit(-1)
           // A static array where a dynamic one is wanted: no conversion
           // (`Image.Read(List^, N)` with List^ a static array takes TStream's
           // untyped Read, not the TBytes one).
-          else if (LParCat = tcArray) and (XCatOf(LCanonArg) = tcArray) and
+          else if (LParCat = tcArray) and (LArgCat = tcArray) and
                   IsDynArrayTypeX(LParX) and IsStaticArrayX(LArgX) then
             Exit(-1)
           // A scalar where a class, an interface or a class reference is
@@ -14717,7 +14723,7 @@ var
           // (ScalarEnumMismatch: `Seek(0, soCurrent)` takes Seek(Int64;
           // TSeekOrigin) over Seek(Longint; Word), local/probe-b31 O3); an
           // ordinal for an array.
-          else if ArgCatRejects(LParCat, XCatOf(LCanonArg)) then
+          else if ArgCatRejects(LParCat, LArgCat) then
             Exit(-1)
           // An instance where a class reference is wanted: `RegC(Self)` in
           // an instance method takes RegC(O: TObject) over RegC(C: TClass)
@@ -14725,7 +14731,7 @@ var
           // B3-30). A type name and a class method's Self, which are class
           // references, took the branch above; the unit typer's scorer has
           // no such branch, so the rule is this pass's alone.
-          else if (LParCat = tcClassOf) and (XCatOf(LCanonArg) = tcClass) then
+          else if (LParCat = tcClassOf) and (LArgCat = tcClass) then
             Exit(-1)
           else if XAssignableX(LParX, LArgX) then
             Inc(Result, 1);
@@ -15786,6 +15792,7 @@ var
     LAmbiguous: Boolean;
     LExt: TPasExtRef;
     LBX: TSemaXType;
+    LKind: TPasNodeKind;
     // A callee that is a seeded intrinsic: its result shape (4.11) and the
     // argument types the shape reads, collected only when it reads any.
     LIntrShape: TPasIntrinsicResult;
@@ -15797,6 +15804,7 @@ var
     // remembered as walked too (see the end of this procedure).
     if (LProbe <> nil) and LProbe.FX.ContainsKey(N) then
       Exit;
+    LKind := LM.Tree.Nodes[N].Kind;
     // `for var E in Coll do Body` (5.5.2): an element declared with no type
     // has no TypeNode, so nothing above typed it and every member reached
     // through it in the body stayed unbound - `for var AForm in AForms do
@@ -15829,7 +15837,7 @@ var
     // body had already been walked without it - `for var LPeriod :=
     // Low(TFilterByPeriod) to High(..) do ..LPeriod.ToString` lost the enum
     // helper's method on every counter, whatever the bound.
-    if LM.Tree.Nodes[N].Kind = nkForStmt then
+    if LKind = nkForStmt then
     begin
       LChild := LM.Tree.Nodes[N].FirstChild;   // the counter
       if LChild = NIL_NODE then
@@ -15854,7 +15862,7 @@ var
       end;
       Exit;
     end;
-    if LM.Tree.Nodes[N].Kind = nkForInStmt then
+    if LKind = nkForInStmt then
     begin
       LChild := LM.Tree.Nodes[N].FirstChild;   // the element
       if LChild = NIL_NODE then
@@ -15901,7 +15909,7 @@ var
       if LChild <> NIL_NODE then
         LChild := LM.Tree.Nodes[LChild].NextSibling;
     end
-    else if (LM.Tree.Nodes[N].Kind = nkBinaryOp) and IsWalkSpine(LChild) then
+    else if (LKind = nkBinaryOp) and IsWalkSpine(LChild) then
     begin
       // An operator chain's left spine is as deep as the chain is long
       // (audit A1-01, see TPasSemaResolver.WalkOperatorChain): down it in a
@@ -15930,7 +15938,7 @@ var
       LChild := LM.Tree.Nodes[LChild].NextSibling;
     end;
 
-    case LM.Tree.Nodes[N].Kind of
+    case LKind of
       nkIdent:
         begin
           // 12.1.2: the name at the head of an `inherited` designator is a
@@ -15965,16 +15973,19 @@ var
               skVar, skConst, skField, skParam, skProperty, skRoutine,
               skEnumValue:
                 begin
-                  if LNewSymType.TryGetValue(LSym, LBX) then
-                    SetXAt(N, LBX)
-                  else
-                    SetXAt(N, DeclTypeX(AId, LSym));
+                  // LBX holds what N is set to, for the two tests below.
+                  if not LNewSymType.TryGetValue(LSym, LBX) then
+                    LBX := DeclTypeX(AId, LSym);
+                  SetXAt(N, LBX);
                   // A parameterless intrinsic written bare - `Pi`,
                   // `ReturnAddress` - is a call without its parentheses.
-                  if not XValid(XAt(N)) and
+                  if not XValid(LBX) and
                      IsIntrinsicRoutine(AId, LSym, LIntrShape) and
                      not PasIntrinsicReadsArgs(LIntrShape) then
-                    SetXAt(N, IntrinsicResultX(AId, N, LIntrShape, nil));
+                  begin
+                    LBX := IntrinsicResultX(AId, N, LIntrShape, nil);
+                    SetXAt(N, LBX);
+                  end;
                   // An inline `var L := Expr` (3.1.3) or a for-in element
                   // has no type node and no SymTypeX entry until this pass
                   // has typed its declaration - which, for a PROBE run before
@@ -15987,7 +15998,7 @@ var
                   // probe's caller infers itself (FNoInferAt): run here as
                   // well, each link of a constant chain was inferred twice,
                   // 2^n for n links (audit C2-09).
-                  if not XValid(XAt(N)) and
+                  if not XValid(LBX) and
                      (LM.Symbols[LSym].Kind in [skVar, skConst]) and
                      (LM.Symbols[LSym].TypeNode = NIL_NODE) and
                      not ((LProbe <> nil) and (LProbe.FNoInferAt = N) and
@@ -16062,11 +16073,17 @@ var
           // instance whose argument is the OPEN TValue, so
           // `Map.ValueTable[I].WordMLValue` peeled to that parameter (7
           // sites, same suite) - OpenX looks through the arguments.
-          if (not XValid(XAt(N))) or OpenX(XAt(N)) or
-             ((XAt(N).Inst = NIL_INST) and NestedInGenericX(XAt(N))) then
+          // N's type is read once here and kept in step with the one SetXAt
+          // below, for these tests and the frame closing at the end.
+          var LNodeX := XAt(N);
+          if (not XValid(LNodeX)) or OpenX(LNodeX) or
+             ((LNodeX.Inst = NIL_INST) and NestedInGenericX(LNodeX)) then
           begin
             if LM.ExprTypeX.TryGetValue(N, LBX) and XValid(LBX) then
-              SetXAt(N, LBX);
+            begin
+              LNodeX := LBX;
+              SetXAt(N, LNodeX);
+            end;
             // A bare CALL of such a routine is typed once more at its nkCall,
             // from the routine's declared type closed over the callee's frame
             // (CtxAt) - and a bare name had none, so `GetRecord(0).Code` in a
@@ -16096,8 +16113,8 @@ var
           // ancestor - closes the declared type the way a member access
           // closes over its qualifier's frame (MemberTypeX). Without it the
           // re-pointed name typed as the OPEN parameter.
-          if XValid(XAt(N)) and (CtxAt(N) <> NIL_INST) then
-            SetXAt(N, SubstX(XAt(N), CtxAt(N), 0));
+          if XValid(LNodeX) and (CtxAt(N) <> NIL_INST) then
+            SetXAt(N, SubstX(LNodeX, CtxAt(N), 0));
         end;
 
       nkParen:
@@ -16168,9 +16185,11 @@ var
           // TFoo's own unit went to the parameterless TObject.Create an
           // ancestor declares, and TFoo's constructor had no references
           // (pastree-mcp on the client group, 2026-09-25). The same three
-          // positions as the FindMemberX branch below.
+          // positions as the FindMemberX branch below. For an nkMember the
+          // test reads only the tree around N, so one answer serves both.
           LMemCtx := LBX.Inst;
-          if IsValuePosition(N) then
+          var LValuePos := IsValuePosition(N);
+          if LValuePos then
             PreferParamlessMember(N, LName, LBX, LSym, LMemCtx);
           if LSym <> NIL_SYM then
           begin
@@ -16197,7 +16216,7 @@ var
             // with `Create(A: Integer)` declared ahead of `Create` is the
             // shape.
             if (FModels[LMemMid].Symbols[LMemSym].Kind = skRoutine) and
-               IsValuePosition(N) and
+               LValuePos and
                (RoutineRequiresArgs(LMemMid, LMemSym) or
                 IsGenericRoutine(LMemMid, LMemSym)) and
                ParamlessOverloadX(LBX, LM.Tree.NodeNameLower(LName),
@@ -16264,9 +16283,9 @@ var
       // one argument - the same selection, the same frame. Read as
       // comparisons it is no value of its own: its leaves were typed above.
       nkCall, nkAmbiguous:
-        if (LM.Tree.Nodes[N].Kind = nkCall) or AmbigIsGeneric(N) then
+        if (LKind = nkCall) or AmbigIsGeneric(N) then
         begin
-          if LM.Tree.Nodes[N].Kind = nkCall then
+          if LKind = nkCall then
             LBase := LM.Tree.Nodes[N].FirstChild   // the callee
           else
             LBase := N;
@@ -16410,7 +16429,7 @@ var
                   // the call untyped rather than claim the wrong result.
                 end;
               skType, skBuiltinType:
-                if LM.Tree.Nodes[N].Kind = nkAmbiguous then
+                if LKind = nkAmbiguous then
                   // `IMap<K, V>(X)`: the instantiation the head and items name
                   SetXAt(N, ResolveTypeExpr(AId, N))
                 else
@@ -16686,8 +16705,8 @@ var
     end;
     // The memo's "walked" mark for a node that typed to nothing - see the
     // top of this procedure. A typed node is in FX already.
-    if (LProbe <> nil) and not LProbe.FX.ContainsKey(N) then
-      LProbe.FX.Add(N, XNil);
+    if LProbe <> nil then
+      LProbe.FX.TryAdd(N, XNil);
   end;
 
 var
@@ -21347,7 +21366,7 @@ end;
 procedure TPasSemaProject.EnsureCrossWork(AId: Integer);
 var
   LM: TPasSemaModel;
-  LNode, LBase, LInhN, LWithN, LChild, LNext: Integer;
+  LNode, LBase, LBound, LInhN, LWithN, LChild, LNext: Integer;
   LInh, LWith: TArray<Integer>;
   LInhNames, LWithNames: TArray<string>;
   LInWith: TBytes;
@@ -21434,6 +21453,7 @@ begin
     // A goto's target is a label, never a with member (5.6.4; audit B4-17).
     if (LBase <> NIL_NODE) and (LM.Tree.Nodes[LBase].Kind = nkGotoStmt) then
       Continue;
+    LBound := LM.RefMap[LNode];
     if (LInWith <> nil) and (LInWith[LNode] <> 0) then
     begin
       // NOT filtered on bound-ness: the with pass revisits an already-bound
@@ -21462,11 +21482,11 @@ begin
       LWithNames[LWithN] := LName;
       Inc(LWithN);
     end
-    else if ((LM.RefMap[LNode] = NIL_SYM) and
+    else if ((LBound = NIL_SYM) and
              not LM.ExtRefMap.ContainsKey(LNode)) or
-            ((LM.RefMap[LNode] <> NIL_SYM) and
-             ((LM.Symbols[LM.RefMap[LNode]].Kind = skUnitRef) or
-              ((sfBuiltin in LM.Symbols[LM.RefMap[LNode]].Flags) and
+            ((LBound <> NIL_SYM) and
+             ((LM.Symbols[LBound].Kind = skUnitRef) or
+              ((sfBuiltin in LM.Symbols[LBound].Flags) and
                (StructSymOfNode(LM, LNode) <> NIL_SYM)) or
               LM.BoundPastStruct(LNode))) then
     begin
