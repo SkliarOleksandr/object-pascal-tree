@@ -368,6 +368,29 @@ type
     none there (mirNone), or one that cannot be read (mirUnknown). }
   TPasMsgIdRead = (mirId, mirNone, mirUnknown);
 
+  { One class's `message` methods as TPasSemaProject.MessageHandlerX reads
+    them: in member order up to the first whose id cannot be read, each with
+    its folded id, and whether such a method ends the list - the scan answers
+    mirUnknown there. }
+  TPasMsgHandler = record
+    Id: Int64;
+    Sym: Integer;
+  end;
+  TPasMsgTable = record
+    Handlers: TArray<TPasMsgHandler>;
+    EndsUnknown: Boolean;
+  end;
+  PPasMsgTable = ^TPasMsgTable;
+
+  { One model's message tables while a cross-type stage runs
+    (TPasSemaProject.MsgTableOf): a slot per scope, nil until a walk asks
+    about that class. }
+  TPasMsgSlots = class
+  public
+    Tables: TArray<PPasMsgTable>;
+    destructor Destroy; override;
+  end;
+
   { TPasSemaProject.XDescent: does a type descend from another? xdUnknown
     when the walk met a link it cannot follow (an ancestor's unit missing
     from the path, a depth cap) - a diagnostic acts on xdNo only. }
@@ -561,6 +584,20 @@ type
       being grown under a reader indexes a nil or half-built slot array.
       Committed after the parallel phase, each model by its own worker. }
     FXNewExprType: TArray<TList<TPair<Integer, TSemaXType>>>;
+    { The cross-type walks' message tables (MsgTableOf). Every bare
+      `inherited` in a `message` method looks its id up in the class's
+      ancestry, and without the tables each lookup folds every `message`
+      constant of every ancestor through the $IF oracle again: 102,875 folds
+      of 1,926 distinct ids on a 3750-unit closure, the same VCL ancestors for
+      every handler of every unit. A slot per model, nil until a walk asks
+      about one of its classes; shared by the parallel walks and filled
+      without a lock - a table is built whole, then published by a
+      compare-exchange, and when two walks build one the first published
+      wins. Lives for one RunCrossTypeOver, where nothing a table reads
+      changes: the models, their demotion, and so what the oracle can read
+      (OracleReadable never hydrates during an analysis). Empty everywhere
+      else, and MessageHandlerX scans directly. }
+    FMsgTables: TArray<TPasMsgSlots>;
     { Same treatment for CheckCalls' arity-error re-point, which runs in the
       parallel 'calls' pass - see RunCallChecksPass. Nil outside it,
       and then the write goes straight to the model. }
@@ -1995,6 +2032,12 @@ type
     // has a handler whose id cannot be read.
     function MessageHandlerX(const AStart: TSemaXType; AId: Int64;
       out AMemMid, AMemSym, ACtx: Integer): TPasMsgIdRead;
+    // The `message` methods of class scope AScope of model AMid as
+    // MessageHandlerX reads them (TPasMsgTable).
+    function MsgTableScan(AMid, AScope: Integer): TPasMsgTable;
+    // MsgTableScan's table through the cross-type stage's memo (FMsgTables),
+    // built once per class and stage; nil outside the stage.
+    function MsgTableOf(AMid, AScope: Integer): PPasMsgTable;
     function IsConstructorSym(AMid, ASym: Integer): Boolean;
     function IsClassCtorDtorSym(AMid, ASym: Integer): Boolean;
     function XParamSyms(AMid, ASym: Integer): TArray<Integer>;
@@ -12350,10 +12393,9 @@ function TPasSemaProject.MessageHandlerX(const AStart: TSemaXType; AId: Int64;
   out AMemMid, AMemSym, ACtx: Integer): TPasMsgIdRead;
 var
   LCur: TSemaXType;
-  LM: TPasSemaModel;
-  LScope, LSym, LDepth: Integer;
-  LList: TSemaSymList;
-  LId: Int64;
+  LScope, LDepth: Integer;
+  LTable: PPasMsgTable;
+  LOwn: TPasMsgTable;
 begin
   Result := mirNone;
   AMemMid := NIL_SYM;
@@ -12364,32 +12406,114 @@ begin
   begin
     if not XValid(LCur) then
       Exit;
-    LM := FModels[LCur.UnitId];
-    LScope := LM.Symbols[LCur.Sym].MemberScope;
+    LScope := FModels[LCur.UnitId].Symbols[LCur.Sym].MemberScope;
     if LScope <> NIL_SCOPE then
     begin
-      LList := LM.Scopes[LScope].Symbols;
-      for var LIdx := 0 to LList.Count - 1 do
+      LTable := MsgTableOf(LCur.UnitId, LScope);
+      if LTable = nil then
       begin
-        LSym := LList[LIdx];
-        if LM.Symbols[LSym].Kind <> skRoutine then
-          Continue;
-        case MessageIdOf(LCur.UnitId, LSym, LId) of
-          mirId:
-            if LId = AId then
-            begin
-              AMemMid := LCur.UnitId;
-              AMemSym := LSym;
-              ACtx := LCur.Inst;
-              Exit(mirId);
-            end;
-          mirUnknown:
-            Exit(mirUnknown);
-        end;
+        LOwn := MsgTableScan(LCur.UnitId, LScope);
+        LTable := @LOwn;
       end;
+      for var LIdx := 0 to High(LTable.Handlers) do
+        if LTable.Handlers[LIdx].Id = AId then
+        begin
+          AMemMid := LCur.UnitId;
+          AMemSym := LTable.Handlers[LIdx].Sym;
+          ACtx := LCur.Inst;
+          Exit(mirId);
+        end;
+      if LTable.EndsUnknown then
+        Exit(mirUnknown);
     end;
     LCur := AncestorOfX(LCur);
   end;
+end;
+
+destructor TPasMsgSlots.Destroy;
+begin
+  for var LTable in Tables do
+    if LTable <> nil then
+      Dispose(LTable);
+  inherited;
+end;
+
+{ A lookup over the table answers what a walk of the class's members would
+  for any id: the first handler of the id in member order, and mirUnknown
+  when a method whose id cannot be read comes first - so every method after
+  that one is left out. }
+function TPasSemaProject.MsgTableScan(AMid, AScope: Integer): TPasMsgTable;
+var
+  LM: TPasSemaModel;
+  LList: TSemaSymList;
+  LSym, LCount: Integer;
+  LId: Int64;
+begin
+  Result := Default(TPasMsgTable);
+  LM := FModels[AMid];
+  LList := LM.Scopes[AScope].Symbols;
+  LCount := 0;
+  for var LIdx := 0 to LList.Count - 1 do
+  begin
+    LSym := LList[LIdx];
+    if LM.Symbols[LSym].Kind <> skRoutine then
+      Continue;
+    case MessageIdOf(AMid, LSym, LId) of
+      mirId:
+        begin
+          if LCount = Length(Result.Handlers) then
+            SetLength(Result.Handlers, LCount * 2 + 4);
+          Result.Handlers[LCount].Id := LId;
+          Result.Handlers[LCount].Sym := LSym;
+          Inc(LCount);
+        end;
+      mirUnknown:
+        begin
+          Result.EndsUnknown := True;
+          Break;
+        end;
+    end;
+  end;
+  SetLength(Result.Handlers, LCount);
+end;
+
+{ Lock-free: a slot holds nil or a table that never changes again. A walk
+  that finds nil builds the table and publishes it with a compare-exchange
+  (a full barrier, so a reader that sees the pointer sees the table); a walk
+  that lost the race frees its copy - the same answer, built twice. The
+  model's slot block is published the same way. }
+function TPasSemaProject.MsgTableOf(AMid, AScope: Integer): PPasMsgTable;
+var
+  LSlots, LNew: TPasMsgSlots;
+  LTable: PPasMsgTable;
+  LBuilt: TPasMsgTable;
+begin
+  Result := nil;
+  if AMid > High(FMsgTables) then
+    Exit;   // outside a cross-type stage
+  LSlots := FMsgTables[AMid];
+  if LSlots = nil then
+  begin
+    LNew := TPasMsgSlots.Create;
+    SetLength(LNew.Tables, FModels[AMid].Scopes.Count);
+    LSlots := TPasMsgSlots(AtomicCmpExchange(Pointer(FMsgTables[AMid]),
+      Pointer(LNew), nil));
+    if LSlots = nil then
+      LSlots := LNew
+    else
+      LNew.Free;
+  end;
+  Result := LSlots.Tables[AScope];
+  if Result <> nil then
+    Exit;
+  LBuilt := MsgTableScan(AMid, AScope);
+  New(LTable);
+  LTable^ := LBuilt;
+  Result := AtomicCmpExchange(LSlots.Tables[AScope], LTable, nil);
+  if Result = nil then
+    Result := LTable
+  else
+    Dispose(LTable);
 end;
 
 // Member lookup by name on a type, following type aliases and the first
@@ -16878,11 +17002,19 @@ begin
     FXNewExprType[LId] := TList<TPair<Integer, TSemaXType>>.Create;
   end;
   try
-    ForEachIndex(High(AIds), 'cross-type',
-      procedure(ASlot: Integer)
-      begin
-        CrossType(AIds[ASlot]);
-      end, LMidOf);
+    // The walks' message tables (MsgTableOf): for these walks only.
+    SetLength(FMsgTables, FModels.Count);
+    try
+      ForEachIndex(High(AIds), 'cross-type',
+        procedure(ASlot: Integer)
+        begin
+          CrossType(AIds[ASlot]);
+        end, LMidOf);
+    finally
+      for var LSlots in FMsgTables do
+        LSlots.Free;
+      FMsgTables := nil;
+    end;
     ForEachIndex(High(AIds), 'cross-type-commit',
       procedure(ASlot: Integer)
       begin
