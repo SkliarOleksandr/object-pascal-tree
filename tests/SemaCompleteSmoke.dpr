@@ -719,6 +719,81 @@ const
     'procedure LateProc;'#10'begin'#10'end;'#10 +
     'end.'#10;
 
+  // Audit C1/C2 (local/ALIAS-GENERIC-AUDIT-2026-11.md): the overload a call
+  // binds to, by its arguments' types in project space, and the frame a
+  // generic method's written type arguments make. TCustOv's own field
+  // CreatedF tells its rows from TObjOv's.
+  OV_EXT =
+    'unit extov;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TObjOv = class'#10 +
+    '  public'#10 +
+    '    IdF: Integer;'#10 +
+    '  end;'#10 +
+    '  TCustOv = class(TObjOv)'#10 +
+    '  public'#10 +
+    '    CreatedF: Integer;'#10 +
+    '  end;'#10 +
+    '  TCustOvClass = class of TCustOv;'#10 +
+    '  TBoxOv<T> = class'#10 +
+    '  public'#10 +
+    '    BoxF: T;'#10 +
+    '  end;'#10 +
+    '  TCustBoxU = TBoxOv<TCustOv>;'#10 +
+    '  TUtilU = class'#10 +
+    '  public'#10 +
+    '    class function FirstOf<T>(const B: TBoxOv<T>): T; static;'#10 +
+    '    class function Make<T>: T; static;'#10 +
+    '  end;'#10 +
+    'function UPick(const S: string): TObjOv; overload;'#10 +
+    'function UPick(const C: TCustOv): TCustOv; overload;'#10 +
+    'implementation'#10 +
+    'class function TUtilU.FirstOf<T>(const B: TBoxOv<T>): T;'#10 +
+    'begin'#10'end;'#10 +
+    'class function TUtilU.Make<T>: T;'#10'begin'#10'end;'#10 +
+    'function UPick(const S: string): TObjOv;'#10'begin'#10'end;'#10 +
+    'function UPick(const C: TCustOv): TCustOv;'#10'begin'#10'end;'#10 +
+    'end.'#10;
+  OV_MAIN =
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses extov;'#10 +
+    'type'#10 +
+    '  TCustAliasM = TCustOv;'#10 +
+    '  TCustBoxM = TBoxOv<TCustOv>;'#10 +
+    '  TUtilM = class'#10 +
+    '  public'#10 +
+    '    class function FirstOf<T>(const B: TBoxOv<T>): T; static;'#10 +
+    '    class function Make<T>: T; static;'#10 +
+    '    class function Get: TObjOv; overload; static;'#10 +
+    '    class function Get<T>: T; overload; static;'#10 +
+    '  end;'#10 +
+    'function Pick(const B: TBoxOv<TCustOv>): TCustOv; overload;'#10 +
+    'function Pick(const S: string): TObjOv; overload;'#10 +
+    'function PickC(const S: string): TObjOv; overload;'#10 +
+    'function PickC(const C: TCustOv): TCustOv; overload;'#10 +
+    'function Reg(O: TCustOv): TObjOv; overload;'#10 +
+    'function Reg(C: TCustOvClass): TCustOv; overload;'#10 +
+    'implementation'#10 +
+    'class function TUtilM.FirstOf<T>(const B: TBoxOv<T>): T;'#10 +
+    'begin'#10'end;'#10 +
+    'class function TUtilM.Make<T>: T;'#10'begin'#10'end;'#10 +
+    'class function TUtilM.Get: TObjOv;'#10'begin'#10'end;'#10 +
+    'class function TUtilM.Get<T>: T;'#10'begin'#10'end;'#10 +
+    'function Pick(const B: TBoxOv<TCustOv>): TCustOv;'#10'begin'#10'end;'#10 +
+    'function Pick(const S: string): TObjOv;'#10'begin'#10'end;'#10 +
+    'function PickC(const S: string): TObjOv;'#10'begin'#10'end;'#10 +
+    'function PickC(const C: TCustOv): TCustOv;'#10'begin'#10'end;'#10 +
+    'function Reg(O: TCustOv): TObjOv;'#10'begin'#10'end;'#10 +
+    'function Reg(C: TCustOvClass): TCustOv;'#10'begin'#10'end;'#10 +
+    'procedure Go(BM: TCustBoxM; CM: TCustAliasM; CD: TCustOv;'#10 +
+    '  BU: TCustBoxU);'#10 +
+    'begin'#10 +
+    '//OV'#10 +
+    'end;'#10 +
+    'end.'#10;
+
 var
   GDir: string;
   B50_Src: string;
@@ -751,6 +826,23 @@ begin
     AWant, '(any)'), IfThen(ANot <> '', ', not ' + ANot, '')]),
     GHit and ((AWant = '') or Has(AWant)) and
     ((ANot = '') or not Has(ANot)),
+    procedure
+    begin
+      Write('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':');
+      for var LFi := 0 to Min(High(GItems), 9) do
+        Write(' ', GItems[LFi].Name);
+      Writeln;
+    end);
+end;
+
+// One C1/C2 case: the marker `//OV` of OV_MAIN replaced by ALine, and the
+// list there holds AWant and not ANot ('' = no check).
+procedure OvCase(const ALine, AWant, ANot: string);
+begin
+  ProjCase(StringReplace(OV_MAIN, '//OV', '  ' + ALine, []));
+  GCounter.Ok(Format('C1/C2 %s lists %s%s', [ALine, AWant,
+    IfThen(ANot <> '', ', not ' + ANot, '')]),
+    GHit and Has(AWant) and ((ANot = '') or not Has(ANot)),
     procedure
     begin
       Write('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':');
@@ -2239,6 +2331,51 @@ begin
   ProjCase(StringReplace(StringReplace(LDotMain, '//V', 'Integer', []),
     'implementation', 'type TQ = Zz.|;'#10'implementation', []));
   GCounter.Ok('dotted: ... in a type declaration too', GHit and Has('Leaf'));
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
+  // ======== audit C1/C2: the overload and the frame a call types in =========
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_ov');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'extov.pas'), OV_EXT);
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'), OV_MAIN);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  GCounter.Ok('C1/C2 mini-project analyzed', GProjMid >= 0);
+  // C1: an alias the edited unit declares has no category for its own unit
+  // typer, which scored it assignable to `string`. The instantiation's
+  // overload is declared first: the analysis does not canonicalize an alias
+  // of an instantiation yet, so the declaration order still breaks its tie.
+  OvCase('Pick(BM).|', 'CreatedF', '');
+  OvCase('Pick(TCustBoxM(nil)).|', 'CreatedF', '');
+  // ...and the string overload first: the same type under two names is an
+  // exact match (6.3.1), another unit's class included.
+  OvCase('PickC(CM).|', 'CreatedF', '');
+  OvCase('PickC(CD).|', 'CreatedF', '');
+  OvCase('PickC(''xy'').|', 'IdF', 'CreatedF');
+  // A used unit's family was chosen by the argument count alone.
+  OvCase('UPick(CD).|', 'CreatedF', '');
+  OvCase('UPick(''xy'').|', 'IdF', 'CreatedF');
+  // A type name is a class reference: the `class of` overload (15.2.1).
+  OvCase('Reg(TCustOv).|', 'CreatedF', '');
+  // C2: the written type arguments are the answer (16.5.1), for a generic
+  // method of the edited unit and of a used one.
+  OvCase('TUtilM.FirstOf<TCustOv>(BU).|', 'CreatedF', '');
+  OvCase('TUtilM.FirstOf<TCustAliasM>(BM).|', 'CreatedF', '');
+  OvCase('TUtilU.FirstOf<TCustOv>(BU).|', 'CreatedF', '');
+  // ...called without parentheses (6.6.1), and beside a plain overload of
+  // the name: the written arguments pick the generic one, either way.
+  OvCase('TUtilM.Make<TCustOv>.|', 'CreatedF', '');
+  OvCase('TUtilU.Make<TCustOv>.|', 'CreatedF', '');
+  OvCase('TUtilM.Get<TCustOv>.|', 'CreatedF', '');
+  OvCase('TUtilM.Get<TCustOv>().|', 'CreatedF', '');
+  OvCase('TUtilM.Get.|', 'IdF', 'CreatedF');
   GComp.Free;
   GComp := nil;
   GProj.Free;

@@ -1487,6 +1487,13 @@ type
     function SubrangeCatX(AMid, ASym: Integer): TSemaTypeCat;
     function XSameType(const A, B: TSemaXType): Boolean;
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
+    function HasConversionOperator(const AX: TSemaXType): Boolean;
+    function ParCatOf(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
+    function IsStaticArrayX(const AX: TSemaXType): Boolean;
+    // ArgFitX over sides already canonicalized - see there.
+    function ArgFitCanonX(const AArgX, AParX, ACanonArgX,
+      ACanonParX: TSemaXType; const ATree: TPasTree; ACore: Integer;
+      AProcDesig, AClassRef: Boolean): Integer;
     // ACallMid / AArgNodes: the call site's model and argument nodes, read
     // only for an open-array parameter (its element type binds T).
     function InferMethodFrame(AMid, ASym: Integer;
@@ -2062,6 +2069,20 @@ type
       known frame comes back as the SAME index the project uses. }
     function Instantiate(const ABase: TSemaXType;
       const AArgs: TArray<TSemaXType>): Integer;
+    { How one argument of type AArgX fits a parameter of type AParX - the
+      cross-type pass's overload scorer, the rules it applies to every
+      argument: 3 a Char parameter for a character literal, 2 the same type,
+      1 assignable, 0 no evidence, -1 the candidate is out. ATree / ACore:
+      the argument's node under its parentheses (NIL_NODE: none), whose shape
+      decides the anonymous-method, procedure and `[...]` rejections and the
+      literal's rank; AProcDesig: it names a procedure; AClassRef: it is a
+      class REFERENCE to AArgX (a type name, `Self` in a class method), not
+      an instance. Promoted for the completion engine, which picks an
+      overload of a buffer being typed by the same rule: the buffer's own
+      unit typer cannot see a type of another unit, nor an alias of one
+      (audit C1). }
+    function ArgFitX(const AArgX, AParX: TSemaXType; const ATree: TPasTree;
+      ACore: Integer; AProcDesig, AClassRef: Boolean): Integer;
     { The ENUMERATING twin of FindMemberX, for completion: reports EVERY
       member reachable from ABase, walking the same hops in the same order -
       active helper (and its ancestor helpers) first, then each type's own
@@ -13389,6 +13410,216 @@ begin
   Result := CatAssignable(D, S, False);
 end;
 
+{ Does AX's type declare a conversion operator - the one thing that can make
+  a value of another record type acceptable where AX is wanted (`class
+  operator Implicit`/`Explicit`, 6 sec. 6.7)? Only the type's OWN members are
+  read: an operator is not inherited. }
+function TPasSemaProject.HasConversionOperator(const AX: TSemaXType): Boolean;
+var
+  LScope: Integer;
+begin
+  Result := False;
+  if not XValid(AX) then
+    Exit;
+  LScope := FModels[AX.UnitId].Symbols[AX.Sym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  Result := (FModels[AX.UnitId].DeclaresOperator(LScope, 'implicit')) or
+            (FModels[AX.UnitId].DeclaresOperator(LScope, 'explicit'));
+end;
+
+// The parameter's category for the rejections. `TBytes = TArray<Byte>`
+// canonicalizes to no category of its own (an alias of an instantiation
+// in another unit), so a Byte or a record for it was scored assignable
+// and `MS.Write(B[0], N)` / `Stream.Write(Header, SizeOf(Header))` took
+// TStream's TBytes overload over the untyped one: an unknown category is
+// asked whether it is a dynamic array (IsDynArrayTypeX).
+function TPasSemaProject.ParCatOf(const APar,
+  ACanonPar: TSemaXType): TSemaTypeCat;
+begin
+  Result := XCatOf(ACanonPar);
+  if (Result = tcUnknown) and IsDynArrayTypeX(APar) then
+    Result := tcArray;
+end;
+
+// Is AX a STATIC array (`array[0..N] of T`, `TByteArray`)? Read off its
+// declaration after aliases: an nkArrayType with an index child.
+function TPasSemaProject.IsStaticArrayX(const AX: TSemaXType): Boolean;
+var
+  LCanon: TSemaXType;
+  LDef, LFirst: Integer;
+  LTree: TPasTree;
+begin
+  Result := False;
+  LCanon := CanonTypeX(AX);
+  if not XValid(LCanon) or (XCatOf(LCanon) <> tcArray) then
+    Exit;
+  LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
+  if LDef = NIL_NODE then
+    Exit;
+  LTree := FModels[LCanon.UnitId].Tree;
+  if (LTree.Nodes[LDef].Kind <> nkArrayType) or
+     (LTree.Nodes[LDef].Aux = 1) then
+    Exit;
+  LFirst := LTree.Nodes[LDef].FirstChild;
+  Result := (LFirst <> NIL_NODE) and
+    (LTree.Nodes[LFirst].NextSibling <> NIL_NODE);
+end;
+
+function TPasSemaProject.ArgFitX(const AArgX, AParX: TSemaXType;
+  const ATree: TPasTree; ACore: Integer; AProcDesig,
+  AClassRef: Boolean): Integer;
+var
+  LArgX, LCanonArgX, LCanonParX: TSemaXType;
+begin
+  LArgX := AArgX;
+  // A literal's own unnamed type scores nothing (CrossType's ArgScore).
+  if (ACore <> NIL_NODE) and (ATree.Nodes[ACore].Kind = nkAnonMethod) then
+    LArgX := XNil;
+  LCanonParX := AParX;
+  if XValid(AParX) then
+    LCanonParX := CanonTypeX(AParX);
+  LCanonArgX := LArgX;
+  if XValid(LArgX) and XValid(AParX) then
+    LCanonArgX := CanonTypeX(LArgX);
+  Result := ArgFitCanonX(LArgX, AParX, LCanonArgX, LCanonParX, ATree, ACore,
+    AProcDesig, AClassRef);
+end;
+
+function TPasSemaProject.ArgFitCanonX(const AArgX, AParX, ACanonArgX,
+  ACanonParX: TSemaXType; const ATree: TPasTree; ACore: Integer;
+  AProcDesig, AClassRef: Boolean): Integer;
+var
+  LParCat, LArgCat: TSemaTypeCat;
+  LTarget: TSemaXType;
+begin
+  Result := 0;
+  if not XValid(AParX) then
+    Exit;
+  // A class REFERENCE (CrossType's ArgScore says which nodes are one) fits
+  // a `class of` its class or an ancestor names, and nothing that wants an
+  // instance, a record, a scalar or an interface.
+  if AClassRef and XValid(AArgX) and (XCatOf(ACanonArgX) = tcClass) then
+  begin
+    case XCatOf(ACanonParX) of
+      tcClassOf:
+        begin
+          LTarget := CanonTypeX(ClassRefTargetX(ACanonParX));
+          if XValid(LTarget) then
+          begin
+            if XSameType(LTarget, ACanonArgX) then
+              Result := 2
+            else if XDescendsFrom(ACanonArgX, LTarget) then
+              Result := 1
+            else if FModels[LTarget.UnitId].Symbols[LTarget.Sym].Kind <>
+                    skGenericParam then
+              Result := -1;
+          end;
+        end;
+      tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
+      tcChar, tcString, tcEnum, tcSet, tcArray:
+        Result := -1;
+    end;
+    Exit;
+  end;
+  // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
+  // the only mismatch that does. `TThread.Synchronize(nil, procedure ...
+  // end)` fits BOTH the public `(const AThread: TThread; AThreadProc:
+  // TThreadProcedure)` and the PRIVATE `(ASyncRec: PSynchronizeRecord;
+  // QueueEvent: Boolean = False; ForceQueue: Boolean = False)` on arity,
+  // `nil` scores the same against either first parameter, and the first
+  // candidate - the private one - won the tie. 41 of bigflat's 111 false
+  // E2361 came from that single pair.
+  //
+  // Deliberately SYNTACTIC and not a general type-mismatch rejection. A
+  // written-out `procedure ... end` is a value of procedural type and
+  // nothing else, so this is provable at the node; a general "the types do
+  // not fit" rule is not, and would have to answer for record `Implicit`
+  // operators, Variant, untyped parameters, and the rule that a
+  // PARAMETERLESS function reference in a value position is CALLED (which
+  // is why a tcProc argument in general may legitimately meet a Boolean
+  // parameter - see the E2012 entry). A literal cannot be called that way.
+  // The same holds for a `[...]` against a parameter it cannot be passed
+  // to - a string, a scalar, a class (IsBracketToScalar). ArgShapeRejects
+  // is the rule the unit's ScoreArgs applies too.
+  if (ACore <> NIL_NODE) and ArgShapeRejects(ATree.Nodes[ACore].Kind,
+     AProcDesig, XCatOf(ACanonParX),
+     FModels[AParX.UnitId].Symbols[AParX.Sym].Kind = skGenericParam) then
+    Exit(-1);
+  if not XValid(AArgX) then
+    Exit;
+  // A one-character literal is a Char constant (IsCharLiteralExpr -
+  // through parentheses and both branches of an inline `if`, every
+  // piece of `#13#10` counted): a `Char` parameter fits it best, a
+  // string one next (the literal's own type here), an AnsiChar one
+  // least - 'a' takes F(WideChar) over F(AnsiChar) and F(string) over
+  // F(AnsiChar), either order (local/probe-b31 O2, probe-b32 P1).
+  if (XCatOf(ACanonParX) = tcChar) and (ACore <> NIL_NODE) and
+     IsCharLiteralExpr(ATree, ACore) then
+  begin
+    if PasBuiltinIsChar(FModels[ACanonParX.UnitId], ACanonParX.Sym,
+       FPlatform) then
+      Exit(3);
+    Exit(1);
+  end;
+  // Not the same SYMBOL - but it may still be the same TYPE reached
+  // through an alias, and the two sides are read in different units
+  // by construction. `LayoutUnitsToPixels` in
+  // dxDocumentLayoutUnitConverter is declared for TSize, TPoint and
+  // TRect at one arity; a TRect argument matched none of them by
+  // symbol, all three scored 0, and the FIRST - TSize - won the tie.
+  // The call then typed as TSize: a wrong binding that costs no
+  // diagnostic until something reads a member off it (`.ToRectF` in
+  // a suite's ruler unit). Canonicalized only after the cheap test has
+  // already failed.
+  if XSameType(AParX, AArgX) or XSameType(ACanonParX, ACanonArgX) then
+    Exit(2);
+  LParCat := ParCatOf(AParX, ACanonParX);
+  LArgCat := XCatOf(ACanonArgX);
+  // Two DIFFERENT record types REJECT the candidate, and so does an
+  // ARRAY parameter against a record/class/interface argument or the
+  // reverse (ArgStructRejects). The general "the types do not fit"
+  // rule is still not attempted (see the note above), but these
+  // corners are decidable: the one thing that could make them fit -
+  // a `class operator Implicit`/`Explicit` - is a MEMBER, so it can
+  // be looked for. The array one matters because a binding stops at
+  // the FIRST declaration of a name: a derived interface that
+  // declares only the `TArray<T>` overload of a method and INHERITS
+  // the single-item one leaves the array overload as the only
+  // candidate, fitting on arity; rejecting it is what lets the
+  // "nothing in the type's own chain fits, so this means an
+  // INHERITED routine" fallback do its job. `nil` and untyped
+  // arguments never reach here - they are tcNil/tcUnknown.
+  if ArgStructNeedsConv(LParCat, LArgCat) and
+     ArgStructRejects(LParCat, LArgCat, HasConversionOperator(ACanonParX),
+       HasConversionOperator(ACanonArgX)) then
+    Exit(-1);
+  // A static array where a dynamic one is wanted: no conversion
+  // (`Image.Read(List^, N)` with List^ a static array takes TStream's
+  // untyped Read, not the TBytes one).
+  if (LParCat = tcArray) and (LArgCat = tcArray) and
+     IsDynArrayTypeX(AParX) and IsStaticArrayX(AArgX) then
+    Exit(-1);
+  // A scalar where a class, an interface or a class reference is
+  // wanted (IsScalarToReference); an enumeration where another
+  // ordinal, a Boolean, a Char or a float is wanted, or the reverse
+  // (ScalarEnumMismatch: `Seek(0, soCurrent)` takes Seek(Int64;
+  // TSeekOrigin) over Seek(Longint; Word), local/probe-b31 O3); an
+  // ordinal for an array.
+  if ArgCatRejects(LParCat, LArgCat) then
+    Exit(-1);
+  // An instance where a class reference is wanted: `RegC(Self)` in
+  // an instance method takes RegC(O: TObject) over RegC(C: TClass)
+  // in either order (15.1.1, local/probe-park/b330 SP.dpr; audit
+  // B3-30). A type name and a class method's Self, which are class
+  // references, took ArgScore's own branch before; the unit typer's
+  // scorer has no such branch, so the rule is this pass's alone.
+  if (LParCat = tcClassOf) and (LArgCat = tcClass) then
+    Exit(-1);
+  if XAssignableX(AParX, AArgX) then
+    Result := 1;
+end;
+
 // A routine's parameter symbols in declaration order (its param scope -
 // reused as MemberScope, see the resolver). nil when there is no param info
 // (builtins).
@@ -14444,24 +14675,6 @@ var
   // parameter types substituted in ACtx (the instantiation frame the callee
   // member was found in). -1 = the candidate's arity does not admit the call.
   // A candidate with NO param info (builtin) fits neutrally at 0.
-  { Does AX's type declare a conversion operator - the one thing that can make
-    a value of another record type acceptable where AX is wanted (`class
-    operator Implicit`/`Explicit`, 6 sec. 6.7)? Only the type's OWN members are
-    read: an operator is not inherited. }
-  function HasConversionOperator(const AX: TSemaXType): Boolean;
-  var
-    LScope: Integer;
-  begin
-    Result := False;
-    if not XValid(AX) then
-      Exit;
-    LScope := FModels[AX.UnitId].Symbols[AX.Sym].MemberScope;
-    if LScope = NIL_SCOPE then
-      Exit;
-    Result := (FModels[AX.UnitId].DeclaresOperator(LScope, 'implicit')) or
-              (FModels[AX.UnitId].DeclaresOperator(LScope, 'explicit'));
-  end;
-
   function ScoreCandidate(ACall, AMid, ACand, ACtx: Integer): Integer;
   var
     LPM: TPasSemaModel;
@@ -14566,43 +14779,6 @@ var
       end;
     end;
 
-    // The parameter's category for the rejections. `TBytes = TArray<Byte>`
-    // canonicalizes to no category of its own (an alias of an instantiation
-    // in another unit), so a Byte or a record for it was scored assignable
-    // and `MS.Write(B[0], N)` / `Stream.Write(Header, SizeOf(Header))` took
-    // TStream's TBytes overload over the untyped one: an unknown category is
-    // asked whether it is a dynamic array (IsDynArrayTypeX).
-    function ParCatOf(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
-    begin
-      Result := XCatOf(ACanonPar);
-      if (Result = tcUnknown) and IsDynArrayTypeX(APar) then
-        Result := tcArray;
-    end;
-
-    // Is AX a STATIC array (`array[0..N] of T`, `TByteArray`)? Read off its
-    // declaration after aliases: an nkArrayType with an index child.
-    function IsStaticArrayX(const AX: TSemaXType): Boolean;
-    var
-      LCanon: TSemaXType;
-      LDef, LFirst: Integer;
-      LTree: TPasTree;
-    begin
-      Result := False;
-      LCanon := CanonTypeX(AX);
-      if not XValid(LCanon) or (XCatOf(LCanon) <> tcArray) then
-        Exit;
-      LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
-      if LDef = NIL_NODE then
-        Exit;
-      LTree := FModels[LCanon.UnitId].Tree;
-      if (LTree.Nodes[LDef].Kind <> nkArrayType) or
-         (LTree.Nodes[LDef].Aux = 1) then
-        Exit;
-      LFirst := LTree.Nodes[LDef].FirstChild;
-      Result := (LFirst <> NIL_NODE) and
-        (LTree.Nodes[LFirst].NextSibling <> NIL_NODE);
-    end;
-
     function LiteralFits(ALit: Integer; const AX: TSemaXType): Boolean;
     var
       LCanon: TSemaXType;
@@ -14670,11 +14846,13 @@ var
     // -1 rejects the candidate.
     function ArgScore(AArg: Integer; const AArgX, AParX: TSemaXType): Integer;
     var
-      LCore, LCoreFirst: Integer;
+      LCore, LCoreFirst, LFit: Integer;
       LCoreKind: TPasNodeKind;
       LArgX, LParX, LCanonParX, LCanonArgX: TSemaXType;
+      LClassRef: Boolean;
     begin
       Result := 0;
+      LClassRef := False;
       LArgX := AArgX;
       // The literal tests below look through parentheses: `(procedure begin
       // ... end)` is how a multi-line anonymous argument is often written,
@@ -14727,161 +14905,38 @@ var
         // `Self` in a class method (IsClassMethodSelf; audit B3-30), and so is
         // a generic type name, `SubscribeToMessage(TMessage<TNotification>,
         // ...)` (System.Notification) - unless its head is a generic ROUTINE,
-        // whose paren-less call is a value.
-        else if XValid(LArgX) and XValid(LParX) and
-                (XCatOf(LCanonArgX) = tcClass) and
-                ((LCoreKind in [nkIdent, nkMember]) and
-                 (IsTypeDesignator(LCore) or IsClassMethodSelf(LCore)) or
-                 (LCoreKind = nkTypeArgs) and not HeadIsRoutine(LCore)) then
-        begin
-          var LCanonPar := LCanonParX;
-          case XCatOf(LCanonPar) of
-            tcClassOf:
-              begin
-                var LTarget := CanonTypeX(ClassRefTargetX(LCanonPar));
-                if XValid(LTarget) then
-                begin
-                  if XSameType(LTarget, LCanonArgX) then
-                    Inc(Result, 2)
-                  else if XDescendsFrom(LCanonArgX, LTarget) then
-                    Inc(Result, 1)
-                  else if FModels[LTarget.UnitId].Symbols[LTarget.Sym].Kind <>
-                          skGenericParam then
-                    Exit(-1);
-                end;
-              end;
-            // A class reference is no instance, record, scalar or interface.
-            tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
-            tcChar, tcString, tcEnum, tcSet, tcArray:
-              Exit(-1);
-          end;
-          Exit;
-        end;
-        // An ANONYMOUS METHOD LITERAL rejects the candidate outright, and it is
-        // the only mismatch that does. `TThread.Synchronize(nil, procedure ...
-        // end)` fits BOTH the public `(const AThread: TThread; AThreadProc:
-        // TThreadProcedure)` and the PRIVATE `(ASyncRec: PSynchronizeRecord;
-        // QueueEvent: Boolean = False; ForceQueue: Boolean = False)` on arity,
-        // `nil` scores the same against either first parameter, and the first
-        // candidate - the private one - won the tie. 41 of bigflat's 111 false
-        // E2361 came from that single pair.
-        //
-        // Deliberately SYNTACTIC and not a general type-mismatch rejection. A
-        // written-out `procedure ... end` is a value of procedural type and
-        // nothing else, so this is provable at the node; a general "the types do
-        // not fit" rule is not, and would have to answer for record `Implicit`
-        // operators, Variant, untyped parameters, and the rule that a
-        // PARAMETERLESS function reference in a value position is CALLED (which
-        // is why a tcProc argument in general may legitimately meet a Boolean
-        // parameter - see the E2012 entry). A literal cannot be called that way.
-        // The same holds for a `[...]` against a parameter it cannot be passed
-        // to - a string, a scalar, a class (IsBracketToScalar). ArgShapeRejects
-        // is the rule the unit's ScoreArgs applies too.
-        if XValid(LParX) and ArgShapeRejects(LCoreKind,
-             IsProcedureDesignator(LCore), XCatOf(LCanonParX),
-             FModels[LParX.UnitId].Symbols[LParX.Sym].Kind = skGenericParam) then
-          Exit(-1);
-        // The same literal against a procedural parameter it cannot be passed
-        // to (LiteralFits): a method pointer, a plain procedural type, or a
-        // `reference to` type of another signature. dcc picks the overload the
-        // literal fits, in either declaration order (probed, dcc32 37.0): a UI
-        // unit on the client group declares `Make(..., AEvent: TNotifyEvent =
-        // nil)` beside `Make(..., AProc: TProc)`, both scored 0 on the literal,
-        // and the first - the event one - won the tie, so the TProc overload
-        // had no references (pastree-mcp, 2026-09-25); `Take(TProc)` beside
+        // whose paren-less call is a value. ArgFitCanonX scores it.
+        else
+          LClassRef := XValid(LArgX) and XValid(LParX) and
+            (XCatOf(LCanonArgX) = tcClass) and
+            ((LCoreKind in [nkIdent, nkMember]) and
+             (IsTypeDesignator(LCore) or IsClassMethodSelf(LCore)) or
+             (LCoreKind = nkTypeArgs) and not HeadIsRoutine(LCore));
+        // An anonymous-method literal against a procedural parameter it
+        // cannot be passed to (LiteralFits): a method pointer, a plain
+        // procedural type, or a `reference to` type of another signature. dcc
+        // picks the overload the literal fits, in either declaration order
+        // (probed, dcc32 37.0): a UI unit on the client group declares
+        // `Make(..., AEvent: TNotifyEvent = nil)` beside `Make(..., AProc:
+        // TProc)`, both scored 0 on the literal, and the first - the event
+        // one - won the tie, so the TProc overload had no references
+        // (pastree-mcp, 2026-09-25); `Take(TProc)` beside
         // `Take(TProc<Integer>)` is the same tie between two references.
-        // Provable at the node, like the rule above.
+        // Provable at the node, like ArgFitCanonX's rejection of the literal
+        // against a parameter that is not procedural.
         if (LCoreKind = nkAnonMethod) and XValid(LParX) and
            (XCatOf(LParX) = tcProc) and not LiteralFits(LCore, LParX) then
           Exit(-1);
       end;
-      if XValid(LArgX) and XValid(LParX) then
-        // A one-character literal is a Char constant (IsCharLiteralExpr -
-        // through parentheses and both branches of an inline `if`, every
-        // piece of `#13#10` counted): a `Char` parameter fits it best, a
-        // string one next (the literal's own type here), an AnsiChar one
-        // least - 'a' takes F(WideChar) over F(AnsiChar) and F(string) over
-        // F(AnsiChar), either order (local/probe-b31 O2, probe-b32 P1).
-        if (XCatOf(LCanonParX) = tcChar) and
-           (LCore <> NIL_NODE) and IsCharLiteralExpr(LM.Tree, LCore) then
-        begin
-          var LCharX := LCanonParX;
-          if PasBuiltinIsChar(FModels[LCharX.UnitId], LCharX.Sym,
-             FPlatform) then
-            Inc(Result, 3)
-          else
-            Inc(Result, 1);
-        end
-        else if XSameType(LParX, LArgX) then
-          Inc(Result, 2)
-        else
-        begin
-          // Not the same SYMBOL - but it may still be the same TYPE reached
-          // through an alias, and the two sides are read in different units
-          // by construction. `LayoutUnitsToPixels` in
-          // dxDocumentLayoutUnitConverter is declared for TSize, TPoint and
-          // TRect at one arity; a TRect argument matched none of them by
-          // symbol, all three scored 0, and the FIRST - TSize - won the tie.
-          // The call then typed as TSize: a wrong binding that costs no
-          // diagnostic until something reads a member off it (`.ToRectF` in
-          // a suite's ruler unit). Canonicalized only after the cheap test has
-          // already failed.
-          var LCanonPar := LCanonParX;
-          var LCanonArg := LCanonArgX;
-          var LSame := XSameType(LCanonPar, LCanonArg);
-          var LParCat: TSemaTypeCat := tcUnknown;
-          var LArgCat: TSemaTypeCat := tcUnknown;
-          if not LSame then
-          begin
-            LParCat := ParCatOf(LParX, LCanonPar);
-            LArgCat := XCatOf(LCanonArg);
-          end;
-          if LSame then
-            Inc(Result, 2)
-          // Two DIFFERENT record types REJECT the candidate, and so does an
-          // ARRAY parameter against a record/class/interface argument or the
-          // reverse (ArgStructRejects). The general "the types do not fit"
-          // rule is still not attempted (see the note above), but these
-          // corners are decidable: the one thing that could make them fit -
-          // a `class operator Implicit`/`Explicit` - is a MEMBER, so it can
-          // be looked for. The array one matters because a binding stops at
-          // the FIRST declaration of a name: a derived interface that
-          // declares only the `TArray<T>` overload of a method and INHERITS
-          // the single-item one leaves the array overload as the only
-          // candidate, fitting on arity; rejecting it is what lets the
-          // "nothing in the type's own chain fits, so this means an
-          // INHERITED routine" fallback do its job. `nil` and untyped
-          // arguments never reach here - they are tcNil/tcUnknown.
-          else if ArgStructNeedsConv(LParCat, LArgCat) and
-                  ArgStructRejects(LParCat, LArgCat,
-                    HasConversionOperator(LCanonPar),
-                    HasConversionOperator(LCanonArg)) then
-            Exit(-1)
-          // A static array where a dynamic one is wanted: no conversion
-          // (`Image.Read(List^, N)` with List^ a static array takes TStream's
-          // untyped Read, not the TBytes one).
-          else if (LParCat = tcArray) and (LArgCat = tcArray) and
-                  IsDynArrayTypeX(LParX) and IsStaticArrayX(LArgX) then
-            Exit(-1)
-          // A scalar where a class, an interface or a class reference is
-          // wanted (IsScalarToReference); an enumeration where another
-          // ordinal, a Boolean, a Char or a float is wanted, or the reverse
-          // (ScalarEnumMismatch: `Seek(0, soCurrent)` takes Seek(Int64;
-          // TSeekOrigin) over Seek(Longint; Word), local/probe-b31 O3); an
-          // ordinal for an array.
-          else if ArgCatRejects(LParCat, LArgCat) then
-            Exit(-1)
-          // An instance where a class reference is wanted: `RegC(Self)` in
-          // an instance method takes RegC(O: TObject) over RegC(C: TClass)
-          // in either order (15.1.1, local/probe-park/b330 SP.dpr; audit
-          // B3-30). A type name and a class method's Self, which are class
-          // references, took the branch above; the unit typer's scorer has
-          // no such branch, so the rule is this pass's alone.
-          else if (LParCat = tcClassOf) and (LArgCat = tcClass) then
-            Exit(-1)
-          else if XAssignableX(LParX, LArgX) then
-            Inc(Result, 1);
-        end;
+      // The rest - the class reference, the shape rejections, the character
+      // literal, the types - is ArgFitCanonX, the rule the completion engine
+      // scores by too.
+      LFit := ArgFitCanonX(LArgX, LParX, LCanonArgX, LCanonParX, LM.Tree,
+        LCore, (LCore <> NIL_NODE) and not LClassRef and XValid(LParX) and
+        IsProcedureDesignator(LCore), LClassRef);
+      if LFit < 0 then
+        Exit(-1);
+      Inc(Result, LFit);
     end;
 
     // The next parameter of the candidate's param scope after LPos (or the

@@ -381,7 +381,15 @@ type
     function BareNameSym(ANode, ADepth: Integer;
       out AMid, ASym, ACtx: Integer): Boolean;
     function IsResultRoutine(AMid, ASym: Integer): Boolean;
-    function ArityOverload(AMid, ASym, ACall: Integer): Integer;
+    function ArgTypedOverload(AMid, ASym, ACtx, ACall,
+      ADepth: Integer): Integer;
+    function OverlayParams(ASym: Integer): TArray<Integer>;
+    function IsProcedureValue(ACore, ADepth: Integer): Boolean;
+    function OwnModelRoutine(AOvSym: Integer): Integer;
+    function WrittenCallType(AMid, ASym, ACtx, ACallee,
+      ADepth: Integer): TPasComplTypeRef;
+    function WrittenMethodFrame(AMid, ASym, ACtx, ATypeArgs,
+      ADepth: Integer): Integer;
     function IsInheritedHead(ANode: Integer): Boolean;
     function WithMemberSym(ANode: Integer; const AKey: string;
       ADepth: Integer; out AMid, ASym, ACtx: Integer): Boolean;
@@ -1608,17 +1616,21 @@ begin
       end;
     nkCall:
       begin
-        // The routine the call binds to - the analysis's or Phase 1's
-        // argument-matched overload (CallTargetX / CallTarget), the one
-        // signature help shows - types it by its result: the overload chain's
+        // The routine the call binds to - the analysis's choice
+        // (CallTargetX), else the overload its arguments' types pick
+        // (ArgTypedOverload) - types it by its result: the overload chain's
         // head, which the callee's name alone gives, is another overload's
         // result (audit A1-26). A constructor keeps the walk below (its
         // value is the NAMED class), and so does a cast.
         if CalleeSyms(FModel.Tree.Nodes[ANode].FirstChild, ANode, LMid, LSym,
            LCtx) and IsResultRoutine(LMid, LSym) then
         begin
-          if LMid >= 0 then
-            LSym := ArityOverload(LMid, LSym, ANode);
+          LSym := ArgTypedOverload(LMid, LSym, LCtx, ANode, ADepth + 1);
+          // `Name<...>(...)`: in the frame of its written type arguments.
+          Result := WrittenCallType(LMid, LSym, LCtx,
+            FModel.Tree.Nodes[ANode].FirstChild, ADepth + 1);
+          if ComplValid(Result) then
+            Exit;
           // Both answer a routine by its result as a VALUE (ValueOfTypeRef:
           // a class reference stays class side).
           if LMid < 0 then
@@ -1661,7 +1673,20 @@ begin
         end;
       end;
     nkTypeArgs:
-      Result := ResolveTypeRefNode(ANode, ADepth);
+      begin
+        // `Node.GetData<TItem>.`: a generic METHOD written with its type
+        // arguments and no parentheses is a call (6.6.1) - of the overload
+        // declaring that many (16.5.1) - typed in their frame; a generic
+        // TYPE stays a type reference.
+        if CalleeSyms(ANode, NIL_NODE, LMid, LSym, LCtx) and
+           IsResultRoutine(LMid, LSym) then
+        begin
+          Result := WrittenCallType(LMid, LSym, LCtx, ANode, ADepth + 1);
+          if ComplValid(Result) then
+            Exit;
+        end;
+        Result := ResolveTypeRefNode(ANode, ADepth);
+      end;
     nkDeref:
       begin
         Result := PointeeTypeOf(DesignatorType(
@@ -1909,36 +1934,388 @@ begin
   ACtx := NIL_INST;
 end;
 
-{ A project routine found by NAME is its overload family's head; the
-  overlay has no scorer for another unit's family, so the call's argument
-  count picks the first member that takes it (6.2.5; TPasSemaTyper.ArityFits,
-  the project's own arity rule) - `B.GetObj(1).` is the overload with a
-  parameter. The analysis's exact choice (CallTargetX) already fits and is
-  kept. }
-function TPasCompletion.ArityOverload(AMid, ASym, ACall: Integer): Integer;
+{ The overload of a call's family that the call binds to, by ARGUMENT TYPE
+  as the analysis picks it (6.3.1): of the routines the argument count
+  admits (6.2.5; TPasSemaTyper.ArityFits) and, after `Name<...>`, of those
+  declaring that many type parameters (16.5.1), the one whose arguments fit
+  its parameters best - each pair scored in project space by the cross-type
+  pass's own rule (TPasSemaProject.ArgFitX), the first declared winning a
+  tie. The callee comes with less: a project family found by NAME is its
+  head (`B.GetObj(1).` must be the overload with a parameter), and Phase 1's
+  choice in a family of the buffer's own was made without any type of
+  another unit - an argument typed TCust scored nothing, and one typed by an
+  alias the buffer declares (`TCustListB = TList<TCust>`) had no category,
+  which the unit typer counts as assignable to anything: `Pick(LB).` took
+  `Pick(const S: string)` over `Pick(const L: TList<TCust>)` (audit C1).
+  The analysis's own choice (CallTargetX) is kept, and so is the callee when
+  nothing fits or an argument is a comparison still undecided (16.3.1). }
+function TPasCompletion.ArgTypedOverload(AMid, ASym, ACtx, ACall,
+  ADepth: Integer): Integer;
 var
   LM: TPasSemaModel;
-  LArgs, LReq, LTot, LCur, LHop: Integer;
+  LCands, LParams, LCores: TArray<Integer>;
+  LArgXs: TArray<TSemaXType>;
+  LProcs, LRefs: TArray<Boolean>;
+  LArgs, LCount, LTypeArgs, LCur, LHop, LIdx, LPass, LReq, LTot, LScore,
+    LFit, LBestScore: Integer;
   LTrailing, LVariadic: Boolean;
+  LRef: TPasComplTypeRef;
+  LParX: TSemaXType;
+  LNode: Integer;
 begin
   Result := ASym;
-  if (FProj = nil) or (AMid < 0) or (ACall = NIL_NODE) or
-     (FModel.Tree.Nodes[ACall].Kind <> nkCall) then
+  if (FProj = nil) or (ASym = NIL_SYM) or (ACall = NIL_NODE) or
+     (ADepth > 16) or (FModel.Tree.Nodes[ACall].Kind <> nkCall) or
+     FModel.CallTargetX.ContainsKey(ACall) or
+     not SymModelOf(AMid, 'ArgTypedOverload', LM, False) or
+     (LM.Symbols[ASym].Kind <> skRoutine) then
     Exit;
-  LM := ProjModel(AMid, 'ArityOverload');
   LArgs := CallArgCount(FModel, ACall, LTrailing);
+  if LArgs < 0 then
+    Exit;
+  // The family in declaration order. A routine of the buffer's own: the
+  // chain its NAME heads in the buffer - the callee's binding, which Phase 1
+  // chose an overload of - and, after an implementation-section head, the
+  // interface section's set, which joins it (6.3.1; Phase 1's
+  // InterfaceCounterpart).
+  LCur := ASym;
+  if AMid < 0 then
+  begin
+    LNode := FModel.Tree.Nodes[ACall].FirstChild;
+    while (LNode <> NIL_NODE) and
+          (FModel.Tree.Nodes[LNode].Kind in [nkParen, nkTypeArgs]) do
+      LNode := FModel.Tree.Nodes[LNode].FirstChild;
+    if (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkMember) then
+      LNode := FModel.Tree.LastChild(LNode);
+    if (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkIdent) and
+       (FModel.RefMap[LNode] <> NIL_SYM) and
+       (FModel.Symbols[FModel.RefMap[LNode]].Kind = skRoutine) and
+       (FModel.Symbols[FModel.RefMap[LNode]].NameLower =
+        FModel.Symbols[ASym].NameLower) then
+      LCur := FModel.RefMap[LNode]
+    else if FModel.Symbols[ASym].Scope <> NIL_SCOPE then
+      LCur := FModel.FindLocal(FModel.Symbols[ASym].Scope,
+        FModel.Symbols[ASym].NameLower);
+  end;
+  LCands := nil;
+  for LPass := 0 to 1 do
+  begin
+    for LHop := 1 to 64 do
+    begin
+      if (LCur = NIL_SYM) or (LM.Symbols[LCur].Kind <> skRoutine) then
+        Break;
+      LCands := LCands + [LCur];
+      LCur := LM.Symbols[LCur].NextOverload;
+    end;
+    if (AMid >= 0) or (Length(LCands) = 0) or
+       (LM.Symbols[LCands[0]].Scope = NIL_SCOPE) or
+       (LM.Scopes[LM.Symbols[LCands[0]].Scope].Kind <> sckImplementation) or
+       (LM.InterfaceScope = NIL_SCOPE) then
+      Break;
+    LCur := LM.FindLocal(LM.InterfaceScope, LM.Symbols[ASym].NameLower);
+  end;
+  if Length(LCands) < 2 then
+    Exit;
+  // The arguments, each typed once: its type in project space, whether it
+  // is a class REFERENCE (a type name, a class-side value) and whether it
+  // names a procedure, and its node under the parentheses.
+  SetLength(LArgXs, LArgs);
+  SetLength(LCores, LArgs);
+  SetLength(LProcs, LArgs);
+  SetLength(LRefs, LArgs);
+  LCount := 0;
+  LNode := CallFirstArg(FModel.Tree, ACall);
+  while (LNode <> NIL_NODE) and (LCount < LArgs) and
+        (FModel.Tree.Nodes[LNode].Kind <> nkMissing) do
+  begin
+    if FModel.Tree.Nodes[LNode].Kind = nkAmbiguous then
+      Exit;
+    LCores[LCount] := PeelParens(FModel.Tree, LNode);
+    LRef := DesignatorType(LNode, ADepth + 1);
+    LArgXs[LCount] := XNil;
+    // A value of an inline `^T` comes typed as T (ResolveTypeRefNode): its
+    // own type is the pointer, which has no name to score.
+    if not LRef.ViaPointer then
+    begin
+      LArgXs[LCount] := LRef.X;
+      if not XValid(LArgXs[LCount]) then
+        LArgXs[LCount] := OwnModelTypeX(LRef.OvSym);
+    end;
+    LRefs[LCount] := LRef.IsTypeRef;
+    LProcs[LCount] := IsProcedureValue(LCores[LCount], ADepth + 1);
+    Inc(LCount);
+    LNode := FModel.Tree.Nodes[LNode].NextSibling;
+  end;
+  // The written type arguments' count, the 16.5.1 filter; when it leaves no
+  // candidate the choice runs again without it, as SelectCallTarget's does.
+  LTypeArgs := -1;
+  LNode := FModel.Tree.Nodes[ACall].FirstChild;
+  while (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkParen) do
+    LNode := FModel.Tree.Nodes[LNode].FirstChild;
+  if (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkTypeArgs) then
+  begin
+    LTypeArgs := -1;   // the first child is the name they follow
+    LNode := FModel.Tree.Nodes[LNode].FirstChild;
+    while LNode <> NIL_NODE do
+    begin
+      Inc(LTypeArgs);
+      LNode := FModel.Tree.Nodes[LNode].NextSibling;
+    end;
+  end;
+  for LPass := 0 to 1 do
+  begin
+    LBestScore := -1;
+    for LCur in LCands do
+    begin
+      if (LPass = 0) and (LTypeArgs >= 0) and
+         (TPasSemaProject.GenericParamCountOf(LM, LCur) <> LTypeArgs) then
+        Continue;
+      if AMid >= 0 then
+      begin
+        if not FProj.RoutineArity(AMid, LCur, LReq, LTot, LVariadic) then
+          Continue;
+        LParams := FProj.XParamSyms(AMid, LCur);
+      end
+      else
+      begin
+        // The unit typer's arity (SelectOverload): parameters up to the
+        // first default are required; one with no parameter scope - a
+        // seeded intrinsic - is no candidate.
+        if LM.Symbols[LCur].MemberScope = NIL_SCOPE then
+          Continue;
+        LParams := OverlayParams(LCur);
+        LTot := Length(LParams);
+        LReq := 0;
+        while (LReq < LTot) and
+              not (sfHasDefault in LM.Symbols[LParams[LReq]].Flags) do
+          Inc(LReq);
+        LVariadic := sfVarArgs in LM.Symbols[LCur].Flags;
+      end;
+      if not (LVariadic or TPasSemaTyper.ArityFits(LArgs, LReq, LTot,
+         LTrailing)) then
+        Continue;
+      LScore := 0;
+      for LIdx := 0 to LCount - 1 do
+      begin
+        if LIdx > High(LParams) then
+          Break;
+        if AMid >= 0 then
+          LParX := FProj.SubstX(FProj.DeclTypeX(AMid, LParams[LIdx]), ACtx, 0)
+        else
+        begin
+          LParX := XNil;
+          if LM.Symbols[LParams[LIdx]].TypeNode <> NIL_NODE then
+          begin
+            LRef := ResolveTypeRefNode(LM.Symbols[LParams[LIdx]].TypeNode,
+              ADepth + 1);
+            if not LRef.ViaPointer then
+            begin
+              LParX := LRef.X;
+              if not XValid(LParX) then
+                LParX := OwnModelTypeX(LRef.OvSym);
+            end;
+          end;
+        end;
+        LFit := FProj.ArgFitX(LArgXs[LIdx], LParX, FModel.Tree, LCores[LIdx],
+          LProcs[LIdx], LRefs[LIdx]);
+        if LFit < 0 then
+        begin
+          LScore := -1;
+          Break;
+        end;
+        Inc(LScore, LFit);
+      end;
+      if LScore > LBestScore then
+      begin
+        LBestScore := LScore;
+        Result := LCur;
+      end;
+    end;
+    if (LBestScore >= 0) or (LTypeArgs < 0) then
+      Exit;
+  end;
+end;
+
+// The parameters of the buffer's routine ASym in declaration order (its
+// parameter scope, the project's XParamSyms over the buffer).
+function TPasCompletion.OverlayParams(ASym: Integer): TArray<Integer>;
+var
+  LScope, LIdx: Integer;
+begin
+  Result := nil;
+  LScope := FModel.Symbols[ASym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  for LIdx := 0 to FModel.Scopes[LScope].Symbols.Count - 1 do
+    if FModel.Symbols[FModel.Scopes[LScope].Symbols[LIdx]].Kind = skParam then
+      Result := Result + [FModel.Scopes[LScope].Symbols[LIdx]];
+end;
+
+// Does the argument node ACore (under its parentheses) name a PROCEDURE - a
+// routine with no result, a method value and nothing else (the unit typer's
+// IsProcDesignator, the project's IsProcedureDesignator)?
+function TPasCompletion.IsProcedureValue(ACore, ADepth: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LMid, LSym: Integer;
+begin
+  Result := False;
+  if (ACore = NIL_NODE) or not (FModel.Tree.Nodes[ACore].Kind in
+     [nkIdent, nkMember, nkTypeArgs]) then
+    Exit;
+  // `DoIt<Integer>` is its head's routine.
+  if FModel.Tree.Nodes[ACore].Kind = nkTypeArgs then
+    ACore := FModel.Tree.Nodes[ACore].FirstChild;
+  if not DesignatorSymOf(ACore, ADepth, LMid, LSym) or (LSym = NIL_SYM) or
+     not SymModelOf(LMid, 'IsProcedureValue', LM, False) then
+    Exit;
+  Result := (LM.Symbols[LSym].Kind = skRoutine) and
+    (LM.Symbols[LSym].TypeNode = NIL_NODE) and
+    not (sfBuiltin in LM.Symbols[LSym].Flags) and
+    (LM.RoutineHead(LSym) <> rhConstructor);
+end;
+
+{ The last-good PROJECT twin of a routine the buffer declares - OwnModelType
+  X's sibling for routines: the same-named routine of the twin of its
+  struct, or of this file's own scopes, the first of its overload chain
+  declaring as many type parameters and parameters. NIL_SYM for a routine
+  the last-good analysis never saw. }
+function TPasCompletion.OwnModelRoutine(AOvSym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LScope, LCand, LHop, LTypeParams, LParams: Integer;
+  LOwner: TSemaXType;
+begin
+  Result := NIL_SYM;
+  if (AOvSym = NIL_SYM) or (FProj = nil) or (FProjMid < 0) or
+     (FModel.Symbols[AOvSym].Kind <> skRoutine) then
+    Exit;
+  if FIsProjectModel then
+    Exit(AOvSym);
+  LM := ProjModel(FProjMid, 'OwnModelRoutine');
+  LScope := FModel.Symbols[AOvSym].Scope;
+  if (LScope <> NIL_SCOPE) and (FModel.Scopes[LScope].Kind = sckStruct) then
+  begin
+    LOwner := OwnModelTypeX(FModel.Scopes[LScope].StructSym);
+    if not XValid(LOwner) or (LOwner.UnitId <> FProjMid) or
+       (LM.Symbols[LOwner.Sym].MemberScope = NIL_SCOPE) then
+      Exit;
+    LCand := LM.FindLocal(LM.Symbols[LOwner.Sym].MemberScope,
+      FModel.Symbols[AOvSym].NameLower);
+  end
+  else
+  begin
+    if LM.OwnDeclScope = NIL_SCOPE then
+      Exit;
+    LCand := LM.Resolve(LM.OwnDeclScope, FModel.Symbols[AOvSym].NameLower);
+  end;
+  LTypeParams := TPasSemaProject.GenericParamCountOf(FModel, AOvSym);
+  LParams := Length(OverlayParams(AOvSym));
+  for LHop := 1 to 64 do
+  begin
+    if (LCand = NIL_SYM) or (LM.Symbols[LCand].Kind <> skRoutine) then
+      Exit;
+    if (FProj.GenericParamCount(FProjMid, LCand) = LTypeParams) and
+       (Length(FProj.XParamSyms(FProjMid, LCand)) = LParams) then
+      Exit(LCand);
+    LCand := LM.Symbols[LCand].NextOverload;
+  end;
+end;
+
+{ A generic method called with its type arguments WRITTEN - `TUtil.FirstOf<
+  TCust>(AD)`, `Node.GetData<TItem>`: they are the answer and nothing is
+  inferred (16.5.1), so the call types in the frame they make - the routine
+  of the family declaring that many type parameters, ASym's own first; one
+  the buffer declares through its last-good twin, which the frame is keyed
+  on. Without it the result stayed the open T, whose members are its
+  constraints' - none for a bare `<T>` (audit C2). ACallee: the designator
+  called. A nil ref when it is not written so or no frame can be made. }
+function TPasCompletion.WrittenCallType(AMid, ASym, ACtx, ACallee,
+  ADepth: Integer): TPasComplTypeRef;
+var
+  LM: TPasSemaModel;
+  LCount, LCur, LHop, LFrame: Integer;
+  LX: TSemaXType;
+begin
+  Result := ComplNilRef;
+  if (FProj = nil) or (ADepth > 16) then
+    Exit;
+  while (ACallee <> NIL_NODE) and
+        (FModel.Tree.Nodes[ACallee].Kind = nkParen) do
+    ACallee := FModel.Tree.Nodes[ACallee].FirstChild;
+  if (ACallee = NIL_NODE) or
+     (FModel.Tree.Nodes[ACallee].Kind <> nkTypeArgs) or
+     not SymModelOf(AMid, 'WrittenCallType', LM, False) then
+    Exit;
+  LCount := -1;   // the first child is the name they follow
+  LCur := FModel.Tree.Nodes[ACallee].FirstChild;
+  while LCur <> NIL_NODE do
+  begin
+    Inc(LCount);
+    LCur := FModel.Tree.Nodes[LCur].NextSibling;
+  end;
   LCur := ASym;
   for LHop := 1 to 64 do
   begin
-    if LCur = NIL_SYM then
+    if (LCur = NIL_SYM) or (LM.Symbols[LCur].Kind <> skRoutine) then
+      Exit;
+    if TPasSemaProject.GenericParamCountOf(LM, LCur) = LCount then
       Break;
-    if (LM.Symbols[LCur].Kind = skRoutine) and
-       FProj.RoutineArity(AMid, LCur, LReq, LTot, LVariadic) and
-       (LVariadic or TPasSemaTyper.ArityFits(LArgs, LReq, LTot,
-         LTrailing)) then
-      Exit(LCur);
     LCur := LM.Symbols[LCur].NextOverload;
   end;
+  if AMid < 0 then
+  begin
+    AMid := FProjMid;
+    LCur := OwnModelRoutine(LCur);
+  end;
+  LFrame := WrittenMethodFrame(AMid, LCur, ACtx, ACallee, ADepth + 1);
+  if LFrame = NIL_INST then
+    Exit;
+  LX := FProj.SubstX(FProj.SubstX(FProj.SymDeclTypeX(AMid, LCur), ACtx, 0),
+    LFrame, 0);
+  if XValid(LX) then
+  begin
+    Result.X := LX;
+    Result := ValueOfTypeRef(Result, ADepth + 1);
+  end;
+end;
+
+{ The substitution frame the type arguments written in ATypeArgs (an
+  nkTypeArgs over the routine's name) make for the project routine
+  AMid.ASym - the project's ExplicitMethodFrame over the buffer's nodes,
+  each argument closed over ACtx first. NIL_INST when an argument does not
+  resolve or their count is not the routine's. }
+function TPasCompletion.WrittenMethodFrame(AMid, ASym, ACtx, ATypeArgs,
+  ADepth: Integer): Integer;
+var
+  LArg: Integer;
+  LRef: TPasComplTypeRef;
+  LX: TSemaXType;
+  LArgs: TArray<TSemaXType>;
+begin
+  Result := NIL_INST;
+  if (FProj = nil) or (AMid < 0) or (ASym = NIL_SYM) or
+     (ATypeArgs = NIL_NODE) or (ADepth > 16) or
+     (FModel.Tree.Nodes[ATypeArgs].FirstChild = NIL_NODE) then
+    Exit;
+  LArgs := nil;
+  LArg := FModel.Tree.Nodes[FModel.Tree.Nodes[ATypeArgs].FirstChild].
+    NextSibling;
+  while LArg <> NIL_NODE do
+  begin
+    LRef := ResolveTypeRefNode(LArg, ADepth + 1);
+    LX := LRef.X;
+    if not XValid(LX) then
+      LX := OwnModelTypeX(LRef.OvSym);
+    if not XValid(LX) then
+      Exit;
+    LArgs := LArgs + [FProj.SubstX(LX, ACtx, 0)];
+    LArg := FModel.Tree.Nodes[LArg].NextSibling;
+  end;
+  if (Length(LArgs) = 0) or
+     (Length(LArgs) <> FProj.GenericParamCount(AMid, ASym)) then
+    Exit;
+  Result := FProj.Instantiate(XPlain(AMid, ASym), LArgs);
 end;
 
 // A routine whose call is typed by its declared result - not a constructor,
