@@ -378,7 +378,18 @@ of less work, not a gap in following the language; its consequences are in
   scalar, a pointer, an enum, a class, an interface, a class reference, a
   procedural type - so it picks the open-array, set or dynamic-array overload
   in either declaration order (dcc32 37.0 probed); a record or Variant
-  parameter is still only scored.
+  parameter is still only scored. An open-array parameter is scored by its
+  element type, `array of const` by System.TVarRec (6.2.6; both scorers
+  share OpenArrayArgFit): an array of exactly that element fits, below a
+  parameter of the argument's own type, and an array of another element or
+  one value of another type is out. A value of the element type itself (a
+  one-element array only when it is a variable) and a `[...]` give no
+  evidence, so between open arrays a bracket still takes the first declared -
+  dcc ranks `['a', 'b']` to `array of string` over `array of const` and over
+  `TArray<string>`, `[1, 'b']` to `array of const` over `array of Variant`
+  (6.3.1) - and so does an argument whose array type is written inline
+  (`var A: array of string`, an open-array parameter passed on), which has
+  no type to read an element off.
 - the completion overlay picks a call's overload by the project's rule
   (`TPasSemaProject.ArgFitX`, the cross-type scorer's verdict per
   argument), arguments and parameters typed in project space - the unit

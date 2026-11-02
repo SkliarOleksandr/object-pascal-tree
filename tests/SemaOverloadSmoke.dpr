@@ -277,6 +277,50 @@ const
     '  I := Pick(11).A;'#10 +
     'end;'#10'end.'#10;
 
+  { An open-array parameter names no type, so every argument scored nothing
+    against it and the first declared won (6.2.6, 6.3.1; dcc64 37.0,
+    local/compl-c1c2-2026-11/fc): an array of the element type fits, of
+    another element is out, a string variable is no `array of const`
+    argument; a parameter of the argument's own type beats the open array
+    (Z, a control). Each TRW overload is dcc's pick; J, O and Y typed TRA on
+    0.146.8. }
+  SRC_OPEN =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TStrs = array of string;'#10 +
+    '  TInts = array of Integer;'#10 +
+    'function J(const A: array of const): TRA; overload;'#10 +
+    'function J(const A: array of string): TRW; overload;'#10 +
+    'function L(const A: array of string): TRW; overload;'#10 +
+    'function L(const A: array of const): TRA; overload;'#10 +
+    'function O(const A: array of const): TRA; overload;'#10 +
+    'function O(const A: array of string): TRW; overload;'#10 +
+    'function Y(const A: array of Int64): TRA; overload;'#10 +
+    'function Y(const A: array of Integer): TRW; overload;'#10 +
+    'function Z(const A: array of Integer): TRA; overload;'#10 +
+    'function Z(const A: TInts): TRW; overload;'#10 +
+    'implementation'#10 +
+    'function J(const A: array of const): TRA; begin end;'#10 +
+    'function J(const A: array of string): TRW; begin end;'#10 +
+    'function L(const A: array of string): TRW; begin end;'#10 +
+    'function L(const A: array of const): TRA; begin end;'#10 +
+    'function O(const A: array of const): TRA; begin end;'#10 +
+    'function O(const A: array of string): TRW; begin end;'#10 +
+    'function Y(const A: array of Int64): TRA; begin end;'#10 +
+    'function Y(const A: array of Integer): TRW; begin end;'#10 +
+    'function Z(const A: array of Integer): TRA; begin end;'#10 +
+    'function Z(const A: TInts): TRW; begin end;'#10 +
+    'procedure Test(SS: TStrs; S: string; II: TInts);'#10 +
+    'var X: TRW;'#10 +
+    'begin'#10 +
+    '  X := J(SS);'#10 +
+    '  X := L(SS);'#10 +
+    '  X := O(S);'#10 +
+    '  X := Y(II);'#10 +
+    '  X := Z(II);'#10 +
+    'end;'#10'end.'#10;
+
   { The Char-literal and nil exemptions of the assignment check (A4-10,
     A4-11; probe-b32 P1): dcc compiles every line but the last, where an
     operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
@@ -358,6 +402,13 @@ begin
   Ok('one scorer: Pick(11) rejected by its only candidate is untyped',
     not HasCallTyped('Pick', 'TRA'));
   Ok('one scorer: no E2010', DiagCount('E2010') = 0);
+  GModel.Free;
+
+  Analyze(SRC_OPEN);
+  for var LName in ['J', 'L', 'O', 'Y', 'Z'] do
+    Ok('open array (6.2.6): ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  Ok('open array: no E2010', DiagCount('E2010') = 0);
   GModel.Free;
 
   Analyze(SRC_ASSIGN);

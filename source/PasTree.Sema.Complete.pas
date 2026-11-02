@@ -1959,10 +1959,10 @@ var
   LProcs, LRefs: TArray<Boolean>;
   LArgs, LCount, LTypeArgs, LCur, LHop, LIdx, LPass, LReq, LTot, LScore,
     LFit, LBestScore: Integer;
-  LTrailing, LVariadic: Boolean;
+  LTrailing, LVariadic, LOpenArr: Boolean;
   LRef: TPasComplTypeRef;
   LParX: TSemaXType;
-  LNode: Integer;
+  LNode, LTypeNode, LVarRecMid, LVarRecSym: Integer;
 begin
   Result := ASym;
   if (FProj = nil) or (ASym = NIL_SYM) or (ACall = NIL_NODE) or
@@ -2096,14 +2096,25 @@ begin
         if LIdx > High(LParams) then
           Break;
         if AMid >= 0 then
-          LParX := FProj.SubstX(FProj.DeclTypeX(AMid, LParams[LIdx]), ACtx, 0)
+          LParX := FProj.ParamFitTypeX(AMid, LParams[LIdx], ACtx, LOpenArr)
         else
         begin
+          // ParamFitTypeX over the buffer's own nodes: an open array is
+          // scored by its element type, `array of const` by System.TVarRec.
           LParX := XNil;
-          if LM.Symbols[LParams[LIdx]].TypeNode <> NIL_NODE then
+          LTypeNode := LM.Symbols[LParams[LIdx]].TypeNode;
+          LOpenArr := (LTypeNode <> NIL_NODE) and
+            (LM.Tree.Nodes[LTypeNode].Kind = nkArrayType);
+          if LOpenArr then
           begin
-            LRef := ResolveTypeRefNode(LM.Symbols[LParams[LIdx]].TypeNode,
-              ADepth + 1);
+            if (LM.Tree.Nodes[LTypeNode].Aux = 1) and
+               BridgeName('tvarrec', LVarRecMid, LVarRecSym) then
+              LParX := XPlain(LVarRecMid, LVarRecSym);
+            LTypeNode := PasArrayElemNode(LM.Tree, LTypeNode);
+          end;
+          if LTypeNode <> NIL_NODE then
+          begin
+            LRef := ResolveTypeRefNode(LTypeNode, ADepth + 1);
             if not LRef.ViaPointer then
             begin
               LParX := LRef.X;
@@ -2113,7 +2124,7 @@ begin
           end;
         end;
         LFit := FProj.ArgFitX(LArgXs[LIdx], LParX, FModel.Tree, LCores[LIdx],
-          LProcs[LIdx], LRefs[LIdx]);
+          LProcs[LIdx], LRefs[LIdx], LOpenArr);
         if LFit < 0 then
         begin
           LScore := -1;

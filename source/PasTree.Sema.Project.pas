@@ -1493,7 +1493,12 @@ type
     // ArgFitX over sides already canonicalized - see there.
     function ArgFitCanonX(const AArgX, AParX, ACanonArgX,
       ACanonParX: TSemaXType; const ATree: TPasTree; ACore: Integer;
-      AProcDesig, AClassRef: Boolean): Integer;
+      AProcDesig, AClassRef, AOpenArr: Boolean): Integer;
+    // ArgFitCanonX for an open-array parameter - see the implementation.
+    function OpenArrFitX(const AArgX, ACanonArgX, ACanonElemX: TSemaXType;
+      const ATree: TPasTree; ACore: Integer): Integer;
+    // The element type of an array type - see the implementation.
+    function ArrayElemX(const AX: TSemaXType): TSemaXType;
     // ACallMid / AArgNodes: the call site's model and argument nodes, read
     // only for an open-array parameter (its element type binds T).
     function InferMethodFrame(AMid, ASym: Integer;
@@ -2077,12 +2082,21 @@ type
       decides the anonymous-method, procedure and `[...]` rejections and the
       literal's rank; AProcDesig: it names a procedure; AClassRef: it is a
       class REFERENCE to AArgX (a type name, `Self` in a class method), not
-      an instance. Promoted for the completion engine, which picks an
-      overload of a buffer being typed by the same rule: the buffer's own
-      unit typer cannot see a type of another unit, nor an alias of one
-      (audit C1). }
+      an instance; AOpenArr: the parameter is an OPEN ARRAY and AParX its
+      element type (ParamFitTypeX). Promoted for the completion engine,
+      which picks an overload of a buffer being typed by the same rule: the
+      buffer's own unit typer cannot see a type of another unit, nor an
+      alias of one (audit C1). }
     function ArgFitX(const AArgX, AParX: TSemaXType; const ATree: TPasTree;
-      ACore: Integer; AProcDesig, AClassRef: Boolean): Integer;
+      ACore: Integer; AProcDesig, AClassRef: Boolean;
+      AOpenArr: Boolean = False): Integer;
+    { The type ArgFitX scores an argument for parameter AParam of AMid
+      against, closed over ACtx: its declared type - or, for an OPEN-ARRAY
+      parameter, whose `array of T` names no type, its element type T with
+      AOpenArr set; `array of const` takes what an `array of TVarRec` takes
+      (6.2.6), so its element is System.TVarRec. }
+    function ParamFitTypeX(AMid, AParam, ACtx: Integer;
+      out AOpenArr: Boolean): TSemaXType;
     { The ENUMERATING twin of FindMemberX, for completion: reports EVERY
       member reachable from ABase, walking the same hops in the same order -
       active helper (and its ancestor helpers) first, then each type's own
@@ -13485,8 +13499,8 @@ begin
 end;
 
 function TPasSemaProject.ArgFitX(const AArgX, AParX: TSemaXType;
-  const ATree: TPasTree; ACore: Integer; AProcDesig,
-  AClassRef: Boolean): Integer;
+  const ATree: TPasTree; ACore: Integer; AProcDesig, AClassRef,
+  AOpenArr: Boolean): Integer;
 var
   LArgX, LCanonArgX, LCanonParX: TSemaXType;
 begin
@@ -13501,12 +13515,108 @@ begin
   if XValid(LArgX) and XValid(AParX) then
     LCanonArgX := CanonTypeX(LArgX);
   Result := ArgFitCanonX(LArgX, AParX, LCanonArgX, LCanonParX, ATree, ACore,
-    AProcDesig, AClassRef);
+    AProcDesig, AClassRef, AOpenArr);
+end;
+
+function TPasSemaProject.ParamFitTypeX(AMid, AParam, ACtx: Integer;
+  out AOpenArr: Boolean): TSemaXType;
+var
+  LM: TPasSemaModel;
+  LNode, LUid, LSym: Integer;
+begin
+  LM := FModels[AMid];
+  LNode := LM.Symbols[AParam].TypeNode;
+  // A parameter's type is a type identifier or `array of` (6.2.6), so an
+  // array definition in the slot is an open array.
+  AOpenArr := (LNode <> NIL_NODE) and (LM.Tree.Nodes[LNode].Kind = nkArrayType);
+  if not AOpenArr then
+    Exit(SubstX(DeclTypeX(AMid, AParam), ACtx, 0));
+  Result := XNil;
+  if LM.Tree.Nodes[LNode].Aux = 1 then
+  begin
+    if FindInSystemUnit('tvarrec', LUid, LSym) then
+      Result := XPlain(LUid, LSym);
+  end
+  else
+    Result := SubstX(ResolveTypeExprNested(AMid,
+      PasArrayElemNode(LM.Tree, LNode)), ACtx, 0);
+end;
+
+{ The element type of the array type AX, after aliases and closed over its
+  instantiation frame: `TStringDynArray` (`TArray<string>`, which is `array
+  of T`) gives string. XNil for anything else, and for an element no symbol
+  names - a row of a multi-dimensional array, an inline `array of` nested in
+  another. }
+function TPasSemaProject.ArrayElemX(const AX: TSemaXType): TSemaXType;
+var
+  LCur: TSemaXType;
+  LDef, LDepth: Integer;
+  LTree: TPasTree;
+begin
+  Result := XNil;
+  LCur := AX;
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    LTree := FModels[LCur.UnitId].Tree;
+    case LTree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := AliasStepX(LCur, LDef);   // alias link
+      nkArrayType:
+        begin
+          if (LTree.Nodes[LDef].Aux <> 1) and (PasArrayDims(LTree, LDef) = 1) then
+            Result := SubstX(ResolveTypeExprNested(LCur.UnitId,
+              PasArrayElemNode(LTree, LDef)), LCur.Inst, 0);
+          Exit;
+        end;
+    else
+      Exit;
+    end;
+  end;
+end;
+
+{ ArgFitCanonX for an OPEN-ARRAY parameter of element type ACanonElemX -
+  OpenArrayArgFit, the rule, over the argument read in project space: its
+  category, whether it is of the element type, and an array's element
+  after aliases in its instantiation frame (ArrayElemX). A side that
+  mentions an open generic parameter (OpenX) decides nothing. }
+function TPasSemaProject.OpenArrFitX(const AArgX, ACanonArgX,
+  ACanonElemX: TSemaXType; const ATree: TPasTree; ACore: Integer): Integer;
+var
+  LElemX: TSemaXType;
+  LArgCat: TSemaTypeCat;
+  LElemFit: Integer;
+begin
+  Result := 0;
+  if not XValid(AArgX) or OpenX(ACanonElemX) or OpenX(ACanonArgX) then
+    Exit;
+  LArgCat := XCatOf(ACanonArgX);
+  if (LArgCat = tcUnknown) and IsDynArrayTypeX(ACanonArgX) then
+    LArgCat := tcArray;
+  LElemFit := 0;
+  if LArgCat = tcArray then
+  begin
+    LElemX := ArrayElemX(ACanonArgX);
+    if XValid(LElemX) then
+      LElemX := CanonTypeX(LElemX);
+    if XValid(LElemX) and not OpenX(LElemX) then
+      if XSameType(LElemX, ACanonElemX) then
+        LElemFit := 1
+      else
+        LElemFit := -1;
+  end;
+  Result := OpenArrayArgFit((ACore <> NIL_NODE) and
+    (ATree.Nodes[ACore].Kind = nkSetCtor), LArgCat,
+    XSameType(ACanonArgX, ACanonElemX), LElemFit);
 end;
 
 function TPasSemaProject.ArgFitCanonX(const AArgX, AParX, ACanonArgX,
   ACanonParX: TSemaXType; const ATree: TPasTree; ACore: Integer;
-  AProcDesig, AClassRef: Boolean): Integer;
+  AProcDesig, AClassRef, AOpenArr: Boolean): Integer;
 var
   LParCat, LArgCat: TSemaTypeCat;
   LTarget: TSemaXType;
@@ -13514,6 +13624,15 @@ begin
   Result := 0;
   if not XValid(AParX) then
     Exit;
+  // An OPEN ARRAY, AParX its element type, has its own rule (OpenArrFitX);
+  // a class reference (a type name, a class method's Self) decides nothing
+  // there.
+  if AOpenArr then
+  begin
+    if not AClassRef then
+      Result := OpenArrFitX(AArgX, ACanonArgX, ACanonParX, ATree, ACore);
+    Exit;
+  end;
   // A class REFERENCE (CrossType's ArgScore says which nodes are one) fits
   // a `class of` its class or an ancestor names, and nothing that wants an
   // instance, a record, a scalar or an interface.
@@ -14698,7 +14817,7 @@ var
     LPM: TPasSemaModel;
     LPList: TSemaSymList;
     LReq, LTot, LPos, LPCount, LArg, LArgs, LK, LL, LR, LS: Integer;
-    LVariadic, LTrailing: Boolean;
+    LVariadic, LTrailing, LOpenArr: Boolean;
     LArgX, LParX: TSemaXType;
 
     // The parameter count of a signature node - an nkAnonMethod literal or
@@ -14861,8 +14980,10 @@ var
     // One argument against the parameter type AParX: AArg its node, or
     // NIL_NODE for a comparison an nkAmbiguous stands for (16.3.1) - typed
     // AArgX, with no node shape to read. Above 0 a match, 0 no evidence,
-    // -1 rejects the candidate.
-    function ArgScore(AArg: Integer; const AArgX, AParX: TSemaXType): Integer;
+    // -1 rejects the candidate. AOpenArr: AParX is an open array's element
+    // type (ParamFitTypeX).
+    function ArgScore(AArg: Integer; const AArgX, AParX: TSemaXType;
+      AOpenArr: Boolean): Integer;
     var
       LCore, LCoreFirst, LFit: Integer;
       LCoreKind: TPasNodeKind;
@@ -14951,7 +15072,7 @@ var
       // scores by too.
       LFit := ArgFitCanonX(LArgX, LParX, LCanonArgX, LCanonParX, LM.Tree,
         LCore, (LCore <> NIL_NODE) and not LClassRef and XValid(LParX) and
-        IsProcedureDesignator(LCore), LClassRef);
+        IsProcedureDesignator(LCore), LClassRef, AOpenArr);
       if LFit < 0 then
         Exit(-1);
       Inc(Result, LFit);
@@ -15008,16 +15129,16 @@ var
         begin
           if LPos >= LPCount then
             Exit;
-          LParX := SubstX(DeclTypeX(AMid, LPList[LPos]), ACtx, 0);
+          LParX := ParamFitTypeX(AMid, LPList[LPos], ACtx, LOpenArr);
           if LM.AmbigArg(LArg, LK, LL, LR) then
           begin
             LArgX := XNil;
             if XValid(GetX(LL)) and XValid(GetX(LR)) then
               LArgX := BuiltinX(AId, 'boolean');
-            LS := ArgScore(NIL_NODE, LArgX, LParX);
+            LS := ArgScore(NIL_NODE, LArgX, LParX, LOpenArr);
           end
           else
-            LS := ArgScore(LL, GetX(LL), LParX);
+            LS := ArgScore(LL, GetX(LL), LParX, LOpenArr);
           if LS < 0 then
             Exit(-1);
           Inc(Result, LS);
@@ -15026,8 +15147,8 @@ var
       end
       else
       begin
-        LS := ArgScore(LArg, GetX(LArg),
-          SubstX(DeclTypeX(AMid, LPList[LPos]), ACtx, 0));
+        LParX := ParamFitTypeX(AMid, LPList[LPos], ACtx, LOpenArr);
+        LS := ArgScore(LArg, GetX(LArg), LParX, LOpenArr);
         if LS < 0 then
           Exit(-1);
         Inc(Result, LS);

@@ -651,6 +651,80 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 6.2.6 / 6.3.1: an open-array parameter names no type, so every argument
+  // scored nothing against it and the first declared won - TStringHelper's
+  // `Join(Sep, A)` for a TArray<string> took `array of const`, which is no
+  // argument for a dynamic array (E2010), over `array of string` declared
+  // after it. An open array is scored by its element (`array of const` by
+  // TVarRec): an array of that element exactly fits, of another is out, as
+  // is one value of another type; a parameter of the argument's own type is
+  // the better fit (dcc64 37.0, local/compl-c1c2-2026-11/fc).
+  UNIT_XOP =
+    'unit XOP;'#10'interface'#10 +
+    'type'#10 +
+    '  TOpObj = class'#10 +
+    '    Id: Integer;'#10 +
+    '  end;'#10 +
+    '  TOpCust = class(TOpObj)'#10 +
+    '    Created: Integer;'#10 +
+    '  end;'#10 +
+    '  TOpStrs = TArray<string>;'#10 +
+    '  TOpOwn = array of string;'#10 +
+    'function OpJoin(const A: array of const): TOpObj; overload;'#10 +
+    'function OpJoin(const A: array of string): TOpCust; overload;'#10 +
+    'function OpRev(const A: array of string): TOpCust; overload;'#10 +
+    'function OpRev(const A: array of const): TOpObj; overload;'#10 +
+    'function OpDyn(const A: array of string): TOpObj; overload;'#10 +
+    'function OpDyn(const A: TArray<string>): TOpCust; overload;'#10 +
+    'function OpInt(const A: array of Int64): TOpObj; overload;'#10 +
+    'function OpInt(const A: array of Integer): TOpCust; overload;'#10 +
+    'implementation'#10 +
+    'function OpJoin(const A: array of const): TOpObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function OpJoin(const A: array of string): TOpCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function OpRev(const A: array of string): TOpCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function OpRev(const A: array of const): TOpObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function OpDyn(const A: array of string): TOpObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function OpDyn(const A: TArray<string>): TOpCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function OpInt(const A: array of Int64): TOpObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function OpInt(const A: array of Integer): TOpCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'procedure Run(A: TArray<string>; D: TOpStrs; S: string;'#10 +
+    '  V: TArray<TVarRec>; AI: TArray<Integer>; O: TOpOwn);'#10 +
+    'begin'#10 +
+    '  var OpArr := OpJoin(A);'#10 +
+    '  var OpMember := OpJoin(A).Created;'#10 +
+    '  var OpOwn := OpJoin(O);'#10 +
+    '  var OpAlias := OpJoin(D);'#10 +
+    '  var OpOne := OpJoin(S);'#10 +
+    '  var OpVarRecs := OpJoin(V);'#10 +
+    '  var OpRevArr := OpRev(A);'#10 +
+    '  var OpRevAlias := OpRev(D);'#10 +
+    '  var OpRevOne := OpRev(S);'#10 +
+    '  var OpRevVarRecs := OpRev(V);'#10 +
+    '  var OpDynArr := OpDyn(A);'#10 +
+    '  var OpIntArr := OpInt(AI);'#10 +
+    'end;'#10 +
+    'end.'#10;
+  UNIT_XOQ =
+    'unit XOQ;'#10'interface'#10'uses XOP;'#10 +
+    'implementation'#10 +
+    'procedure Run(A: TArray<string>; D: TOpStrs; V: TArray<TVarRec>);'#10 +
+    'begin'#10 +
+    '  var OqArr := OpJoin(A);'#10 +
+    '  var OqMember := OpJoin(A).Created;'#10 +
+    '  var OqAlias := OpJoin(D);'#10 +
+    '  var OqRevArr := OpRev(A);'#10 +
+    '  var OqVarRecs := OpJoin(V);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // F45 of the parser-fidelity plan: a dereference of a dereference. M is an
   // ANONYMOUS pointer to a named pointer type (System.SysUtils'
   // ResStringModuleUnloadProc: `M: ^PResStringModule`, then `M^^.Module`);
@@ -2474,12 +2548,16 @@ begin
   // TObject/TArray<T>: real declarations (PasTree.Sema.Builtins no longer
   // seeds either) -- named System.pas so every fixture below reaches them
   // via the IMPLICIT unit, with no `uses` clause of its own to change.
+  // TVarRec: the element type of `array of const` (6.2.6, XOP).
   TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
     'unit System;'#10'interface'#10 +
     'type'#10 +
     '  TObject = class'#10 +
     '  end;'#10 +
     '  TArray<T> = array of T;'#10 +
+    '  TVarRec = record'#10 +
+    '    VType: Byte;'#10 +
+    '  end;'#10 +
     'implementation'#10 +
     'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'XA.pas'), UNIT_XA);
@@ -2550,6 +2628,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XAM.pas'), UNIT_XAM);
   TFile.WriteAllText(TPath.Combine(LDir, 'XFB.pas'), UNIT_XFB);
   TFile.WriteAllText(TPath.Combine(LDir, 'XFC.pas'), UNIT_XFC);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XOP.pas'), UNIT_XOP);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XOQ.pas'), UNIT_XOQ);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -2625,8 +2705,11 @@ begin
     // open TArray<T> of its Data and TArray<TAlItem>; 59 with XFB's
     // TFbList<TFbCust>, TArray<Byte>, TArray<Integer>, TArray<TFbCust>,
     // TFbGen<TFbCust> and the open TArray<T> of its TItems (the same 59 on
-    // 0.146.7: canonicalizing an alias of an instantiation adds none).
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '59');
+    // 0.146.7: canonicalizing an alias of an instantiation adds none); 60
+    // with XOP's TArray<TVarRec> - its TArray<string>, TArray<Integer> and
+    // the alias TOpStrs add none, and scoring an open array adds none (the
+    // same 60 on 0.146.8; 59 there with the TArray<TVarRec> taken out).
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '60');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -2991,6 +3074,45 @@ begin
     Eq('6.3.1: another unit''s alias and family', DeclTypeOf(LE, 'fcalias'),
       'TFbCust');
     Eq('6.3.1: ...of `TArray<Byte>`', DeclTypeOf(LE, 'fcbytes'), 'TFbCust');
+
+    // ---- open-array parameters in overload resolution (6.2.6, 6.3.1) ----
+    LE := ModelByName('xop');
+    Ok('XOP loaded', Assigned(LE));
+    Ok('XOP: no diags at all', Length(LE.Diags) = 0);
+    Eq('6.2.6: a TArray<string> takes `array of string` over `array of const` '
+      + 'declared first', DeclTypeOf(LE, 'oparr'), 'TOpCust');
+    Eq('6.2.6: ...and a member of its result is read off it',
+      DeclTypeOf(LE, 'opmember'), 'Integer');
+    Eq('6.2.6: ...a dynamic array type the unit declares too',
+      DeclTypeOf(LE, 'opown'), 'TOpCust');
+    Eq('6.2.6: ...an alias of TArray<string> too', DeclTypeOf(LE, 'opalias'),
+      'TOpCust');
+    Eq('6.2.6: ...a string variable too (a one-element `array of string`)',
+      DeclTypeOf(LE, 'opone'), 'TOpCust');
+    Eq('6.2.6: a TArray<TVarRec> takes `array of const`',
+      DeclTypeOf(LE, 'opvarrecs'), 'TOpObj');
+    Eq('6.2.6: the other declaration order: a TArray<string>',
+      DeclTypeOf(LE, 'oprevarr'), 'TOpCust');
+    Eq('6.2.6: ...an alias of it', DeclTypeOf(LE, 'oprevalias'), 'TOpCust');
+    Eq('6.2.6: ...a string variable', DeclTypeOf(LE, 'oprevone'), 'TOpCust');
+    Eq('6.2.6: ...a TArray<TVarRec>', DeclTypeOf(LE, 'oprevvarrecs'),
+      'TOpObj');
+    Eq('6.3.1: a parameter of the argument''s own type beats the open array '
+      + '(control)', DeclTypeOf(LE, 'opdynarr'), 'TOpCust');
+    Eq('6.2.6: elements are not converted: a TArray<Integer> takes `array of '
+      + 'Integer` over `array of Int64` declared first',
+      DeclTypeOf(LE, 'opintarr'), 'TOpCust');
+    LE := ModelByName('xoq');
+    Ok('XOQ loaded', Assigned(LE));
+    Ok('XOQ: no diags at all', Length(LE.Diags) = 0);
+    Eq('6.2.6: another unit''s family: a TArray<string>',
+      DeclTypeOf(LE, 'oqarr'), 'TOpCust');
+    Eq('6.2.6: ...and a member of its result', DeclTypeOf(LE, 'oqmember'),
+      'Integer');
+    Eq('6.2.6: ...an alias of it', DeclTypeOf(LE, 'oqalias'), 'TOpCust');
+    Eq('6.2.6: ...the other declaration order', DeclTypeOf(LE, 'oqrevarr'),
+      'TOpCust');
+    Eq('6.2.6: ...a TArray<TVarRec>', DeclTypeOf(LE, 'oqvarrecs'), 'TOpObj');
 
     // ---- F45: a dereference of a dereference ----
     LE := ModelByName('xpd');

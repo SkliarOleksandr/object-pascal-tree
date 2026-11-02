@@ -163,6 +163,10 @@ type
       for a comparison an nkAmbiguous stands for (no node shape to read);
       AAt its type. 2 exact, 1 assignable, 0 no evidence, -1 rejected. }
     function ScoreArg(AArg, AAt, AParam: Integer): Integer;
+    // ScoreArg for an open-array parameter - see the implementation.
+    function OpenArrayScore(AArg, AAt, ADef: Integer): Integer;
+    // The type symbol an element type node names - see the implementation.
+    function ElemTypeSym(ANode: Integer): Integer;
     { The type of the comparison `ALeft < ARight` / `ALeft > ARight` an
       nkAmbiguous stands for: Boolean once both operands are typed. }
     function CompareType(ALeft, ARight: Integer): Integer;
@@ -276,6 +280,34 @@ function ArgStructRejects(AParCat, AArgCat: TSemaTypeCat;
   AArgConv say, and the operators need not be looked for - a member search
   per argument of every candidate scored (perf audit 2026-10, C11). }
 function ArgStructNeedsConv(AParCat, AArgCat: TSemaTypeCat): Boolean;
+
+{ An argument against an OPEN-ARRAY parameter (6.2.6), which names no type
+  of its own: the rule both scorers apply to what each knows of the
+  argument (TPasSemaProject.OpenArrFitX, TPasSemaTyper.OpenArrayScore). The
+  element type of `array of const` is System.TVarRec - it takes what an
+  `array of TVarRec` takes, and a `[...]` of anything.
+  - an ARRAY, static or dynamic, whose element is the parameter's element
+    type exactly (AElemFit 1) fits, at 1: below the exact match of a
+    parameter of the argument's own type, which a `TArray<string>` argument
+    takes over `array of string` in either declaration order. An array of
+    another element (AElemFit -1) is out - elements are not converted:
+    `TArray<TComponent>` for `array of TObject` and `TArray<string>` for
+    `array of const` are E2010, so `string.Join(',', A)` calls
+    TStringHelper's `array of string` overload, declared after the `array
+    of const` one. AElemFit 0: the element is not known;
+  - one value of the element type (AIsElem) is a one-element array when it
+    is a VARIABLE, but a constant is E2192 and any other expression E2010:
+    no evidence, as before (`P(1)` beside `P(X: Double)` stays Double's);
+  - one value of another type is out: a Byte variable for `array of
+    Integer`, a TComponent one for `array of TObject`, a string or an
+    Integer one for `array of const` (E2010);
+  - `[...]` (ASetCtor) builds an open array of any element type, and
+    whether its elements fit is not ranked here: no evidence;
+  - an argument whose type is not known (AArgCat tcUnknown) or `nil`:
+    no evidence.
+  dcc64 37.0, 2026-11-02 (spec 6.2.6, 6.3.1; local/compl-c1c2-2026-11/fc). }
+function OpenArrayArgFit(ASetCtor: Boolean; AArgCat: TSemaTypeCat;
+  AIsElem: Boolean; AElemFit: Integer): Integer;
 
 { The present arguments of the nkCall ACall - its children after the callee,
   the nkMissing slot a trailing comma leaves (`F(1, 2,)`, ParseArgList) not
@@ -587,6 +619,17 @@ begin
              (AArgCat in [tcRecord, tcClass, tcInterface]) and not AArgConv) or
             ((AArgCat = tcArray) and
              (AParCat in [tcRecord, tcClass, tcInterface]) and not AParConv);
+end;
+
+function OpenArrayArgFit(ASetCtor: Boolean; AArgCat: TSemaTypeCat;
+  AIsElem: Boolean; AElemFit: Integer): Integer;
+begin
+  Result := 0;
+  if ASetCtor or AIsElem or (AArgCat in [tcUnknown, tcNil]) then
+    Exit;
+  if AArgCat = tcArray then
+    Exit(AElemFit);
+  Result := -1;
 end;
 
 function ArgStructNeedsConv(AParCat, AArgCat: TSemaTypeCat): Boolean;
@@ -2612,10 +2655,15 @@ end;
 
 function TPasSemaTyper.ScoreArg(AArg, AAt, AParam: Integer): Integer;
 var
-  LCore, LPt, LCAt, LCPt: Integer;
+  LCore, LPt, LCAt, LCPt, LDef: Integer;
   LParCat: TSemaTypeCat;
 begin
   Result := 0;
+  // A parameter's type is a type identifier or `array of` (6.2.6): an
+  // array definition in the slot is an open array, which names no type.
+  LDef := M.Symbols[AParam].TypeNode;
+  if (LDef <> NIL_NODE) and (Kind(LDef) = nkArrayType) then
+    Exit(OpenArrayScore(AArg, AAt, LDef));
   LPt := M.Symbols[AParam].TypeSym;
   if LPt = NIL_SYM then
     Exit;
@@ -2678,6 +2726,82 @@ begin
     else if Assignable(LPt, AAt) then
       Result := 1;
   end;
+end;
+
+{ ScoreArg for an OPEN-ARRAY parameter whose `array of` definition is ADef:
+  OpenArrayArgFit, the rule, over what this unit knows - the project's
+  OpenArrFitX reads the same in project space. The element is a builtin or
+  a type of this unit (ElemTypeSym), `array of const`'s System.TVarRec
+  known here only as the record of that name. An argument typed by another
+  unit's type is untyped here and decides nothing, and so do a generic
+  parameter and a type name (a class reference, no variable). }
+function TPasSemaTyper.OpenArrayScore(AArg, AAt, ADef: Integer): Integer;
+var
+  LCore, LElem, LArgDef, LArgElem, LElemFit: Integer;
+  LOfConst: Boolean;
+
+  // Is the type ASym the parameter's element type?
+  function IsElem(ASym: Integer): Boolean;
+  begin
+    if LOfConst then
+      Result := (CatOf(ASym) = tcRecord) and
+        (M.Symbols[WeakAliasEnd(ASym)].NameLower = 'tvarrec')
+    else
+      Result := (ASym = LElem) or
+        (PasBuiltinCanonSym(M, WeakAliasEnd(ASym), FPlatform) =
+         PasBuiltinCanonSym(M, WeakAliasEnd(LElem), FPlatform));
+  end;
+
+begin
+  Result := 0;
+  if (AAt = NIL_SYM) or (M.Symbols[AAt].Kind = skGenericParam) then
+    Exit;
+  LOfConst := T.Nodes[ADef].Aux = 1;
+  LElem := NIL_SYM;
+  if not LOfConst then
+  begin
+    LElem := ElemTypeSym(PasArrayElemNode(T, ADef));
+    if LElem = NIL_SYM then
+      Exit;
+  end;
+  LCore := NIL_NODE;
+  if AArg <> NIL_NODE then
+  begin
+    LCore := PeelParens(T, AArg);
+    if (Kind(LCore) in [nkIdent, nkMember]) and (Head(LCore) = AAt) and
+       (M.Symbols[AAt].Kind = skType) then
+      Exit;
+  end;
+  LElemFit := 0;
+  if CatOf(AAt) = tcArray then
+  begin
+    LArgDef := ArrayDefOf(AAt);
+    if (LArgDef <> NIL_NODE) and (PasArrayDims(T, LArgDef) = 1) then
+    begin
+      LArgElem := ElemTypeSym(PasArrayElemNode(T, LArgDef));
+      if LArgElem <> NIL_SYM then
+        if IsElem(LArgElem) then
+          LElemFit := 1
+        else
+          LElemFit := -1;
+    end;
+  end;
+  Result := OpenArrayArgFit((LCore <> NIL_NODE) and (Kind(LCore) = nkSetCtor),
+    CatOf(AAt), IsElem(AAt), LElemFit);
+end;
+
+{ The type symbol the type node ANode names when this unit can see it - a
+  builtin or a type of its own, named or qualified; NIL_SYM for a generic
+  parameter, an instantiation, an inline type and an imported type. }
+function TPasSemaTyper.ElemTypeSym(ANode: Integer): Integer;
+begin
+  Result := NIL_SYM;
+  if (ANode = NIL_NODE) or not (Kind(ANode) in [nkIdent, nkMember]) then
+    Exit;
+  Result := Head(ANode);
+  if (Result <> NIL_SYM) and
+     not (M.Symbols[Result].Kind in [skType, skBuiltinType]) then
+    Result := NIL_SYM;
 end;
 
 

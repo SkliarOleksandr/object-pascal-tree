@@ -741,6 +741,7 @@ const
     '    BoxF: T;'#10 +
     '  end;'#10 +
     '  TCustBoxU = TBoxOv<TCustOv>;'#10 +
+    '  TStrsU = array of string;'#10 +
     '  TUtilU = class'#10 +
     '  public'#10 +
     '    class function FirstOf<T>(const B: TBoxOv<T>): T; static;'#10 +
@@ -748,12 +749,16 @@ const
     '  end;'#10 +
     'function UPick(const S: string): TObjOv; overload;'#10 +
     'function UPick(const C: TCustOv): TCustOv; overload;'#10 +
+    'function UJoin(const A: array of const): TObjOv; overload;'#10 +
+    'function UJoin(const A: array of string): TCustOv; overload;'#10 +
     'implementation'#10 +
     'class function TUtilU.FirstOf<T>(const B: TBoxOv<T>): T;'#10 +
     'begin'#10'end;'#10 +
     'class function TUtilU.Make<T>: T;'#10'begin'#10'end;'#10 +
     'function UPick(const S: string): TObjOv;'#10'begin'#10'end;'#10 +
     'function UPick(const C: TCustOv): TCustOv;'#10'begin'#10'end;'#10 +
+    'function UJoin(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
+    'function UJoin(const A: array of string): TCustOv;'#10'begin'#10'end;'#10 +
     'end.'#10;
   OV_MAIN =
     'unit mainu;'#10 +
@@ -762,6 +767,7 @@ const
     'type'#10 +
     '  TCustAliasM = TCustOv;'#10 +
     '  TCustBoxM = TBoxOv<TCustOv>;'#10 +
+    '  TStrsM = array of string;'#10 +
     '  TUtilM = class'#10 +
     '  public'#10 +
     '    class function FirstOf<T>(const B: TBoxOv<T>): T; static;'#10 +
@@ -775,6 +781,8 @@ const
     'function PickC(const C: TCustOv): TCustOv; overload;'#10 +
     'function Reg(O: TCustOv): TObjOv; overload;'#10 +
     'function Reg(C: TCustOvClass): TCustOv; overload;'#10 +
+    'function MJoin(const A: array of const): TObjOv; overload;'#10 +
+    'function MJoin(const A: array of string): TCustOv; overload;'#10 +
     'implementation'#10 +
     'class function TUtilM.FirstOf<T>(const B: TBoxOv<T>): T;'#10 +
     'begin'#10'end;'#10 +
@@ -787,8 +795,10 @@ const
     'function PickC(const C: TCustOv): TCustOv;'#10'begin'#10'end;'#10 +
     'function Reg(O: TCustOv): TObjOv;'#10'begin'#10'end;'#10 +
     'function Reg(C: TCustOvClass): TCustOv;'#10'begin'#10'end;'#10 +
+    'function MJoin(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
+    'function MJoin(const A: array of string): TCustOv;'#10'begin'#10'end;'#10 +
     'procedure Go(BM: TCustBoxM; CM: TCustAliasM; CD: TCustOv;'#10 +
-    '  BU: TCustBoxU);'#10 +
+    '  BU: TCustBoxU; SU: TStrsU; SM: TStrsM);'#10 +
     'begin'#10 +
     '//OV'#10 +
     'end;'#10 +
@@ -2364,6 +2374,12 @@ begin
   OvCase('UPick(''xy'').|', 'IdF', 'CreatedF');
   // A type name is a class reference: the `class of` overload (15.2.1).
   OvCase('Reg(TCustOv).|', 'CreatedF', '');
+  // An open array is scored by its element (6.2.6): an array of string takes
+  // `array of string` over `array of const` declared first - a used unit's
+  // family and the edited unit's own (read off the buffer's nodes).
+  OvCase('UJoin(SU).|', 'CreatedF', '');
+  OvCase('MJoin(SM).|', 'CreatedF', '');
+  OvCase('MJoin(SU).|', 'CreatedF', '');
   // C2: the written type arguments are the answer (16.5.1), for a generic
   // method of the edited unit and of a used one.
   OvCase('TUtilM.FirstOf<TCustOv>(BU).|', 'CreatedF', '');
