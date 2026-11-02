@@ -769,8 +769,8 @@ const
     '    class function Get: TObjOv; overload; static;'#10 +
     '    class function Get<T>: T; overload; static;'#10 +
     '  end;'#10 +
-    'function Pick(const B: TBoxOv<TCustOv>): TCustOv; overload;'#10 +
     'function Pick(const S: string): TObjOv; overload;'#10 +
+    'function Pick(const B: TBoxOv<TCustOv>): TCustOv; overload;'#10 +
     'function PickC(const S: string): TObjOv; overload;'#10 +
     'function PickC(const C: TCustOv): TCustOv; overload;'#10 +
     'function Reg(O: TCustOv): TObjOv; overload;'#10 +
@@ -781,8 +781,8 @@ const
     'class function TUtilM.Make<T>: T;'#10'begin'#10'end;'#10 +
     'class function TUtilM.Get: TObjOv;'#10'begin'#10'end;'#10 +
     'class function TUtilM.Get<T>: T;'#10'begin'#10'end;'#10 +
-    'function Pick(const B: TBoxOv<TCustOv>): TCustOv;'#10'begin'#10'end;'#10 +
     'function Pick(const S: string): TObjOv;'#10'begin'#10'end;'#10 +
+    'function Pick(const B: TBoxOv<TCustOv>): TCustOv;'#10'begin'#10'end;'#10 +
     'function PickC(const S: string): TObjOv;'#10'begin'#10'end;'#10 +
     'function PickC(const C: TCustOv): TCustOv;'#10'begin'#10'end;'#10 +
     'function Reg(O: TCustOv): TObjOv;'#10'begin'#10'end;'#10 +
@@ -2349,13 +2349,13 @@ begin
   GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
   GCounter.Ok('C1/C2 mini-project analyzed', GProjMid >= 0);
   // C1: an alias the edited unit declares has no category for its own unit
-  // typer, which scored it assignable to `string`. The instantiation's
-  // overload is declared first: the analysis does not canonicalize an alias
-  // of an instantiation yet, so the declaration order still breaks its tie.
+  // typer, which scored it assignable to `string` - declared first here. An
+  // alias of an instantiation is that instance (16.3.1), another unit's too.
   OvCase('Pick(BM).|', 'CreatedF', '');
   OvCase('Pick(TCustBoxM(nil)).|', 'CreatedF', '');
-  // ...and the string overload first: the same type under two names is an
-  // exact match (6.3.1), another unit's class included.
+  OvCase('Pick(BU).|', 'CreatedF', '');
+  // ...and the same type under two names is an exact match (6.3.1), another
+  // unit's class included.
   OvCase('PickC(CM).|', 'CreatedF', '');
   OvCase('PickC(CD).|', 'CreatedF', '');
   OvCase('PickC(''xy'').|', 'IdF', 'CreatedF');

@@ -383,11 +383,7 @@ of less work, not a gap in following the language; its consequences are in
   (`TPasSemaProject.ArgFitX`, the cross-type scorer's verdict per
   argument), arguments and parameters typed in project space - the unit
   pass cannot see another unit's types, nor a category for an alias of
-  one. An alias of a generic INSTANTIATION (`TL = TList<TFoo>`) is not
-  canonicalized to it in either pass: an argument of that type scores as
-  merely assignable to the instantiation's parameter and to a `string`
-  one alike, so the first declared wins the tie, where dcc calls the
-  instantiation's in either order.
+  one.
 - a bare routine name in a value position - a member qualifier, a `with`
   target or an inline initializer - means the overload that needs no
   argument (6.6.1): one with no parameters, else one whose parameters all

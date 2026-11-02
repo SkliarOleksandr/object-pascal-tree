@@ -588,6 +588,69 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 6.3.1 / 16.3.1: an alias of an instantiation IS that instantiation for
+  // overload resolution too, whichever overload comes first (dcc64 37.0,
+  // local/compl-c1c2-2026-11/probe4). CanonTypeX stopped at the alias: no
+  // exact match against the instance's parameter, no category of its own
+  // (assignable to anything), so the `string` overload declared first won.
+  UNIT_XFB =
+    'unit XFB;'#10'interface'#10 +
+    'type'#10 +
+    '  TFbObj = class'#10 +
+    '    Id: Integer;'#10 +
+    '  end;'#10 +
+    '  TFbCust = class(TFbObj)'#10 +
+    '    Created: Integer;'#10 +
+    '  end;'#10 +
+    '  TFbList<T> = class'#10 +
+    '    First: T;'#10 +
+    '  end;'#10 +
+    '  TFbCustList = TFbList<TFbCust>;'#10 +
+    '  TFbBytes = TArray<Byte>;'#10 +
+    // ...declared in a generic's body: closed over the frame it is read in.
+    '  TFbGen<T> = class'#10 +
+    '  public type'#10 +
+    '    TItems = TArray<T>;'#10 +
+    '  public'#10 +
+    '    Items: TItems;'#10 +
+    '  end;'#10 +
+    'function FbArr(const A: TArray<Integer>): TFbObj; overload;'#10 +
+    'function FbArr(const A: TArray<TFbCust>): TFbCust; overload;'#10 +
+    'function FbPick(const S: string): TFbObj; overload;'#10 +
+    'function FbPick(const L: TFbList<TFbCust>): TFbCust; overload;'#10 +
+    'function FbBytes(const S: string): TFbObj; overload;'#10 +
+    'function FbBytes(const B: TArray<Byte>): TFbCust; overload;'#10 +
+    'implementation'#10 +
+    'function FbArr(const A: TArray<Integer>): TFbObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function FbArr(const A: TArray<TFbCust>): TFbCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function FbPick(const S: string): TFbObj; begin Result := nil; end;'#10 +
+    'function FbPick(const L: TFbList<TFbCust>): TFbCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function FbBytes(const S: string): TFbObj; begin Result := nil; end;'#10 +
+    'function FbBytes(const B: TArray<Byte>): TFbCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'procedure Run(LC: TFbCustList; LD: TFbList<TFbCust>; BB: TFbBytes;'#10 +
+    '  G: TFbGen<TFbCust>);'#10 +
+    'begin'#10 +
+    '  var FbAlias := FbPick(LC);'#10 +
+    '  var FbCast := FbPick(TFbCustList(nil));'#10 +
+    '  var FbDirect := FbPick(LD);'#10 +
+    '  var FbBytesAlias := FbBytes(BB);'#10 +
+    '  var FbNested := FbArr(G.Items);'#10 +
+    'end;'#10 +
+    'end.'#10;
+  UNIT_XFC =
+    'unit XFC;'#10'interface'#10'uses XFB;'#10 +
+    'implementation'#10 +
+    'procedure Run(LC: TFbCustList; BB: TFbBytes);'#10 +
+    'begin'#10 +
+    '  var FcAlias := FbPick(LC);'#10 +
+    '  var FcBytes := FbBytes(BB);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // F45 of the parser-fidelity plan: a dereference of a dereference. M is an
   // ANONYMOUS pointer to a named pointer type (System.SysUtils'
   // ResStringModuleUnloadProc: `M: ^PResStringModule`, then `M^^.Module`);
@@ -2485,6 +2548,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XEV.pas'), UNIT_XEV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XAL.pas'), UNIT_XAL);
   TFile.WriteAllText(TPath.Combine(LDir, 'XAM.pas'), UNIT_XAM);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XFB.pas'), UNIT_XFB);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XFC.pas'), UNIT_XFC);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -2557,8 +2622,11 @@ begin
     // in TGrBox.Make's two headings; 47 since 0.98.2 (one TWrap<Integer>);
     // 50 with XFI's TFiHolder<TFiItem>, the open TArray<T> of its field and
     // that field closed over the instance; 53 with XAL's TAlGen<TAlItem>, the
-    // open TArray<T> of its Data and TArray<TAlItem>.
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '53');
+    // open TArray<T> of its Data and TArray<TAlItem>; 59 with XFB's
+    // TFbList<TFbCust>, TArray<Byte>, TArray<Integer>, TArray<TFbCust>,
+    // TFbGen<TFbCust> and the open TArray<T> of its TItems (the same 59 on
+    // 0.146.7: canonicalizing an alias of an instantiation adds none).
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '59');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -2900,6 +2968,29 @@ begin
       DeclTypeOf(LE, 'ampointerin'), 'TAlItem');
     Eq('16.3.1: a nested-typed member through a foreign alias, probed',
       ProbeTypeOf(LE, 'X.Items'), 'TAlGen<TAlItem>.TItems');
+
+    // ---- an alias of an instantiation in overload resolution (6.3.1) ----
+    LE := ModelByName('xfb');
+    Ok('XFB loaded', Assigned(LE));
+    Ok('XFB: no diags at all', Length(LE.Diags) = 0);
+    Eq('6.3.1: an alias of an instantiation picks the instance''s overload '
+      + 'over a string one declared first', DeclTypeOf(LE, 'fbalias'),
+      'TFbCust');
+    Eq('6.3.1: ...a cast to the alias too', DeclTypeOf(LE, 'fbcast'),
+      'TFbCust');
+    Eq('6.3.1: ...as the instance itself does', DeclTypeOf(LE, 'fbdirect'),
+      'TFbCust');
+    Eq('6.3.1: an alias of `TArray<Byte>` picks the TArray<Byte> overload',
+      DeclTypeOf(LE, 'fbbytesalias'), 'TFbCust');
+    Eq('6.3.1: a generic''s nested alias of TArray<T>, read through '
+      + 'TFbGen<TFbCust>, is TArray<TFbCust>', DeclTypeOf(LE, 'fbnested'),
+      'TFbCust');
+    LE := ModelByName('xfc');
+    Ok('XFC loaded', Assigned(LE));
+    Ok('XFC: no diags at all', Length(LE.Diags) = 0);
+    Eq('6.3.1: another unit''s alias and family', DeclTypeOf(LE, 'fcalias'),
+      'TFbCust');
+    Eq('6.3.1: ...of `TArray<Byte>`', DeclTypeOf(LE, 'fcbytes'), 'TFbCust');
 
     // ---- F45: a dereference of a dereference ----
     LE := ModelByName('xpd');

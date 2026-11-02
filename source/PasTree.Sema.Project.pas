@@ -13331,6 +13331,17 @@ end;
   three-way overload set (TSize / TPoint / TRect at one arity) is decided by
   declaration order instead of by the argument.
 
+  An alias of an INSTANTIATION is followed too: `TCustList = TList<TCust>` is
+  that instance (16.3.1), one type with every other `TList<TCust>` - an
+  instance is keyed by its generic and its arguments, wherever it is written.
+  Stopped at the alias, it had no category of its own (XCatOf: tcUnknown,
+  assignable to anything) and matched no `TList<TCust>` parameter, so beside
+  `Pick(const S: string)` declared first `Pick(LC)` took the string overload
+  (6.3.1; local/compl-c1c2-2026-11/probe4). One declared in a generic's body
+  (`TItems = TArray<T>`, read through `TG<Integer>`) is closed over the frame
+  it is read in, as AliasStepX closes it: the open instance would leak T into
+  whatever is read off the canonical type.
+
   `T = type Base` is NOT followed: 2 sec. 2.5.1 makes it a distinct type, and the
   parser marks it with Aux = 1 on the nkTypeDecl - the same test BuildHelperMap
   applies for the same reason. }
@@ -13346,7 +13357,7 @@ begin
       Exit;
     LDef := TypeDefNodeOf(Result.UnitId, Result.Sym);
     if (LDef = NIL_NODE) or not (FModels[Result.UnitId].Tree.Nodes[LDef].Kind in
-       [nkIdent, nkMember]) then
+       [nkIdent, nkMember, nkTypeArgs]) then
       Exit;
     LParent := FModels[Result.UnitId].Tree.Nodes[LDef].Parent;
     if (LParent <> NIL_NODE) and
@@ -13354,6 +13365,8 @@ begin
        (FModels[Result.UnitId].Tree.Nodes[LParent].Aux = 1) then
       Exit;   // `type Base` - a distinct type, not an alias
     LNext := ResolveTypeExprNested(Result.UnitId, LDef);
+    if FModels[Result.UnitId].Tree.Nodes[LDef].Kind = nkTypeArgs then
+      LNext := SubstX(LNext, Result.Inst, 0);
     if not XValid(LNext) or
        ((LNext.UnitId = Result.UnitId) and (LNext.Sym = Result.Sym)) then
       Exit;
