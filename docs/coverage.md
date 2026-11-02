@@ -380,21 +380,39 @@ of less work, not a gap in following the language; its consequences are in
   in either declaration order (dcc32 37.0 probed); a record or Variant
   parameter is still only scored. An open-array parameter is scored by its
   element type, `array of const` by System.TVarRec (6.2.6; both scorers
-  share OpenArrayArgFit): an array of exactly that element fits, below a
-  parameter of the argument's own type, and an array of another element or
-  one value of another type is out. A value of the element type itself (a
-  one-element array only when it is a variable) and a `[...]` give no
-  evidence, so between open arrays a bracket still takes the first declared -
-  dcc ranks `['a', 'b']` to `array of string` over `array of const` and over
-  `TArray<string>`, `[1, 'b']` to `array of const` over `array of Variant`
-  (6.3.1) - and so does an argument whose array type is written inline
-  (`var A: array of string`, an open-array parameter passed on), which has
-  no type to read an element off.
+  share OpenArrayArgFit): an array of exactly that element fits - one whose
+  type is written inline (`var A: array of string`, an open-array parameter
+  passed on) read off its declaration - below a parameter of the argument's
+  own type, and an array of another element or one value of another type is
+  out; a value of the element type itself (a one-element array only when it
+  is a variable) gives no evidence. A `[...]` fits as its worst element does
+  (6.3.1; OpenCtorElemFit): `array of const` takes any element a TVarRec
+  holds just below an exact match, and is out for an enumeration, a record,
+  a set or a static array (E2150); `array of T` ranks above it only when
+  every element is exact for T (a Char value for string too - though not an
+  AnsiChar for AnsiString, which dcc counts exact as well), and one element
+  merely assignable to T gives no evidence, which leaves `array of const`
+  the better, as dcc has it. Between two typed open arrays the
+  scorers rank no conversion against another, so when neither is exact the
+  first declared wins: `[B, B, I]` for `array of Byte` / `array of Integer`
+  (dcc: Integer, the worst element's conversion is better), `[1, 'b']` for
+  `array of string` / `array of Variant` (dcc: Variant - the string one is
+  out, which the scorers do not prove). A bracket against a set or a
+  dynamic-array parameter is not scored, though dcc ranks those by the
+  elements too (6.3.1): beside `TArray<string>`, `array of const` takes
+  `['a']` or `[S]` (dcc: the dynamic array). A literal is typed as itself
+  here - an integer one Integer, a real one Extended - and so counts exact
+  for that type, where dcc ranks a constant a step lower: `[1]` takes `array
+  of Integer` over `array of Byte` (dcc: Byte) as `F(1)` takes F(Integer)
+  over F(Byte), `[5000000000]` `array of Integer` (dcc: Int64), `[1.5]`
+  `array of Extended` over `array of const` (dcc: const); and `nil` is no
+  exact match for Pointer (dcc: `[nil]` takes `array of Pointer` over `array
+  of const`).
 - the completion overlay picks a call's overload by the project's rule
-  (`TPasSemaProject.ArgFitX`, the cross-type scorer's verdict per
-  argument), arguments and parameters typed in project space - the unit
-  pass cannot see another unit's types, nor a category for an alias of
-  one.
+  (`TPasSemaProject.ArgFitX`, `OpenArgFitX` for an open array, the
+  cross-type scorer's verdict per argument), arguments and parameters
+  typed in project space, a `[...]`'s elements too: the unit pass cannot
+  see another unit's types, nor a category for an alias of one.
 - a bare routine name in a value position - a member qualifier, a `with`
   target or an inline initializer - means the overload that needs no
   argument (6.6.1): one with no parameters, else one whose parameters all

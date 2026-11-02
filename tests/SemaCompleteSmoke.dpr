@@ -798,7 +798,7 @@ const
     'function MJoin(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
     'function MJoin(const A: array of string): TCustOv;'#10'begin'#10'end;'#10 +
     'procedure Go(BM: TCustBoxM; CM: TCustAliasM; CD: TCustOv;'#10 +
-    '  BU: TCustBoxU; SU: TStrsU; SM: TStrsM);'#10 +
+    '  BU: TCustBoxU; SU: TStrsU; SM: TStrsM; const OA: array of string);'#10 +
     'begin'#10 +
     '//OV'#10 +
     'end;'#10 +
@@ -2380,6 +2380,15 @@ begin
   OvCase('UJoin(SU).|', 'CreatedF', '');
   OvCase('MJoin(SM).|', 'CreatedF', '');
   OvCase('MJoin(SU).|', 'CreatedF', '');
+  // A `[...]` by its worst element, an inline-typed array by its element
+  // (6.3.1, 6.2.6): an exact bracket and an open-array parameter passed on
+  // take `array of string` over `array of const` declared first; one
+  // element converted leaves `array of const` (a control).
+  OvCase('UJoin([''a'', ''b'']).|', 'CreatedF', '');
+  OvCase('MJoin([''a'', SU[0]]).|', 'CreatedF', '');
+  OvCase('MJoin(OA).|', 'CreatedF', '');
+  OvCase('UJoin(OA).|', 'CreatedF', '');
+  OvCase('MJoin([1, ''b'']).|', 'IdF', 'CreatedF');
   // C2: the written type arguments are the answer (16.5.1), for a generic
   // method of the edited unit and of a used one.
   OvCase('TUtilM.FirstOf<TCustOv>(BU).|', 'CreatedF', '');

@@ -725,6 +725,141 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 6.3.1: a `[...]` against open-array overloads is ranked by its WORST
+  // element: `array of T` beats `array of const` when every element is
+  // exact for T (a Char value counting exact for string), loses to it when
+  // one is not; `array of Char` takes Char values over `array of string`, a
+  // multi-character string goes to `array of string`; an exact bracket beats
+  // `TArray<string>`, and `array of const` beats `array of Variant`. An array
+  // whose type is written inline (a local, a field, a typed constant, an
+  // open-array parameter passed on) is an array of its element. Every
+  // family in both declaration orders; each Bk* is dcc's pick (dcc64 37.0,
+  // local/compl-c1c2-2026-11/fd), the second-declared overload's answers red
+  // on 0.146.10 - the brackets and the inline arrays scored nothing.
+  UNIT_XOK =
+    'unit XOK;'#10'interface'#10 +
+    'type'#10 +
+    '  TBkObj = class'#10 +
+    '    Id: Integer;'#10 +
+    '  end;'#10 +
+    '  TBkCust = class(TBkObj)'#10 +
+    '    Created: Integer;'#10 +
+    '  end;'#10 +
+    '  TBkObjClass = class of TBkObj;'#10 +
+    '  TBkRec = record'#10 +
+    '    FA: array of string;'#10 +
+    '  end;'#10 +
+    'function BkJoin(const A: array of const): TBkObj; overload;'#10 +
+    'function BkJoin(const A: array of string): TBkCust; overload;'#10 +
+    'function BkRev(const A: array of string): TBkCust; overload;'#10 +
+    'function BkRev(const A: array of const): TBkObj; overload;'#10 +
+    'function BkSplit(const A: array of Char): TBkObj; overload;'#10 +
+    'function BkSplit(const A: array of string): TBkCust; overload;'#10 +
+    'function BkSplitRev(const A: array of string): TBkCust; overload;'#10 +
+    'function BkSplitRev(const A: array of Char): TBkObj; overload;'#10 +
+    'function BkDyn(const A: TArray<string>): TBkObj; overload;'#10 +
+    'function BkDyn(const A: array of string): TBkCust; overload;'#10 +
+    'function BkVar(const A: array of Variant): TBkObj; overload;'#10 +
+    'function BkVar(const A: array of const): TBkCust; overload;'#10 +
+    'function BkInt(const A: array of Byte): TBkObj; overload;'#10 +
+    'function BkInt(const A: array of Integer): TBkCust; overload;'#10 +
+    'function BkReg(const A: array of TBkObjClass): TBkCust;'#10 +
+    'function BkCls(const A: array of string): TBkObj; overload;'#10 +
+    'function BkCls(const A: array of TBkObjClass): TBkCust; overload;'#10 +
+    'implementation'#10 +
+    'const'#10 +
+    '  CA: array[0..1] of string = (''a'', ''b'');'#10 +
+    'function BkJoin(const A: array of const): TBkObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkJoin(const A: array of string): TBkCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkRev(const A: array of string): TBkCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkRev(const A: array of const): TBkObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkSplit(const A: array of Char): TBkObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkSplit(const A: array of string): TBkCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkSplitRev(const A: array of string): TBkCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkSplitRev(const A: array of Char): TBkObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkDyn(const A: TArray<string>): TBkObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkDyn(const A: array of string): TBkCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkVar(const A: array of Variant): TBkObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkVar(const A: array of const): TBkCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkInt(const A: array of Byte): TBkObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkInt(const A: array of Integer): TBkCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkReg(const A: array of TBkObjClass): TBkCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkCls(const A: array of string): TBkObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function BkCls(const A: array of TBkObjClass): TBkCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'procedure Pass(const A: array of string; const K: array of const);'#10 +
+    'begin'#10 +
+    '  var BkPass := BkJoin(A);'#10 +
+    '  var BkPassDyn := BkDyn(A);'#10 +
+    '  var BkPassK := BkRev(K);'#10 +
+    'end;'#10 +
+    'procedure Run(S: string; I: Integer; C: Char; AS_: AnsiString;'#10 +
+    '  R: TBkRec);'#10 +
+    'var'#10 +
+    '  LA: array of string;'#10 +
+    '  SA: array[0..1] of string;'#10 +
+    'begin'#10 +
+    '  var BkStrs := BkJoin([''a'', ''b'']);'#10 +
+    '  var BkStrsMember := BkJoin([''a'', S]).Created;'#10 +
+    '  var BkRevStrs := BkRev([''ab'', S]);'#10 +
+    '  var BkChar := BkJoin([C]);'#10 +
+    '  var BkMixed := BkJoin([1, ''b'']);'#10 +
+    '  var BkRevMixed := BkRev([1, ''b'']);'#10 +
+    '  var BkRevInt := BkRev([S, I]);'#10 +
+    '  var BkRevAnsi := BkRev([S, AS_]);'#10 +
+    '  var BkSpChar := BkSplit(['','']);'#10 +
+    '  var BkSpStr := BkSplit(['', '']);'#10 +
+    '  var BkSpBoth := BkSplit(['','', ''ab'']);'#10 +
+    '  var BkSpRevChar := BkSplitRev(['','', '';'']);'#10 +
+    '  var BkSpRevVar := BkSplitRev([C, '';'']);'#10 +
+    '  var BkSpRevStr := BkSplitRev(['', '']);'#10 +
+    '  var BkDynStrs := BkDyn([''a'', ''b'']);'#10 +
+    '  var BkVarMixed := BkVar([1, ''b'']);'#10 +
+    '  var BkInts := BkInt([I, I]);'#10 +
+    '  var BkRegs := BkReg([TBkCust, TBkObj]);'#10 +
+    '  var BkClsRefs := BkCls([TBkCust]);'#10 +
+    '  var BkLocal := BkJoin(LA);'#10 +
+    '  var BkLocalDyn := BkDyn(LA);'#10 +
+    '  var BkStatic := BkJoin(SA);'#10 +
+    '  var BkConst := BkJoin(CA);'#10 +
+    '  var BkField := BkJoin(R.FA);'#10 +
+    'end;'#10 +
+    'end.'#10;
+  UNIT_XOL =
+    'unit XOL;'#10'interface'#10'uses XOK;'#10 +
+    'implementation'#10 +
+    'procedure Run(S: string; C: Char);'#10 +
+    'var'#10 +
+    '  LA: array of string;'#10 +
+    'begin'#10 +
+    '  var BcStrs := BkJoin([''a'', S]);'#10 +
+    '  var BcMixed := BkRev([1, ''b'']);'#10 +
+    '  var BcSpRevChar := BkSplitRev([C, '';'']);'#10 +
+    '  var BcSpStr := BkSplit(['', '']);'#10 +
+    '  var BcDynStrs := BkDyn([''a'', ''b'']);'#10 +
+    '  var BcVarMixed := BkVar([1, ''b'']);'#10 +
+    '  var BcLocal := BkJoin(LA);'#10 +
+    '  var BcRegs := BkReg([TBkCust, TBkObj]);'#10 +
+    '  var BcClsRefs := BkCls([TBkCust]);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // F45 of the parser-fidelity plan: a dereference of a dereference. M is an
   // ANONYMOUS pointer to a named pointer type (System.SysUtils'
   // ResStringModuleUnloadProc: `M: ^PResStringModule`, then `M^^.Module`);
@@ -2630,6 +2765,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XFC.pas'), UNIT_XFC);
   TFile.WriteAllText(TPath.Combine(LDir, 'XOP.pas'), UNIT_XOP);
   TFile.WriteAllText(TPath.Combine(LDir, 'XOQ.pas'), UNIT_XOQ);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XOK.pas'), UNIT_XOK);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XOL.pas'), UNIT_XOL);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -3113,6 +3250,84 @@ begin
     Eq('6.2.6: ...the other declaration order', DeclTypeOf(LE, 'oqrevarr'),
       'TOpCust');
     Eq('6.2.6: ...a TArray<TVarRec>', DeclTypeOf(LE, 'oqvarrecs'), 'TOpObj');
+
+    // ---- a `[...]` and an inline-typed array against open arrays (6.3.1) ----
+    LE := ModelByName('xok');
+    Ok('XOK loaded', Assigned(LE));
+    Ok('XOK: no diags at all', Length(LE.Diags) = 0);
+    Eq('6.3.1: [''a'', ''b''] takes `array of string` over `array of const` '
+      + 'declared first', DeclTypeOf(LE, 'bkstrs'), 'TBkCust');
+    Eq('6.3.1: ...and a member of its result is read off it',
+      DeclTypeOf(LE, 'bkstrsmember'), 'Integer');
+    Eq('6.3.1: ...the other declaration order', DeclTypeOf(LE, 'bkrevstrs'),
+      'TBkCust');
+    Eq('6.3.1: a Char variable is exact for `array of string` too',
+      DeclTypeOf(LE, 'bkchar'), 'TBkCust');
+    Eq('6.3.1: [1, ''b''] takes `array of const`', DeclTypeOf(LE, 'bkmixed'),
+      'TBkObj');
+    Eq('6.3.1: ...declared second', DeclTypeOf(LE, 'bkrevmixed'), 'TBkObj');
+    Eq('6.3.1: one element converted - an Integer - and `array of const` wins',
+      DeclTypeOf(LE, 'bkrevint'), 'TBkObj');
+    Eq('6.3.1: ...an AnsiString for `array of string` too',
+      DeclTypeOf(LE, 'bkrevansi'), 'TBkObj');
+    Eq('6.3.1: ['',''] takes `array of Char` over `array of string`',
+      DeclTypeOf(LE, 'bkspchar'), 'TBkObj');
+    Eq('6.3.1: ['', ''] takes `array of string`, declared second',
+      DeclTypeOf(LE, 'bkspstr'), 'TBkCust');
+    Eq('6.3.1: ...and so does a bracket with one string in it',
+      DeclTypeOf(LE, 'bkspboth'), 'TBkCust');
+    Eq('6.3.1: Char literals take `array of Char` declared second',
+      DeclTypeOf(LE, 'bksprevchar'), 'TBkObj');
+    Eq('6.3.1: ...and a Char variable among them',
+      DeclTypeOf(LE, 'bksprevvar'), 'TBkObj');
+    Eq('6.3.1: ['', ''] in that order (control)', DeclTypeOf(LE, 'bksprevstr'),
+      'TBkCust');
+    Eq('6.3.1: an exact bracket takes `array of string` over TArray<string> '
+      + 'declared first', DeclTypeOf(LE, 'bkdynstrs'), 'TBkCust');
+    Eq('6.3.1: [1, ''b''] takes `array of const` over `array of Variant` '
+      + 'declared first', DeclTypeOf(LE, 'bkvarmixed'), 'TBkCust');
+    Eq('6.3.1: [I, I] takes `array of Integer` over `array of Byte` declared '
+      + 'first', DeclTypeOf(LE, 'bkints'), 'TBkCust');
+    Eq('6.3.1: class names are class references: `array of TBkObjClass` '
+      + 'takes [TBkCust, TBkObj]', DeclTypeOf(LE, 'bkregs'), 'TBkCust');
+    Eq('6.3.1: ...over `array of string` declared first',
+      DeclTypeOf(LE, 'bkclsrefs'), 'TBkCust');
+    Eq('6.2.6: a local `array of string` takes `array of string` over `array '
+      + 'of const` declared first', DeclTypeOf(LE, 'bklocal'), 'TBkCust');
+    Eq('6.2.6: ...and the open array over TArray<string> declared first',
+      DeclTypeOf(LE, 'bklocaldyn'), 'TBkCust');
+    Eq('6.2.6: an inline static array', DeclTypeOf(LE, 'bkstatic'),
+      'TBkCust');
+    Eq('6.2.6: a typed constant of an inline array type',
+      DeclTypeOf(LE, 'bkconst'), 'TBkCust');
+    Eq('6.2.6: a record field of an inline array type',
+      DeclTypeOf(LE, 'bkfield'), 'TBkCust');
+    Eq('6.2.6: an `array of string` parameter passed on',
+      DeclTypeOf(LE, 'bkpass'), 'TBkCust');
+    Eq('6.2.6: ...takes the open array over TArray<string> declared first',
+      DeclTypeOf(LE, 'bkpassdyn'), 'TBkCust');
+    Eq('6.2.6: an `array of const` parameter passed on takes `array of const`',
+      DeclTypeOf(LE, 'bkpassk'), 'TBkObj');
+    LE := ModelByName('xol');
+    Ok('XOL loaded', Assigned(LE));
+    Ok('XOL: no diags at all', Length(LE.Diags) = 0);
+    Eq('6.3.1: another unit''s family: [''a'', S]', DeclTypeOf(LE, 'bcstrs'),
+      'TBkCust');
+    Eq('6.3.1: ...[1, ''b'']', DeclTypeOf(LE, 'bcmixed'), 'TBkObj');
+    Eq('6.3.1: ...[C, '';''] for `array of Char` declared second',
+      DeclTypeOf(LE, 'bcsprevchar'), 'TBkObj');
+    Eq('6.3.1: ...['', ''] for `array of string` declared second',
+      DeclTypeOf(LE, 'bcspstr'), 'TBkCust');
+    Eq('6.3.1: ...an exact bracket over TArray<string>',
+      DeclTypeOf(LE, 'bcdynstrs'), 'TBkCust');
+    Eq('6.3.1: ...`array of const` over `array of Variant`',
+      DeclTypeOf(LE, 'bcvarmixed'), 'TBkCust');
+    Eq('6.2.6: ...a local `array of string`', DeclTypeOf(LE, 'bclocal'),
+      'TBkCust');
+    Eq('6.3.1: ...class names for `array of TBkObjClass`',
+      DeclTypeOf(LE, 'bcregs'), 'TBkCust');
+    Eq('6.3.1: ...over `array of string` declared first',
+      DeclTypeOf(LE, 'bcclsrefs'), 'TBkCust');
 
     // ---- F45: a dereference of a dereference ----
     LE := ModelByName('xpd');

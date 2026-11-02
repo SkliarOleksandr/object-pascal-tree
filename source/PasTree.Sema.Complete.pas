@@ -383,6 +383,9 @@ type
     function IsResultRoutine(AMid, ASym: Integer): Boolean;
     function ArgTypedOverload(AMid, ASym, ACtx, ACall,
       ADepth: Integer): Integer;
+    function ArgValueX(const ARef: TPasComplTypeRef): TSemaXType;
+    function OpenArrArgOf(ACore: Integer; const ARef: TPasComplTypeRef;
+      ADepth: Integer): TPasOpenArrArg;
     function OverlayParams(ASym: Integer): TArray<Integer>;
     function IsProcedureValue(ACore, ADepth: Integer): Boolean;
     function OwnModelRoutine(AOvSym: Integer): Integer;
@@ -1956,10 +1959,11 @@ var
   LM: TPasSemaModel;
   LCands, LParams, LCores: TArray<Integer>;
   LArgXs: TArray<TSemaXType>;
+  LOpens: TArray<TPasOpenArrArg>;
   LProcs, LRefs: TArray<Boolean>;
   LArgs, LCount, LTypeArgs, LCur, LHop, LIdx, LPass, LReq, LTot, LScore,
     LFit, LBestScore: Integer;
-  LTrailing, LVariadic, LOpenArr: Boolean;
+  LTrailing, LVariadic, LOpenArr, LOfConst: Boolean;
   LRef: TPasComplTypeRef;
   LParX: TSemaXType;
   LNode, LTypeNode, LVarRecMid, LVarRecSym: Integer;
@@ -2021,10 +2025,12 @@ begin
   end;
   if Length(LCands) < 2 then
     Exit;
-  // The arguments, each typed once: its type in project space, whether it
-  // is a class REFERENCE (a type name, a class-side value) and whether it
-  // names a procedure, and its node under the parentheses.
+  // The arguments, each typed once: its type in project space, what it
+  // brings an open array besides (OpenArrArgOf), whether it is a class
+  // REFERENCE (a type name, a class-side value) and whether it names a
+  // procedure, and its node under the parentheses.
   SetLength(LArgXs, LArgs);
+  SetLength(LOpens, LArgs);
   SetLength(LCores, LArgs);
   SetLength(LProcs, LArgs);
   SetLength(LRefs, LArgs);
@@ -2037,15 +2043,8 @@ begin
       Exit;
     LCores[LCount] := PeelParens(FModel.Tree, LNode);
     LRef := DesignatorType(LNode, ADepth + 1);
-    LArgXs[LCount] := XNil;
-    // A value of an inline `^T` comes typed as T (ResolveTypeRefNode): its
-    // own type is the pointer, which has no name to score.
-    if not LRef.ViaPointer then
-    begin
-      LArgXs[LCount] := LRef.X;
-      if not XValid(LArgXs[LCount]) then
-        LArgXs[LCount] := OwnModelTypeX(LRef.OvSym);
-    end;
+    LArgXs[LCount] := ArgValueX(LRef);
+    LOpens[LCount] := OpenArrArgOf(LCores[LCount], LRef, ADepth + 1);
     LRefs[LCount] := LRef.IsTypeRef;
     LProcs[LCount] := IsProcedureValue(LCores[LCount], ADepth + 1);
     Inc(LCount);
@@ -2096,7 +2095,8 @@ begin
         if LIdx > High(LParams) then
           Break;
         if AMid >= 0 then
-          LParX := FProj.ParamFitTypeX(AMid, LParams[LIdx], ACtx, LOpenArr)
+          LParX := FProj.ParamFitTypeX(AMid, LParams[LIdx], ACtx, LOpenArr,
+            LOfConst)
         else
         begin
           // ParamFitTypeX over the buffer's own nodes: an open array is
@@ -2105,10 +2105,10 @@ begin
           LTypeNode := LM.Symbols[LParams[LIdx]].TypeNode;
           LOpenArr := (LTypeNode <> NIL_NODE) and
             (LM.Tree.Nodes[LTypeNode].Kind = nkArrayType);
+          LOfConst := LOpenArr and (LM.Tree.Nodes[LTypeNode].Aux = 1);
           if LOpenArr then
           begin
-            if (LM.Tree.Nodes[LTypeNode].Aux = 1) and
-               BridgeName('tvarrec', LVarRecMid, LVarRecSym) then
+            if LOfConst and BridgeName('tvarrec', LVarRecMid, LVarRecSym) then
               LParX := XPlain(LVarRecMid, LVarRecSym);
             LTypeNode := PasArrayElemNode(LM.Tree, LTypeNode);
           end;
@@ -2123,8 +2123,12 @@ begin
             end;
           end;
         end;
-        LFit := FProj.ArgFitX(LArgXs[LIdx], LParX, FModel.Tree, LCores[LIdx],
-          LProcs[LIdx], LRefs[LIdx], LOpenArr);
+        if LOpenArr then
+          LFit := FProj.OpenArgFitX(LArgXs[LIdx], LParX, LOfConst, FModel.Tree,
+            LCores[LIdx], LRefs[LIdx], LOpens[LIdx])
+        else
+          LFit := FProj.ArgFitX(LArgXs[LIdx], LParX, FModel.Tree, LCores[LIdx],
+            LProcs[LIdx], LRefs[LIdx]);
         if LFit < 0 then
         begin
           LScore := -1;
@@ -2141,6 +2145,63 @@ begin
     if (LBestScore >= 0) or (LTypeArgs < 0) then
       Exit;
   end;
+end;
+
+// The project-space type of the value ARef types: its XType, a buffer
+// type's project twin (OwnModelTypeX), or nothing for a value of an inline
+// `^T`, which comes typed as T (ResolveTypeRefNode) while its own type is
+// the pointer, which has no name to score.
+function TPasCompletion.ArgValueX(const ARef: TPasComplTypeRef): TSemaXType;
+begin
+  Result := XNil;
+  if ARef.ViaPointer then
+    Exit;
+  Result := ARef.X;
+  if not XValid(Result) then
+    Result := OwnModelTypeX(ARef.OvSym);
+end;
+
+{ What the argument ACore, typed ARef, brings an OPEN-ARRAY parameter
+  besides its type (TPasSemaProject.OpenArgFitX): a `[...]`'s elements,
+  each typed here - a type name a class reference - or the element of the
+  one-dimensional inline array type it is declared with (ARef's ArrNode:
+  `var A: array of string`, an open-array parameter, `array of const`'s
+  TVarRec). }
+function TPasCompletion.OpenArrArgOf(ACore: Integer;
+  const ARef: TPasComplTypeRef; ADepth: Integer): TPasOpenArrArg;
+var
+  LKid, LIdx, LCount: Integer;
+  LM: TPasSemaModel;
+  LElem: TPasComplTypeRef;
+begin
+  Result.ElemXs := nil;
+  Result.ElemClassRefs := nil;
+  Result.InlineElemX := XNil;
+  if FModel.Tree.Nodes[ACore].Kind = nkSetCtor then
+  begin
+    LCount := PasChildCount(FModel.Tree, ACore);
+    SetLength(Result.ElemXs, LCount);
+    SetLength(Result.ElemClassRefs, LCount);
+    LIdx := 0;
+    LKid := FModel.Tree.Nodes[ACore].FirstChild;
+    while LKid <> NIL_NODE do
+    begin
+      LElem := DesignatorType(LKid, ADepth + 1);
+      Result.ElemXs[LIdx] := ArgValueX(LElem);
+      Result.ElemClassRefs[LIdx] := LElem.IsTypeRef;
+      Inc(LIdx);
+      LKid := FModel.Tree.Nodes[LKid].NextSibling;
+    end;
+    Exit;
+  end;
+  if (ARef.ArrNode = NIL_NODE) or (ARef.ArrSkip <> 0) or ARef.ViaPointer or
+     not SymModelOf(ARef.ArrMid, 'OpenArrArgOf', LM) or
+     (LM.Tree.Nodes[ARef.ArrNode].Aux <> 1) and
+     (PasArrayDims(LM.Tree, ARef.ArrNode) <> 1) then
+    Exit;
+  LElem := ArrayElemRef(ARef.ArrMid, ARef.ArrNode, ARef.ArrCtx, ADepth + 1);
+  if LElem.ArrNode = NIL_NODE then
+    Result.InlineElemX := ArgValueX(LElem);
 end;
 
 // The parameters of the buffer's routine ASym in declaration order (its

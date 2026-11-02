@@ -321,6 +321,146 @@ const
     '  X := Z(II);'#10 +
     'end;'#10'end.'#10;
 
+  { A `[...]` against open-array overloads is ranked by its WORST element,
+    and an array whose type is written inline is an array of its element
+    (6.3.1, 6.2.6; dcc64 37.0, local/compl-c1c2-2026-11/fd). Each TRW
+    overload is dcc's pick: J an exact bracket or inline array over `array
+    of const`; L `array of const` over `array of string` for one element
+    converted; Q `array of string` over `array of Char` for a string among
+    the elements, K the reverse for Char values; D an exact bracket and an
+    inline `array of string` over a named dynamic array; V `array of const`
+    over `array of Variant`; N `array of Integer` over `array of Byte`; E and
+    F an open-array parameter passed on. Declared second there - every one
+    took the first on 0.146.10 - and first in the *M twins, which must not
+    lose it. }
+  SRC_OPEN2 =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TStrs = array of string;'#10 +
+    '  TCA = class end;'#10 +
+    '  TCAClass = class of TCA;'#10 +
+    'function J(const A: array of const): TRA; overload;'#10 +
+    'function J(const A: array of string): TRW; overload;'#10 +
+    'function L(const A: array of string): TRA; overload;'#10 +
+    'function L(const A: array of const): TRW; overload;'#10 +
+    'function Q(const A: array of Char): TRA; overload;'#10 +
+    'function Q(const A: array of string): TRW; overload;'#10 +
+    'function K(const A: array of string): TRA; overload;'#10 +
+    'function K(const A: array of Char): TRW; overload;'#10 +
+    'function D(const A: TStrs): TRA; overload;'#10 +
+    'function D(const A: array of string): TRW; overload;'#10 +
+    'function V(const A: array of Variant): TRA; overload;'#10 +
+    'function V(const A: array of const): TRW; overload;'#10 +
+    'function N(const A: array of Byte): TRA; overload;'#10 +
+    'function N(const A: array of Integer): TRW; overload;'#10 +
+    'function E(const A: array of const): TRA; overload;'#10 +
+    'function E(const A: array of string): TRW; overload;'#10 +
+    'function F(const A: array of string): TRA; overload;'#10 +
+    'function F(const A: array of const): TRW; overload;'#10 +
+    'function JM(const A: array of string): TRW; overload;'#10 +
+    'function JM(const A: array of const): TRA; overload;'#10 +
+    'function LM(const A: array of const): TRW; overload;'#10 +
+    'function LM(const A: array of string): TRA; overload;'#10 +
+    'function QM(const A: array of string): TRW; overload;'#10 +
+    'function QM(const A: array of Char): TRA; overload;'#10 +
+    'function KM(const A: array of Char): TRW; overload;'#10 +
+    'function KM(const A: array of string): TRA; overload;'#10 +
+    'function DM(const A: array of string): TRW; overload;'#10 +
+    'function DM(const A: TStrs): TRA; overload;'#10 +
+    'function VM(const A: array of const): TRW; overload;'#10 +
+    'function VM(const A: array of Variant): TRA; overload;'#10 +
+    'function NM(const A: array of Integer): TRW; overload;'#10 +
+    'function NM(const A: array of Byte): TRA; overload;'#10 +
+    'function CR(const A: array of string): TRA; overload;'#10 +
+    'function CR(const A: array of TCAClass): TRW; overload;'#10 +
+    'function CRM(const A: array of TCAClass): TRW; overload;'#10 +
+    'function CRM(const A: array of string): TRA; overload;'#10 +
+    'implementation'#10 +
+    'function J(const A: array of const): TRA; begin end;'#10 +
+    'function J(const A: array of string): TRW; begin end;'#10 +
+    'function L(const A: array of string): TRA; begin end;'#10 +
+    'function L(const A: array of const): TRW; begin end;'#10 +
+    'function Q(const A: array of Char): TRA; begin end;'#10 +
+    'function Q(const A: array of string): TRW; begin end;'#10 +
+    'function K(const A: array of string): TRA; begin end;'#10 +
+    'function K(const A: array of Char): TRW; begin end;'#10 +
+    'function D(const A: TStrs): TRA; begin end;'#10 +
+    'function D(const A: array of string): TRW; begin end;'#10 +
+    'function V(const A: array of Variant): TRA; begin end;'#10 +
+    'function V(const A: array of const): TRW; begin end;'#10 +
+    'function N(const A: array of Byte): TRA; begin end;'#10 +
+    'function N(const A: array of Integer): TRW; begin end;'#10 +
+    'function E(const A: array of const): TRA; begin end;'#10 +
+    'function E(const A: array of string): TRW; begin end;'#10 +
+    'function F(const A: array of string): TRA; begin end;'#10 +
+    'function F(const A: array of const): TRW; begin end;'#10 +
+    'function JM(const A: array of string): TRW; begin end;'#10 +
+    'function JM(const A: array of const): TRA; begin end;'#10 +
+    'function LM(const A: array of const): TRW; begin end;'#10 +
+    'function LM(const A: array of string): TRA; begin end;'#10 +
+    'function QM(const A: array of string): TRW; begin end;'#10 +
+    'function QM(const A: array of Char): TRA; begin end;'#10 +
+    'function KM(const A: array of Char): TRW; begin end;'#10 +
+    'function KM(const A: array of string): TRA; begin end;'#10 +
+    'function DM(const A: array of string): TRW; begin end;'#10 +
+    'function DM(const A: TStrs): TRA; begin end;'#10 +
+    'function VM(const A: array of const): TRW; begin end;'#10 +
+    'function VM(const A: array of Variant): TRA; begin end;'#10 +
+    'function NM(const A: array of Integer): TRW; begin end;'#10 +
+    'function NM(const A: array of Byte): TRA; begin end;'#10 +
+    'function CR(const A: array of string): TRA; begin end;'#10 +
+    'function CR(const A: array of TCAClass): TRW; begin end;'#10 +
+    'function CRM(const A: array of TCAClass): TRW; begin end;'#10 +
+    'function CRM(const A: array of string): TRA; begin end;'#10 +
+    'procedure PassOn(const A: array of string; const KK: array of const);'#10 +
+    'var X: TRW;'#10 +
+    'begin'#10 +
+    '  X := E(A);'#10 +
+    '  X := F(KK);'#10 +
+    'end;'#10 +
+    'procedure Test(S: string; I: Integer; C: Char; AS_: AnsiString);'#10 +
+    'var'#10 +
+    '  X: TRW;'#10 +
+    '  LA: array of string;'#10 +
+    '  SA: array[0..1] of string;'#10 +
+    'begin'#10 +
+    '  X := J([''a'', ''b'']);'#10 +
+    '  X := J([S, ''x'']);'#10 +
+    '  X := J([C]);'#10 +
+    '  X := J(LA);'#10 +
+    '  X := J(SA);'#10 +
+    '  X := L([1, ''b'']);'#10 +
+    '  X := L([S, I]);'#10 +
+    '  X := L([S, AS_]);'#10 +
+    '  X := Q(['', '']);'#10 +
+    '  X := Q(['','', ''ab'']);'#10 +
+    '  X := Q([S]);'#10 +
+    '  X := K(['','']);'#10 +
+    '  X := K([C, '';'']);'#10 +
+    '  X := K([#9]);'#10 +
+    '  X := D([''a'', ''b'']);'#10 +
+    '  X := D(LA);'#10 +
+    '  X := V([1, ''b'']);'#10 +
+    '  X := N([I, I]);'#10 +
+    '  X := JM([''a'', ''b'']);'#10 +
+    '  X := JM([C]);'#10 +
+    '  X := JM(LA);'#10 +
+    '  X := LM([1, ''b'']);'#10 +
+    '  X := LM([S, I]);'#10 +
+    '  X := LM([S, AS_]);'#10 +
+    '  X := QM(['', '']);'#10 +
+    '  X := QM(['','', ''ab'']);'#10 +
+    '  X := KM(['','']);'#10 +
+    '  X := KM([C, '';'']);'#10 +
+    '  X := DM([''a'', ''b'']);'#10 +
+    '  X := DM(LA);'#10 +
+    '  X := VM([1, ''b'']);'#10 +
+    '  X := NM([I, I]);'#10 +
+    '  X := CR([TCA]);'#10 +
+    '  X := CRM([TCA]);'#10 +
+    'end;'#10'end.'#10;
+
   { The Char-literal and nil exemptions of the assignment check (A4-10,
     A4-11; probe-b32 P1): dcc compiles every line but the last, where an
     operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
@@ -409,6 +549,14 @@ begin
     Ok('open array (6.2.6): ' + LName + ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   Ok('open array: no E2010', DiagCount('E2010') = 0);
+  GModel.Free;
+
+  Analyze(SRC_OPEN2);
+  for var LName in ['J', 'L', 'Q', 'K', 'D', 'V', 'N', 'E', 'F', 'JM', 'LM',
+    'QM', 'KM', 'DM', 'VM', 'NM', 'CR', 'CRM'] do
+    Ok('[...] / inline array (6.3.1): ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  Ok('[...] / inline array: no E2010', DiagCount('E2010') = 0);
   GModel.Free;
 
   Analyze(SRC_ASSIGN);

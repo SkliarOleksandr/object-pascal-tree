@@ -118,6 +118,13 @@ function PasBuiltinCanonSym(AModel: TPasSemaModel; ASym: Integer;
 function PasBuiltinIsChar(AModel: TPasSemaModel; ASym: Integer;
   APlatform: TPasPlatform): Boolean;
 
+{ Is ASym the seeded `string` (or `UnicodeString`) - the one string type a
+  Char value converts to as exactly as to Char itself where a `[...]`'s
+  element is ranked (6.3.1: `[C]` takes `array of string` over `array of
+  const`, `array of Char` over both). }
+function PasBuiltinIsUString(AModel: TPasSemaModel; ASym: Integer;
+  APlatform: TPasPlatform): Boolean;
+
 type
   { How a value-returning intrinsic's RESULT type is decided (4.11.4). Every
     shape below is a dcc 37.0 probe on BOTH compilers, read through the type
@@ -539,6 +546,7 @@ type
     Names: TSemaNames;                     // names + order, immutable after init
     Canon: TArray<Integer>;                // seed index -> PasBuiltinCanonSym
     CharSym: Integer;                      // the seeded `Char`
+    StringSym: Integer;                    // the seeded `string`
   end;
 
 var
@@ -598,6 +606,15 @@ begin
     (sfBuiltin in AModel.Symbols[ASym].Flags) and
     (PasBuiltinCanonSym(AModel, ASym, APlatform) =
      GSeedTemplates[SeedClassOf(APlatform)].CharSym);
+end;
+
+function PasBuiltinIsUString(AModel: TPasSemaModel; ASym: Integer;
+  APlatform: TPasPlatform): Boolean;
+begin
+  Result := (ASym >= 0) and (ASym < AModel.SymCount) and
+    (sfBuiltin in AModel.Symbols[ASym].Flags) and
+    (PasBuiltinCanonSym(AModel, ASym, APlatform) =
+     GSeedTemplates[SeedClassOf(APlatform)].StringSym);
 end;
 
 function PasBuiltinSignature(const ANameLower: string;
@@ -704,6 +721,7 @@ begin
           GSeedTemplates[LClass].Canon[LSym] := LHead;
       end;
       GSeedTemplates[LClass].CharSym := LModel.FindLocal(LScope, 'char');
+      GSeedTemplates[LClass].StringSym := LModel.FindLocal(LScope, 'string');
     finally
       LModel.Free;
     end;
