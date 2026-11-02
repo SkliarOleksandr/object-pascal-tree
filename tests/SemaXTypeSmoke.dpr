@@ -463,6 +463,10 @@ const
     '  end;'#10 +
     '  TFiColor = (fcRed, fcBlue);'#10 +
     '  TFiNames = array of string;'#10 +
+    '  TFiHolder<T: TFiBase> = class'#10 +
+    '    Data: TArray<T>;'#10 +
+    '  end;'#10 +
+    '  TFiItems = TFiHolder<TFiItem>;'#10 +
     'implementation'#10 +
     'constructor TFiBase.Create; begin end;'#10 +
     'function TFiEnum<T>.GetCurrent: T; begin Result := Default(T); end;'#10 +
@@ -488,6 +492,99 @@ const
     '  var ICatCtorR := APaths + ([ADir]);'#10 +
     '  var ICatNamed := ANames + [ADir];'#10 +
     '  var ICatTwoCtors := [ADir] + [ADir];'#10 +
+    'end;'#10 +
+    'procedure InferHeld(AItems: TFiItems; AHeld: TFiHolder<TFiItem>);'#10 +
+    'begin'#10 +
+    '  for var IHeldAlias in AItems.Data do'#10 +
+    '    IHeldAlias.Name := '''';'#10 +
+    '  for var IHeldDirect in AHeld.Data do ;'#10 +
+    '  var IHeldArr := AItems.Data;'#10 +
+    '  for var IHeldVar in IHeldArr do ;'#10 +
+    'end;'#10 +
+    'end.'#10;
+
+  // A generic's NESTED types and its members reached through an ALIAS of an
+  // instance (16.3.1, 5.7; local/ALIAS-GENERIC-AUDIT-2026-11.md), every line
+  // compiled by dcc64 37.0. In the declaring unit: `TAlGen<TAlItem>.TItems` /
+  // `.TEnum` written as a declared type (Phase 1 bound the last segment with
+  // no frame); aliases defined as a nested type through an alias of the
+  // instance; a nested-typed member (`Items: TItems`) read through such an
+  // alias; and a `with` over the instance, whose bare fields Phase 1 binds.
+  // XAM: the same aliases in another unit, a nested CLASS walked by for-in
+  // through an alias of it, and an alias of a nested POINTER type.
+  UNIT_XAL =
+    'unit XAL;'#10'interface'#10 +
+    'type'#10 +
+    '  TAlBase = class'#10 +
+    '    Id: Integer;'#10 +
+    '  end;'#10 +
+    '  TAlItem = class(TAlBase)'#10 +
+    '    Name: string;'#10 +
+    '  end;'#10 +
+    '  TAlGen<T: TAlBase> = class'#10 +
+    '  public type'#10 +
+    '    TItems = array of T;'#10 +
+    '    PItems = ^TItems;'#10 +
+    '    TEnum = class'#10 +
+    '      function GetCurrent: T;'#10 +
+    '      function MoveNext: Boolean;'#10 +
+    '      property Current: T read GetCurrent;'#10 +
+    '    end;'#10 +
+    '    TValues = class'#10 +
+    '      function GetEnumerator: TEnum;'#10 +
+    '    end;'#10 +
+    '  public'#10 +
+    '    Data: TArray<T>;'#10 +
+    '    Items: TItems;'#10 +
+    '    First: T;'#10 +
+    '    function GetItems: TItems;'#10 +
+    '  end;'#10 +
+    '  TAlItems = TAlGen<TAlItem>;'#10 +
+    '  TAlNested = TAlItems.TItems;'#10 +
+    '  TAlEnumA = TAlItems.TEnum;'#10 +
+    'implementation'#10 +
+    'function TAlGen<T>.TEnum.GetCurrent: T; begin Result := nil; end;'#10 +
+    'function TAlGen<T>.TEnum.MoveNext: Boolean; begin Result := False; end;'#10 +
+    'function TAlGen<T>.TValues.GetEnumerator: TEnum; begin Result := nil; end;'#10 +
+    'function TAlGen<T>.GetItems: TItems; begin Result := Items; end;'#10 +
+    'procedure Run(A: TAlItems; D: TAlGen<TAlItem>;'#10 +
+    '  IT2: TAlGen<TAlItem>.TItems; E4: TAlGen<TAlItem>.TEnum;'#10 +
+    '  IT: TAlNested; E: TAlEnumA);'#10 +
+    'begin'#10 +
+    '  var AlWrittenIdx := IT2[0];'#10 +
+    '  for var AlWrittenIn in IT2 do ;'#10 +
+    '  var AlWrittenCur := E4.Current;'#10 +
+    '  var AlNestedIdx := IT[0];'#10 +
+    '  for var AlNestedIn in IT do ;'#10 +
+    '  var AlNestedCur := E.Current;'#10 +
+    '  var AlMemberIdx := A.Items[0];'#10 +
+    '  for var AlMemberIn in A.Items do ;'#10 +
+    '  for var AlMemberGet in A.GetItems do ;'#10 +
+    '  with D do'#10 +
+    '  begin'#10 +
+    '    var AlWithFirst := First;'#10 +
+    '    var AlWithIdx := Data[0];'#10 +
+    '  end;'#10 +
+    '  with A do'#10 +
+    '    for var AlWithIn in Data do ;'#10 +
+    'end;'#10 +
+    'end.'#10;
+  UNIT_XAM =
+    'unit XAM;'#10'interface'#10'uses XAL;'#10 +
+    'type'#10 +
+    '  TAmItems = TAlGen<TAlItem>;'#10 +
+    '  TAmNested = TAmItems.TItems;'#10 +
+    '  TAmValues = TAlGen<TAlItem>.TValues;'#10 +
+    '  TAmPItems = TAlGen<TAlItem>.PItems;'#10 +
+    'implementation'#10 +
+    'procedure Run(IT: TAmNested; VC: TAmValues; PA: TAmPItems; X: TAlItems);'#10 +
+    'begin'#10 +
+    '  var AmNestedIdx := IT[0];'#10 +
+    '  for var AmNestedIn in IT do ;'#10 +
+    '  for var AmValuesIn in VC do ;'#10 +
+    '  var AmPointerIdx := PA^[0];'#10 +
+    '  for var AmPointerIn in PA^ do ;'#10 +
+    '  var AmMemberIdx := X.Items[0];'#10 +
     'end;'#10 +
     'end.'#10;
 
@@ -2386,6 +2483,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XJV.pas'), UNIT_XJV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XIV.pas'), UNIT_XIV);
   TFile.WriteAllText(TPath.Combine(LDir, 'XEV.pas'), UNIT_XEV);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XAL.pas'), UNIT_XAL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XAM.pas'), UNIT_XAM);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -2455,8 +2554,11 @@ begin
     // open TOpGen<T> twice (interface and implementation T, as above); 48
     // with XGR, whose open IGrSpec<T> and TGrSpec<T> are written in the
     // declarations and in each implementation heading (8), and TGrSpec<U>
-    // in TGrBox.Make's two headings; 47 since 0.98.2 (one TWrap<Integer>).
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '47');
+    // in TGrBox.Make's two headings; 47 since 0.98.2 (one TWrap<Integer>);
+    // 50 with XFI's TFiHolder<TFiItem>, the open TArray<T> of its field and
+    // that field closed over the instance; 53 with XAL's TAlGen<TAlItem>, the
+    // open TArray<T> of its Data and TArray<TAlItem>.
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '53');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -2750,6 +2852,54 @@ begin
       DeclTypeOf(LE, 'icatnamed'), 'TFiNames');
     Eq('4.2.1: `[ADir] + [ADir]` (dcc: an anonymous array): no type',
       DeclTypeOf(LE, 'icattwoctors'), '?');
+    Eq('5.5.2: for-in over a TArray<T> field of an ALIASED generic instance',
+      DeclTypeOf(LE, 'iheldalias'), 'TFiItem');
+    Eq('5.5.2: ...and of the instance written directly',
+      DeclTypeOf(LE, 'ihelddirect'), 'TFiItem');
+    Eq('5.5.2: ...and of an inline var initialized from that field',
+      DeclTypeOf(LE, 'iheldvar'), 'TFiItem');
+
+    // ---- nested types of a generic, and members through an alias (16.3.1) ----
+    LE := ModelByName('xal');
+    Ok('XAL loaded', Assigned(LE));
+    Ok('XAL: no diags at all', Length(LE.Diags) = 0);
+    Eq('16.3.1: `TAlGen<TAlItem>.TItems` written in the declaring unit, indexed',
+      DeclTypeOf(LE, 'alwrittenidx'), 'TAlItem');
+    Eq('16.3.1: ...walked by for-in', DeclTypeOf(LE, 'alwrittenin'), 'TAlItem');
+    Eq('16.3.1: `TAlGen<TAlItem>.TEnum` written, its Current',
+      DeclTypeOf(LE, 'alwrittencur'), 'TAlItem');
+    Eq('16.3.1: an alias of `TAlItems.TItems`, indexed',
+      DeclTypeOf(LE, 'alnestedidx'), 'TAlItem');
+    Eq('16.3.1: ...walked by for-in', DeclTypeOf(LE, 'alnestedin'), 'TAlItem');
+    Eq('16.3.1: an alias of `TAlItems.TEnum`, its Current',
+      DeclTypeOf(LE, 'alnestedcur'), 'TAlItem');
+    Eq('16.3.1: a nested-typed member through an alias, indexed',
+      DeclTypeOf(LE, 'almemberidx'), 'TAlItem');
+    Eq('16.3.1: ...the member keeps the frame in the probe typer, after the '
+      + 'pass bound it', ProbeTypeOf(LE, 'A.Items'), 'TAlGen<TAlItem>.TItems');
+    Eq('16.3.1: ...walked by for-in', DeclTypeOf(LE, 'almemberin'), 'TAlItem');
+    Eq('16.3.1: ...a method''s nested-typed result walked by for-in',
+      DeclTypeOf(LE, 'almemberget'), 'TAlItem');
+    Eq('5.7: `with D do` over a same-unit instance, a bare field',
+      DeclTypeOf(LE, 'alwithfirst'), 'TAlItem');
+    Eq('5.7: ...a bare TArray<T> field, indexed',
+      DeclTypeOf(LE, 'alwithidx'), 'TAlItem');
+    Eq('5.7, 5.5.2: ...walked by for-in inside the with',
+      DeclTypeOf(LE, 'alwithin'), 'TAlItem');
+    LE := ModelByName('xam');
+    Ok('XAM loaded', Assigned(LE));
+    Ok('XAM: no diags at all', Length(LE.Diags) = 0);
+    Eq('16.3.1: another unit''s alias of `TAmItems.TItems`, indexed',
+      DeclTypeOf(LE, 'amnestedidx'), 'TAlItem');
+    Eq('16.3.1: ...walked by for-in', DeclTypeOf(LE, 'amnestedin'), 'TAlItem');
+    Eq('16.3.1: an alias of a nested enumerable class, walked by for-in',
+      DeclTypeOf(LE, 'amvaluesin'), 'TAlItem');
+    Eq('16.3.1: an alias of a nested pointer type, dereferenced and indexed',
+      DeclTypeOf(LE, 'ampointeridx'), 'TAlItem');
+    Eq('16.3.1: ...dereferenced and walked by for-in',
+      DeclTypeOf(LE, 'ampointerin'), 'TAlItem');
+    Eq('16.3.1: a nested-typed member through a foreign alias, probed',
+      ProbeTypeOf(LE, 'X.Items'), 'TAlGen<TAlItem>.TItems');
 
     // ---- F45: a dereference of a dereference ----
     LE := ModelByName('xpd');

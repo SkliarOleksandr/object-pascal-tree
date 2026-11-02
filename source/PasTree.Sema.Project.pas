@@ -1178,8 +1178,8 @@ type
       ACount: Integer; out APropMid, APropSym: Integer;
       out AInsideArray: Boolean): TSemaXType;
     { The one alias step every type chaser takes: the type alias definition
-      ADef of ACur resolved and closed over ACur's frame - `TItems =
-      TArray<T>` nested in TBox<T>, reached from a TBox<TRec>, is
+      ADef of ACur resolved (nested-aware) and closed over ACur's frame -
+      `TItems = TArray<T>` nested in TBox<T>, reached from a TBox<TRec>, is
       TArray<TRec> (audit A3-25: five copies of the step, three of them
       dropped the frame). }
     function AliasStepX(const ACur: TSemaXType; ADef: Integer): TSemaXType;
@@ -11356,6 +11356,15 @@ end;
   Kept OUT of ResolveTypeExpr itself, which is on the BindTypesX/CrossType hot
   path: callers reach this only after the plain lookup has already missed.
 
+  Or after it answered without the frame (16.3.1): in the unit that declares
+  the generic, Phase 1 DOES bind the last segment of `TGen<TRec>.TItems`, to
+  the nested TItems with nothing of the TGen<TRec> written before it - so
+  `IT: TGen<TRec>.TItems` indexed to the open T and `IT[0].Fld` was a false
+  E2003, while the same declaration in another unit, or through an alias of
+  the instance, came here and took the qualifier's frame. A frameless type
+  nested in a generic, answered for a dotted name, is read through the
+  qualifier once more; the plain answer stands when that finds nothing.
+
   The lookup is the qualifier's own members and then its ANCESTORS' - a nested
   type is inherited like any other member (11.4.1), and the qualifier need not be
   the class that declares it:
@@ -11379,24 +11388,35 @@ var
   LM, LQM: TPasSemaModel;
   LBase, LName, LScope, LFound, LDef, LDepth, LChild: Integer;
   LNameLower: string;
-  LQ: TSemaXType;
+  LQ, LPlain: TSemaXType;
 begin
   Result := ResolveTypeExpr(AId, ANode);
-  if XValid(Result) or (ANode = NIL_NODE) then
+  if ANode = NIL_NODE then
     Exit;
   LM := FModels[AId];
+  // The plain answer, kept when the qualifier below finds nothing better:
+  // XNil when there was none, a frameless nested type (see the header).
+  LPlain := Result;
+  if XValid(Result) then
+  begin
+    if (Result.Inst <> NIL_INST) or
+       (LM.Tree.Nodes[ANode].Kind <> nkMember) or
+       not NestedInGenericX(Result) then
+      Exit;
+    Result := XNil;
+  end;
   if LM.Tree.Nodes[ANode].Kind <> nkMember then
-    Exit;
+    Exit(LPlain);
   LBase := LM.Tree.Nodes[ANode].FirstChild;
   if LBase = NIL_NODE then
-    Exit;
+    Exit(LPlain);
   LName := LM.Tree.Nodes[LBase].NextSibling;
   // Qualifier and ONE trailing segment; a longer chain nests nkMember nodes, so
   // the recursion below covers `A.B.C` without a flat-list case here. That
   // recursion walks to a strictly SMALLER node, so it is bounded by the chain.
   if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) or
      (LM.Tree.Nodes[LName].NextSibling <> NIL_NODE) then
-    Exit;
+    Exit(LPlain);
   LQ := ResolveTypeExprNested(AId, LBase, ADepth);
   LNameLower := LM.Tree.NodeNameLower(LName);
   // Alias and ancestor hops chased like everywhere else here, depth-capped for a
@@ -11404,7 +11424,7 @@ begin
   for LDepth := 1 to 32 do
   begin
     if not XValid(LQ) then
-      Exit;
+      Exit(LPlain);
     LQM := FModels[LQ.UnitId];
     LScope := LQM.Symbols[LQ.Sym].MemberScope;
     if LScope <> NIL_SCOPE then
@@ -11422,7 +11442,7 @@ begin
     end;
     LDef := TypeDefNodeOf(LQ.UnitId, LQ.Sym);
     if LDef = NIL_NODE then
-      Exit;
+      Exit(LPlain);
     case LQM.Tree.Nodes[LDef].Kind of
       nkIdent, nkMember, nkTypeArgs:
         LQ := SubstX(ResolveTypeExpr(LQ.UnitId, LDef), LQ.Inst, 0);   // alias link
@@ -11434,17 +11454,18 @@ begin
           // clause ends the walk: the implicit TObject/IInterface declare no
           // nested types, so there is nothing there to find.
           if ADepth >= 4 then
-            Exit;
+            Exit(LPlain);
           LChild := PasHeritageRef(LQM.Tree, LDef);
           if LChild = NIL_NODE then
-            Exit;
+            Exit(LPlain);
           LQ := SubstX(ResolveTypeExprNested(LQ.UnitId, LChild, ADepth + 1),
             LQ.Inst, 0);
         end;
     else
-      Exit;
+      Exit(LPlain);
     end;
   end;
+  Result := LPlain;
 end;
 
 { Cross-unit helper injection (15.3) ---------------------------------------
@@ -12681,7 +12702,8 @@ begin
         // (REST.BindSource), and REST.Client's `TNotify = TRESTComponentAdapter
         // .TNotify` then has no definition at all, so `TNotify.Create` had no
         // members to search. Costs nothing on the common path:
-        // ResolveTypeExprNested IS ResolveTypeExpr until that one fails.
+        // ResolveTypeExprNested IS ResolveTypeExpr until that one fails (or
+        // answers a generic's nested type with no frame).
         begin
           LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // type alias
           LDistinct := LDistinct or IsDistinctTypeDef(LCur.UnitId, LDef);
@@ -15591,23 +15613,24 @@ var
     SetCtxAt(N, LCtx);
   end;
 
-  { The instantiation frame a bare routine name N, bound to (AMid, ASym), is
-    called in - the lookup that name gets in dcc's order: the targets of the
-    `with` statements around it, innermost first and right to left (their
-    types are walked already: a with's targets are children before its
-    body), then the enclosing struct. NIL_INST unless that lookup finds the
-    routine it is bound to (an overload of it: the same scope), so a binding
-    this walk did not make keeps no frame it did not earn. }
-  function BareRoutineFrame(N, AMid, ASym: Integer): Integer;
+  { The instantiation frame a bare member name N, bound to (AMid, ASym), is
+    read in - a routine's call, a field's or a property's read: the lookup
+    that name gets in dcc's order: the targets of the `with` statements
+    around it, innermost first and right to left (their types are walked
+    already: a with's targets are children before its body), then the
+    enclosing struct. NIL_INST unless that lookup finds the member it is
+    bound to (an overload of it: the same scope), so a binding this walk did
+    not make keeps no frame it did not earn. }
+  function BareMemberFrame(N, AMid, ASym: Integer): Integer;
   var
     LCur, LParent, LLast, LTarget, LFMid, LFSym, LFCtx, LStruct: Integer;
     LTargets: TArray<Integer>;
     LTX: TSemaXType;
   begin
     Result := NIL_INST;
-    // A frame is earned only through an instantiated hop, so the routine's
-    // own struct must be generic or nested in one: a unit-level routine, a
-    // seed (Exit, Inc, FreeAndNil) and a method of a plain class answer
+    // A frame is earned only through an instantiated hop, so the member's
+    // own struct must be generic or nested in one: a unit-level name, a
+    // seed (Exit, Inc, FreeAndNil) and a member of a plain class answer
     // NIL_INST without the climb and the member lookups below (audit C1-12:
     // 45 frames of 121,670 calls on a 665-unit closure).
     LStruct := FModels[AMid].Symbols[ASym].Scope;
@@ -15669,7 +15692,8 @@ var
     whose generic ANCESTOR declares the member: WinRT's `TFooImport.Statics`,
     `class property Statics: S` of TWinRTGenericImportS<S>, typed as S. Asked
     only for a member declared outside the base's own type whose declared
-    type is an open type parameter - what a wrong frame leaves open. }
+    type is open (a type parameter, or an instance with one among its
+    arguments) or nested in a generic - what a wrong frame leaves open. }
   function BoundMemberCtx(AMid, ASym: Integer; const ABX: TSemaXType;
     AName, ACtx: Integer): Integer;
   var
@@ -15687,9 +15711,19 @@ var
     if not (FModels[AMid].Symbols[ASym].Kind in [skRoutine, skVar, skField,
        skProperty, skConst]) then
       Exit;
+    // OpenX, not "is a parameter": a type that only CONTAINS one is left as
+    // open by a wrong frame too - `Data: TArray<T>` of a TApiList<T>, read
+    // through `TCustomers = TApiList<TCustomer>`, typed TArray<T>, and every
+    // member off a `for var L in A.Data` element was a false E2003 (16.3.1).
+    // A type NESTED in the generic has no arguments for OpenX to look into,
+    // yet its definition is written in the generic's parameters: `Items:
+    // TItems` with `TItems = array of T`, read through the same alias, typed
+    // as the frameless TItems once the pass had bound it - so a probe after
+    // the pass (`A.Items[0]`, a for-in element re-read through it) peeled to
+    // the open T.
     LDecl := DeclTypeX(AMid, ASym);
-    if not XValid(LDecl) or
-       (FModels[LDecl.UnitId].Symbols[LDecl.Sym].Kind <> skGenericParam) then
+    if not (OpenX(LDecl) or (XValid(LDecl) and (LDecl.Inst = NIL_INST) and
+       NestedInGenericX(LDecl))) then
       Exit;
     if FindMemberX(AId, ABX, PasNodeKey(LM.Tree, AName), LFMid, LFSym,
          LFCtx) and (LFMid = AMid) and
@@ -16216,8 +16250,13 @@ var
             // it unbound), while `Self.GetRecord(0).Code` - a member access,
             // which carries the frame - compiled clean. dcc compiles all of
             // them (pastree-mcp field report FR.2). The frame is the one the
-            // name's own lookup finds (BareRoutineFrame), whichever pass bound
+            // name's own lookup finds (BareMemberFrame), whichever pass bound
             // it: RefMap for a same-unit ancestor, ExtRefMap for another's.
+            // A FIELD or PROPERTY the same way: in `with D do` over a generic
+            // instance declared in the same unit, Phase 1 binds the body's
+            // names, so no with-pass answer waits in ExprTypeX - `with D do
+            // X := First.Fld` typed First as the open T and left Fld unbound,
+            // and `for var E in Data` walked T (5.7).
             if CtxAt(N) = NIL_INST then
             begin
               var LBMid := AId;
@@ -16228,8 +16267,9 @@ var
                 LBSym := LExt.Sym;
               end;
               if (LBSym <> NIL_SYM) and
-                 (FModels[LBMid].Symbols[LBSym].Kind = skRoutine) then
-                SetCtxAt(N, BareRoutineFrame(N, LBMid, LBSym));
+                 (FModels[LBMid].Symbols[LBSym].Kind in [skRoutine, skField,
+                  skProperty, skVar, skConst]) then
+                SetCtxAt(N, BareMemberFrame(N, LBMid, LBSym));
             end;
           end;
           // The frame a re-pointing above found the member in - an inherited
@@ -18351,8 +18391,10 @@ begin
         Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
           FModels[LCur.UnitId].Tree.Nodes[LDef].FirstChild), LCur.Inst, 0));
       nkIdent, nkMember, nkTypeArgs:
-        LCur := SubstX(ResolveTypeExpr(LCur.UnitId, LDef),
-          LCur.Inst, 0);   // alias link, same frame
+        // Alias link, same frame - nested-aware (AliasStepX): `TPItems =
+        // TList<TRec>.ParrayofT` from another unit had nothing to resolve to,
+        // so `P^[0].Fld` was unbound and `for var E in P^` walked nothing.
+        LCur := AliasStepX(LCur, LDef);
       // `@X` under {$T+}: the type the project pass recorded for X (E3-20).
       nkUnaryOp:
         begin
@@ -18428,7 +18470,13 @@ end;
 function TPasSemaProject.AliasStepX(const ACur: TSemaXType;
   ADef: Integer): TSemaXType;
 begin
-  Result := SubstX(ResolveTypeExpr(ACur.UnitId, ADef), ACur.Inst, 0);
+  // Nested-aware, as FindMemberX's own alias step: a definition that names a
+  // nested type through its outer one - `TValues = TDictionary<string,
+  // TRec>.TValueCollection`, `TPItems = TList<TRec>.ParrayofT` from another
+  // unit, `TItemsA = TGenA.TItems` in the generic's own - had no binding, or
+  // a frameless one, for the plain resolve, so `for var V in AValues` walked
+  // nothing and `IT[0].Fld` over `IT: TItemsA` the open T.
+  Result := SubstX(ResolveTypeExprNested(ACur.UnitId, ADef), ACur.Inst, 0);
 end;
 
 function TPasSemaProject.DesignatorSymX(AId, ANode: Integer;
@@ -18627,7 +18675,8 @@ begin
     // last segment bound by CrossType, which runs AFTER BindTypesX has read
     // this - so FMX.TabControl's `MinTarget: TAniCalculations.TTarget` typed
     // to nothing in the pass and every member read through it was unbound
-    // (F46). ResolveTypeExprNested is ResolveTypeExpr until that one fails.
+    // (F46). ResolveTypeExprNested is ResolveTypeExpr until that one fails
+    // (or answers a generic's nested type with no frame).
     Result := ResolveTypeExprNested(AMid, LM.Symbols[ASym].TypeNode);
     if XValid(Result) then
       Exit;
@@ -21231,9 +21280,11 @@ begin
     // array property, and a for-in over such a class walks its enumerator, not
     // its indexer - `for var LPair in Dict` yielded V instead of TPair<K,V>
     // that way, and every `.Key`/`.Value` after it was a false E2003 (44 in
-    // one project). So the type is classified first; arrays defer to ElementX
-    // from inside the loop, and a designator whose type could not be named at
-    // all (an inline `array[..] of T` on its own declaration) is the fallback.
+    // one project). So the type is classified first; an array's element is
+    // read off the classified type itself, ElementX re-reading the node only
+    // when that says nothing, and a designator whose type could not be named
+    // at all (an inline `array[..] of T` on its own declaration) is the
+    // fallback.
     LCur := ACollX;
     // The caller's walk records no type for an inline var inferred from its
     // initializer (`var LDict := TObjectDictionary<..>.Create(..)` - see the
@@ -21269,7 +21320,22 @@ begin
           Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
             LM.Tree.Nodes[LDef].FirstChild), LCur.Inst, 0));
         nkArrayType:
-          Exit(ElementX(AMid, ACollNode, Probe));
+          begin
+            // The element in the collection's OWN frame, which the walk that
+            // typed it already holds. ElementX re-types the collection node
+            // through a probe that sees the node alone - not the `with`
+            // around it (`with A do for var E in Data` walked the open T over
+            // `A: TGen<TRec>`, `Data: TArray<T>`) and not the frame of a
+            // member already bound through an alias (16.3.1). `array of
+            // const` (Aux 1) has no element node: ElementX answers TVarRec.
+            Result := XNil;
+            if LM.Tree.Nodes[LDef].Aux <> 1 then
+              Result := SubstX(ResolveTypeExprNested(LCur.UnitId,
+                PasArrayInnermostElem(LM.Tree, LDef)), LCur.Inst, 0);
+            if not XValid(Result) then
+              Result := ElementX(AMid, ACollNode, Probe);
+            Exit;
+          end;
         nkIdent, nkMember, nkTypeArgs:
           LCur := AliasStepX(LCur, LDef);   // alias link
         nkClassType, nkRecordType, nkInterfaceType, nkObjectType:
