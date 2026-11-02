@@ -1497,7 +1497,8 @@ end;
 function TPasCompletion.DesignatorType(ANode, ADepth: Integer):
   TPasComplTypeRef;
 var
-  LSym, LMid, LChild, LScope, LNode, LCtx: Integer;
+  LSym, LMid, LChild, LScope, LNode, LCtx, LFirst: Integer;
+  LKind: TPasNodeKind;
   LKey: string;
   LCallee: TPasComplTypeRef;
   LRes, LCached: TSemaXType;
@@ -1505,22 +1506,25 @@ begin
   Result := ComplNilRef;
   if (ANode = NIL_NODE) or (ADepth > 16) then
     Exit;
+  // The node's kind and first child, read once: the branches below asked
+  // for them twelve times.
+  LKind := FModel.Tree.Nodes[ANode].Kind;
+  LFirst := FModel.Tree.Nodes[ANode].FirstChild;
   // An ANALYZED model already typed its expressions (the cross passes fill
   // ExprTypeX, frames closed) - for VALUE-shaped nodes that answer beats any
   // re-derivation, and covers what the walk below does not (indexing and
   // derefs). Only value shapes: a bare type designator may also carry its
   // type here, and treating THAT as a value would offer instance members on
   // `TFoo.`. An overlay model has no cache and falls through everywhere.
-  if FModel.Tree.Nodes[ANode].Kind in [nkCall, nkParen, nkIndex, nkDeref] then
+  if LKind in [nkCall, nkParen, nkIndex, nkDeref] then
     if FModel.ExprTypeX.TryGetValue(ANode, LCached) and XValid(LCached) then
     begin
       Result.X := LCached;
       Exit(ValueOfTypeRef(Result, ADepth + 1));
     end;
-  case FModel.Tree.Nodes[ANode].Kind of
+  case LKind of
     nkParen:
-      Result := DesignatorType(FModel.Tree.Nodes[ANode].FirstChild,
-        ADepth + 1);
+      Result := DesignatorType(LFirst, ADepth + 1);
     nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
       // A literal - `'abc'.Substring(`, or the initializer of an untyped
       // constant - types as dcc types it: `'x'` is a Char, `'xy'` a string,
@@ -1535,8 +1539,8 @@ begin
       begin
         // `X as T` is a T (12.4.1) - the type, wherever it is declared,
         // which the intra-unit typer cannot reach across units.
-        LChild := FModel.Tree.Nodes[ANode].FirstChild;
-        if (FModel.Tree.Nodes[ANode].Kind = nkBinaryOp) and
+        LChild := LFirst;
+        if (LKind = nkBinaryOp) and
            (LChild <> NIL_NODE) and
            (FModel.Tree.Nodes[LChild].NextSibling <> NIL_NODE) and
            (FModel.Tree.Source.VisibleToken(
@@ -1605,9 +1609,8 @@ begin
       end;
     nkMember:
       begin
-        LCallee := DesignatorType(FModel.Tree.Nodes[ANode].FirstChild,
-          ADepth + 1);
-        LChild := FModel.Tree.Nodes[ANode].FirstChild;
+        LCallee := DesignatorType(LFirst, ADepth + 1);
+        LChild := LFirst;
         if LChild <> NIL_NODE then
           LChild := FModel.Tree.Nodes[LChild].NextSibling;
         if LChild <> NIL_NODE then
@@ -1622,13 +1625,12 @@ begin
         // head, which the callee's name alone gives, is another overload's
         // result (audit A1-26). A constructor keeps the walk below (its
         // value is the NAMED class), and so does a cast.
-        if CalleeSyms(FModel.Tree.Nodes[ANode].FirstChild, ANode, LMid, LSym,
-           LCtx) and IsResultRoutine(LMid, LSym) then
+        if CalleeSyms(LFirst, ANode, LMid, LSym, LCtx) and
+           IsResultRoutine(LMid, LSym) then
         begin
           LSym := ArgTypedOverload(LMid, LSym, LCtx, ANode, ADepth + 1);
           // `Name<...>(...)`: in the frame of its written type arguments.
-          Result := WrittenCallType(LMid, LSym, LCtx,
-            FModel.Tree.Nodes[ANode].FirstChild, ADepth + 1);
+          Result := WrittenCallType(LMid, LSym, LCtx, LFirst, ADepth + 1);
           if ComplValid(Result) then
             Exit;
           // Both answer a routine by its result as a VALUE (ValueOfTypeRef:
@@ -1640,8 +1642,7 @@ begin
           if ComplValid(Result) then
             Exit;
         end;
-        LCallee := DesignatorType(FModel.Tree.Nodes[ANode].FirstChild,
-          ADepth + 1);
+        LCallee := DesignatorType(LFirst, ADepth + 1);
         if not ComplValid(LCallee) then
         begin
           // A compiler intrinsic has no declared result - `Copy(S, 1, 2).`,
@@ -1689,13 +1690,13 @@ begin
       end;
     nkDeref:
       begin
-        Result := PointeeTypeOf(DesignatorType(
-          FModel.Tree.Nodes[ANode].FirstChild, ADepth + 1), ADepth + 1);
+        Result := PointeeTypeOf(DesignatorType(LFirst, ADepth + 1),
+          ADepth + 1);
         Result.IsTypeRef := False;   // a dereferenced value is an INSTANCE
       end;
     nkIndex:
       begin
-        LChild := FModel.Tree.Nodes[ANode].FirstChild;
+        LChild := LFirst;
         Result := DesignatorType(LChild, ADepth + 1);
         // An array property's declared type is already the element's: the
         // brackets consume its parameters and peel nothing (13.1.2; audit
@@ -1973,6 +1974,8 @@ begin
   LArgs := CallArgCount(FModel, ACall, LTrailing);
   if LArgs < 0 then
     Exit;
+  // The designator called, read by both walks below.
+  var LCallee := FModel.Tree.Nodes[ACall].FirstChild;
   // The family in declaration order. A routine of the buffer's own: the
   // chain its NAME heads in the buffer - the callee's binding, which Phase 1
   // chose an overload of - and, after an implementation-section head, the
@@ -1981,21 +1984,23 @@ begin
   LCur := ASym;
   if AMid < 0 then
   begin
-    LNode := FModel.Tree.Nodes[ACall].FirstChild;
+    LNode := LCallee;
     while (LNode <> NIL_NODE) and
           (FModel.Tree.Nodes[LNode].Kind in [nkParen, nkTypeArgs]) do
       LNode := FModel.Tree.Nodes[LNode].FirstChild;
     if (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkMember) then
       LNode := FModel.Tree.LastChild(LNode);
-    if (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkIdent) and
-       (FModel.RefMap[LNode] <> NIL_SYM) and
-       (FModel.Symbols[FModel.RefMap[LNode]].Kind = skRoutine) and
-       (FModel.Symbols[FModel.RefMap[LNode]].NameLower =
-        FModel.Symbols[ASym].NameLower) then
-      LCur := FModel.RefMap[LNode]
-    else if FModel.Symbols[ASym].Scope <> NIL_SCOPE then
-      LCur := FModel.FindLocal(FModel.Symbols[ASym].Scope,
-        FModel.Symbols[ASym].NameLower);
+    // The name's binding, and ASym's name and scope, read once each.
+    var LBound: Integer := NIL_SYM;
+    if (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkIdent) then
+      LBound := FModel.RefMap[LNode];
+    var LName := FModel.Symbols[ASym].NameLower;
+    var LScope := FModel.Symbols[ASym].Scope;
+    if (LBound <> NIL_SYM) and (FModel.Symbols[LBound].Kind = skRoutine) and
+       (FModel.Symbols[LBound].NameLower = LName) then
+      LCur := LBound
+    else if LScope <> NIL_SCOPE then
+      LCur := FModel.FindLocal(LScope, LName);
   end;
   LCands := nil;
   for LPass := 0 to 1 do
@@ -2049,19 +2054,10 @@ begin
   // The written type arguments' count, the 16.5.1 filter; when it leaves no
   // candidate the choice runs again without it, as SelectCallTarget's does.
   LTypeArgs := -1;
-  LNode := FModel.Tree.Nodes[ACall].FirstChild;
-  while (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkParen) do
-    LNode := FModel.Tree.Nodes[LNode].FirstChild;
+  LNode := PeelParens(FModel.Tree, LCallee);
   if (LNode <> NIL_NODE) and (FModel.Tree.Nodes[LNode].Kind = nkTypeArgs) then
-  begin
-    LTypeArgs := -1;   // the first child is the name they follow
-    LNode := FModel.Tree.Nodes[LNode].FirstChild;
-    while LNode <> NIL_NODE do
-    begin
-      Inc(LTypeArgs);
-      LNode := FModel.Tree.Nodes[LNode].NextSibling;
-    end;
-  end;
+    // The first child is the name they follow.
+    LTypeArgs := PasChildCount(FModel.Tree, LNode) - 1;
   for LPass := 0 to 1 do
   begin
     LBestScore := -1;
@@ -2158,13 +2154,16 @@ function TPasCompletion.IsProcedureValue(ACore, ADepth: Integer): Boolean;
 var
   LM: TPasSemaModel;
   LMid, LSym: Integer;
+  LKind: TPasNodeKind;
 begin
   Result := False;
-  if (ACore = NIL_NODE) or not (FModel.Tree.Nodes[ACore].Kind in
-     [nkIdent, nkMember, nkTypeArgs]) then
+  if ACore = NIL_NODE then
+    Exit;
+  LKind := FModel.Tree.Nodes[ACore].Kind;
+  if not (LKind in [nkIdent, nkMember, nkTypeArgs]) then
     Exit;
   // `DoIt<Integer>` is its head's routine.
-  if FModel.Tree.Nodes[ACore].Kind = nkTypeArgs then
+  if LKind = nkTypeArgs then
     ACore := FModel.Tree.Nodes[ACore].FirstChild;
   if not DesignatorSymOf(ACore, ADepth, LMid, LSym) or (LSym = NIL_SYM) or
      not SymModelOf(LMid, 'IsProcedureValue', LM, False) then
@@ -2183,7 +2182,7 @@ end;
 function TPasCompletion.OwnModelRoutine(AOvSym: Integer): Integer;
 var
   LM: TPasSemaModel;
-  LScope, LCand, LHop, LTypeParams, LParams: Integer;
+  LScope, LMembers, LCand, LHop, LTypeParams, LParams: Integer;
   LOwner: TSemaXType;
 begin
   Result := NIL_SYM;
@@ -2197,11 +2196,12 @@ begin
   if (LScope <> NIL_SCOPE) and (FModel.Scopes[LScope].Kind = sckStruct) then
   begin
     LOwner := OwnModelTypeX(FModel.Scopes[LScope].StructSym);
-    if not XValid(LOwner) or (LOwner.UnitId <> FProjMid) or
-       (LM.Symbols[LOwner.Sym].MemberScope = NIL_SCOPE) then
+    if not XValid(LOwner) or (LOwner.UnitId <> FProjMid) then
       Exit;
-    LCand := LM.FindLocal(LM.Symbols[LOwner.Sym].MemberScope,
-      FModel.Symbols[AOvSym].NameLower);
+    LMembers := LM.Symbols[LOwner.Sym].MemberScope;
+    if LMembers = NIL_SCOPE then
+      Exit;
+    LCand := LM.FindLocal(LMembers, FModel.Symbols[AOvSym].NameLower);
   end
   else
   begin
@@ -2240,20 +2240,13 @@ begin
   Result := ComplNilRef;
   if (FProj = nil) or (ADepth > 16) then
     Exit;
-  while (ACallee <> NIL_NODE) and
-        (FModel.Tree.Nodes[ACallee].Kind = nkParen) do
-    ACallee := FModel.Tree.Nodes[ACallee].FirstChild;
+  ACallee := PeelParens(FModel.Tree, ACallee);
   if (ACallee = NIL_NODE) or
      (FModel.Tree.Nodes[ACallee].Kind <> nkTypeArgs) or
      not SymModelOf(AMid, 'WrittenCallType', LM, False) then
     Exit;
-  LCount := -1;   // the first child is the name they follow
-  LCur := FModel.Tree.Nodes[ACallee].FirstChild;
-  while LCur <> NIL_NODE do
-  begin
-    Inc(LCount);
-    LCur := FModel.Tree.Nodes[LCur].NextSibling;
-  end;
+  // The first child is the name they follow.
+  LCount := PasChildCount(FModel.Tree, ACallee) - 1;
   LCur := ASym;
   for LHop := 1 to 64 do
   begin

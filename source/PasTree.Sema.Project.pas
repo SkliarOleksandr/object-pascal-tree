@@ -11410,23 +11410,24 @@ var
   LBase, LName, LScope, LFound, LDef, LDepth, LChild: Integer;
   LNameLower: string;
   LQ, LPlain: TSemaXType;
+  LIsMember: Boolean;
 begin
   Result := ResolveTypeExpr(AId, ANode);
   if ANode = NIL_NODE then
     Exit;
   LM := FModels[AId];
+  LIsMember := LM.Tree.Nodes[ANode].Kind = nkMember;
   // The plain answer, kept when the qualifier below finds nothing better:
   // XNil when there was none, a frameless nested type (see the header).
   LPlain := Result;
   if XValid(Result) then
   begin
-    if (Result.Inst <> NIL_INST) or
-       (LM.Tree.Nodes[ANode].Kind <> nkMember) or
+    if (Result.Inst <> NIL_INST) or not LIsMember or
        not NestedInGenericX(Result) then
       Exit;
     Result := XNil;
   end;
-  if LM.Tree.Nodes[ANode].Kind <> nkMember then
+  if not LIsMember then
     Exit(LPlain);
   LBase := LM.Tree.Nodes[ANode].FirstChild;
   if LBase = NIL_NODE then
@@ -13347,7 +13348,9 @@ end;
   applies for the same reason. }
 function TPasSemaProject.CanonTypeX(const AX: TSemaXType): TSemaXType;
 var
+  LM: TPasSemaModel;
   LDef, LParent, LDepth: Integer;
+  LDefKind: TPasNodeKind;
   LNext: TSemaXType;
 begin
   Result := AX;
@@ -13356,16 +13359,18 @@ begin
     if not XValid(Result) then
       Exit;
     LDef := TypeDefNodeOf(Result.UnitId, Result.Sym);
-    if (LDef = NIL_NODE) or not (FModels[Result.UnitId].Tree.Nodes[LDef].Kind in
-       [nkIdent, nkMember, nkTypeArgs]) then
+    if LDef = NIL_NODE then
       Exit;
-    LParent := FModels[Result.UnitId].Tree.Nodes[LDef].Parent;
-    if (LParent <> NIL_NODE) and
-       (FModels[Result.UnitId].Tree.Nodes[LParent].Kind = nkTypeDecl) and
-       (FModels[Result.UnitId].Tree.Nodes[LParent].Aux = 1) then
+    LM := FModels[Result.UnitId];
+    LDefKind := LM.Tree.Nodes[LDef].Kind;
+    if not (LDefKind in [nkIdent, nkMember, nkTypeArgs]) then
+      Exit;
+    LParent := LM.Tree.Nodes[LDef].Parent;
+    if (LParent <> NIL_NODE) and (LM.Tree.Nodes[LParent].Kind = nkTypeDecl) and
+       (LM.Tree.Nodes[LParent].Aux = 1) then
       Exit;   // `type Base` - a distinct type, not an alias
     LNext := ResolveTypeExprNested(Result.UnitId, LDef);
-    if FModels[Result.UnitId].Tree.Nodes[LDef].Kind = nkTypeArgs then
+    if LDefKind = nkTypeArgs then
       LNext := SubstX(LNext, Result.Inst, 0);
     if not XValid(LNext) or
        ((LNext.UnitId = Result.UnitId) and (LNext.Sym = Result.Sym)) then
@@ -15691,9 +15696,11 @@ var
     not make keeps no frame it did not earn. }
   function BareMemberFrame(N, AMid, ASym: Integer): Integer;
   var
-    LCur, LParent, LLast, LTarget, LFMid, LFSym, LFCtx, LStruct: Integer;
+    LCur, LParent, LLast, LTarget, LFMid, LFSym, LFCtx, LStruct,
+      LOwnScope: Integer;
     LTargets: TArray<Integer>;
     LTX: TSemaXType;
+    LSymM: TPasSemaModel;
   begin
     Result := NIL_INST;
     // A frame is earned only through an instantiated hop, so the member's
@@ -15701,13 +15708,16 @@ var
     // seed (Exit, Inc, FreeAndNil) and a member of a plain class answer
     // NIL_INST without the climb and the member lookups below (audit C1-12:
     // 45 frames of 121,670 calls on a 665-unit closure).
-    LStruct := FModels[AMid].Symbols[ASym].Scope;
-    if LStruct = NIL_SCOPE then
+    LSymM := FModels[AMid];
+    LOwnScope := LSymM.Symbols[ASym].Scope;
+    if LOwnScope = NIL_SCOPE then
       Exit;
-    LStruct := FModels[AMid].Scopes[LStruct].StructSym;
+    LStruct := LSymM.Scopes[LOwnScope].StructSym;
     if (LStruct = NIL_SYM) or not (IsGenericTypeSym(AMid, LStruct) or
        NestedInGenericX(XPlain(AMid, LStruct))) then
       Exit;
+    // The name's key, built once for every lookup below.
+    var LKey := PasNodeKey(LM.Tree, N);
     LCur := N;
     LParent := LM.Tree.Nodes[LCur].Parent;
     while LParent <> NIL_NODE do
@@ -15727,12 +15737,11 @@ var
           begin
             LTarget := LTargets[LIdx];
             LTX := XAt(LTarget);
-            if XValid(LTX) and FindMemberX(AId, LTX, PasNodeKey(LM.Tree, N),
-               LFMid, LFSym, LFCtx) then
+            if XValid(LTX) and FindMemberX(AId, LTX, LKey, LFMid, LFSym,
+               LFCtx) then
             begin
               // The target has the name: it is the one the name means.
-              if (LFMid = AMid) and (FModels[LFMid].Symbols[LFSym].Scope =
-                 FModels[AMid].Symbols[ASym].Scope) then
+              if (LFMid = AMid) and (LSymM.Symbols[LFSym].Scope = LOwnScope) then
                 Result := LFCtx;
               Exit;
             end;
@@ -15742,10 +15751,9 @@ var
       LParent := LM.Tree.Nodes[LCur].Parent;
     end;
     LStruct := StructSymOfNode(LM, N);
-    if (LStruct <> NIL_SYM) and FindMemberX(AId, XPlain(AId, LStruct),
-       PasNodeKey(LM.Tree, N), LFMid, LFSym, LFCtx) and (LFMid = AMid) and
-       (FModels[LFMid].Symbols[LFSym].Scope = FModels[AMid].Symbols[ASym].Scope)
-    then
+    if (LStruct <> NIL_SYM) and FindMemberX(AId, XPlain(AId, LStruct), LKey,
+       LFMid, LFSym, LFCtx) and (LFMid = AMid) and
+       (LSymM.Symbols[LFSym].Scope = LOwnScope) then
       Result := LFCtx;
   end;
 
@@ -18421,8 +18429,10 @@ end;
   same reason. XNil when AX is not a pointer type. }
 function TPasSemaProject.PointeeX(const AX: TSemaXType): TSemaXType;
 var
+  LM: TPasSemaModel;
   LCur: TSemaXType;
   LDef, LDepth: Integer;
+  LName: string;
 begin
   Result := XNil;
   LCur := AX;
@@ -18430,6 +18440,7 @@ begin
   begin
     if not XValid(LCur) then
       Exit;
+    LM := FModels[LCur.UnitId];
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
     if LDef = NIL_NODE then
     begin
@@ -18437,18 +18448,19 @@ begin
       // declaration in System.pas), so their pointee has no node either:
       // `FormatPtr^.IsNumber` (System.SysUtils), `Result^.IsLowSurrogate`
       // (System.Classes) read TCharHelper off a PChar's Char (F46).
-      if FModels[LCur.UnitId].Symbols[LCur.Sym].Kind = skBuiltinType then
-        if FModels[LCur.UnitId].Symbols[LCur.Sym].NameLower = 'pchar' then
+      if LM.Symbols[LCur.Sym].Kind = skBuiltinType then
+      begin
+        LName := LM.Symbols[LCur.Sym].NameLower;
+        if LName = 'pchar' then
           Result := BuiltinX(LCur.UnitId, 'char')
-        else if FModels[LCur.UnitId].Symbols[LCur.Sym].NameLower =
-                'pwidechar' then
+        else if LName = 'pwidechar' then
           Result := BuiltinX(LCur.UnitId, 'widechar')
-        else if FModels[LCur.UnitId].Symbols[LCur.Sym].NameLower =
-                'pansichar' then
+        else if LName = 'pansichar' then
           Result := BuiltinX(LCur.UnitId, 'ansichar');
+      end;
       Exit;
     end;
-    case FModels[LCur.UnitId].Tree.Nodes[LDef].Kind of
+    case LM.Tree.Nodes[LDef].Kind of
       nkPointerType:
         // Closed over the POINTER's own frame: `ParrayofT = ^arrayofT` nested
         // in TList<T>, reached as `L.PList` on a TList<TRec>, points at an
@@ -18457,7 +18469,7 @@ begin
         // 28 sites in one FMX library's graphics unit, while the frame-less
         // `List[I].X` right beside it was fine.
         Exit(SubstX(ResolveTypeExpr(LCur.UnitId,
-          FModels[LCur.UnitId].Tree.Nodes[LDef].FirstChild), LCur.Inst, 0));
+          LM.Tree.Nodes[LDef].FirstChild), LCur.Inst, 0));
       nkIdent, nkMember, nkTypeArgs:
         // Alias link, same frame - nested-aware (AliasStepX): `TPItems =
         // TList<TRec>.ParrayofT` from another unit had nothing to resolve to,
@@ -18466,7 +18478,7 @@ begin
       // `@X` under {$T+}: the type the project pass recorded for X (E3-20).
       nkUnaryOp:
         begin
-          if not FModels[LCur.UnitId].AnonPointee.TryGetValue(LDef, Result) then
+          if not LM.AnonPointee.TryGetValue(LDef, Result) then
             Result := XNil;
           Exit;
         end;
