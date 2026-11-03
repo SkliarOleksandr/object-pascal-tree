@@ -206,9 +206,36 @@ type
     // only the project level can reach.
     irTypeKind);
 
+  { When a call of an intrinsic is a constant expression dcc folds - `const X
+    = <call>` compiles instead of E2026 (B.10, 3.2.1; dcc64 37.0, PasTree
+    local/const-intrinsics-2026-11). The rule itself is ConstExprKind's
+    (PasTree.Sema.Types).
+    - ifNone: never - Copy, Assigned (of `nil` too), TypeInfo, TypeHandle,
+      Addr, ReturnAddress, and every routine that is not seeded (UpCase, Int,
+      Frac, Sqrt, Sin, Pos, StringOfChar are System functions).
+    - ifAlways: whatever the argument - a type, a variable: Low (`Low(S)`,
+      `Low(DA)`, an open array's), Pi, GetTypeKind, IsManagedType,
+      HasWeakRef, IsConstValue, NameOf.
+    - ifSizeOf: SizeOf, of anything but an open-array parameter.
+    - ifArgs: every argument a constant - Ord, Chr, Succ, Pred, Abs, Odd, Hi,
+      Lo, Swap, Trunc, Round, Concat, MulDivInt64; ifPtr: Ptr, the same, its
+      result a Pointer VALUE (ConstExprKind's sckTyped).
+    - ifIntArg: Sqr, of an INTEGER constant only (`Sqr(1.5)` is E2026).
+    - ifHigh: High of a type, or of a value whose type alone gives it: an
+      ordinal, a static array, a short string - not a long string (the
+      constant `High('abc')` neither), a dynamic or an open array.
+    - ifLength: Length of a string constant or of a static array value.
+    - ifDefault: Default(T) but of a record, a static array, a Variant. }
+  TPasIntrinsicFold = (ifNone, ifAlways, ifSizeOf, ifArgs, ifPtr, ifIntArg,
+    ifHigh, ifLength, ifDefault);
+
 { The result shape of the seeded intrinsic ROUTINE named ANameLower - irNone
   for a procedure, for Slice, and for any name that is not an intrinsic. }
 function PasIntrinsicResult(const ANameLower: string): TPasIntrinsicResult;
+
+{ When a call of the seeded intrinsic ANameLower folds (TPasIntrinsicFold) -
+  ifNone for any name that is not an intrinsic. }
+function PasIntrinsicFold(const ANameLower: string): TPasIntrinsicFold;
 
 { Does AShape read its ARGUMENTS' types? False for the fixed-type shapes, so
   a caller can skip typing the arguments of `Ord(X)` or `SizeOf(T)`. }
@@ -280,33 +307,34 @@ type
     HasArgs: Boolean;
     Shape: TPasIntrinsicResult;
     Gate: TIntrinsicGate;
+    Fold: TPasIntrinsicFold;   // left out where it is ifNone
   end;
 
 const
   { THE intrinsic table - one entry per seeded intrinsic ROUTINE, in seed
     order; SeedSystemScopeOwn seeds from it (by Gate), the typers read Shape
-    (PasIntrinsicResult) and completion the display columns
-    (PasBuiltinSignature), whose result text is derived from Shape. Three
-    hand-kept lists had drifted apart before (audit B2-15, D1-16: Hi / Lo
-    displayed Byte, FilePos / FileSize / NameOf / AtomicCmpExchange128 showed
-    a result no typer gave). Params follow the documented "Delphi Intrinsic
-    Routines" catalog; optional arguments are shown in [] the way the docs
-    write them. }
+    (PasIntrinsicResult) and Fold (PasIntrinsicFold), completion the
+    display columns (PasBuiltinSignature), whose result text is derived from
+    Shape. Three hand-kept lists had drifted apart before (audit B2-15,
+    D1-16: Hi / Lo displayed Byte, FilePos / FileSize / NameOf /
+    AtomicCmpExchange128 showed a result no typer gave). Params follow the
+    documented "Delphi Intrinsic Routines" catalog; optional arguments are
+    shown in [] the way the docs write them. }
   CIntrinsics: array[0..98] of TIntrinsicEntry = (
     (Name: 'Length'; Params: '(const S: <string|array>)';
-     HasArgs: True; Shape: irLength; Gate: igAll),
+     HasArgs: True; Shape: irLength; Gate: igAll; Fold: ifLength),
     (Name: 'SetLength'; Params: '(var S; NewLength: NativeInt)';
      HasArgs: True; Shape: irNone; Gate: igAll),
     (Name: 'SetString'; Params: '(var S: string; Buffer: PChar; Len: Integer)';
      HasArgs: True; Shape: irNone; Gate: igAll),
     (Name: 'High'; Params: '(const X: <type|array|string>)';
-     HasArgs: True; Shape: irBounds; Gate: igAll),
+     HasArgs: True; Shape: irBounds; Gate: igAll; Fold: ifHigh),
     (Name: 'Low'; Params: '(const X: <type|array|string>)';
-     HasArgs: True; Shape: irBounds; Gate: igAll),
+     HasArgs: True; Shape: irBounds; Gate: igAll; Fold: ifAlways),
     (Name: 'Ord'; Params: '(const X: <ordinal>)';
-     HasArgs: True; Shape: irOrd; Gate: igAll),
+     HasArgs: True; Shape: irOrd; Gate: igAll; Fold: ifArgs),
     (Name: 'Chr'; Params: '(X: Byte)';
-     HasArgs: True; Shape: irChar; Gate: igAll),
+     HasArgs: True; Shape: irChar; Gate: igAll; Fold: ifArgs),
     (Name: 'Assigned'; Params: '(const P)';
      HasArgs: True; Shape: irBoolean; Gate: igAll),
     (Name: 'Inc'; Params: '(var X[; N])';
@@ -314,7 +342,7 @@ const
     (Name: 'Dec'; Params: '(var X[; N])';
      HasArgs: True; Shape: irNone; Gate: igAll),
     (Name: 'SizeOf'; Params: '(const X)';
-     HasArgs: True; Shape: irInteger; Gate: igAll),
+     HasArgs: True; Shape: irInteger; Gate: igAll; Fold: ifSizeOf),
     (Name: 'Assert'; Params: '(Condition: Boolean[; Message: string])';
      HasArgs: True; Shape: irNone; Gate: igAll),
     (Name: 'Copy'; Params: '(const S[; Index, Count: Integer])';
@@ -350,39 +378,39 @@ const
     (Name: 'FillChar'; Params: '(var X; Count: NativeInt; Value)';
      HasArgs: True; Shape: irNone; Gate: igAll),
     (Name: 'Odd'; Params: '(X: Integer)';
-     HasArgs: True; Shape: irBoolean; Gate: igAll),
+     HasArgs: True; Shape: irBoolean; Gate: igAll; Fold: ifArgs),
     (Name: 'Pred'; Params: '(const X: <ordinal>)';
-     HasArgs: True; Shape: irOrdinal; Gate: igAll),
+     HasArgs: True; Shape: irOrdinal; Gate: igAll; Fold: ifArgs),
     (Name: 'Succ'; Params: '(const X: <ordinal>)';
-     HasArgs: True; Shape: irOrdinal; Gate: igAll),
+     HasArgs: True; Shape: irOrdinal; Gate: igAll; Fold: ifArgs),
     (Name: 'Default'; Params: '(TypeIdent)';
-     HasArgs: True; Shape: irDefault; Gate: igAll),
+     HasArgs: True; Shape: irDefault; Gate: igAll; Fold: ifDefault),
     (Name: 'Trunc'; Params: '(X: Extended)';
-     HasArgs: True; Shape: irInt64; Gate: igAll),
+     HasArgs: True; Shape: irInt64; Gate: igAll; Fold: ifArgs),
     (Name: 'Round'; Params: '(X: Extended)';
-     HasArgs: True; Shape: irInt64; Gate: igAll),
+     HasArgs: True; Shape: irInt64; Gate: igAll; Fold: ifArgs),
     (Name: 'Abs'; Params: '(X)';
-     HasArgs: True; Shape: irAbs; Gate: igAll),
+     HasArgs: True; Shape: irAbs; Gate: igAll; Fold: ifArgs),
     (Name: 'Sqr'; Params: '(X)';
-     HasArgs: True; Shape: irSqr; Gate: igAll),
+     HasArgs: True; Shape: irSqr; Gate: igAll; Fold: ifIntArg),
     (Name: 'Pi'; Params: '';
-     HasArgs: False; Shape: irExtended; Gate: igAll),
+     HasArgs: False; Shape: irExtended; Gate: igAll; Fold: ifAlways),
     (Name: 'Concat'; Params: '(const S1, S2, ...)';
-     HasArgs: True; Shape: irConcat; Gate: igAll),
+     HasArgs: True; Shape: irConcat; Gate: igAll; Fold: ifArgs),
     (Name: 'Str'; Params: '(X[: Width[: Decimals]]; var S: string)';
      HasArgs: True; Shape: irNone; Gate: igAll),
     (Name: 'Val'; Params: '(const S: string; var V; var Code: Integer)';
      HasArgs: True; Shape: irNone; Gate: igAll),
     (Name: 'Swap'; Params: '(X)';
-     HasArgs: True; Shape: irSwap; Gate: igAll),
+     HasArgs: True; Shape: irSwap; Gate: igAll; Fold: ifArgs),
     (Name: 'Hi'; Params: '(X)';
-     HasArgs: True; Shape: irHiLo; Gate: igAll),
+     HasArgs: True; Shape: irHiLo; Gate: igAll; Fold: ifArgs),
     (Name: 'Lo'; Params: '(X)';
-     HasArgs: True; Shape: irHiLo; Gate: igAll),
+     HasArgs: True; Shape: irHiLo; Gate: igAll; Fold: ifArgs),
     (Name: 'Addr'; Params: '(var X)';
      HasArgs: True; Shape: irPointer; Gate: igAll),
     (Name: 'Ptr'; Params: '(Address: Integer)';
-     HasArgs: True; Shape: irPointer; Gate: igAll),
+     HasArgs: True; Shape: irPointer; Gate: igAll; Fold: ifPtr),
     (Name: 'Slice'; Params: '(var A: <array>; Count: Integer)';
      HasArgs: True; Shape: irNone; Gate: igAll),
     (Name: 'RunError'; Params: '([ErrorCode: Byte])';
@@ -392,13 +420,13 @@ const
     (Name: 'Finalize'; Params: '(var V[; Count: NativeInt])';
      HasArgs: True; Shape: irNone; Gate: igAll),
     (Name: 'GetTypeKind'; Params: '(TypeIdent)';
-     HasArgs: True; Shape: irTypeKind; Gate: igAll),
+     HasArgs: True; Shape: irTypeKind; Gate: igAll; Fold: ifAlways),
     (Name: 'IsManagedType'; Params: '(TypeIdent)';
-     HasArgs: True; Shape: irBoolean; Gate: igAll),
+     HasArgs: True; Shape: irBoolean; Gate: igAll; Fold: ifAlways),
     (Name: 'IsConstValue'; Params: '(const X)';
-     HasArgs: True; Shape: irBoolean; Gate: igAll),
+     HasArgs: True; Shape: irBoolean; Gate: igAll; Fold: ifAlways),
     (Name: 'HasWeakRef'; Params: '(TypeIdent)';
-     HasArgs: True; Shape: irBoolean; Gate: igAll),
+     HasArgs: True; Shape: irBoolean; Gate: igAll; Fold: ifAlways),
     (Name: 'TypeHandle'; Params: '(TypeIdent)';
      HasArgs: True; Shape: irPointer; Gate: igAll),
     (Name: 'TypeOf'; Params: '(const X: <object>)';
@@ -418,7 +446,7 @@ const
      HasArgs: True; Shape: irFirstArg; Gate: igAll),
     (Name: 'MulDivInt64';
      Params: '(AValue, AMultiplier, ADivisor: Int64[; out Remainder: Int64])';
-     HasArgs: True; Shape: irInt64; Gate: igAll),
+     HasArgs: True; Shape: irInt64; Gate: igAll; Fold: ifArgs),
     (Name: 'Fail'; Params: '';
      HasArgs: False; Shape: irNone; Gate: igAll),
     // Sibling of the Atomic* family and equally undeclared: System.pas does not
@@ -507,7 +535,7 @@ const
      HasArgs: True; Shape: irNone; Gate: igAll),
     // 13.0 (see ch.04 sec. 4.11.1).
     (Name: 'NameOf'; Params: '(Identifier)';
-     HasArgs: True; Shape: irString; Gate: igAll),
+     HasArgs: True; Shape: irString; Gate: igAll; Fold: ifAlways),
     // Not on Win32 (Gate igVarArg). The varargs family is the same System.pas
     // trap as CompilerVersion: its only mention there is four COMMENTED-OUT
     // signatures, so a source grep says "declared" and dcc says otherwise.
@@ -894,19 +922,31 @@ end;
 
 var
   GIntrResult: TDictionary<string, TPasIntrinsicResult>;
+  GIntrFold: TDictionary<string, TPasIntrinsicFold>;
 
 procedure BuildIntrResult;
 begin
   GIntrResult := TDictionary<string, TPasIntrinsicResult>.Create(96);
+  GIntrFold := TDictionary<string, TPasIntrinsicFold>.Create(32);
   for var LEntry in CIntrinsics do
+  begin
     if LEntry.Shape <> irNone then
       GIntrResult.Add(LowerCase(LEntry.Name), LEntry.Shape);
+    if LEntry.Fold <> ifNone then
+      GIntrFold.Add(LowerCase(LEntry.Name), LEntry.Fold);
+  end;
 end;
 
 function PasIntrinsicResult(const ANameLower: string): TPasIntrinsicResult;
 begin
   if not GIntrResult.TryGetValue(ANameLower, Result) then
     Result := irNone;
+end;
+
+function PasIntrinsicFold(const ANameLower: string): TPasIntrinsicFold;
+begin
+  if not GIntrFold.TryGetValue(ANameLower, Result) then
+    Result := ifNone;
 end;
 
 function PasIntrinsicReadsArgs(AShape: TPasIntrinsicResult): Boolean;
@@ -931,6 +971,7 @@ initialization
   BuildIntrResult;
 
 finalization
+  GIntrFold.Free;
   GIntrResult.Free;
   GSigIndex.Free;
 

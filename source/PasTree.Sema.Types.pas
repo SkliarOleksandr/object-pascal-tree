@@ -75,9 +75,9 @@ type
     (4.11.4; OrdAnswer, OrdStepAnswer). Builtin: the NameLower of the
     builtin it is stored as (aliases and distinct `type X` of a number
     chased), '' for an enumeration or subrange of its own; Rank that
-    builtin's NumRank. IsConst: a literal, a true constant or an enumeration
-    value - dcc folds Ord / Hi / Lo / Swap of one to Integer. HasRange: Lo..Hi
-    is the ordinal range of the enumeration or subrange type. }
+    builtin's NumRank. IsConst: a constant expression dcc folds
+    (ConstExprKind) - Ord / Hi / Lo / Swap of one is Integer. HasRange:
+    Lo..Hi is the ordinal range of the enumeration or subrange type. }
   TSemaOrdFacts = record
     Cat: TSemaTypeCat;
     Builtin: string;
@@ -91,6 +91,40 @@ type
     supplies its own binding lookup. ADepth guards a cycle of constants. }
   TSemaOrdNameValue = reference to function(ANode, ADepth: Integer;
     out AValue: Int64): Boolean;
+
+  { How dcc reads a constant expression (B.10, 3.2.1; dcc64 37.0, PasTree
+    local/const-intrinsics-2026-11) - ConstExprKind's answer.
+    - sckNone: not one - `const X = <it>` is E2026: a variable, a typed
+      constant, `@X`, an inline `if`, Copy, Assigned, `Length(S)`.
+    - sckValue: folded, and read by its VALUE as a literal is: an overload
+      takes the narrowest parameter holding it (`FI(Low(Byte))` the ShortInt
+      one), a `[...]` element ranks below `array of const` (6.3.1).
+    - sckTyped: folded, but its outermost operation names a type and it is a
+      value of that type there: a typecast (`Integer(5)`, `Byte(300)`,
+      `Pointer(nil)`), Default(T), Ptr(X), `nil`, and a true constant whose
+      value is one - `J([Integer(5)])` takes `TArray<Integer>` over `array
+      of const`, `FI(Byte(300))` the Byte overload.
+    Ord, Hi, Lo and Swap of either folded kind are Integer (4.11.4). }
+  TSemaConstKind = (sckNone, sckValue, sckTyped);
+
+  { What ConstExprKind reads of one node, from the typer that asks. Role:
+    scrConst a true constant or an enumeration value (Typed: its value is
+    sckTyped); scrType a type name; scrIntrinsic a seeded intrinsic routine,
+    Intrinsic its NameLower; scrValue anything else with a value - a
+    variable, a typed constant, a parameter, an expression; scrOther what the
+    typer cannot tell. The type of the value, or the type named: Cat its
+    category; RunTime a long string or a dynamic array, whose High and Length
+    are run-time values; OpenArray an open-array parameter (SizeOf too);
+    StaticArray a static array, whose Length is a constant. }
+  TSemaConstRole = (scrOther, scrConst, scrType, scrIntrinsic, scrValue);
+  TSemaConstFacts = record
+    Role: TSemaConstRole;
+    Intrinsic: string;
+    Cat: TSemaTypeCat;
+    Typed, RunTime, OpenArray, StaticArray: Boolean;
+  end;
+  TSemaConstFactsFunc = reference to function(ANode, ADepth: Integer):
+    TSemaConstFacts;
 
   // The type, as one of THIS model's symbols, of an ident the model itself no
   // longer binds (its binding lives in ExtRefMap) - NIL_SYM when it cannot be
@@ -145,6 +179,7 @@ type
     function IntrinsicResult(ACall, AHead: Integer): Integer;
     function WidenOrdinal(ASym: Integer): Integer;
     function OrdNameValue: TSemaOrdNameValue;
+    function ConstFacts: TSemaConstFactsFunc;
     function IsConstArg(ANode: Integer): Boolean;
     function OrdFacts(ANode, ASym: Integer): TSemaOrdFacts;
     function OrdStep(ASym: Integer): Integer;
@@ -473,6 +508,22 @@ function PasLiteralTypeName(const ATree: TPasTree; ANode: Integer;
   anything else, and past ADepth 8. }
 function OrdinalNodeValue(const ATree: TPasTree; ANode, ADepth: Integer;
   const AName: TSemaOrdNameValue; out AValue: Int64): Boolean;
+
+{ Is expression ANode of ATree a constant dcc folds, and how is it read
+  (TSemaConstKind)? The one rule both typers ask through AFacts (TPasSemaTyper
+  .IsConstArg, TPasSemaProject.IsConstArgX), from dcc64 37.0's answers
+  (local/const-intrinsics-2026-11): a literal, `nil`, a true constant, an
+  enumeration value; an operator or a set constructor over constants (not
+  `@X`); a typecast of a constant, but a string or character one to a pointer
+  type (`PChar('abc')` is E2026); a call of a seeded intrinsic by its
+  TPasIntrinsicFold - `Low(X)`, `SizeOf(X)`, `High` of a type or of a value
+  its type alone gives (`High(I)`, a static array, a short string), `Length`
+  of a string constant or a static array, `Ord` / `Succ` / `Hi` / ... of
+  constants (`Ord(High(Char))`, `Swap(Byte(5))`), `Sqr` of an integer one,
+  `Default` but of a record, a static array or a Variant. sckNone past
+  ADepth 8 (a chain of constants). }
+function ConstExprKind(const ATree: TPasTree; ANode, ADepth: Integer;
+  const AFacts: TSemaConstFactsFunc): TSemaConstKind;
 
 { The ordinal of enumeration element AElem (an nkEnumValue node of ATree):
   its explicit value, else one past the previous element's (the first is
@@ -1313,6 +1364,137 @@ begin
       end;
     nkIdent, nkMember:
       Result := Assigned(AName) and AName(ANode, ADepth + 1, AValue);
+  end;
+end;
+
+function ConstExprKind(const ATree: TPasTree; ANode, ADepth: Integer;
+  const AFacts: TSemaConstFactsFunc): TSemaConstKind;
+
+  function IsConst(N: Integer): Boolean;
+  begin
+    Result := ConstExprKind(ATree, N, ADepth, AFacts) <> sckNone;
+  end;
+
+  // Is every node from AFrom on, along its siblings, a constant (one at
+  // least)?
+  function AllConst(AFrom: Integer): Boolean;
+  begin
+    Result := AFrom <> NIL_NODE;
+    while Result and (AFrom <> NIL_NODE) do
+    begin
+      Result := IsConst(AFrom);
+      AFrom := ATree.Nodes[AFrom].NextSibling;
+    end;
+  end;
+
+var
+  LCallee, LArg: Integer;
+  LF, LA: TSemaConstFacts;
+begin
+  Result := sckNone;
+  if ADepth > 8 then
+    Exit;
+  ANode := PeelParens(ATree, ANode);
+  if ANode = NIL_NODE then
+    Exit;
+  case ATree.Nodes[ANode].Kind of
+    nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
+      Result := sckValue;
+    nkNilLit:
+      Result := sckTyped;   // `[nil]` takes TArray<Pointer>
+    nkUnaryOp:
+      if not ((ATree.Nodes[ANode].Aux >= 0) and
+              (ATree.Nodes[ANode].Aux <= High(ATree.Source.Visible)) and
+              (ATree.Source.VisibleKind(ATree.Nodes[ANode].Aux) = tkAt)) and
+         AllConst(ATree.Nodes[ANode].FirstChild) then
+        Result := sckValue;
+    nkBinaryOp, nkRange:
+      if AllConst(ATree.Nodes[ANode].FirstChild) then
+        Result := sckValue;
+    nkSetCtor:
+      // `[]` too.
+      if (ATree.Nodes[ANode].FirstChild = NIL_NODE) or
+         AllConst(ATree.Nodes[ANode].FirstChild) then
+        Result := sckValue;
+    nkIdent, nkMember:
+      begin
+        LF := AFacts(ANode, ADepth);
+        if LF.Role = scrConst then
+        begin
+          if LF.Typed then
+            Result := sckTyped
+          else
+            Result := sckValue;
+        end
+        // A bare parameterless intrinsic: Pi.
+        else if (LF.Role = scrIntrinsic) and
+                (PasIntrinsicFold(LF.Intrinsic) = ifAlways) then
+          Result := sckValue;
+      end;
+    nkCall:
+      begin
+        LCallee := ATree.Nodes[ANode].FirstChild;
+        if LCallee = NIL_NODE then
+          Exit;
+        LArg := ATree.Nodes[LCallee].NextSibling;
+        LF := AFacts(LCallee, ADepth);
+        case LF.Role of
+          scrType:
+            // A typecast of one constant - a string or a character one to
+            // a pointer type is an address, no constant (`PChar('abc')`,
+            // `PChar(KC)`); what the argument is must be known for that.
+            if (LArg <> NIL_NODE) and
+               (ATree.Nodes[LArg].NextSibling = NIL_NODE) and IsConst(LArg) then
+            begin
+              if LF.Cat <> tcPointer then
+                Exit(sckTyped);
+              LA := AFacts(LArg, ADepth);
+              if not (LA.Cat in [tcUnknown, tcString, tcChar]) then
+                Result := sckTyped;
+            end;
+          scrIntrinsic:
+            case PasIntrinsicFold(LF.Intrinsic) of
+              ifAlways:
+                Result := sckValue;
+              ifSizeOf:
+                if (LArg <> NIL_NODE) and
+                   not AFacts(LArg, ADepth).OpenArray then
+                  Result := sckValue;
+              ifArgs:
+                if AllConst(LArg) then
+                  Result := sckValue;
+              ifPtr:
+                if AllConst(LArg) then
+                  Result := sckTyped;
+              ifIntArg:
+                if (LArg <> NIL_NODE) and IsConst(LArg) and
+                   (AFacts(LArg, ADepth).Cat = tcInteger) then
+                  Result := sckValue;
+              ifHigh:
+                if LArg <> NIL_NODE then
+                begin
+                  LA := AFacts(LArg, ADepth);
+                  if (LA.Role = scrType) or
+                     ((LA.Role in [scrConst, scrValue]) and
+                      (LA.Cat <> tcUnknown) and not LA.RunTime and
+                      not LA.OpenArray) then
+                    Result := sckValue;
+                end;
+              ifLength:
+                if (LArg <> NIL_NODE) and
+                   (AFacts(LArg, ADepth).StaticArray or IsConst(LArg)) then
+                  Result := sckValue;
+              ifDefault:
+                if LArg <> NIL_NODE then
+                begin
+                  LA := AFacts(LArg, ADepth);
+                  if (LA.Role = scrType) and not LA.StaticArray and
+                     not (LA.Cat in [tcUnknown, tcRecord, tcVariant]) then
+                    Result := sckTyped;
+                end;
+            end;
+        end;
+      end;
   end;
 end;
 
@@ -3281,40 +3463,140 @@ begin
     end;
 end;
 
-{ Is argument ANode a constant dcc folds - a literal, a true constant or an
-  enumeration value (Ord / Hi / Lo / Swap of one are Integer, 4.11.4)? A
-  typed constant is a variable here. }
-function TPasSemaTyper.IsConstArg(ANode: Integer): Boolean;
-var
-  LName, LSym: Integer;
+{ ConstExprKind's view of a node of this unit (TSemaConstFacts): a name by
+  its binding here - a true constant's category and Typed read off its
+  initializer - anything else by its ExprType; an array or a string written
+  inline at a declaration (`A: array of Integer`, `S: string[10]`) by that
+  declaration's type node. }
+function TPasSemaTyper.ConstFacts: TSemaConstFactsFunc;
 begin
-  Result := False;
-  ANode := PeelParens(T, ANode);
-  if ANode = NIL_NODE then
-    Exit;
-  case Kind(ANode) of
-    nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
-      Result := True;
-    nkUnaryOp:
-      Result := IsConstArg(Child(ANode));
-    nkIdent, nkMember:
-      begin
-        LName := ANode;
-        if Kind(LName) = nkMember then
-        begin
-          LName := Child(LName);
-          while (LName <> NIL_NODE) and (Sib(LName) <> NIL_NODE) do
-            LName := Sib(LName);
-        end;
-        if LName = NIL_NODE then
-          Exit;
-        LSym := M.RefMap[LName];
-        Result := (LSym <> NIL_SYM) and
-          ((M.Symbols[LSym].Kind = skEnumValue) or
-           ((M.Symbols[LSym].Kind = skConst) and
-            (M.Symbols[LSym].TypeNode = NIL_NODE)));
+  Result :=
+    function(ANode, ADepth: Integer): TSemaConstFacts
+    var
+      LSym, LType, LDecl, LInit, LDef: Integer;
+    begin
+      Result := Default(TSemaConstFacts);
+      ANode := PeelParens(T, ANode);
+      if ANode = NIL_NODE then
+        Exit;
+      Result.Role := scrValue;
+      case Kind(ANode) of
+        nkIntLit: Result.Cat := tcInteger;
+        nkRealLit: Result.Cat := tcFloat;
+        nkCaretChar: Result.Cat := tcChar;
+        nkNilLit: Result.Cat := tcNil;
+        nkStrLit:
+          if IsOneCharLiteralNode(T, ANode) then
+            Result.Cat := tcChar
+          else
+          begin
+            Result.Cat := tcString;
+            Result.RunTime := True;   // a long string: `High(KS)` is E2026
+          end;
       end;
-  end;
+      if Result.Cat <> tcUnknown then
+        Exit;
+      LType := M.ExprType[ANode];
+      LDef := NIL_NODE;
+      LSym := NIL_SYM;
+      if Kind(ANode) in [nkIdent, nkMember, nkTypeArgs] then
+        LSym := Head(ANode);
+      if LSym <> NIL_SYM then
+        case M.Symbols[LSym].Kind of
+          skEnumValue:
+            Result.Role := scrConst;
+          skConst:
+            if sfBuiltin in M.Symbols[LSym].Flags then
+              Result.Role := scrConst   // True, False, MaxInt
+            else if M.Symbols[LSym].TypeNode <> NIL_NODE then
+              LDef := M.Symbols[LSym].TypeNode   // a typed constant: a value
+            else
+            begin
+              Result.Role := scrConst;
+              LDecl := M.Symbols[LSym].DeclNode;
+              if (LDecl <> NIL_NODE) and (T.Nodes[LDecl].Parent <> NIL_NODE) and
+                 (Kind(T.Nodes[LDecl].Parent) = nkConstDecl) then
+              begin
+                LInit := Sib(LDecl);
+                Result.Typed := ConstExprKind(T, LInit, ADepth + 1,
+                  ConstFacts()) = sckTyped;
+                if LType = NIL_SYM then
+                begin
+                  // The type of the value it names.
+                  var LV := ConstFacts()(LInit, ADepth + 1);
+                  Result.Cat := LV.Cat;
+                  Result.RunTime := LV.RunTime;
+                  Exit;
+                end;
+              end;
+            end;
+          skType, skBuiltinType:
+            begin
+              Result.Role := scrType;
+              LType := LSym;
+            end;
+          skRoutine:
+            if sfBuiltin in M.Symbols[LSym].Flags then
+            begin
+              Result.Role := scrIntrinsic;
+              Result.Intrinsic := M.Symbols[LSym].NameLower;
+            end
+            else
+              Result.Role := scrOther;
+          skVar, skParam, skField, skProperty:
+            LDef := M.Symbols[LSym].TypeNode;
+        else
+          Result.Role := scrOther;
+        end;
+      if (LDef <> NIL_NODE) and (Kind(LDef) in [nkArrayType, nkStringType]) then
+      begin
+        // An inline array: static with an index, else dynamic - or an open
+        // array, a parameter's. An inline `string[N]` is a short string.
+        if Kind(LDef) = nkStringType then
+          Result.Cat := tcString
+        else
+        begin
+          Result.Cat := tcArray;
+          Result.StaticArray := (Child(LDef) <> NIL_NODE) and
+            (Sib(Child(LDef)) <> NIL_NODE);
+          Result.OpenArray := not Result.StaticArray and
+            (M.Symbols[LSym].Kind = skParam);
+          Result.RunTime := not Result.StaticArray and not Result.OpenArray;
+        end;
+        Exit;
+      end;
+      Result.Cat := CatOf(LType);
+      case Result.Cat of
+        tcArray:
+          begin
+            LDef := ArrayDefOf(LType);
+            if LDef <> NIL_NODE then
+            begin
+              Result.RunTime := IsDynArrayDef(LDef);
+              Result.StaticArray := not Result.RunTime;
+            end;
+          end;
+        tcString:
+          begin
+            // A long string, but ShortString or a `string[N]` type.
+            LType := WeakAliasEnd(LType);
+            LDef := NIL_NODE;
+            if M.Symbols[LType].Kind = skType then
+              LDef := TypeDefNode(LType);
+            Result.RunTime := (LType <> SStr) and
+              ((LDef = NIL_NODE) or (Kind(LDef) <> nkStringType));
+          end;
+      end;
+    end;
+end;
+
+{ Is argument ANode a constant dcc folds (ConstExprKind) - Ord / Hi / Lo /
+  Swap of one are Integer, 4.11.4: `Ord(High(Char))`, `Hi(SizeOf(T))`,
+  `Swap(Byte(5))`, `Ord(N + 1)` as `Ord('A')`. A typed constant is a
+  variable here. }
+function TPasSemaTyper.IsConstArg(ANode: Integer): Boolean;
+begin
+  Result := ConstExprKind(T, ANode, 0, ConstFacts()) <> sckNone;
 end;
 
 // What Ord and the Pred / Succ / Low / High integer rule read of argument

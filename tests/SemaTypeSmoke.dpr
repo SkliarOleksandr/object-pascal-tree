@@ -638,6 +638,79 @@ begin
   Eq('B.4.3: CompilerVersion is Extended', AssignedType('R29'), 'Extended');
   GModel.Free;
 
+  // CI: the constant test (ConstExprKind) in the unit's typer - Ord / Hi /
+  // Lo / Swap of any constant dcc folds are Integer, not only of a literal:
+  // an intrinsic over constants, a typecast, an operator, a true constant
+  // initialized by a cast, High / SizeOf / Length of a value its type alone
+  // gives; a variable, a typed constant, a string's Length and High, a cast
+  // of a variable keep the argument's row (dcc32 / dcc64 37.0,
+  // local/const-intrinsics-2026-11 p5).
+  const INTRCI =
+    'unit u;'#10'interface'#10 +
+    'type TE = (e0, e1, e2); TRec = record A, B: Integer; end;'#10 +
+    '  TSA = array[0..7] of Byte;'#10 +
+    'const N = 5; KS = ''abc''; KTI = Integer(5); TCC: Char = ''A'';'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var Ch: Char; B: Byte; I: Integer; S: string; SS: ShortString;'#10 +
+    '  SA: TSA; W: Word;'#10 +
+    '  R01, R02, R03, R04, R05, R06, R07, R08, R09, R10, R11, R12, R13, R14,'#10 +
+    '  R15, R16, R17, R18, R19, R20, R21, R22, R23: Variant;'#10 +
+    'begin'#10 +
+    '  R01 := Ord(High(Char));'#10 +
+    '  R02 := Ord(High(Ch));'#10 +
+    '  R03 := Ord(Chr(65));'#10 +
+    '  R04 := Ord(Byte(5));'#10 +
+    '  R05 := Ord(Low(TE));'#10 +
+    '  R06 := Hi(High(Word));'#10 +
+    '  R07 := Lo(SizeOf(TRec));'#10 +
+    '  R08 := Lo(Length(KS));'#10 +
+    '  R09 := Hi(N * 300);'#10 +
+    '  R10 := Swap(Byte(5));'#10 +
+    '  R11 := Hi(SizeOf(I));'#10 +
+    '  R12 := Hi(Length(SA));'#10 +
+    '  R13 := Hi(High(SS));'#10 +
+    '  R14 := Hi(Default(Word));'#10 +
+    '  R15 := Ord(KTI);'#10 +
+    '  R16 := Hi(High(B));'#10 +
+    '  R17 := Ord(Ch);'#10 +
+    '  R18 := Swap(B);'#10 +
+    '  R19 := Ord(TCC);'#10 +
+    '  R20 := Hi(Length(S));'#10 +
+    '  R21 := Hi(High(S));'#10 +
+    '  R22 := Ord(Byte(I));'#10 +
+    '  R23 := Swap(W);'#10 +
+    'end;'#10 +
+    'end.'#10;
+  Analyze(INTRCI);
+  Eq('CI: Ord(High(Char)) is Integer', AssignedType('R01'), 'Integer');
+  Eq('CI: Ord(High(Ch)) is Integer', AssignedType('R02'), 'Integer');
+  Eq('CI: Ord(Chr(65)) is Integer', AssignedType('R03'), 'Integer');
+  Eq('CI: Ord(Byte(5)) is Integer', AssignedType('R04'), 'Integer');
+  Eq('CI: Ord(Low(TE)) is Integer', AssignedType('R05'), 'Integer');
+  Eq('CI: Hi(High(Word)) is Integer', AssignedType('R06'), 'Integer');
+  Eq('CI: Lo(SizeOf(TRec)) is Integer', AssignedType('R07'), 'Integer');
+  Eq('CI: Lo(Length(KS)) is Integer', AssignedType('R08'), 'Integer');
+  Eq('CI: Hi(N * 300) is Integer', AssignedType('R09'), 'Integer');
+  Eq('CI: Swap(Byte(5)) is Integer', AssignedType('R10'), 'Integer');
+  Eq('CI: Hi(SizeOf(I)) is Integer', AssignedType('R11'), 'Integer');
+  Eq('CI: Hi(Length(SA)) of a static array is Integer', AssignedType('R12'),
+    'Integer');
+  Eq('CI: Hi(High(SS)) of a ShortString is Integer', AssignedType('R13'),
+    'Integer');
+  Eq('CI: Hi(Default(Word)) is Integer', AssignedType('R14'), 'Integer');
+  Eq('CI: Ord of a constant initialized by a cast is Integer',
+    AssignedType('R15'), 'Integer');
+  Eq('CI: Hi(High(B)) is Integer', AssignedType('R16'), 'Integer');
+  Eq('CI: Ord(Char) is still Word', AssignedType('R17'), 'Word');
+  Eq('CI: Swap(Byte) is still SmallInt', AssignedType('R18'), 'SmallInt');
+  Eq('CI: Ord of a typed Char constant is Word', AssignedType('R19'), 'Word');
+  Eq('CI: Hi(Length(S)) of a string is Word', AssignedType('R20'), 'Word');
+  Eq('CI: Hi(High(S)) of a string is Word', AssignedType('R21'), 'Word');
+  Eq('CI: Ord(Byte(I)) of a variable is Byte', AssignedType('R22'), 'Byte');
+  Eq('CI: Swap(Word) is still Word', AssignedType('R23'), 'Word');
+  GModel.Free;
+
   // A subrange takes its category from a bound that is an enumeration value
   // or a constant too, not only from a literal (audit E3-18): TWork is an
   // enumeration subrange - `if W` is E2012 as in dcc - and TNeg an integer

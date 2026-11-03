@@ -268,7 +268,11 @@ of less work, not a gap in following the language; its consequences are in
   (`Sub and Sub` over `0..9` is ShortInt in dcc). A true constant
   operand adapts to the other operand by its value only when it is a
   literal or names one - a folded constant expression (`N + 1` in a
-  constant) is read as its declared shape. `AnsiChar + AnsiChar` (dcc's
+  constant), `Succ(4)` and `SizeOf(X)`, which dcc adapts as well (`C +
+  SizeOf(X)` over a Cardinal is Cardinal there, Int64 here), are read as
+  their declared shape: adapting needs the value, and PasTree has no
+  constant folder. A typecast or a typed intrinsic (`C + Integer(5)`, `C +
+  High(Integer)`) adapts in neither. `AnsiChar + AnsiChar` (dcc's
   anonymous short string) is typed ShortString; pointer minus pointer is
   left untyped. The intra-unit typer cannot tell a code-page string declared
   in another unit (UTF8String, RawByteString) from a plain AnsiString-kind
@@ -302,6 +306,15 @@ of less work, not a gap in following the language; its consequences are in
 - a VALUE-taking intrinsic whose argument resolved to a TYPE NAME (a member
   named `Word` bound to the builtin, the CheckAssign mis-binding case) types
   as nothing rather than as that type.
+- `Ord`, `Hi`, `Lo` and `Swap` of a constant are Integer for every argument
+  dcc folds (one rule, ConstExprKind: `Ord(High(Char))`, `Swap(Byte(5))`,
+  `Hi(N * 300)`) - the answer `var X :=` infers. As an overload argument
+  dcc reads such a constant by its value instead - `F(Ord(High(Char)))`
+  takes `F(X: Word)` beside `F(X: Integer)` - where the scorers read
+  Integer, as they read an integer literal (6.3.1). The unit pass sees
+  only its own unit's constants; another unit's are the project level's.
+  An argument the rule cannot type (`High` of an expression it has no
+  type for) is no constant.
 
 ## 4.12 Operator overloading (cross-reference)
 - declared `class operator` overloads are never consulted

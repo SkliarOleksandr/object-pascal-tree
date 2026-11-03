@@ -1214,6 +1214,7 @@ type
       const AX: TSemaXType): TSemaXType;
     function WidenOrdinalX(AMid: Integer; const AX: TSemaXType): TSemaXType;
     function OrdNameValueX(AMid: Integer): TSemaOrdNameValue;
+    function ConstFactsX(AMid: Integer): TSemaConstFactsFunc;
     function IsConstArgX(AMid, ANode: Integer): Boolean;
     function OrdFactsX(AMid, ANode: Integer;
       const AX: TSemaXType): TSemaOrdFacts;
@@ -20011,29 +20012,168 @@ begin
     end;
 end;
 
-{ TPasSemaTyper.IsConstArg across models: argument ANode of model AMid is a
-  literal, a true constant (of any unit) or an enumeration value. }
-function TPasSemaProject.IsConstArgX(AMid, ANode: Integer): Boolean;
-var
-  LBMid, LBSym: Integer;
-  LM: TPasSemaModel;
+{ TPasSemaTyper.ConstFacts across models: ConstExprKind's view of a node of
+  model AMid - a name by its binding in any unit (DesignatorSymX), its type
+  the declared one (DeclTypeX; a true constant's is inferred), a true
+  constant's Typed read off the value ConstValueNodeX follows it to, and
+  anything else by its intra-unit type; an inline array or `string[N]` by
+  the declaration's own type node. }
+function TPasSemaProject.ConstFactsX(AMid: Integer): TSemaConstFactsFunc;
 begin
-  Result := False;
-  LM := FModels[AMid];
-  ANode := PeelParens(LM.Tree, ANode);
-  if ANode = NIL_NODE then
-    Exit;
-  case LM.Tree.Nodes[ANode].Kind of
-    nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
-      Result := True;
-    nkUnaryOp:
-      Result := IsConstArgX(AMid, LM.Tree.Nodes[ANode].FirstChild);
-    nkIdent, nkMember:
-      Result := DesignatorSymX(AMid, ANode, LBMid, LBSym) and
-        ((FModels[LBMid].Symbols[LBSym].Kind = skEnumValue) or
-         ((FModels[LBMid].Symbols[LBSym].Kind = skConst) and
-          (FModels[LBMid].Symbols[LBSym].TypeNode = NIL_NODE)));
-  end;
+  Result :=
+    function(ANode, ADepth: Integer): TSemaConstFacts
+    var
+      LT: TPasTree;
+      LBMid, LBSym, LVMid, LVNode, LDef, LDefMid, LKid: Integer;
+      LS: TSemaSymbol;
+      LX: TSemaXType;
+    begin
+      Result := Default(TSemaConstFacts);
+      LT := FModels[AMid].Tree;
+      ANode := PeelParens(LT, ANode);
+      if ANode = NIL_NODE then
+        Exit;
+      Result.Role := scrValue;
+      case LT.Nodes[ANode].Kind of
+        nkIntLit: Result.Cat := tcInteger;
+        nkRealLit: Result.Cat := tcFloat;
+        nkCaretChar: Result.Cat := tcChar;
+        nkNilLit: Result.Cat := tcNil;
+        nkStrLit:
+          if IsOneCharLiteralNode(LT, ANode) then
+            Result.Cat := tcChar
+          else
+          begin
+            Result.Cat := tcString;
+            Result.RunTime := True;   // a long string: `High(KS)` is E2026
+          end;
+      end;
+      if Result.Cat <> tcUnknown then
+        Exit;
+      LX := XNil;
+      LDef := NIL_NODE;
+      LBMid := AMid;
+      LS := Default(TSemaSymbol);
+      if (LT.Nodes[ANode].Kind in [nkIdent, nkMember]) and
+         DesignatorSymX(AMid, ANode, LBMid, LBSym) then
+      begin
+        LS := FModels[LBMid].Symbols[LBSym];
+        case LS.Kind of
+          skEnumValue:
+            begin
+              Result.Role := scrConst;
+              Result.Cat := tcEnum;
+              Exit;
+            end;
+          skConst:
+            begin
+              LX := DeclTypeX(LBMid, LBSym);
+              if sfBuiltin in LS.Flags then
+                Result.Role := scrConst   // True, False, MaxInt
+              else if LS.TypeNode <> NIL_NODE then
+                LDef := LS.TypeNode       // a typed constant: a value
+              else
+              begin
+                Result.Role := scrConst;
+                ConstValueNodeX(AMid, ANode, LVMid, LVNode);
+                if (LVNode <> NIL_NODE) and
+                   ((LVMid <> AMid) or (LVNode <> ANode)) then
+                begin
+                  Result.Typed := ConstExprKind(FModels[LVMid].Tree, LVNode,
+                    ADepth + 1, ConstFactsX(LVMid)) = sckTyped;
+                  if not XValid(LX) then
+                  begin
+                    // The type of the value it names.
+                    var LV := ConstFactsX(LVMid)(LVNode, ADepth + 1);
+                    Result.Cat := LV.Cat;
+                    Result.RunTime := LV.RunTime;
+                    Exit;
+                  end;
+                end;
+              end;
+            end;
+          skType, skBuiltinType:
+            begin
+              Result.Role := scrType;
+              LX := XPlain(LBMid, LBSym);
+            end;
+          skRoutine:
+            if sfBuiltin in LS.Flags then
+            begin
+              Result.Role := scrIntrinsic;
+              Result.Intrinsic := LS.NameLower;
+              Exit;
+            end
+            else
+              Result.Role := scrOther;
+          skVar, skParam, skField, skProperty:
+            begin
+              LX := DeclTypeX(LBMid, LBSym);
+              LDef := LS.TypeNode;
+            end;
+        else
+          Result.Role := scrOther;
+        end;
+      end
+      else if FModels[AMid].IntraType(ANode) <> NIL_SYM then
+        LX := XPlain(AMid, FModels[AMid].IntraType(ANode));
+      if (LDef <> NIL_NODE) and (FModels[LBMid].Tree.Nodes[LDef].Kind in
+         [nkArrayType, nkStringType]) then
+      begin
+        // An inline array: static with an index, else dynamic - or an open
+        // array, a parameter's. An inline `string[N]` is a short string.
+        if FModels[LBMid].Tree.Nodes[LDef].Kind = nkStringType then
+          Result.Cat := tcString
+        else
+        begin
+          Result.Cat := tcArray;
+          LKid := FModels[LBMid].Tree.Nodes[LDef].FirstChild;
+          Result.StaticArray := (LKid <> NIL_NODE) and
+            (FModels[LBMid].Tree.Nodes[LKid].NextSibling <> NIL_NODE);
+          Result.OpenArray := not Result.StaticArray and (LS.Kind = skParam);
+          Result.RunTime := not Result.StaticArray and not Result.OpenArray;
+        end;
+        Exit;
+      end;
+      Result.Cat := XCatOf(LX);
+      case Result.Cat of
+        tcArray:
+          if ArrayDefOfX(AMid, NIL_NODE, LX, LDefMid, LDef) then
+          begin
+            LKid := FModels[LDefMid].Tree.Nodes[LDef].FirstChild;
+            Result.StaticArray := (LKid <> NIL_NODE) and
+              (FModels[LDefMid].Tree.Nodes[LKid].NextSibling <> NIL_NODE);
+            Result.RunTime := not Result.StaticArray;
+          end;
+        tcString:
+          begin
+            // A long string, but ShortString or a `string[N]` type.
+            Result.RunTime := True;
+            LX := CanonTypeX(LX);
+            if XValid(LX) then
+            begin
+              LS := FModels[LX.UnitId].Symbols[LX.Sym];
+              if LS.Kind = skBuiltinType then
+                Result.RunTime := LS.NameLower <> 'shortstring'
+              else if LS.Kind = skType then
+              begin
+                LDef := TypeDefNodeOf(LX.UnitId, LX.Sym);
+                Result.RunTime := (LDef = NIL_NODE) or
+                  (FModels[LX.UnitId].Tree.Nodes[LDef].Kind <> nkStringType);
+              end;
+            end;
+          end;
+      end;
+    end;
+end;
+
+{ TPasSemaTyper.IsConstArg across models: is argument ANode of model AMid a
+  constant dcc folds (ConstExprKind) - a literal, a true constant or an
+  enumeration value of any unit, a typecast or an intrinsic over them? }
+function TPasSemaProject.IsConstArgX(AMid, ANode: Integer): Boolean;
+begin
+  Result := ConstExprKind(FModels[AMid].Tree, ANode, 0, ConstFactsX(AMid)) <>
+    sckNone;
 end;
 
 { TPasSemaTyper.OrdFacts across models: argument ANode of model AMid

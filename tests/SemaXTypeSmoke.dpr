@@ -2482,6 +2482,43 @@ const
     ('Ord(S200)', 'Byte', 'Byte'),
     ('Ord(SCW)', 'SmallInt', 'SmallInt'),
     ('Ord(WB)', 'Word', 'Word'));
+  // CI: Ord / Hi / Lo / Swap of a constant dcc FOLDS are Integer - an
+  // intrinsic over constants, a typecast, an operator, High of a value its
+  // type alone gives - while a variable, a typed constant, `Length(S)` and
+  // `High(S)` of a string keep the argument's row; the same on dcc32 and
+  // dcc64 (local/const-intrinsics-2026-11; N, KS, KC, KTI, TCC, TCS, TE and
+  // TRec are another unit's, see the fixture).
+  CCONSTARG: array[0..29] of array[0..1] of string = (
+    ('Ord(High(Char))', 'Integer'),
+    ('Ord(High(Ch))', 'Integer'),
+    ('Ord(Chr(65))', 'Integer'),
+    ('Ord(Succ(''a''))', 'Integer'),
+    ('Ord(Byte(5))', 'Integer'),
+    ('Ord(Low(TE))', 'Integer'),
+    ('Hi(High(Word))', 'Integer'),
+    ('Lo(SizeOf(TRec))', 'Integer'),
+    ('Lo(Length(KS))', 'Integer'),
+    ('Hi(N * 300)', 'Integer'),
+    ('Swap(Byte(5))', 'Integer'),
+    ('Hi(High(B))', 'Integer'),
+    ('Hi(SizeOf(I))', 'Integer'),
+    ('Hi(Length(SA))', 'Integer'),
+    ('Hi(Sqr(N))', 'Integer'),
+    ('Hi(Low(S))', 'Integer'),
+    ('Hi(High(SS))', 'Integer'),
+    ('Hi(Default(Word))', 'Integer'),
+    ('Ord(KTI)', 'Integer'),
+    ('Ord(High(KC))', 'Integer'),
+    ('Ord(Ch)', 'Word'),
+    ('Hi(B)', 'Word'),
+    ('Swap(B)', 'SmallInt'),
+    ('Ord(TCC)', 'Word'),
+    ('Hi(Length(S))', 'Word'),
+    ('Hi(High(S))', 'Word'),
+    ('Hi(Length(DA))', 'Word'),
+    ('Ord(Byte(I))', 'Byte'),
+    ('Hi(Length(TCS))', 'Word'),
+    ('Swap(W)', 'Word'));
   // B39: a string's and a character pointer's element, a `for var` over a
   // string, an inline `string[N]` (see the fixture; `for X` walks X).
   CSTRE: array[0..26] of array[0..1] of string = (
@@ -3890,6 +3927,57 @@ begin
           else
             Eq('4.11.4/Win32: ' + CINTR[LRow][0],
               XTypeOf(LE, Format('P%.2d', [LRow])), CINTR[LRow][2]);
+      finally
+        GProj.Free;
+        if TDirectory.Exists(LDir) then
+          TDirectory.Delete(LDir, True);
+      end;
+    end;
+  end;
+
+  // ---- CI: the constant test (ConstExprKind) across units - Ord / Hi / Lo /
+  // Swap of any constant dcc folds are Integer: an intrinsic over constants
+  // (`Ord(High(Char))`, `Lo(Length(KS))`), a typecast (`Swap(Byte(5))`), an
+  // operator (`Hi(N * 300)`), a true constant initialized by a typecast,
+  // High / SizeOf / Length of a value its type alone gives; a variable, a
+  // typed constant, a string's Length and High, a dynamic array's Length,
+  // a cast of a variable are not constants (dcc32 / dcc64 37.0,
+  // local/const-intrinsics-2026-11 p5 and the fixture's twin Fx.dpr). ----
+  begin
+    var LSrcA :=
+      'unit XCA;'#10'interface'#10 +
+      'type TE = (e0, e1, e2); TRec = record A, B: Integer; end;'#10 +
+      'const N = 5; KS = ''abc''; KC = ''A''; TCC: Char = ''A'';'#10 +
+      '  TCS: string = ''abc''; KTI = Integer(5);'#10 +
+      'implementation'#10'end.'#10;
+    var LSrc :=
+      'unit XCB;'#10'interface'#10'uses XCA;'#10 +
+      'implementation'#10 +
+      'procedure P;'#10 +
+      'type TSA = array[0..7] of Byte;'#10 +
+      'var Ch: Char; B: Byte; I: Integer; S: string; SS: ShortString;'#10 +
+      '  SA: TSA; DA: TArray<Integer>; W: Word;'#10 +
+      'begin'#10;
+    for var LRow := 0 to High(CCONSTARG) do
+      LSrc := LSrc + Format('  var P%.2d := %s;'#10,
+        [LRow, CCONSTARG[LRow][0]]);
+    LSrc := LSrc + 'end;'#10'end.'#10;
+    for var LPlat in [pfWin64, pfWin32] do
+    begin
+      LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_constarg');
+      if TDirectory.Exists(LDir) then
+        TDirectory.Delete(LDir, True);
+      TDirectory.CreateDirectory(LDir);
+      TFile.WriteAllText(TPath.Combine(LDir, 'XCA.pas'), LSrcA);
+      TFile.WriteAllText(TPath.Combine(LDir, 'XCB.pas'), LSrc);
+      GProj := TPasSemaProject.Create(LPlat, [LDir], []);
+      try
+        GProj.AnalyzeDirectory(LDir);
+        LE := ModelByName('xcb');
+        Ok('XCB loaded', Assigned(LE));
+        for var LRow := 0 to High(CCONSTARG) do
+          Eq(Format('CI/%s: %s', [PlatformName(LPlat), CCONSTARG[LRow][0]]),
+            XTypeOf(LE, Format('P%.2d', [LRow])), CCONSTARG[LRow][1]);
       finally
         GProj.Free;
         if TDirectory.Exists(LDir) then
