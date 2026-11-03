@@ -860,6 +860,132 @@ const
     'end;'#10 +
     'end.'#10;
 
+  // 6.3.1, a `[...]` against a DYNAMIC-array parameter (TArray<T>, a named
+  // `array of T`): it takes what the open array of T takes, each element a
+  // step below the open array's match - an exact element above `array of
+  // const`, an exact constant other than a string or a character below it,
+  // a conversion with no evidence. Each Dy* is dcc's pick (dcc64 37.0,
+  // local/compl-c1c2-2026-11/fe); red on 0.146.11, where a `[...]` scored
+  // nothing against a dynamic array, are the ones a dynamic array takes.
+  UNIT_XOM =
+    'unit XOM;'#10'interface'#10 +
+    'type'#10 +
+    '  TDyObj = class'#10 +
+    '    Id: Integer;'#10 +
+    '  end;'#10 +
+    '  TDyCust = class(TDyObj)'#10 +
+    '    Created: Integer;'#10 +
+    '  end;'#10 +
+    '  TDyObjClass = class of TDyObj;'#10 +
+    '  TDyInts = array of Integer;'#10 +
+    'const'#10 +
+    '  DyN = 5;'#10 +
+    '  DyTC: Integer = 5;'#10 +
+    'function DyJoin(const A: array of const): TDyObj; overload;'#10 +
+    'function DyJoin(const A: TArray<string>): TDyCust; overload;'#10 +
+    'function DyJoinRev(const A: TArray<string>): TDyCust; overload;'#10 +
+    'function DyJoinRev(const A: array of const): TDyObj; overload;'#10 +
+    'function DyOpen(const A: array of string): TDyCust; overload;'#10 +
+    'function DyOpen(const A: TArray<string>): TDyObj; overload;'#10 +
+    'function DyInt(const A: array of const): TDyObj; overload;'#10 +
+    'function DyInt(const A: TArray<Integer>): TDyCust; overload;'#10 +
+    'function DyIntRev(const A: TArray<Integer>): TDyCust; overload;'#10 +
+    'function DyIntRev(const A: array of const): TDyObj; overload;'#10 +
+    'function DyI64(const A: array of Int64): TDyObj; overload;'#10 +
+    'function DyI64(const A: TArray<Integer>): TDyCust; overload;'#10 +
+    'function DyChar(const A: array of string): TDyObj; overload;'#10 +
+    'function DyChar(const A: TArray<Char>): TDyCust; overload;'#10 +
+    'function DyCls(const A: TArray<TDyObjClass>): TDyCust; overload;'#10 +
+    'function DyCls(const A: array of const): TDyObj; overload;'#10 +
+    'function DyNamed(const A: array of const): TDyObj; overload;'#10 +
+    'function DyNamed(const A: TDyInts): TDyCust; overload;'#10 +
+    'function DyNamedRev(const A: TDyInts): TDyCust; overload;'#10 +
+    'function DyNamedRev(const A: array of const): TDyObj; overload;'#10 +
+    'implementation'#10 +
+    'function DyJoin(const A: array of const): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyJoin(const A: TArray<string>): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyJoinRev(const A: TArray<string>): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyJoinRev(const A: array of const): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyOpen(const A: array of string): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyOpen(const A: TArray<string>): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyInt(const A: array of const): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyInt(const A: TArray<Integer>): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyIntRev(const A: TArray<Integer>): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyIntRev(const A: array of const): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyI64(const A: array of Int64): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyI64(const A: TArray<Integer>): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyChar(const A: array of string): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyChar(const A: TArray<Char>): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyCls(const A: TArray<TDyObjClass>): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyCls(const A: array of const): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyNamed(const A: array of const): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyNamed(const A: TDyInts): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyNamedRev(const A: TDyInts): TDyCust;'#10 +
+    'begin Result := nil; end;'#10 +
+    'function DyNamedRev(const A: array of const): TDyObj;'#10 +
+    'begin Result := nil; end;'#10 +
+    'procedure Run(S: string; I: Integer; C: Char; AS_: AnsiString);'#10 +
+    'begin'#10 +
+    '  var DyStrs := DyJoin([''a'', ''b'']);'#10 +
+    '  var DyStrsMember := DyJoin([''a'', S]).Created;'#10 +
+    '  var DyChars := DyJoin([C]);'#10 +
+    '  var DyMixed := DyJoin([S, I]);'#10 +
+    '  var DyAnsi := DyJoin([S, AS_]);'#10 +
+    '  var DyRevStrs := DyJoinRev([''a'', S]);'#10 +
+    '  var DyRevMixed := DyJoinRev([S, I]);'#10 +
+    '  var DyOpenStrs := DyOpen([''a'', S]);'#10 +
+    '  var DyInts := DyInt([I, I]);'#10 +
+    '  var DyIntConsts := DyInt([1, 2]);'#10 +
+    '  var DyIntRevVars := DyIntRev([I]);'#10 +
+    '  var DyIntRevConsts := DyIntRev([1, 2]);'#10 +
+    '  var DyIntRevNamed := DyIntRev([DyN]);'#10 +
+    '  var DyIntRevTyped := DyIntRev([DyTC]);'#10 +
+    '  var DyIntRevMixed := DyIntRev([DyN, I]);'#10 +
+    '  var DyWide := DyI64([I]);'#10 +
+    '  var DyIntRevExpr := DyIntRev([DyN + 1]);'#10 +
+    '  var DyIntRevLow := DyIntRev([Low(Integer)]);'#10 +
+    '  var DyIntRevCast := DyIntRev([Integer(5)]);'#10 +
+    '  var DyChr := DyChar([C]);'#10 +
+    '  var DyChrStr := DyChar([''ab'']);'#10 +
+    '  var DyClsRef := DyCls([TDyObj]);'#10 +
+    '  var DyNamedInts := DyNamed([I]);'#10 +
+    '  var DyNamedRevConsts := DyNamedRev([1]);'#10 +
+    'end;'#10 +
+    'end.'#10;
+  UNIT_XON =
+    'unit XON;'#10'interface'#10'uses XOM;'#10 +
+    'implementation'#10 +
+    'procedure Run(S: string; I: Integer; C: Char);'#10 +
+    'begin'#10 +
+    '  var DnStrs := DyJoin([''a'', S]);'#10 +
+    '  var DnRevChars := DyJoinRev([C]);'#10 +
+    '  var DnInts := DyIntRev([I]);'#10 +
+    '  var DnConsts := DyIntRev([1, 2]);'#10 +
+    '  var DnWide := DyI64([I]);'#10 +
+    '  var DnChr := DyChar([C]);'#10 +
+    '  var DnNamed := DyNamedRev([DyN]);'#10 +
+    '  var DnNamedVar := DyNamed([I]);'#10 +
+    'end;'#10 +
+    'end.'#10;
+
   // F45 of the parser-fidelity plan: a dereference of a dereference. M is an
   // ANONYMOUS pointer to a named pointer type (System.SysUtils'
   // ResStringModuleUnloadProc: `M: ^PResStringModule`, then `M^^.Module`);
@@ -2804,6 +2930,8 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'XOQ.pas'), UNIT_XOQ);
   TFile.WriteAllText(TPath.Combine(LDir, 'XOK.pas'), UNIT_XOK);
   TFile.WriteAllText(TPath.Combine(LDir, 'XOL.pas'), UNIT_XOL);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XOM.pas'), UNIT_XOM);
+  TFile.WriteAllText(TPath.Combine(LDir, 'XON.pas'), UNIT_XON);
 
   GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
   try
@@ -2882,8 +3010,11 @@ begin
     // 0.146.7: canonicalizing an alias of an instantiation adds none); 60
     // with XOP's TArray<TVarRec> - its TArray<string>, TArray<Integer> and
     // the alias TOpStrs add none, and scoring an open array adds none (the
-    // same 60 on 0.146.8; 59 there with the TArray<TVarRec> taken out).
-    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '60');
+    // same 60 on 0.146.8; 59 there with the TArray<TVarRec> taken out); 62
+    // with XOM's TArray<Char> and TArray<TDyObjClass> - its TArray<string>
+    // and TArray<Integer> add none, and scoring a `[...]` against them adds
+    // none.
+    Eq('instance table (see comment)', IntToStr(GProj.InstanceCount), '62');
 
     // ---- Cross-unit overload selection by ARGUMENT TYPES ----
     LV := ModelByName('xv');
@@ -3365,6 +3496,76 @@ begin
       DeclTypeOf(LE, 'bcregs'), 'TBkCust');
     Eq('6.3.1: ...over `array of string` declared first',
       DeclTypeOf(LE, 'bcclsrefs'), 'TBkCust');
+
+    // ---- a `[...]` against a dynamic-array parameter (6.3.1) ----
+    LE := ModelByName('xom');
+    Ok('XOM loaded', Assigned(LE));
+    Ok('XOM: no diags at all', Length(LE.Diags) = 0);
+    Eq('6.3.1: [''a'', ''b''] takes TArray<string> over `array of const` '
+      + 'declared first', DeclTypeOf(LE, 'dystrs'), 'TDyCust');
+    Eq('6.3.1: ...and a member of its result is read off it',
+      DeclTypeOf(LE, 'dystrsmember'), 'Integer');
+    Eq('6.3.1: ...a Char variable is exact for TArray<string> too',
+      DeclTypeOf(LE, 'dychars'), 'TDyCust');
+    Eq('6.3.1: one element converted - an Integer - and `array of const` wins',
+      DeclTypeOf(LE, 'dymixed'), 'TDyObj');
+    Eq('6.3.1: ...an AnsiString too', DeclTypeOf(LE, 'dyansi'), 'TDyObj');
+    Eq('6.3.1: the other declaration order', DeclTypeOf(LE, 'dyrevstrs'),
+      'TDyCust');
+    Eq('6.3.1: ...[S, I] there', DeclTypeOf(LE, 'dyrevmixed'), 'TDyObj');
+    Eq('6.3.1: `array of string` over TArray<string> (control)',
+      DeclTypeOf(LE, 'dyopenstrs'), 'TDyCust');
+    Eq('6.3.1: [I, I] takes TArray<Integer> over `array of const` declared '
+      + 'first', DeclTypeOf(LE, 'dyints'), 'TDyCust');
+    Eq('6.3.1: [1, 2] takes `array of const`: a constant ranks below it',
+      DeclTypeOf(LE, 'dyintconsts'), 'TDyObj');
+    Eq('6.3.1: [I] takes TArray<Integer> declared first',
+      DeclTypeOf(LE, 'dyintrevvars'), 'TDyCust');
+    Eq('6.3.1: ...[1, 2] `array of const` declared second',
+      DeclTypeOf(LE, 'dyintrevconsts'), 'TDyObj');
+    Eq('6.3.1: ...and so does a true constant',
+      DeclTypeOf(LE, 'dyintrevnamed'), 'TDyObj');
+    Eq('6.3.1: ...but a typed constant is a variable',
+      DeclTypeOf(LE, 'dyintrevtyped'), 'TDyCust');
+    Eq('6.3.1: ...and so does an operator over constants',
+      DeclTypeOf(LE, 'dyintrevexpr'), 'TDyObj');
+    Eq('6.3.1: ...and an intrinsic dcc folds (ConstExprKind)',
+      DeclTypeOf(LE, 'dyintrevlow'), 'TDyObj');
+    Eq('6.3.1: ...but a typecast is a value of its type: TArray<Integer>',
+      DeclTypeOf(LE, 'dyintrevcast'), 'TDyCust');
+    Eq('6.3.1: ...[DyN, I]: the constant is the worst element',
+      DeclTypeOf(LE, 'dyintrevmixed'), 'TDyObj');
+    Eq('6.3.1: [I] takes TArray<Integer> over `array of Int64` declared first',
+      DeclTypeOf(LE, 'dywide'), 'TDyCust');
+    Eq('6.3.1: [C] takes TArray<Char> over `array of string` declared first',
+      DeclTypeOf(LE, 'dychr'), 'TDyCust');
+    Eq('6.3.1: ...[''ab''] `array of string`', DeclTypeOf(LE, 'dychrstr'),
+      'TDyObj');
+    Eq('6.3.1: a class name is a constant: `array of const` over '
+      + 'TArray<TDyObjClass> declared first', DeclTypeOf(LE, 'dyclsref'),
+      'TDyObj');
+    Eq('6.3.1: a named `array of Integer`: [I] over `array of const`',
+      DeclTypeOf(LE, 'dynamedints'), 'TDyCust');
+    Eq('6.3.1: ...[1] `array of const` declared second',
+      DeclTypeOf(LE, 'dynamedrevconsts'), 'TDyObj');
+    LE := ModelByName('xon');
+    Ok('XON loaded', Assigned(LE));
+    Ok('XON: no diags at all', Length(LE.Diags) = 0);
+    Eq('6.3.1: another unit''s family: [''a'', S] for TArray<string>',
+      DeclTypeOf(LE, 'dnstrs'), 'TDyCust');
+    Eq('6.3.1: ...[C] declared first', DeclTypeOf(LE, 'dnrevchars'),
+      'TDyCust');
+    Eq('6.3.1: ...[I] for TArray<Integer>', DeclTypeOf(LE, 'dnints'),
+      'TDyCust');
+    Eq('6.3.1: ...[1, 2] for `array of const`', DeclTypeOf(LE, 'dnconsts'),
+      'TDyObj');
+    Eq('6.3.1: ...[I] over `array of Int64`', DeclTypeOf(LE, 'dnwide'),
+      'TDyCust');
+    Eq('6.3.1: ...[C] for TArray<Char>', DeclTypeOf(LE, 'dnchr'), 'TDyCust');
+    Eq('6.3.1: ...a true constant for `array of const`',
+      DeclTypeOf(LE, 'dnnamed'), 'TDyObj');
+    Eq('6.3.1: ...[I] for a named `array of Integer`',
+      DeclTypeOf(LE, 'dnnamedvar'), 'TDyCust');
 
     // ---- F45: a dereference of a dereference ----
     LE := ModelByName('xpd');

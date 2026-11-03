@@ -48,6 +48,11 @@ type
   TSemaTextKind = (stkNone, stkUni, stkChar, stkWide, stkShort, stkAnsi,
     stkCodePage, stkRaw, stkAnsiChar, stkLit, stkCharLit);
 
+  { What a `[...]` argument is passed to (CtorElemFit): an open array of T,
+    a dynamic array of T - `TArray<T>`, a named `array of T` - or `array of
+    const`. }
+  TSemaCtorTarget = (ctOpenArray, ctDynArray, ctArrayOfConst);
+
   { One operand, after its aliases are chased to the builtin they name - a
     distinct `type X` of a number too, whose storage is its base's (audit
     A3-32, B4-08). Rank: that builtin's NumRank (8-bit 1 .. 64-bit 4 for an
@@ -181,6 +186,7 @@ type
     function OrdNameValue: TSemaOrdNameValue;
     function ConstFacts: TSemaConstFactsFunc;
     function IsConstArg(ANode: Integer): Boolean;
+    function IsConstExpr(ANode: Integer): Boolean;
     function OrdFacts(ANode, ASym: Integer): TSemaOrdFacts;
     function OrdStep(ASym: Integer): Integer;
     function ArrayDefOf(ASym: Integer): Integer;
@@ -196,15 +202,19 @@ type
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
     { One argument against the parameter AParam: AArg its node, or NIL_NODE
       for a comparison an nkAmbiguous stands for (no node shape to read);
-      AAt its type. 2 exact, 1 assignable, 0 no evidence, -1 rejected. }
+      AAt its type. On the doubled scale of CtorElemFit: 4 exact, 2
+      assignable, 0 no evidence, -1 rejected - a `[...]`'s odd steps
+      between. }
     function ScoreArg(AArg, AAt, AParam: Integer): Integer;
-    // ScoreArg against the type APt rather than a parameter's (the element
-    // of an open array a `[...]`'s element is scored against).
+    // ScoreArg's rule against the type APt, on ArgFitCanonX's scale: 2
+    // exact, 1 assignable (the element of an array a `[...]`'s element is
+    // scored against too).
     function ScoreArgAs(AArg, AAt, APt: Integer): Integer;
     // ScoreArg for an open-array parameter - see the implementation.
     function OpenArrayScore(AArg, AAt, ADef: Integer): Integer;
-    // OpenArrayScore for a `[...]` - see the implementation.
-    function OpenCtorScore(ACtor, AElem: Integer; AOfConst: Boolean): Integer;
+    // ScoreArg for a `[...]` - see the implementation.
+    function CtorScore(ACtor, AElem: Integer;
+      ATarget: TSemaCtorTarget): Integer;
     // The type symbol an element type node names - see the implementation.
     function ElemTypeSym(ANode: Integer): Integer;
     { The type of the comparison `ALeft < ARight` / `ALeft > ARight` an
@@ -323,12 +333,12 @@ function ArgStructNeedsConv(AParCat, AArgCat: TSemaTypeCat): Boolean;
 
 { An argument against an OPEN-ARRAY parameter (6.2.6), which names no type
   of its own: the rule both scorers apply to what each knows of the
-  argument (TPasSemaProject.OpenArrFitX, TPasSemaTyper.OpenArrayScore). The
-  element type of `array of const` is System.TVarRec - it takes what an
-  `array of TVarRec` takes. A `[...]` has a rule of its own
-  (OpenCtorElemFit).
+  argument (TPasSemaProject.OpenArrFitX, TPasSemaTyper.OpenArrayScore), on
+  the overload scores' doubled scale (CtorElemFit). The element type of
+  `array of const` is System.TVarRec - it takes what an `array of TVarRec`
+  takes. A `[...]` has a rule of its own (CtorElemFit).
   - an ARRAY, static or dynamic, whose element is the parameter's element
-    type exactly (AElemFit 1) fits, at 1: below the exact match of a
+    type exactly (AElemFit 1) fits, at 2: below the exact match (4) of a
     parameter of the argument's own type, which a `TArray<string>` argument
     takes over `array of string` in either declaration order. An array of
     another element (AElemFit -1) is out - elements are not converted:
@@ -352,38 +362,54 @@ function ArgStructNeedsConv(AParCat, AArgCat: TSemaTypeCat): Boolean;
 function OpenArrayArgFit(AArgCat: TSemaTypeCat; AIsElem: Boolean;
   AElemFit: Integer): Integer;
 
-{ One ELEMENT of a `[...]` against an OPEN-ARRAY parameter - the rule both
-  scorers apply to what each knows of it (TPasSemaProject.OpenCtorFitX,
-  TPasSemaTyper.OpenCtorScore), the brackets fitting as their WORST element
+{ One ELEMENT of a `[...]` against what the brackets are passed to (ATarget:
+  an open array, a dynamic array, `array of const`) - the rule both scorers
+  apply to what each knows of it (TPasSemaProject.CtorFitX,
+  TPasSemaTyper.CtorScore), the brackets fitting as their WORST element
   does: dcc ranks the overloads by that one, however many others fit better
   (`[B, B, B, B, I]` takes `array of Integer` over `array of Byte`), and an
   element out puts the overload out. A range in the brackets makes them a
-  set, which no open array takes; `[]` gives no evidence (6.3.1).
-  - `array of const` (AOfConst) takes an element of any type a TVarRec
-    holds at 1, just below an exact match - an integer, a Char, a Boolean, a
-    float, a string, a pointer, an object, a class reference, an interface,
-    a Variant, a dynamic array, `nil` (AElemCat). An enumeration, a record,
-    a set and a static array (AStaticArray) are E2150, out; an element of
-    no known type, a procedural value and a file give no evidence;
-  - `array of T`: AValueFit, the element's score as a VALUE argument of T
-    (the scorers' one rule: 2 exact, 3 a one-character literal for Char, 1
-    assignable, 0 no evidence, -1 out), with two corrections. A Char value
-    (ACharValue: a one-character literal, a Char variable, constant or cast)
-    fits a Char element best, at 3, and a string (UnicodeString) one next,
-    at 2 - as exactly as its own type, against `array of const` (AParChar,
-    AParString: T is Char, string). And a merely assignable element gives no
-    evidence: dcc ranks `array of const` above every conversion but those,
-    and a set or a dynamic-array parameter above some, while the scorers
-    rank no conversion against another.
+  set, which no array takes; `[]` gives no evidence (6.3.1). On the overload
+  scores' DOUBLED scale - an argument's ArgFitCanonX 3 / 2 / 1 / 0 / -1
+  counts 6 / 4 / 2 / 0 / -1 in a candidate's score - whose odd steps are the
+  dynamic array's:
+  - `array of const` takes an element of any type a TVarRec holds at 2,
+    just below an exact match - an integer, a Char, a Boolean, a float, a
+    string, a pointer, an object, a class reference, an interface, a
+    Variant, a dynamic array, `nil` (AElemCat). An enumeration, a record, a
+    set and a static array (AStaticArray) are E2150, out; an element of no
+    known type, a procedural value and a file give no evidence;
+  - an open array of T: AValueFit, the element's score as a VALUE argument
+    of T (the scorers' one rule: 2 exact, 3 a one-character literal for
+    Char, 1 assignable, 0 no evidence, -1 out), doubled, with two
+    corrections. A Char value (ACharValue: a one-character literal, a Char
+    variable, constant or cast) fits a Char element best, at 6, and a string
+    (UnicodeString) one next, at 4 - as exactly as its own type, against
+    `array of const` (AParChar, AParString: T is Char, string). And a merely
+    assignable element gives no evidence: dcc ranks `array of const` above
+    every conversion, and the kinds of conversion against each other, which
+    the scorers do not;
+  - a dynamic array of T takes what the open array of T takes, each element
+    a step below it: an exact one at 3 (a Char value 5 for Char), above
+    `array of const` and below the open array. An exact CONSTANT other than
+    a string or a character (AConstant: a number, True, a true constant, an
+    enumeration value, a class name, an operator over constants) dcc ranks
+    below `array of const` and above a conversion; here it gives no
+    evidence, as a conversion does: the scorers type every integer literal
+    Integer, so `[5000000000]` or `[1]` beside `array of Byte` would take
+    `TArray<Integer>` (dcc: `TArray<Int64>`, `array of Byte`).
   So `array of T` beats `array of const` when every element is exact for T -
   `string.Join(',', ['a', S])` calls TStringHelper's `array of string`
   overload, declared after the `array of const` one - and loses to it when
   one is not (`[S, I]`, `[1, 'b']`, a Byte for `array of Integer`, an
   AnsiString for `array of string`); `S.Split([','])` takes `array of Char`,
-  `S.Split([', '])` and `S.Split([',', 'ab'])` `array of string`. dcc64
-  37.0, 2026-11-02 (spec 6.3.1; local/compl-c1c2-2026-11/fd). }
-function OpenCtorElemFit(AOfConst: Boolean; AElemCat: TSemaTypeCat;
-  AStaticArray, ACharValue, AParChar, AParString: Boolean;
+  `S.Split([', '])` and `S.Split([',', 'ab'])` `array of string`; `['a', S]`
+  takes `TArray<string>` over `array of const` and `array of string` over
+  `TArray<string>`, `[I]` `TArray<Integer>` over `array of const` and
+  `[1, 2]` `array of const` over `TArray<Integer>`. dcc64 37.0, 2026-11-02
+  (spec 6.3.1; local/compl-c1c2-2026-11/fd, fe). }
+function CtorElemFit(ATarget: TSemaCtorTarget; AElemCat: TSemaTypeCat;
+  AStaticArray, ACharValue, AConstant, AParChar, AParString: Boolean;
   AValueFit: Integer): Integer;
 
 { The present arguments of the nkCall ACall - its children after the callee,
@@ -721,15 +747,19 @@ begin
   if AIsElem or (AArgCat in [tcUnknown, tcNil]) then
     Exit;
   if AArgCat = tcArray then
+  begin
+    if AElemFit > 0 then
+      Exit(2);
     Exit(AElemFit);
+  end;
   Result := -1;
 end;
 
-function OpenCtorElemFit(AOfConst: Boolean; AElemCat: TSemaTypeCat;
-  AStaticArray, ACharValue, AParChar, AParString: Boolean;
+function CtorElemFit(ATarget: TSemaCtorTarget; AElemCat: TSemaTypeCat;
+  AStaticArray, ACharValue, AConstant, AParChar, AParString: Boolean;
   AValueFit: Integer): Integer;
 begin
-  if AOfConst then
+  if ATarget = ctArrayOfConst then
   begin
     case AElemCat of
       tcUnknown, tcProc, tcFile:
@@ -740,17 +770,25 @@ begin
       if AStaticArray then
         Result := -1
       else
-        Result := 1;
+        Result := 2;
     end;
     Exit;
   end;
   if ACharValue and AParChar then
-    Exit(3);
-  if ACharValue and AParString then
-    Exit(2);
-  Result := AValueFit;
-  if Result = 1 then
-    Result := 0;
+    Result := 6
+  else if ACharValue and AParString then
+    Result := 4
+  else if AValueFit < 0 then
+    Exit(-1)
+  else if AValueFit < 2 then
+    Exit(0)   // a conversion, or nothing known
+  else if (ATarget = ctDynArray) and AConstant and
+          not (AElemCat in [tcString, tcChar]) then
+    Exit(0)   // below `array of const`; see above
+  else
+    Result := 4;
+  if ATarget = ctDynArray then
+    Dec(Result);
 end;
 
 function ArgStructNeedsConv(AParCat, AArgCat: TSemaTypeCat): Boolean;
@@ -2907,14 +2945,37 @@ end;
 
 function TPasSemaTyper.ScoreArg(AArg, AAt, AParam: Integer): Integer;
 var
-  LDef: Integer;
+  LDef, LPt, LCore, LElem: Integer;
 begin
   // A parameter's type is a type identifier or `array of` (6.2.6): an
   // array definition in the slot is an open array, which names no type.
   LDef := M.Symbols[AParam].TypeNode;
   if (LDef <> NIL_NODE) and (Kind(LDef) = nkArrayType) then
     Exit(OpenArrayScore(AArg, AAt, LDef));
-  Result := ScoreArgAs(AArg, AAt, M.Symbols[AParam].TypeSym);
+  LPt := M.Symbols[AParam].TypeSym;
+  // A `[...]` for a dynamic array of a type this unit can see is scored by
+  // its elements, as for the open array; one of an element not known here
+  // (`TArray<string>`, an instantiation) gives no evidence. Peeled only
+  // when it may be one: this runs for every argument of every candidate.
+  if (AArg <> NIL_NODE) and (LPt <> NIL_SYM) and
+     (Kind(AArg) in [nkSetCtor, nkParen]) then
+  begin
+    LCore := PeelParens(T, AArg);
+    if Kind(LCore) = nkSetCtor then
+    begin
+      LDef := ArrayDefOf(LPt);
+      if (LDef <> NIL_NODE) and IsDynArrayDef(LDef) then
+      begin
+        LElem := ElemTypeSym(PasArrayElemNode(T, LDef));
+        if LElem = NIL_SYM then
+          Exit(0);
+        Exit(CtorScore(LCore, LElem, ctDynArray));
+      end;
+    end;
+  end;
+  Result := ScoreArgAs(AArg, AAt, LPt);
+  if Result > 0 then
+    Result := 2 * Result;
 end;
 
 function TPasSemaTyper.ScoreArgAs(AArg, AAt, APt: Integer): Integer;
@@ -2990,7 +3051,7 @@ end;
 { ScoreArg for an OPEN-ARRAY parameter whose `array of` definition is ADef:
   OpenArrayArgFit, the rule, over what this unit knows - the project's
   OpenArrFitX reads the same in project space - and a `[...]` by its
-  elements (OpenCtorScore). The element is a builtin or a type of this unit
+  elements (CtorScore). The element is a builtin or a type of this unit
   (ElemTypeSym), `array of const`'s System.TVarRec known here only as the
   record of that name. An argument typed by another unit's type is untyped
   here and decides nothing, and so do a generic parameter and a type name
@@ -3036,7 +3097,11 @@ begin
   if AArg <> NIL_NODE then
     LCore := PeelParens(T, AArg);
   if (LCore <> NIL_NODE) and (Kind(LCore) = nkSetCtor) then
-    Exit(OpenCtorScore(LCore, LElem, LOfConst));
+  begin
+    if LOfConst then
+      Exit(CtorScore(LCore, LElem, ctArrayOfConst));
+    Exit(CtorScore(LCore, LElem, ctOpenArray));
+  end;
   LArgDef := NIL_NODE;
   if AAt <> NIL_SYM then
   begin
@@ -3084,23 +3149,30 @@ begin
     LElemFit);
 end;
 
-{ OpenArrayScore for the `[...]` ACtor against an open array of AElem
-  (AOfConst: `array of const`): OpenCtorElemFit over each element as this
-  unit types it - its category, and ScoreArgAs against AElem - the worst
-  deciding; the project's OpenCtorFitX reads the same in project space. A
-  range makes the brackets a set constructor, which no open array takes. }
-function TPasSemaTyper.OpenCtorScore(ACtor, AElem: Integer;
-  AOfConst: Boolean): Integer;
+{ ScoreArg for the `[...]` ACtor passed to ATarget - an open or a dynamic
+  array of AElem, `array of const` (AElem NIL_SYM): CtorElemFit over each
+  element as this unit types it - its category, ScoreArgAs against AElem,
+  and against a dynamic array whether an exact element is a constant
+  (IsConstExpr, or a type name: a class reference) - the worst deciding; the
+  project's CtorFitX reads the same in project space. A range makes the
+  brackets a set constructor, which no array takes. }
+function TPasSemaTyper.CtorScore(ACtor, AElem: Integer;
+  ATarget: TSemaCtorTarget): Integer;
 var
-  LKid, LAt, LDef, LFit: Integer;
-  LFirst, LParChar, LParString, LStatic: Boolean;
+  LKid, LAt, LDef, LFit, LElemEnd: Integer;
+  LFirst, LOfConst, LParChar, LParString, LStatic, LConst: Boolean;
   LCat: TSemaTypeCat;
 begin
   Result := 0;
-  LParChar := not AOfConst and PasBuiltinIsChar(M, WeakAliasEnd(AElem),
-    FPlatform);
-  LParString := not AOfConst and PasBuiltinIsUString(M, WeakAliasEnd(AElem),
-    FPlatform);
+  LOfConst := ATarget = ctArrayOfConst;
+  LParChar := False;
+  LParString := False;
+  if not LOfConst then
+  begin
+    LElemEnd := WeakAliasEnd(AElem);
+    LParChar := PasBuiltinIsChar(M, LElemEnd, FPlatform);
+    LParString := not LParChar and PasBuiltinIsUString(M, LElemEnd, FPlatform);
+  end;
   LFirst := True;
   LKid := Child(ACtor);
   while LKid <> NIL_NODE do
@@ -3119,12 +3191,20 @@ begin
         not IsDynArrayDef(LDef);
     end;
     LFit := 0;
-    if not AOfConst then
+    LConst := False;
+    if not LOfConst then
+    begin
       LFit := ScoreArgAs(LKid, LAt, AElem);
-    LFit := OpenCtorElemFit(AOfConst, LCat, LStatic,
+      // Only an exact element against a dynamic array asks.
+      LConst := (ATarget = ctDynArray) and (LFit >= 2) and
+        (IsConstExpr(LKid) or (LAt <> NIL_SYM) and
+         (M.Symbols[LAt].Kind = skType) and
+         (Kind(LKid) in [nkIdent, nkMember]) and (Head(LKid) = LAt));
+    end;
+    LFit := CtorElemFit(ATarget, LCat, LStatic,
       IsCharLiteralExpr(T, LKid) or (LCat = tcChar) and
       PasBuiltinIsChar(M, WeakAliasEnd(LAt), FPlatform),
-      LParChar, LParString, LFit);
+      LConst, LParChar, LParString, LFit);
     if LFit < 0 then
       Exit(-1);
     if LFirst or (LFit < Result) then
@@ -3597,6 +3677,17 @@ end;
 function TPasSemaTyper.IsConstArg(ANode: Integer): Boolean;
 begin
   Result := ConstExprKind(T, ANode, 0, ConstFacts()) <> sckNone;
+end;
+
+{ Is ANode a constant a `[...]`'s element is ranked as against a dynamic
+  array (CtorElemFit) - one dcc folds and reads by VALUE (ConstExprKind's
+  sckValue): a literal, a true constant, an enumeration value, an operator
+  or an intrinsic over constants (`N + 1`, `Low(Integer)`). A typecast,
+  Default, Ptr and `nil` are values of their type (sckTyped), exact as any
+  value: `[Integer(5)]` takes TArray<Integer> over `array of const`. }
+function TPasSemaTyper.IsConstExpr(ANode: Integer): Boolean;
+begin
+  Result := ConstExprKind(T, ANode, 0, ConstFacts()) = sckValue;
 end;
 
 // What Ord and the Pred / Succ / Low / High integer rule read of argument

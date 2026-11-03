@@ -751,6 +751,8 @@ const
     'function UPick(const C: TCustOv): TCustOv; overload;'#10 +
     'function UJoin(const A: array of const): TObjOv; overload;'#10 +
     'function UJoin(const A: array of string): TCustOv; overload;'#10 +
+    'function UDyn(const A: array of const): TObjOv; overload;'#10 +
+    'function UDyn(const A: TStrsU): TCustOv; overload;'#10 +
     'implementation'#10 +
     'class function TUtilU.FirstOf<T>(const B: TBoxOv<T>): T;'#10 +
     'begin'#10'end;'#10 +
@@ -759,6 +761,8 @@ const
     'function UPick(const C: TCustOv): TCustOv;'#10'begin'#10'end;'#10 +
     'function UJoin(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
     'function UJoin(const A: array of string): TCustOv;'#10'begin'#10'end;'#10 +
+    'function UDyn(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
+    'function UDyn(const A: TStrsU): TCustOv;'#10'begin'#10'end;'#10 +
     'end.'#10;
   OV_MAIN =
     'unit mainu;'#10 +
@@ -768,6 +772,7 @@ const
     '  TCustAliasM = TCustOv;'#10 +
     '  TCustBoxM = TBoxOv<TCustOv>;'#10 +
     '  TStrsM = array of string;'#10 +
+    '  TIntsM = array of Integer;'#10 +
     '  TUtilM = class'#10 +
     '  public'#10 +
     '    class function FirstOf<T>(const B: TBoxOv<T>): T; static;'#10 +
@@ -783,6 +788,8 @@ const
     'function Reg(C: TCustOvClass): TCustOv; overload;'#10 +
     'function MJoin(const A: array of const): TObjOv; overload;'#10 +
     'function MJoin(const A: array of string): TCustOv; overload;'#10 +
+    'function MDyn(const A: array of const): TObjOv; overload;'#10 +
+    'function MDyn(const A: TIntsM): TCustOv; overload;'#10 +
     'implementation'#10 +
     'class function TUtilM.FirstOf<T>(const B: TBoxOv<T>): T;'#10 +
     'begin'#10'end;'#10 +
@@ -797,8 +804,11 @@ const
     'function Reg(C: TCustOvClass): TCustOv;'#10'begin'#10'end;'#10 +
     'function MJoin(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
     'function MJoin(const A: array of string): TCustOv;'#10'begin'#10'end;'#10 +
+    'function MDyn(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
+    'function MDyn(const A: TIntsM): TCustOv;'#10'begin'#10'end;'#10 +
     'procedure Go(BM: TCustBoxM; CM: TCustAliasM; CD: TCustOv;'#10 +
-    '  BU: TCustBoxU; SU: TStrsU; SM: TStrsM; const OA: array of string);'#10 +
+    '  BU: TCustBoxU; SU: TStrsU; SM: TStrsM; const OA: array of string;'#10 +
+    '  I: Integer);'#10 +
     'begin'#10 +
     '//OV'#10 +
     'end;'#10 +
@@ -2389,6 +2399,12 @@ begin
   OvCase('MJoin(OA).|', 'CreatedF', '');
   OvCase('UJoin(OA).|', 'CreatedF', '');
   OvCase('MJoin([1, ''b'']).|', 'IdF', 'CreatedF');
+  // A `[...]` for a named dynamic array (6.3.1, fe): exact elements take it
+  // (`array of const`, whose TVarRec no unit declares here, scores nothing),
+  // an element it does not take leaves it out.
+  OvCase('UDyn([''a'', SU[0]]).|', 'CreatedF', '');
+  OvCase('UDyn([1, ''b'']).|', 'IdF', 'CreatedF');
+  OvCase('MDyn([I]).|', 'CreatedF', '');
   // C2: the written type arguments are the answer (16.5.1), for a generic
   // method of the edited unit and of a used one.
   OvCase('TUtilM.FirstOf<TCustOv>(BU).|', 'CreatedF', '');

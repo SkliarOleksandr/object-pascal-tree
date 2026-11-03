@@ -384,10 +384,11 @@ type
     function ArgTypedOverload(AMid, ASym, ACtx, ACall,
       ADepth: Integer): Integer;
     function ArgValueX(const ARef: TPasComplTypeRef): TSemaXType;
-    function OpenArrArgOf(ACore: Integer; const ARef: TPasComplTypeRef;
-      ADepth: Integer): TPasOpenArrArg;
+    function ArrayArgOf(ACore: Integer; const ARef: TPasComplTypeRef;
+      ADepth: Integer): TPasArrayArg;
     function OverlayParams(ASym: Integer): TArray<Integer>;
     function IsProcedureValue(ACore, ADepth: Integer): Boolean;
+    function IsConstValue(ANode, ADepth: Integer): Boolean;
     function OwnModelRoutine(AOvSym: Integer): Integer;
     function WrittenCallType(AMid, ASym, ACtx, ACallee,
       ADepth: Integer): TPasComplTypeRef;
@@ -1959,7 +1960,7 @@ var
   LM: TPasSemaModel;
   LCands, LParams, LCores: TArray<Integer>;
   LArgXs: TArray<TSemaXType>;
-  LOpens: TArray<TPasOpenArrArg>;
+  LArrs: TArray<TPasArrayArg>;
   LProcs, LRefs: TArray<Boolean>;
   LArgs, LCount, LTypeArgs, LCur, LHop, LIdx, LPass, LReq, LTot, LScore,
     LFit, LBestScore: Integer;
@@ -2026,11 +2027,11 @@ begin
   if Length(LCands) < 2 then
     Exit;
   // The arguments, each typed once: its type in project space, what it
-  // brings an open array besides (OpenArrArgOf), whether it is a class
+  // brings an array parameter besides (ArrayArgOf), whether it is a class
   // REFERENCE (a type name, a class-side value) and whether it names a
   // procedure, and its node under the parentheses.
   SetLength(LArgXs, LArgs);
-  SetLength(LOpens, LArgs);
+  SetLength(LArrs, LArgs);
   SetLength(LCores, LArgs);
   SetLength(LProcs, LArgs);
   SetLength(LRefs, LArgs);
@@ -2044,7 +2045,7 @@ begin
     LCores[LCount] := PeelParens(FModel.Tree, LNode);
     LRef := DesignatorType(LNode, ADepth + 1);
     LArgXs[LCount] := ArgValueX(LRef);
-    LOpens[LCount] := OpenArrArgOf(LCores[LCount], LRef, ADepth + 1);
+    LArrs[LCount] := ArrayArgOf(LCores[LCount], LRef, ADepth + 1);
     LRefs[LCount] := LRef.IsTypeRef;
     LProcs[LCount] := IsProcedureValue(LCores[LCount], ADepth + 1);
     Inc(LCount);
@@ -2125,10 +2126,10 @@ begin
         end;
         if LOpenArr then
           LFit := FProj.OpenArgFitX(LArgXs[LIdx], LParX, LOfConst, FModel.Tree,
-            LCores[LIdx], LRefs[LIdx], LOpens[LIdx])
+            LCores[LIdx], LRefs[LIdx], LArrs[LIdx])
         else
           LFit := FProj.ArgFitX(LArgXs[LIdx], LParX, FModel.Tree, LCores[LIdx],
-            LProcs[LIdx], LRefs[LIdx]);
+            LProcs[LIdx], LRefs[LIdx], LArrs[LIdx]);
         if LFit < 0 then
         begin
           LScore := -1;
@@ -2161,41 +2162,44 @@ begin
     Result := OwnModelTypeX(ARef.OvSym);
 end;
 
-{ What the argument ACore, typed ARef, brings an OPEN-ARRAY parameter
-  besides its type (TPasSemaProject.OpenArgFitX): a `[...]`'s elements,
-  each typed here - a type name a class reference - or the element of the
-  one-dimensional inline array type it is declared with (ARef's ArrNode:
-  `var A: array of string`, an open-array parameter, `array of const`'s
-  TVarRec). }
-function TPasCompletion.OpenArrArgOf(ACore: Integer;
-  const ARef: TPasComplTypeRef; ADepth: Integer): TPasOpenArrArg;
+{ What the argument ACore, typed ARef, brings an ARRAY parameter besides
+  its type (TPasSemaProject.OpenArgFitX, ArgFitX): a `[...]`'s elements,
+  each typed here - a type name a class reference, a constant told apart
+  (IsConstValue) - or the element of the one-dimensional inline array type
+  it is declared with (ARef's ArrNode: `var A: array of string`, an
+  open-array parameter, `array of const`'s TVarRec). }
+function TPasCompletion.ArrayArgOf(ACore: Integer;
+  const ARef: TPasComplTypeRef; ADepth: Integer): TPasArrayArg;
 var
-  LKid, LIdx, LCount: Integer;
+  LKid, LIdx: Integer;
   LM: TPasSemaModel;
   LElem: TPasComplTypeRef;
+  LKind: TPasCtorElemKind;
 begin
-  Result.ElemXs := nil;
-  Result.ElemClassRefs := nil;
+  Result.Elems := nil;
   Result.InlineElemX := XNil;
   if FModel.Tree.Nodes[ACore].Kind = nkSetCtor then
   begin
-    LCount := PasChildCount(FModel.Tree, ACore);
-    SetLength(Result.ElemXs, LCount);
-    SetLength(Result.ElemClassRefs, LCount);
+    SetLength(Result.Elems, PasChildCount(FModel.Tree, ACore));
     LIdx := 0;
     LKid := FModel.Tree.Nodes[ACore].FirstChild;
     while LKid <> NIL_NODE do
     begin
       LElem := DesignatorType(LKid, ADepth + 1);
-      Result.ElemXs[LIdx] := ArgValueX(LElem);
-      Result.ElemClassRefs[LIdx] := LElem.IsTypeRef;
+      LKind := cekValue;
+      if LElem.IsTypeRef then
+        LKind := cekClassRef
+      else if IsConstValue(LKid, ADepth + 1) then
+        LKind := cekConstant;
+      Result.Elems[LIdx] := FProj.CtorElemX(ArgValueX(LElem), LKind,
+        FModel.Tree, LKid);
       Inc(LIdx);
       LKid := FModel.Tree.Nodes[LKid].NextSibling;
     end;
     Exit;
   end;
   if (ARef.ArrNode = NIL_NODE) or (ARef.ArrSkip <> 0) or ARef.ViaPointer or
-     not SymModelOf(ARef.ArrMid, 'OpenArrArgOf', LM) or
+     not SymModelOf(ARef.ArrMid, 'ArrayArgOf', LM) or
      (LM.Tree.Nodes[ARef.ArrNode].Aux <> 1) and
      (PasArrayDims(LM.Tree, ARef.ArrNode) <> 1) then
     Exit;
@@ -2244,6 +2248,43 @@ begin
     (LM.Symbols[LSym].TypeNode = NIL_NODE) and
     not (sfBuiltin in LM.Symbols[LSym].Flags) and
     (LM.RoutineHead(LSym) <> rhConstructor);
+end;
+
+// Is the value node ANode a constant dcc reads by value - by its shape: a
+// literal but `nil`, a true constant, an enumeration value or an operator
+// over constants? The typers ask ConstExprKind (IsConstExpr, IsConstExprX),
+// whose facts this buffer cannot give, so an intrinsic call is a value here
+// and a true constant initialized by a typecast a constant (docs/coverage.md
+// 6.3.1). A typed constant is a variable.
+function TPasCompletion.IsConstValue(ANode, ADepth: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LMid, LSym, LKid: Integer;
+begin
+  Result := False;
+  ANode := PeelParens(FModel.Tree, ANode);
+  if ANode = NIL_NODE then
+    Exit;
+  case FModel.Tree.Nodes[ANode].Kind of
+    nkIntLit, nkRealLit, nkStrLit, nkCaretChar:
+      Result := True;
+    nkBinaryOp, nkUnaryOp:
+      begin
+        LKid := FModel.Tree.Nodes[ANode].FirstChild;
+        Result := LKid <> NIL_NODE;
+        while Result and (LKid <> NIL_NODE) do
+        begin
+          Result := IsConstValue(LKid, ADepth);
+          LKid := FModel.Tree.Nodes[LKid].NextSibling;
+        end;
+      end;
+    nkIdent, nkMember:
+      if DesignatorSymOf(ANode, ADepth, LMid, LSym) and (LSym <> NIL_SYM) and
+         SymModelOf(LMid, 'IsConstValue', LM, False) then
+        Result := (LM.Symbols[LSym].Kind = skEnumValue) or
+          ((LM.Symbols[LSym].Kind = skConst) and
+           (LM.Symbols[LSym].TypeNode = NIL_NODE));
+  end;
 end;
 
 { The last-good PROJECT twin of a routine the buffer declares - OwnModelType

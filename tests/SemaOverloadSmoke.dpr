@@ -461,6 +461,66 @@ const
     '  X := CRM([TCA]);'#10 +
     'end;'#10'end.'#10;
 
+  { 6.3.1, a `[...]` against a DYNAMIC-array parameter this unit declares:
+    each element a step below the open array's match - an exact element
+    above `array of const`, an exact constant (not a string or a character)
+    below it. Every call binds the TRW overload (dcc64 37.0,
+    local/compl-c1c2-2026-11/fe); G, GM, HV, P and R red on 0.146.11, where
+    a `[...]` scored nothing against a dynamic array. }
+  SRC_OPEN3 =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TInts = array of Integer;'#10 +
+    '  TStrs = array of string;'#10 +
+    '  TChars = array of Char;'#10 +
+    'const'#10 +
+    '  NC = 5;'#10 +
+    'function G(const A: array of const): TRA; overload;'#10 +
+    'function G(const A: TStrs): TRW; overload;'#10 +
+    'function GM(const A: TStrs): TRW; overload;'#10 +
+    'function GM(const A: array of const): TRA; overload;'#10 +
+    'function H(const A: array of const): TRW; overload;'#10 +
+    'function H(const A: TInts): TRA; overload;'#10 +
+    'function HM(const A: TInts): TRA; overload;'#10 +
+    'function HM(const A: array of const): TRW; overload;'#10 +
+    'function HV(const A: array of const): TRA; overload;'#10 +
+    'function HV(const A: TInts): TRW; overload;'#10 +
+    'function P(const A: array of Int64): TRA; overload;'#10 +
+    'function P(const A: TInts): TRW; overload;'#10 +
+    'function R(const A: array of string): TRA; overload;'#10 +
+    'function R(const A: TChars): TRW; overload;'#10 +
+    'implementation'#10 +
+    'function G(const A: array of const): TRA; begin end;'#10 +
+    'function G(const A: TStrs): TRW; begin end;'#10 +
+    'function GM(const A: TStrs): TRW; begin end;'#10 +
+    'function GM(const A: array of const): TRA; begin end;'#10 +
+    'function H(const A: array of const): TRW; begin end;'#10 +
+    'function H(const A: TInts): TRA; begin end;'#10 +
+    'function HM(const A: TInts): TRA; begin end;'#10 +
+    'function HM(const A: array of const): TRW; begin end;'#10 +
+    'function HV(const A: array of const): TRA; begin end;'#10 +
+    'function HV(const A: TInts): TRW; begin end;'#10 +
+    'function P(const A: array of Int64): TRA; begin end;'#10 +
+    'function P(const A: TInts): TRW; begin end;'#10 +
+    'function R(const A: array of string): TRA; begin end;'#10 +
+    'function R(const A: TChars): TRW; begin end;'#10 +
+    'procedure Test(S: string; I: Integer; C: Char);'#10 +
+    'var'#10 +
+    '  X: TRW;'#10 +
+    'begin'#10 +
+    '  X := G([''a'', S]);'#10 +
+    '  X := GM([C]);'#10 +
+    '  X := H([1, 2]);'#10 +
+    '  X := H([NC]);'#10 +
+    '  X := H([NC + 1]);'#10 +
+    '  X := HM([1]);'#10 +
+    '  X := HV([I]);'#10 +
+    '  X := P([I]);'#10 +
+    '  X := R([C]);'#10 +
+    '  X := R([''a'']);'#10 +
+    'end;'#10'end.'#10;
+
   { The Char-literal and nil exemptions of the assignment check (A4-10,
     A4-11; probe-b32 P1): dcc compiles every line but the last, where an
     operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
@@ -557,6 +617,14 @@ begin
     Ok('[...] / inline array (6.3.1): ' + LName + ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   Ok('[...] / inline array: no E2010', DiagCount('E2010') = 0);
+  GModel.Free;
+
+  Analyze(SRC_OPEN3);
+  for var LName in ['G', 'GM', 'H', 'HM', 'HV', 'P', 'R'] do
+    Ok('[...] for a dynamic array (6.3.1): ' + LName +
+      ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  Ok('[...] for a dynamic array: no E2010', DiagCount('E2010') = 0);
   GModel.Free;
 
   Analyze(SRC_ASSIGN);

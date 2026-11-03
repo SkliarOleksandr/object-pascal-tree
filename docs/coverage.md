@@ -399,33 +399,54 @@ of less work, not a gap in following the language; its consequences are in
   own type, and an array of another element or one value of another type is
   out; a value of the element type itself (a one-element array only when it
   is a variable) gives no evidence. A `[...]` fits as its worst element does
-  (6.3.1; OpenCtorElemFit): `array of const` takes any element a TVarRec
-  holds just below an exact match, and is out for an enumeration, a record,
-  a set or a static array (E2150); `array of T` ranks above it only when
-  every element is exact for T (a Char value for string too - though not an
-  AnsiChar for AnsiString, which dcc counts exact as well), and one element
-  merely assignable to T gives no evidence, which leaves `array of const`
-  the better, as dcc has it. Between two typed open arrays the
-  scorers rank no conversion against another, so when neither is exact the
-  first declared wins: `[B, B, I]` for `array of Byte` / `array of Integer`
-  (dcc: Integer, the worst element's conversion is better), `[1, 'b']` for
-  `array of string` / `array of Variant` (dcc: Variant - the string one is
-  out, which the scorers do not prove). A bracket against a set or a
-  dynamic-array parameter is not scored, though dcc ranks those by the
-  elements too (6.3.1): beside `TArray<string>`, `array of const` takes
-  `['a']` or `[S]` (dcc: the dynamic array). A literal is typed as itself
-  here - an integer one Integer, a real one Extended - and so counts exact
-  for that type, where dcc ranks a constant a step lower: `[1]` takes `array
-  of Integer` over `array of Byte` (dcc: Byte) as `F(1)` takes F(Integer)
-  over F(Byte), `[5000000000]` `array of Integer` (dcc: Int64), `[1.5]`
-  `array of Extended` over `array of const` (dcc: const); and `nil` is no
-  exact match for Pointer (dcc: `[nil]` takes `array of Pointer` over `array
-  of const`).
+  (6.3.1; CtorElemFit, on a doubled scale whose odd steps are a dynamic
+  array's): `array of const` takes any element a TVarRec holds just below an
+  exact match, and is out for an enumeration, a record, a set or a static
+  array (E2150); `array of T` ranks above it only when every element is
+  exact for T (a Char value for string too - though not an AnsiChar for
+  AnsiString, which dcc counts exact as well), and one element merely
+  assignable to T gives no evidence, which leaves `array of const` the
+  better, as dcc has it. A dynamic array of T (`TArray<T>`, a named `array
+  of T`) ranks each element a step below the open array of T: an exact one
+  above `array of const`; an exact constant other than a string or a
+  character - one dcc reads by value (ConstExprKind's sckValue: a number,
+  True, a true constant, an enumeration value, an operator or an intrinsic
+  over constants, `[Low(Integer)]`), or a class name - below it, with no
+  evidence - dcc ranks it above a conversion, but every integer literal is
+  Integer here, so that step would take `TArray<Integer>` for
+  `[5000000000]` (dcc: `TArray<Int64>`) and for `[1]` beside `array of
+  Byte` (dcc: the open array), and is left out: `[1]` beside `array of
+  Int64` takes the first declared (dcc: `TArray<Integer>`). A typecast,
+  Default, Ptr and `nil` are values of their type (sckTyped), exact:
+  `[Integer(5)]` takes `TArray<Integer>` over `array of const`. Completion
+  tells a constant by its shape alone (IsConstValue: a literal, a true
+  constant, an enumeration value, an operator over those), so there an
+  intrinsic call (`[Low(Integer)]`) is a value and a true constant
+  initialized by a typecast a constant. Between two typed arrays
+  the scorers rank no conversion against another, so when neither is exact
+  the first declared wins: `[B, B, I]` for `array of Byte` / `array of
+  Integer` (dcc: Integer, the worst element's conversion is better), `[1,
+  'b']` for `array of string` / `array of Variant` (dcc: Variant - the
+  string one is out, which the scorers do not prove), `[B]` for `array of
+  Int64` / `TArray<Integer>` (dcc: the open array - a widening ranks above
+  a dynamic array's) and `[I64]` for `array of Integer` / `TArray<Integer>`
+  (dcc: the dynamic array - a narrowing ranks below it). A bracket against
+  a set parameter is not scored, though dcc ranks it by the elements too
+  (6.3.1).
+  A literal is typed as itself here - an integer one Integer, a real one
+  Extended - and so counts exact for that type, where dcc ranks a constant
+  a step lower: `[1]` takes `array of Integer` over `array of Byte` (dcc:
+  Byte) as `F(1)` takes F(Integer) over F(Byte), `[5000000000]` `array of
+  Integer` (dcc: Int64), `[1.5]` `array of Extended` over `array of const`
+  (dcc: const); and `nil` is no exact match for Pointer (dcc: `[nil]` takes
+  `array of Pointer` and `TArray<Pointer>` over `array of const`).
 - the completion overlay picks a call's overload by the project's rule
   (`TPasSemaProject.ArgFitX`, `OpenArgFitX` for an open array, the
   cross-type scorer's verdict per argument), arguments and parameters
-  typed in project space, a `[...]`'s elements too: the unit pass cannot
-  see another unit's types, nor a category for an alias of one.
+  typed in project space, a `[...]`'s elements too (`CtorElemX`): the unit
+  pass cannot see another unit's types, nor a category for an alias of
+  one - nor the element of an instantiation, so it leaves a `[...]` for
+  `TArray<T>` to the cross-type pass.
 - a bare routine name in a value position - a member qualifier, a `with`
   target or an inline initializer - means the overload that needs no
   argument (6.6.1): one with no parameters, else one whose parameters all
