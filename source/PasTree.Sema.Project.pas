@@ -640,6 +640,7 @@ type
     FReportMembers: Boolean;   // see ReportUnresolvedMembers
     FReportGuessedIfs: Boolean;   // see ReportGuessedIfs
     FReportVisibility: Boolean;   // see ReportVisibility
+    FReportBehindMissing: Boolean;   // see ReportUndeclaredBehindMissingUnits
     // The model a pass is splitting over several workers (RunInheritedOver),
     // -1 otherwise: its per-model memos are then shared and locked.
     FShardMid: Integer;
@@ -1159,6 +1160,7 @@ type
     // implementation-section import cannot propagate a change further.)
     function UsesIsInterface(AId, AUseIdx: Integer): Boolean;
     procedure CrossResolve(AId: Integer);
+    function UndeclaredReported(AModel: TPasSemaModel): Boolean; inline;
     procedure ReportMissingUnitMember(AId: Integer; AModel: TPasSemaModel;
       AMember, AName, AUid: Integer);
     procedure CheckVisibility(AId, ANameNode, AMemMid, AMemSym: Integer);
@@ -1671,6 +1673,17 @@ type
       default. What it covers and what it does not is in the README. }
     property ReportVisibility: Boolean read FReportVisibility
       write FReportVisibility;
+    { OPT-IN, default OFF: report an undeclared identifier (E2003) in a unit
+      with an unresolved import or include too. By default such a unit reports
+      no E2003 at all - the missing unit may declare the name, and dcc stops at
+      the F1027 before it gets that far - which also hides every real typo in
+      the unit until the path is fixed. On, the F1027 stays and each name is
+      judged against what did load: a name the missing unit declares becomes a
+      false E2003, the price the host's user chose. Only the undeclared-name
+      verdicts move (UndeclaredReported); member, call and visibility checks
+      keep their own AllUsesResolved gate, and $IF evaluation is untouched. }
+    property ReportUndeclaredBehindMissingUnits: Boolean
+      read FReportBehindMissing write FReportBehindMissing;
     { Ceiling on the blast radius AnalyzeModuleOnly will take on: an interface
       change re-runs Phase 1 and the cross passes for every model that could
       see it, and past some size a plain rebuild could be cheaper. Default 0
@@ -17770,6 +17783,16 @@ begin
   EmitE2003(AModel, AName, AId);
 end;
 
+{ Whether AModel's undeclared names are reported: always when every import
+  and include loaded, and behind a missing one only under
+  ReportUndeclaredBehindMissingUnits. The one gate of the four E2003
+  verdicts - CrossResolve, CrossResolveDecl, CrossResolveInheritedRange and
+  CrossResolveWith. }
+function TPasSemaProject.UndeclaredReported(AModel: TPasSemaModel): Boolean;
+begin
+  Result := AModel.AllUsesResolved or FReportBehindMissing;
+end;
+
 procedure TPasSemaProject.CrossResolve(AId: Integer);
 var
   LModel: TPasSemaModel;
@@ -18092,7 +18115,7 @@ begin
           // System to bind to (see IsMagicAttributeRef), so reporting it
           // undeclared is a false positive. CheckAttributes exempts the same
           // set for the same reason.
-          else if LModel.AllUsesResolved and
+          else if UndeclaredReported(LModel) and
                   not IsMagicAttributeRef(LModel, LNode) then
             EmitE2003(LModel, LNode, AId);
         end;
@@ -22701,7 +22724,7 @@ begin
       LOut[LPendCount] := LPend;
       Inc(LPendCount);
     end
-    else if AEmit and LModel.AllUsesResolved then
+    else if AEmit and UndeclaredReported(LModel) then
       EmitE2003(LModel, LNode, AId);   // CrossResolve's verdict, just deferred
   end;
   SetLength(LOut, LPendCount);
@@ -23091,7 +23114,7 @@ begin
       LOut[LPendCount] := LPend;
       Inc(LPendCount);
     end
-    else if LModel.AllUsesResolved then
+    else if UndeclaredReported(LModel) then
       EmitE2003(LModel, LNode, AId);
     end;
     SetLength(LOut, LPendCount);
@@ -23381,7 +23404,7 @@ begin
           LOut[LPendCount] := LPend;
           Inc(LPendCount);
         end
-        else if LModel.AllUsesResolved and not LUntyped then
+        else if UndeclaredReported(LModel) and not LUntyped then
         begin
           // Emit-or-record: the converged round's recording IS the emit set -
           // RunWithPass emits from it without paying another full round. AEmit

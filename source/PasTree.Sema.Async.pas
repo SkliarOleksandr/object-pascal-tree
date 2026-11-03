@@ -175,6 +175,9 @@ type
       because a switch that can only be set on the project itself is a switch
       an async host (which never sees the project before Start) cannot use. }
     procedure SetReportVisibility(AValue: Boolean);
+    { Same contract for ReportUndeclaredBehindMissingUnits - E2003 in a unit
+      with an unresolved import; see the property. }
+    procedure SetReportUndeclaredBehindMissingUnits(AValue: Boolean);
     { Forwarded to the inner project's LightPaths: the directory trees whose
       units are analyzed interface-only (docs/library-light-mode.md). Set
       BEFORE Start, like the switches above. }
@@ -339,6 +342,13 @@ procedure TPasAsyncSession.SetReportUnresolvedMembers(AValue: Boolean);
 begin
   CheckNotStarted('SetReportUnresolvedMembers');
   FProject.ReportUnresolvedMembers := AValue;
+end;
+
+procedure TPasAsyncSession.SetReportUndeclaredBehindMissingUnits(
+  AValue: Boolean);
+begin
+  CheckNotStarted('SetReportUndeclaredBehindMissingUnits');
+  FProject.ReportUndeclaredBehindMissingUnits := AValue;
 end;
 
 procedure TPasAsyncSession.SetReportGuessedIfs(AValue: Boolean);

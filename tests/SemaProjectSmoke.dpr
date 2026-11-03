@@ -13237,6 +13237,46 @@ begin
       TDirectory.Delete(LDir, True);
   end;
 
+  { ReportUndeclaredBehindMissingUnits: a unit with an import that does not
+    load reports no E2003 by default - the missing unit may declare the name -
+    and every one under the switch, the F1027 either way. }
+  LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_behindmissing');
+  if TDirectory.Exists(LDir) then
+    TDirectory.Delete(LDir, True);
+  TDirectory.CreateDirectory(LDir);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BMUse.pas'),
+    'unit BMUse;'#10'interface'#10 +
+    'uses BMNoSuchUnit;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'begin'#10 +
+    '  BMUndeclared := 1;'#10 +
+    'end;'#10 +
+    'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.AnalyzeDirectory(LDir);
+    Ok('behindmissing: the missing import is F1027',
+      DiagCount(ModelByName('bmuse'), 'F1027') = 1);
+    Ok('behindmissing: by default no E2003 behind it',
+      DiagCount(ModelByName('bmuse'), 'E2003') = 0);
+  finally
+    GProj.Free;
+  end;
+  GProj := TPasSemaProject.Create(pfWin32, [LDir], []);
+  try
+    GProj.ReportUndeclaredBehindMissingUnits := True;
+    GProj.AnalyzeDirectory(LDir);
+    Ok('behindmissing: switched on, the F1027 stays',
+      DiagCount(ModelByName('bmuse'), 'F1027') = 1);
+    Ok('behindmissing: ...and the undeclared name is E2003',
+      DiagHasText(ModelByName('bmuse'), 'E2003', 'BMUndeclared'));
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+
   { An ANONYMOUS METHOD literal cannot bind to a non-procedural parameter, so it
     rejects that candidate outright. `TThread.Synchronize(nil, procedure ... end)`
     fits the PRIVATE `(ASyncRec: PSynchronizeRecord; QueueEvent: Boolean = False)`
