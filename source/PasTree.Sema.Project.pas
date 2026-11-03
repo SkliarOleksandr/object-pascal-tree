@@ -1231,6 +1231,8 @@ type
     function WidenOrdinalX(AMid: Integer; const AX: TSemaXType): TSemaXType;
     function OrdNameValueX(AMid: Integer): TSemaOrdNameValue;
     function ConstFactsX(AMid: Integer): TSemaConstFactsFunc;
+    function FoldedArgTypeX(AMid, ANode, ADepth: Integer): TSemaXType;
+    function ArgFactsX(AMid: Integer): TSemaArgFactsProc;
     function IsConstArgX(AMid, ANode: Integer): Boolean;
     function IsConstExprX(AMid, ANode: Integer): Boolean;
     function OrdFactsX(AMid, ANode: Integer;
@@ -2122,14 +2124,29 @@ type
       none), whose shape decides the anonymous-method, procedure and `[...]`
       rejections and the literal's rank; AProcDesig: it names a procedure;
       AClassRef: it is a class REFERENCE to AArgX (a type name, `Self` in a
-      class method), not an instance. An OPEN-ARRAY parameter is
-      OpenArgFitX's. Promoted for the completion engine, which picks an
-      overload of a buffer being typed by the same rule: the buffer's own
-      unit typer cannot see a type of another unit, nor an alias of one
-      (audit C1). }
+      class method), not an instance. ALitM: the model ACore is a node of,
+      for an anonymous-method literal against a procedural parameter
+      (AnonLiteralFitsX: only a `reference to` type of its shape takes it);
+      nil leaves that rule out. An OPEN-ARRAY parameter is OpenArgFitX's.
+      Promoted for the completion engine, which picks an overload of a
+      buffer being typed by the same rule: the buffer's own unit typer
+      cannot see a type of another unit, nor an alias of one (audit C1). }
     function ArgFitX(const AArgX, AParX: TSemaXType; const ATree: TPasTree;
       ACore: Integer; AProcDesig, AClassRef: Boolean;
-      const AArg: TPasArrayArg): Integer;
+      const AArg: TPasArrayArg; const ALitM: TPasSemaModel = nil): Integer;
+    { Can the anonymous-method literal ALit of model ALitM be passed to a
+      parameter of the procedural type AX? Only when AX is a `reference to`
+      type (nkProcType Aux 2 - not 1, `of object`, nor 0, a plain procedural
+      type) with the same parameter count, the same procedure / function
+      kind (17.2.1) and, where ALitMid names ALitM in the project (-1: a
+      buffer of the completion engine), the same parameter types. True
+      whenever a side cannot be read, so an unknown shape never rejects. }
+    function AnonLiteralFitsX(const ALitM: TPasSemaModel;
+      ALitMid, ALit: Integer; const AX: TSemaXType): Boolean;
+    function SigShapeOf(const AModel: TPasSemaModel; ANode: Integer;
+      out AParams: Integer; out AFunc: Boolean): Boolean;
+    function SigParamsOf(const AModel: TPasSemaModel;
+      ANode: Integer): TArray<Integer>;
     { ArgFitX for an OPEN-ARRAY parameter of element type AElemX
       (ParamFitTypeX; AOfConst: it is `array of const`): OpenArrayArgFit
       over the argument, a `[...]` by its elements (CtorElemFit), from what
@@ -13416,7 +13433,8 @@ end;
   (6.3.1; local/compl-c1c2-2026-11/probe4). One declared in a generic's body
   (`TItems = TArray<T>`, read through `TG<Integer>`) is closed over the frame
   it is read in, as AliasStepX closes it: the open instance would leak T into
-  whatever is read off the canonical type.
+  whatever is read off the canonical type. Every step is, so an alias of
+  that alias (`TItems2 = TItems`) keeps the frame.
 
   `T = type Base` is NOT followed: 2 sec. 2.5.1 makes it a distinct type, and the
   parser marks it with Aux = 1 on the nkTypeDecl - the same test BuildHelperMap
@@ -13444,9 +13462,9 @@ begin
     if (LParent <> NIL_NODE) and (LM.Tree.Nodes[LParent].Kind = nkTypeDecl) and
        (LM.Tree.Nodes[LParent].Aux = 1) then
       Exit;   // `type Base` - a distinct type, not an alias
-    LNext := ResolveTypeExprNested(Result.UnitId, LDef);
-    if LDefKind = nkTypeArgs then
-      LNext := SubstX(LNext, Result.Inst, 0);
+    // Each step is closed over the frame it is read in, a name step too
+    // (`TItems2 = TItems` read through TG<Integer>).
+    LNext := AliasStepX(Result, LDef);
     if not XValid(LNext) or
        ((LNext.UnitId = Result.UnitId) and (LNext.Sym = Result.Sym)) then
       Exit;
@@ -13521,12 +13539,12 @@ begin
             (FModels[AX.UnitId].DeclaresOperator(LScope, 'explicit'));
 end;
 
-// The parameter's category for the rejections. `TBytes = TArray<Byte>`
-// canonicalizes to no category of its own (an alias of an instantiation
-// in another unit), so a Byte or a record for it was scored assignable
-// and `MS.Write(B[0], N)` / `Stream.Write(Header, SizeOf(Header))` took
-// TStream's TBytes overload over the untyped one: an unknown category is
-// asked whether it is a dynamic array (IsDynArrayTypeX).
+// The parameter's category for the rejections: a Byte or a record is not
+// assignable to `TBytes`, or `MS.Write(B[0], N)` / `Stream.Write(Header,
+// SizeOf(Header))` takes TStream's TBytes overload over the untyped one.
+// CanonTypeX follows `TBytes = TArray<Byte>` to the instance, whose category
+// is the array's; a dynamic array whose canonical type still has no
+// category (tcUnknown, assignable to anything) is asked IsDynArrayTypeX.
 function TPasSemaProject.ParCatOf(const APar,
   ACanonPar: TSemaXType): TSemaTypeCat;
 begin
@@ -13559,9 +13577,108 @@ begin
     (LTree.Nodes[LFirst].NextSibling <> NIL_NODE);
 end;
 
+// The parameter count of a signature node of AModel - an nkAnonMethod literal
+// or an nkProcType - and whether it is a function, read off the scope the
+// resolver declares its parameters in (both own an sckRoutine scope keyed by
+// the node; see TPasSemaResolver's nkAnonMethod / nkProcType cases), so no
+// text is needed. False when that scope cannot be found.
+function TPasSemaProject.SigShapeOf(const AModel: TPasSemaModel; ANode: Integer;
+  out AParams: Integer; out AFunc: Boolean): Boolean;
+var
+  LChild: Integer;
+begin
+  AFunc := False;
+  AParams := Length(SigParamsOf(AModel, ANode));
+  Result := (ANode >= 0) and (ANode <= High(AModel.NodeScope)) and
+    (AModel.NodeScope[ANode] <> NIL_SCOPE) and
+    (AModel.NodeScope[ANode] < AModel.Scopes.Count) and
+    (AModel.Scopes[AModel.NodeScope[ANode]].OwnerNode = ANode);
+  if not Result then
+    Exit;
+  // A result type is the one child that is neither the parameter list, a
+  // directive (`procedure stdcall`) nor a literal's body.
+  LChild := AModel.Tree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if not (AModel.Tree.Nodes[LChild].Kind in [nkParams, nkAnonParams,
+       nkDirective, nkRoutineBody]) then
+      AFunc := True;
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+// The parameter symbols of a signature node of AModel, in declaration order (the
+// scope SigShapeOf counts them in); nil when it cannot be found.
+function TPasSemaProject.SigParamsOf(const AModel: TPasSemaModel;
+  ANode: Integer): TArray<Integer>;
+var
+  LScope: Integer;
+  LList: TSemaSymList;
+begin
+  Result := nil;
+  if (ANode < 0) or (ANode > High(AModel.NodeScope)) then
+    Exit;
+  LScope := AModel.NodeScope[ANode];
+  if (LScope = NIL_SCOPE) or (LScope >= AModel.Scopes.Count) or
+     (AModel.Scopes[LScope].OwnerNode <> ANode) then
+    Exit;
+  LList := AModel.Scopes[LScope].Symbols;
+  for var LI := 0 to LList.Count - 1 do
+    if AModel.Symbols[LList[LI]].Kind = skParam then
+      Result := Result + [LList[LI]];
+end;
+
+function TPasSemaProject.AnonLiteralFitsX(const ALitM: TPasSemaModel;
+  ALitMid, ALit: Integer; const AX: TSemaXType): Boolean;
+var
+  LCanon, LA, LB: TSemaXType;
+  LDef, LLitN, LRefN: Integer;
+  LLitF, LRefF: Boolean;
+  LLitP, LRefP: TArray<Integer>;
+begin
+  Result := True;
+  LCanon := CanonTypeX(AX);
+  if not XValid(LCanon) then
+    Exit;
+  LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
+  if (LDef = NIL_NODE) or
+     (FModels[LCanon.UnitId].Tree.Nodes[LDef].Kind <> nkProcType) then
+    Exit;
+  if FModels[LCanon.UnitId].Tree.Nodes[LDef].Aux <> 2 then
+    Exit(False);
+  if not SigShapeOf(ALitM, ALit, LLitN, LLitF) or
+     not SigShapeOf(FModels[LCanon.UnitId], LDef, LRefN, LRefF) then
+    Exit;
+  if (LLitN <> LRefN) or (LLitF <> LRefF) then
+    Exit(False);
+  if ALitMid < 0 then
+    Exit;
+  // Each parameter's type, where both sides read one: a literal
+  // `procedure(X: string)` does not go to `reference to procedure(X:
+  // Integer)`, nor a `procedure(I: Int64)` to TProc<Integer> - the reference
+  // type's arguments applied (17.2.1; audit E3-30: same-arity reference
+  // overloads tied and the first declared won). A side that cannot be read,
+  // or a generic parameter, never rejects.
+  LLitP := SigParamsOf(ALitM, ALit);
+  LRefP := SigParamsOf(FModels[LCanon.UnitId], LDef);
+  if Length(LLitP) <> Length(LRefP) then
+    Exit;
+  for var LI := 0 to High(LLitP) do
+  begin
+    LA := CanonTypeX(DeclTypeX(ALitMid, LLitP[LI]));
+    LB := CanonTypeX(SubstX(DeclTypeX(LCanon.UnitId, LRefP[LI]),
+      LCanon.Inst, 0));
+    if XValid(LA) and XValid(LB) and
+       (FModels[LA.UnitId].Symbols[LA.Sym].Kind <> skGenericParam) and
+       (FModels[LB.UnitId].Symbols[LB.Sym].Kind <> skGenericParam) and
+       not XSameType(LA, LB) then
+      Exit(False);
+  end;
+end;
+
 function TPasSemaProject.ArgFitX(const AArgX, AParX: TSemaXType;
   const ATree: TPasTree; ACore: Integer; AProcDesig, AClassRef: Boolean;
-  const AArg: TPasArrayArg): Integer;
+  const AArg: TPasArrayArg; const ALitM: TPasSemaModel): Integer;
 var
   LArgX, LCanonArgX, LCanonParX, LElemX: TSemaXType;
   LCoreKind: TPasNodeKind;
@@ -13576,6 +13693,11 @@ begin
   LCanonParX := AParX;
   if XValid(AParX) then
     LCanonParX := CanonTypeX(AParX);
+  // ...and a procedural parameter it cannot be passed to is out, as in
+  // CrossType's ArgScore.
+  if (LCoreKind = nkAnonMethod) and (ALitM <> nil) and XValid(AParX) and
+     (XCatOf(AParX) = tcProc) and not AnonLiteralFitsX(ALitM, -1, ACore, AParX) then
+    Exit(-1);
   // A `[...]` for a dynamic array: by its elements (CrossType's ArgScore).
   if LCoreKind = nkSetCtor then
   begin
@@ -13803,6 +13925,9 @@ var
   LOfConst, LParChar, LParString: Boolean;
   LElem: TPasCtorElem;
 begin
+  // `[...]` in parentheses is a set constructor, which no array takes.
+  if IsParenthesizedCtor(ATree, ACtor) then
+    Exit(-1);
   Result := 0;
   if not XValid(ACanonElemX) or OpenX(ACanonElemX) then
     Exit;
@@ -15060,124 +15185,6 @@ var
     LVariadic, LTrailing, LOpenArr, LOfConst: Boolean;
     LArgX, LParX: TSemaXType;
 
-    // The parameter count of a signature node - an nkAnonMethod literal or
-    // an nkProcType - and whether it is a function, read off the scope the
-    // resolver declares its parameters in (both own an sckRoutine scope keyed
-    // by the node; see TPasSemaResolver's nkAnonMethod / nkProcType cases),
-    // so no text is needed. False when that scope cannot be found.
-    function SigShape(AMid, ANode: Integer; out AParams: Integer;
-      out AFunc: Boolean): Boolean;
-    var
-      LSM: TPasSemaModel;
-      LScope, LChild: Integer;
-      LList: TSemaSymList;
-    begin
-      Result := False;
-      AParams := 0;
-      AFunc := False;
-      LSM := FModels[AMid];
-      if (ANode < 0) or (ANode > High(LSM.NodeScope)) then
-        Exit;
-      LScope := LSM.NodeScope[ANode];
-      if (LScope = NIL_SCOPE) or (LScope >= LSM.Scopes.Count) or
-         (LSM.Scopes[LScope].OwnerNode <> ANode) then
-        Exit;
-      LList := LSM.Scopes[LScope].Symbols;
-      for var LI := 0 to LList.Count - 1 do
-        if LSM.Symbols[LList[LI]].Kind = skParam then
-          Inc(AParams);
-      // A result type is the one child that is neither the parameter list,
-      // a directive (`procedure stdcall`) nor a literal's body.
-      LChild := LSM.Tree.Nodes[ANode].FirstChild;
-      while LChild <> NIL_NODE do
-      begin
-        if not (LSM.Tree.Nodes[LChild].Kind in [nkParams, nkAnonParams,
-           nkDirective, nkRoutineBody]) then
-          AFunc := True;
-        LChild := LSM.Tree.Nodes[LChild].NextSibling;
-      end;
-      Result := True;
-    end;
-
-    // Can the anonymous-method literal ALit be passed to a parameter of the
-    // procedural type AX? Only when AX is a `reference to` type (nkProcType
-    // Aux 2 - not 1, `of object`, nor 0, a plain procedural type) with the
-    // same parameter count and the same procedure/function kind (17.2.1).
-    // True whenever a side cannot be read, so an unknown shape never rejects.
-    // The parameter symbols of a signature node, in declaration order (the
-    // scope SigShape counts them in); nil when it cannot be found.
-    function SigParams(AMid, ANode: Integer): TArray<Integer>;
-    var
-      LSM: TPasSemaModel;
-      LScope: Integer;
-      LList: TSemaSymList;
-    begin
-      Result := nil;
-      LSM := FModels[AMid];
-      if (ANode < 0) or (ANode > High(LSM.NodeScope)) then
-        Exit;
-      LScope := LSM.NodeScope[ANode];
-      if (LScope = NIL_SCOPE) or (LScope >= LSM.Scopes.Count) or
-         (LSM.Scopes[LScope].OwnerNode <> ANode) then
-        Exit;
-      LList := LSM.Scopes[LScope].Symbols;
-      for var LI := 0 to LList.Count - 1 do
-        if LSM.Symbols[LList[LI]].Kind = skParam then
-          Result := Result + [LList[LI]];
-    end;
-
-    // Each parameter's type, where both sides read one: a literal
-    // `procedure(X: string)` does not go to `reference to procedure(X:
-    // Integer)`, nor a `procedure(I: Int64)` to TProc<Integer> - the
-    // reference type's arguments applied (17.2.1; audit E3-30: same-arity
-    // reference overloads tied and the first declared won). A side that
-    // cannot be read, or a generic parameter, never rejects.
-    function ParamTypesFit(ALit: Integer; const ARef: TSemaXType;
-      ADef: Integer): Boolean;
-    var
-      LLitP, LRefP: TArray<Integer>;
-      LA, LB: TSemaXType;
-    begin
-      Result := True;
-      LLitP := SigParams(AId, ALit);
-      LRefP := SigParams(ARef.UnitId, ADef);
-      if Length(LLitP) <> Length(LRefP) then
-        Exit;
-      for var LI := 0 to High(LLitP) do
-      begin
-        LA := CanonTypeX(DeclTypeX(AId, LLitP[LI]));
-        LB := CanonTypeX(SubstX(DeclTypeX(ARef.UnitId, LRefP[LI]),
-          ARef.Inst, 0));
-        if XValid(LA) and XValid(LB) and
-           (FModels[LA.UnitId].Symbols[LA.Sym].Kind <> skGenericParam) and
-           (FModels[LB.UnitId].Symbols[LB.Sym].Kind <> skGenericParam) and
-           not XSameType(LA, LB) then
-          Exit(False);
-      end;
-    end;
-
-    function LiteralFits(ALit: Integer; const AX: TSemaXType): Boolean;
-    var
-      LCanon: TSemaXType;
-      LDef, LLitN, LRefN: Integer;
-      LLitF, LRefF: Boolean;
-    begin
-      Result := True;
-      LCanon := CanonTypeX(AX);
-      if not XValid(LCanon) then
-        Exit;
-      LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
-      if (LDef = NIL_NODE) or
-         (FModels[LCanon.UnitId].Tree.Nodes[LDef].Kind <> nkProcType) then
-        Exit;
-      if FModels[LCanon.UnitId].Tree.Nodes[LDef].Aux <> 2 then
-        Exit(False);
-      if SigShape(AId, ALit, LLitN, LLitF) and
-         SigShape(LCanon.UnitId, LDef, LRefN, LRefF) then
-        Result := (LLitN = LRefN) and (LLitF = LRefF) and
-          ParamTypesFit(ALit, LCanon, LDef);
-    end;
-
     // `Self` in a `class` method - in a nested routine or an anonymous
     // method inside one too - is the class REFERENCE, not an instance
     // (15.1.1; audit B3-30): the outermost routine around it says `class`.
@@ -15314,7 +15321,7 @@ var
         LCore := PeelParens(LM.Tree, AArg);
         LCoreKind := LM.Tree.Nodes[LCore].Kind;
       end;
-      // A literal's own unnamed type (E3-39) scores nothing: LiteralFits and
+      // A literal's own unnamed type (E3-39) scores nothing: AnonLiteralFitsX and
       // ArgShapeRejects below decide its fit, as before it had one.
       if LCoreKind = nkAnonMethod then
         LArgX := XNil;
@@ -15352,7 +15359,7 @@ var
           LClassRef := XValid(LArgX) and XValid(LParX) and
             IsClassRefValue(LCore, LCanonArgX);
         // An anonymous-method literal against a procedural parameter it
-        // cannot be passed to (LiteralFits): a method pointer, a plain
+        // cannot be passed to (AnonLiteralFitsX): a method pointer, a plain
         // procedural type, or a `reference to` type of another signature. dcc
         // picks the overload the literal fits, in either declaration order
         // (probed, dcc32 37.0): a UI unit on the client group declares
@@ -15364,7 +15371,8 @@ var
         // Provable at the node, like ArgFitCanonX's rejection of the literal
         // against a parameter that is not procedural.
         if (LCoreKind = nkAnonMethod) and XValid(LParX) and
-           (XCatOf(LParX) = tcProc) and not LiteralFits(LCore, LParX) then
+           (XCatOf(LParX) = tcProc) and
+           not AnonLiteralFitsX(LM, AId, LCore, LParX) then
           Exit(-1);
       end;
       // An OPEN ARRAY, AParX its element type, has its own rule; a class
@@ -15688,7 +15696,13 @@ var
     LSeen := nil;
     LSeenCount := 0;
     // A new call: the array argument read last is not one of its own (an
-    // empty LArrArg goes with NIL_NODE, ReadArrayArg's unread core).
+    // empty LArrArg goes with NIL_NODE, ReadArrayArg's unread core). One
+    // LArrArg serves the whole CrossType walk, so this relies on
+    // SelectCallTarget never re-entering while a call's candidates are
+    // scored: ScoreCandidate reads argument types through GetX, a lookup of
+    // what the walk has already typed, not a typing that could select
+    // another call's target - a re-entry would clear the elements
+    // ReadArrayArg is filling for the outer call.
     if LArrArgCore <> NIL_NODE then
     begin
       LArrArgCore := NIL_NODE;
@@ -20156,6 +20170,10 @@ begin
       LX: TSemaXType;
     begin
       Result := Default(TSemaConstFacts);
+      // A true constant's facts read its initializer's, which may name it
+      // back across units: ConstExprKind's cap, as TPasSemaTyper.ConstFacts.
+      if ADepth > 8 then
+        Exit;
       LT := FModels[AMid].Tree;
       ANode := PeelParens(LT, ANode);
       if ANode = NIL_NODE then
@@ -20199,6 +20217,14 @@ begin
                 Result.Role := scrConst   // True, False, MaxInt
               else if LS.TypeNode <> NIL_NODE then
                 LDef := LS.TypeNode       // a typed constant: a value
+              else if IsResourceStringName(FModels[LBMid].Tree,
+                LS.DeclNode) then
+              begin
+                // A string value, not a constant (3.2.3).
+                Result.Cat := tcString;
+                Result.RunTime := True;
+                Exit;
+              end
               else
               begin
                 Result.Role := scrConst;
@@ -20263,6 +20289,12 @@ begin
         Exit;
       end;
       Result.Cat := XCatOf(LX);
+      if (Result.Role = scrType) and (Result.Cat = tcInteger) then
+      begin
+        var LOp := OpFactsX(AMid, NIL_NODE, LX);
+        Result.Rank := LOp.Rank;
+        Result.Unsigned := LOp.Unsigned;
+      end;
       case Result.Cat of
         tcArray:
           if ArrayDefOfX(AMid, NIL_NODE, LX, LDefMid, LDef) then
@@ -20291,6 +20323,74 @@ begin
             end;
           end;
       end;
+    end;
+end;
+
+{ The type of ANode of model AMid, the argument of an intrinsic call that
+  folds - so a constant (ConstExprKind), whose type is read off its shape: a
+  literal, a name (an enumeration value, a constant, a type), a typecast,
+  Succ / Pred / High / Low of one. The cross-type walk's own node types are
+  out of reach of the operator facts that ask (FoldedCallOpFacts). XNil when
+  the shape gives none. }
+function TPasSemaProject.FoldedArgTypeX(AMid, ANode, ADepth: Integer):
+  TSemaXType;
+var
+  LT: TPasTree;
+  LMid, LSym, LCallee: Integer;
+  LS: TSemaSymbol;
+begin
+  Result := XNil;
+  if ADepth > 8 then
+    Exit;
+  LT := FModels[AMid].Tree;
+  ANode := PeelParens(LT, ANode);
+  if ANode = NIL_NODE then
+    Exit;
+  case LT.Nodes[ANode].Kind of
+    nkCaretChar:
+      Exit(BuiltinX(AMid, 'char'));
+    nkStrLit:
+      if IsOneCharLiteralNode(LT, ANode) then
+        Exit(BuiltinX(AMid, 'char'));
+    nkIdent, nkMember:
+      if DesignatorSymX(AMid, ANode, LMid, LSym) then
+      begin
+        if FModels[LMid].Symbols[LSym].Kind in [skType, skBuiltinType] then
+          Exit(XPlain(LMid, LSym));
+        Result := DeclTypeX(LMid, LSym);
+      end;
+    nkCall:
+      begin
+        LCallee := LT.Nodes[ANode].FirstChild;
+        if (LCallee <> NIL_NODE) and
+           DesignatorSymX(AMid, LCallee, LMid, LSym) then
+        begin
+          LS := FModels[LMid].Symbols[LSym];
+          if LS.Kind in [skType, skBuiltinType] then
+            Exit(XPlain(LMid, LSym));
+          if (LS.Kind = skRoutine) and (sfBuiltin in LS.Flags) and
+             ((LS.NameLower = 'succ') or (LS.NameLower = 'pred') or
+              (LS.NameLower = 'high') or (LS.NameLower = 'low')) then
+            Exit(FoldedArgTypeX(AMid, LT.Nodes[LCallee].NextSibling,
+              ADepth + 1));
+        end;
+      end;
+  end;
+  if not XValid(Result) and (FModels[AMid].IntraType(ANode) <> NIL_SYM) then
+    Result := XPlain(AMid, FModels[AMid].IntraType(ANode));
+end;
+
+// TPasSemaTyper.ArgFacts across models: FoldedArgTypeX's type of AArg.
+function TPasSemaProject.ArgFactsX(AMid: Integer): TSemaArgFactsProc;
+begin
+  Result :=
+    procedure(AArg: Integer; out AOrd: TSemaOrdFacts; out AOp: TSemaOpFacts)
+    var
+      LA: TSemaXType;
+    begin
+      LA := FoldedArgTypeX(AMid, AArg, 0);
+      AOrd := OrdFactsX(AMid, NIL_NODE, LA);   // NIL_NODE: read as a value
+      AOp := OpFactsX(AMid, NIL_NODE, LA);
     end;
 end;
 
@@ -21120,6 +21220,9 @@ begin
   Result.Rank := LS.NumRank;
   Result.Unsigned := NameIs(['byte', 'word', 'cardinal', 'longword', 'uint64',
     'nativeuint']);
+  if (Result.Cat = tcInteger) and not Result.IntConst and (ANode <> NIL_NODE) then
+    FoldedCallOpFacts(FModels[AMid].Tree, ANode, ConstFactsX(AMid),
+      OrdNameValueX(AMid), ArgFactsX(AMid), Result);
   Result.Curr := NameIs(['currency']) and not Result.RealLit;
   Result.Comp := NameIs(['comp']);
   if Result.Cat in [tcString, tcChar] then

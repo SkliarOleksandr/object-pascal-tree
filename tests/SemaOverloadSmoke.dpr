@@ -521,6 +521,69 @@ const
     '  X := R([''a'']);'#10 +
     'end;'#10'end.'#10;
 
+  { 6.3.1, a `[...]` in parentheses is a set constructor (8.2.2), which no
+    array takes: beside a set overload the set one is taken whichever is
+    declared first - an open array (SR, SRM), `array of const` (SJ) and a
+    dynamic array (SD); without the parentheses the open array is taken
+    again (RC). dcc64 37.0 (review 2026-11-03): `R(([1, 2]))` takes the set
+    overload, `R([1, 2])` the open array; both scored the brackets as an
+    array constructor before. }
+  SRC_OPEN4 =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TInts = array of Integer;'#10 +
+    '  TBS = set of Byte;'#10 +
+    '  TCo = class end;'#10 +
+    '  TCoClass = class of TCo;'#10 +
+    'function SR(const A: array of Integer): TRA; overload;'#10 +
+    'function SR(const S: TBS): TRW; overload;'#10 +
+    'function SRM(const S: TBS): TRW; overload;'#10 +
+    'function SRM(const A: array of Integer): TRA; overload;'#10 +
+    'function SJ(const A: array of const): TRA; overload;'#10 +
+    'function SJ(const S: TBS): TRW; overload;'#10 +
+    'function SD(const A: TInts): TRA; overload;'#10 +
+    'function SD(const S: TBS): TRW; overload;'#10 +
+    'function RC(const A: array of Integer): TRW; overload;'#10 +
+    'function RC(const S: TBS): TRA; overload;'#10 +
+    'function CF(const A: array of TObject): TRA; overload;'#10 +
+    'function CF(const A: array of TCoClass): TRW; overload;'#10 +
+    'function VQ(var A: array of Integer): TRW; overload;'#10 +
+    'function VQ(const A: array of const): TRA; overload;'#10 +
+    'function VR(const A: array of const): TRA; overload;'#10 +
+    'function VR(out A: array of Integer): TRW; overload;'#10 +
+    'implementation'#10 +
+    'function SR(const A: array of Integer): TRA; begin end;'#10 +
+    'function SR(const S: TBS): TRW; begin end;'#10 +
+    'function SRM(const S: TBS): TRW; begin end;'#10 +
+    'function SRM(const A: array of Integer): TRA; begin end;'#10 +
+    'function SJ(const A: array of const): TRA; begin end;'#10 +
+    'function SJ(const S: TBS): TRW; begin end;'#10 +
+    'function SD(const A: TInts): TRA; begin end;'#10 +
+    'function SD(const S: TBS): TRW; begin end;'#10 +
+    'function RC(const A: array of Integer): TRW; begin end;'#10 +
+    'function RC(const S: TBS): TRA; begin end;'#10 +
+    'function CF(const A: array of TObject): TRA; begin end;'#10 +
+    'function CF(const A: array of TCoClass): TRW; begin end;'#10 +
+    'function VQ(var A: array of Integer): TRW; begin end;'#10 +
+    'function VQ(const A: array of const): TRA; begin end;'#10 +
+    'function VR(const A: array of const): TRA; begin end;'#10 +
+    'function VR(out A: array of Integer): TRW; begin end;'#10 +
+    'procedure Test;'#10 +
+    'var'#10 +
+    '  X: TRW; I: Integer;'#10 +
+    'begin'#10 +
+    '  X := CF([TCo]);'#10 +
+    '  X := CF([(TCo)]);'#10 +
+    '  X := VQ([I]);'#10 +
+    '  X := VR([I]);'#10 +
+    '  X := SR(([1, 2]));'#10 +
+    '  X := SRM(([1, 2]));'#10 +
+    '  X := SJ(([1, 2]));'#10 +
+    '  X := SD(([1, 2]));'#10 +
+    '  X := RC([1, 2]);'#10 +
+    'end;'#10'end.'#10;
+
   { The Char-literal and nil exemptions of the assignment check (A4-10,
     A4-11; probe-b32 P1): dcc compiles every line but the last, where an
     operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
@@ -625,6 +688,16 @@ begin
       ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   Ok('[...] for a dynamic array: no E2010', DiagCount('E2010') = 0);
+  GModel.Free;
+
+  Analyze(SRC_OPEN4);
+  // VQ / VR: the mode takes no part in the ranking - `[I]` takes the `var` /
+  // `out` open array over `array of const`, as dcc does before its E2197.
+  // CF: a type name in brackets is a class reference, in parentheses too.
+  for var LName in ['SR', 'SRM', 'SJ', 'SD', 'RC', 'VQ', 'VR', 'CF'] do
+    Ok('6.3.1 brackets: ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  Ok('([...]) is a set: no E2010', DiagCount('E2010') = 0);
   GModel.Free;
 
   Analyze(SRC_ASSIGN);

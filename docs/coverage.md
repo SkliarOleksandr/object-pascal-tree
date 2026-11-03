@@ -432,7 +432,10 @@ of less work, not a gap in following the language; its consequences are in
   a dynamic array's) and `[I64]` for `array of Integer` / `TArray<Integer>`
   (dcc: the dynamic array - a narrowing ranks below it). A bracket against
   a set parameter is not scored, though dcc ranks it by the elements too
-  (6.3.1).
+  (6.3.1). A bracket in parentheses (`R(([1, 2]))`) is a set constructor
+  and fits no open array, `array of const` or dynamic array in either
+  scorer (IsParenthesizedCtor), so beside a set overload the set one is
+  taken, as dcc has it.
   A literal is typed as itself here - an integer one Integer, a real one
   Extended - and so counts exact for that type, where dcc ranks a constant
   a step lower: `[1]` takes `array of Integer` over `array of Byte` (dcc:

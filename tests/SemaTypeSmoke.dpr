@@ -510,6 +510,31 @@ begin
     'Currency');
   GModel.Free;
 
+  // A folded intrinsic call mixes by a row of its own, not by its type (an
+  // Integer): Hi / Lo / Swap / Succ / Pred of a constant adapt as a literal,
+  // Ord of one is Ord's answer for the argument as a value, High / Low the
+  // argument's type (4.2.1; dcc64 37.0, 2026-11-03).
+  begin
+    var FOLDMIX: TArray<TArray<string>> := [
+      ['Ord(''A'')', 'Cardinal'], ['Ord(5)', 'Int64'], ['Ord(200)', 'Cardinal'],
+      ['Ord(eB)', 'Int64'], ['Ord(True)', 'Int64'], ['Ord(Word(5))', 'Cardinal'],
+      ['Ord(Integer(5))', 'Int64'], ['Hi(5)', 'Cardinal'],
+      ['Swap(ShortInt(5))', 'Cardinal'], ['Succ(Integer(5))', 'Cardinal'],
+      ['High(Byte)', 'Cardinal'], ['High(ShortInt)', 'Int64'],
+      ['Length(''abc'')', 'Int64'], ['Lo(-5)', 'Cardinal']];
+    var LSrc := 'unit u;'#10'interface'#10'type TE = (eA, eB, eC, eD);'#10 +
+      'implementation'#10'procedure P;'#10'var C: Cardinal;'#10 +
+      '  R00, R01, R02, R03, R04, R05, R06, R07, R08, R09, R10, R11, R12,' +
+      ' R13: Variant;'#10'begin'#10;
+    for var LRow := 0 to High(FOLDMIX) do
+      LSrc := LSrc + Format('  R%.2d := C + %s;'#10, [LRow, FOLDMIX[LRow][0]]);
+    Analyze(LSrc + 'end;'#10'end.'#10);
+    for var LRow := 0 to High(FOLDMIX) do
+      Eq('4.2.1: C + ' + FOLDMIX[LRow][0],
+        AssignedType(Format('R%.2d', [LRow])), FOLDMIX[LRow][1]);
+    GModel.Free;
+  end;
+
   // B36b in the unit's typer: a literal joins the other operand's string
   // type, Concat folds the join, an inline `if` unifies its branches, `St +
   // [e1]` keeps St's type (audit A3-34, E3-19, E3-43).
@@ -709,6 +734,44 @@ begin
   Eq('CI: Hi(High(S)) of a string is Word', AssignedType('R21'), 'Word');
   Eq('CI: Ord(Byte(I)) of a variable is Byte', AssignedType('R22'), 'Byte');
   Eq('CI: Swap(Word) is still Word', AssignedType('R23'), 'Word');
+  GModel.Free;
+
+  // CI2: a resourcestring is no constant (3.2.3): `Hi(Length(RS))` is Word
+  // as for a string variable, where a true string constant's is Integer
+  // (dcc64 37.0, `const X = Length(RS)` is E2026). A true constant naming
+  // itself back - code dcc rejects - leaves the constant test bounded: it
+  // overflowed the stack in ConstFacts (review 2026-11-03).
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'resourcestring RS = ''abc'';'#10 +
+    'const KS = ''abc''; CA = CA; CB = CC; CC = CB;'#10 +
+    'type TSA = array[0..7] of Byte;'#10 +
+    '  TFR = record A: array[0..3] of Integer; T: TSA; end;'#10 +
+    'implementation'#10 +
+    'procedure P;'#10 +
+    'var R01, R02, R03, R04, R05, R06, R07: Variant; FR: TFR;'#10 +
+    'begin'#10 +
+    '  R01 := Hi(Length(RS));'#10 +
+    '  R02 := Hi(Length(KS));'#10 +
+    '  R03 := Ord(CA);'#10 +
+    '  R04 := Ord(CB);'#10 +
+    '  R05 := Hi(Length(FR.A));'#10 +
+    '  R06 := Hi(Length(FR.T));'#10 +
+    '  R07 := Hi(High(FR.T));'#10 +
+    'end;'#10 +
+    'end.'#10);
+  // A record field's static array: its Length and High are constants
+  // (3.2.1; dcc64 37.0, 2026-11-03).
+  Eq('CI2: Hi(Length(FR.A)) of an inline static-array field is Integer',
+    AssignedType('R05'), 'Integer');
+  Eq('CI2: Hi(Length(FR.T)) of a named static-array field is Integer',
+    AssignedType('R06'), 'Integer');
+  Eq('CI2: Hi(High(FR.T)) is Integer', AssignedType('R07'), 'Integer');
+  Eq('CI2: Hi(Length(RS)) of a resourcestring is Word', AssignedType('R01'),
+    'Word');
+  Eq('CI2: Hi(Length(KS)) of a string constant is Integer',
+    AssignedType('R02'), 'Integer');
+  Ok('CI2: a constant naming itself is analyzed', GModel <> nil);
   GModel.Free;
 
   // A subrange takes its category from a bound that is an enumeration value

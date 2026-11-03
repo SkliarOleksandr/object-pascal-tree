@@ -109,7 +109,8 @@ type
       `Pointer(nil)`), Default(T), Ptr(X), `nil`, and a true constant whose
       value is one - `J([Integer(5)])` takes `TArray<Integer>` over `array
       of const`, `FI(Byte(300))` the Byte overload.
-    Ord, Hi, Lo and Swap of either folded kind are Integer (4.11.4). }
+    Ord, Hi, Lo and Swap of either folded kind are Integer (4.11.4) - but
+    mix with another operand by a row of their own (FoldedCallOpFacts). }
   TSemaConstKind = (sckNone, sckValue, sckTyped);
 
   { What ConstExprKind reads of one node, from the typer that asks. Role:
@@ -120,16 +121,26 @@ type
     typer cannot tell. The type of the value, or the type named: Cat its
     category; RunTime a long string or a dynamic array, whose High and Length
     are run-time values; OpenArray an open-array parameter (SizeOf too);
-    StaticArray a static array, whose Length is a constant. }
+    StaticArray a static array, whose Length is a constant. Rank and
+    Unsigned: for an integer type name, the builtin it is stored as
+    (TSemaOpFacts) - a typecast cuts a value to it (FoldedIntValue). }
   TSemaConstRole = (scrOther, scrConst, scrType, scrIntrinsic, scrValue);
   TSemaConstFacts = record
     Role: TSemaConstRole;
     Intrinsic: string;
     Cat: TSemaTypeCat;
     Typed, RunTime, OpenArray, StaticArray: Boolean;
+    Rank: Byte;
+    Unsigned: Boolean;
   end;
   TSemaConstFactsFunc = reference to function(ANode, ADepth: Integer):
     TSemaConstFacts;
+
+  { What FoldedCallOpFacts reads of an intrinsic's argument AArg, from the
+    typer that asks: Ord's facts of its type read as a value (IsConst False)
+    and that type's operator facts (no node). }
+  TSemaArgFactsProc = reference to procedure(AArg: Integer;
+    out AOrd: TSemaOrdFacts; out AOp: TSemaOpFacts);
 
   // The type, as one of THIS model's symbols, of an ident the model itself no
   // longer binds (its binding lives in ExtRefMap) - NIL_SYM when it cannot be
@@ -173,6 +184,7 @@ type
     procedure CheckSetCardinality;
     function StorageBase(ASym: Integer): Integer;
     function OpFacts(ASym, ANode: Integer): TSemaOpFacts;
+    function ArgFacts: TSemaArgFactsProc;
     function OpSym(AAns: TSemaOpAnswer; ALeft, ARight: Integer;
       AKeepOwn: Boolean): Integer;
     function TypeOfIdent(N: Integer): Integer;
@@ -202,13 +214,13 @@ type
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
     { One argument against the parameter AParam: AArg its node, or NIL_NODE
       for a comparison an nkAmbiguous stands for (no node shape to read);
-      AAt its type. On the doubled scale of CtorElemFit: 4 exact, 2
-      assignable, 0 no evidence, -1 rejected - a `[...]`'s odd steps
-      between. }
+      AAt its type. On the doubled scale of CtorElemFit: 6 a one-character
+      literal for a Char parameter, 4 exact, 2 assignable, 0 no evidence,
+      -1 rejected - a `[...]`'s odd steps between. }
     function ScoreArg(AArg, AAt, AParam: Integer): Integer;
-    // ScoreArg's rule against the type APt, on ArgFitCanonX's scale: 2
-    // exact, 1 assignable (the element of an array a `[...]`'s element is
-    // scored against too).
+    // ScoreArg's rule against the type APt, on ArgFitCanonX's scale: 3 a
+    // one-character literal for a Char, 2 exact, 1 assignable (the element
+    // of an array a `[...]`'s element is scored against too).
     function ScoreArgAs(AArg, AAt, APt: Integer): Integer;
     // ScoreArg for an open-array parameter - see the implementation.
     function OpenArrayScore(AArg, AAt, ADef: Integer): Integer;
@@ -222,6 +234,7 @@ type
     function CompareType(ALeft, ARight: Integer): Integer;
 
     function SelectOverload(ACall, AHead: Integer): Integer;
+    function MemberSym(N: Integer): Integer;
     function MemberResult(N: Integer): Integer;
     procedure Diag(const ACode, AMsg: string; ANode: Integer);
     function Assignable(ADst, ASrc: Integer): Boolean;
@@ -286,6 +299,19 @@ type
 
   PeelParens: ANode with its enclosing parentheses taken off.
 
+  IsParenthesizedCtor: the `[...]` ACtor is written in parentheses as an
+  argument - `J((['a', 'b']))`. dcc reads it as a set constructor there
+  (8.2.2), not an open-array one: it fits no open array, no `array of const`
+  and no dynamic array (6.3.1: `J((['a', 'b']))` is E2250, `D(([1, 2]))`
+  for `D(const A: TArray<Integer>)` E2010), and beside a set overload the set
+  one is taken. The parentheses of a generic call's argument (`G<T>(X)`, an
+  nkParen under nkAmbiguous) are the call's own, not the argument's.
+
+  IsResourceStringName: ADecl, a constant's name node, is declared in a
+  `resourcestring` section (its nkConstSec has Aux 1). Such a name is no
+  constant (3.2.3): `const X = Length(RS)` is E2026 and `Hi(Length(RS))` is
+  Word, so ConstExprKind must read it as a string value, not a true constant.
+
   IsScalarToReference: an argument of a scalar category (integer, float,
   Boolean, Char, string) cannot be passed to a class, interface or
   class-reference parameter at all - not assignable, no conversion - so the
@@ -298,6 +324,8 @@ function StrLitUnits(const ATree: TPasTree; ANode: Integer): Integer;
 function IsOneCharLiteralNode(const ATree: TPasTree; ANode: Integer): Boolean;
 function IsCharLiteralExpr(const ATree: TPasTree; ANode: Integer): Boolean;
 function PeelParens(const ATree: TPasTree; ANode: Integer): Integer;
+function IsParenthesizedCtor(const ATree: TPasTree; ACtor: Integer): Boolean;
+function IsResourceStringName(const ATree: TPasTree; ADecl: Integer): Boolean;
 function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
 
 { The overload-scoring rejections both scorers apply - what makes a candidate
@@ -577,6 +605,41 @@ function OrdAnswer(const AF: TSemaOrdFacts): TSemaOpAnswer;
   when its range is past Integer's. }
 function OrdStepAnswer(const AF: TSemaOrdFacts): TSemaOpAnswer;
 
+{ The value of integer constant ANode of ATree as dcc folds it, as far as it
+  is read here: what OrdinalNodeValue reads, a typecast of one to an integer
+  type cut to that type (`Byte(300)` is 44, `ShortInt(200)` -56), and Ord /
+  Hi / Lo / Swap / Succ / Pred of one - Swap swaps the low word's bytes and
+  drops the rest (`Swap(Integer($12345678))` is $7856, dcc64 37.0). AFacts
+  tells a type name and an intrinsic apart (ConstExprKind's). False for
+  anything else, and past ADepth 8. }
+function FoldedIntValue(const ATree: TPasTree; ANode, ADepth: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
+  out AValue: Int64): Boolean;
+
+{ The integer shape - rank and signedness, as TSemaOpFacts has them - of
+  Ord's answer AAns of a fixed builtin (oaShortInt .. oaCardinal); False for
+  oaLeft and the rest. }
+function OrdAnswerShape(AAns: TSemaOpAnswer; out ARank: Byte;
+  out AUnsigned: Boolean): Boolean;
+
+{ Operand ANode of ATree as an intrinsic call dcc folds: such a call mixes
+  with another integer operand by a row of its own, not by its type - every
+  one of them is an Integer (`var V := Ord('A')`), yet `C + Ord('A')` of a
+  Cardinal C is Cardinal and `C + Ord(eB)` Int64 (4.2.1; dcc64 37.0). Hi /
+  Lo / Swap / Succ / Pred of a constant adapt as a literal does (AF.IntConst,
+  by FoldedIntValue's value; Hi / Lo whose value is not read here are a
+  Byte's 0..255). Ord of one is Ord's answer for the argument read as a
+  value (`Ord('A')` Word, `Ord(eB)` and `Ord(True)` ShortInt, `Ord(Word(5))`
+  Word), and of an integer read by value the narrowest type holding it
+  (`Ord(200)` Byte, `Ord(5)` ShortInt). High / Low of an integer is the
+  argument's type (`High(Byte)` Byte). Anything else - Length, Abs, SizeOf,
+  a call that does not fold - leaves AF as it is. AFacts / AName / AArg are
+  the asking typer's (ConstExprKind's, OrdinalNodeValue's,
+  TSemaArgFactsProc). }
+procedure FoldedCallOpFacts(const ATree: TPasTree; ANode: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
+  const AArg: TSemaArgFactsProc; var AF: TSemaOpFacts);
+
 implementation
 
 uses
@@ -663,6 +726,35 @@ begin
   while (Result <> NIL_NODE) and (ATree.Nodes[Result].Kind = nkParen) and
         (ATree.Nodes[Result].FirstChild <> NIL_NODE) do
     Result := ATree.Nodes[Result].FirstChild;
+end;
+
+function IsParenthesizedCtor(const ATree: TPasTree; ACtor: Integer): Boolean;
+var
+  LParen, LOuter: Integer;
+begin
+  Result := False;
+  if ACtor = NIL_NODE then
+    Exit;
+  LParen := ATree.Nodes[ACtor].Parent;
+  if (LParen = NIL_NODE) or (ATree.Nodes[LParen].Kind <> nkParen) then
+    Exit;
+  LOuter := ATree.Nodes[LParen].Parent;
+  Result := (LOuter = NIL_NODE) or (ATree.Nodes[LOuter].Kind <> nkAmbiguous);
+end;
+
+function IsResourceStringName(const ATree: TPasTree; ADecl: Integer): Boolean;
+var
+  LSec: Integer;
+begin
+  Result := False;
+  if ADecl = NIL_NODE then
+    Exit;
+  ADecl := ATree.Nodes[ADecl].Parent;
+  if (ADecl = NIL_NODE) or (ATree.Nodes[ADecl].Kind <> nkConstDecl) then
+    Exit;
+  LSec := ATree.Nodes[ADecl].Parent;
+  Result := (LSec <> NIL_NODE) and (ATree.Nodes[LSec].Kind = nkConstSec) and
+    (ATree.Nodes[LSec].Aux = 1);
 end;
 
 function IsCharLiteralExpr(const ATree: TPasTree; ANode: Integer): Boolean;
@@ -1676,6 +1768,156 @@ begin
     Result := oaInteger;
 end;
 
+function FoldedIntValue(const ATree: TPasTree; ANode, ADepth: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
+  out AValue: Int64): Boolean;
+var
+  LCallee, LArg: Integer;
+  LF: TSemaConstFacts;
+  LV: Int64;
+begin
+  Result := False;
+  AValue := 0;
+  if ADepth > 8 then
+    Exit;
+  if OrdinalNodeValue(ATree, ANode, ADepth, AName, AValue) then
+    Exit(True);
+  ANode := PeelParens(ATree, ANode);
+  if (ANode = NIL_NODE) or (ATree.Nodes[ANode].Kind <> nkCall) then
+    Exit;
+  LCallee := ATree.Nodes[ANode].FirstChild;
+  if LCallee = NIL_NODE then
+    Exit;
+  LArg := ATree.Nodes[LCallee].NextSibling;
+  if (LArg = NIL_NODE) or (ATree.Nodes[LArg].NextSibling <> NIL_NODE) then
+    Exit;
+  LF := AFacts(LCallee, ADepth + 1);
+  if not (LF.Role in [scrType, scrIntrinsic]) or
+     not FoldedIntValue(ATree, LArg, ADepth + 1, AFacts, AName, LV) then
+    Exit;
+  if LF.Role = scrType then
+  begin
+    if LF.Cat <> tcInteger then
+      Exit;
+    case LF.Rank of
+      1: if LF.Unsigned then LV := LV and $FF else LV := ShortInt(LV and $FF);
+      2: if LF.Unsigned then LV := LV and $FFFF else LV := SmallInt(LV and $FFFF);
+      3: if LF.Unsigned then LV := LV and $FFFFFFFF
+         else LV := Integer(LV and $FFFFFFFF);
+      4: ;
+    else
+      Exit;
+    end;
+  end
+  else if LF.Intrinsic = 'hi' then
+    LV := (LV shr 8) and $FF
+  else if LF.Intrinsic = 'lo' then
+    LV := LV and $FF
+  else if LF.Intrinsic = 'swap' then
+    LV := ((LV and $FF) shl 8) or ((LV shr 8) and $FF)
+  else if LF.Intrinsic = 'succ' then
+  begin
+    if LV = High(Int64) then
+      Exit;
+    Inc(LV);
+  end
+  else if LF.Intrinsic = 'pred' then
+  begin
+    if LV = Low(Int64) then
+      Exit;
+    Dec(LV);
+  end
+  else if LF.Intrinsic <> 'ord' then
+    Exit;
+  AValue := LV;
+  Result := True;
+end;
+
+function OrdAnswerShape(AAns: TSemaOpAnswer; out ARank: Byte;
+  out AUnsigned: Boolean): Boolean;
+begin
+  Result := True;
+  AUnsigned := AAns in [oaByte, oaWord, oaCardinal];
+  case AAns of
+    oaShortInt, oaByte: ARank := 1;
+    oaSmallInt, oaWord: ARank := 2;
+    oaInteger, oaCardinal: ARank := 3;
+  else
+    ARank := 0;
+    Result := False;
+  end;
+end;
+
+procedure FoldedCallOpFacts(const ATree: TPasTree; ANode: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
+  const AArg: TSemaArgFactsProc; var AF: TSemaOpFacts);
+var
+  LCall, LCallee, LArg: Integer;
+  LF: TSemaConstFacts;
+  LName: string;
+  LOrd: TSemaOrdFacts;
+  LArgF: TSemaOpFacts;
+  LAns: TSemaOpAnswer;
+  LV: Int64;
+begin
+  LCall := PeelParens(ATree, ANode);
+  if (LCall = NIL_NODE) or (ATree.Nodes[LCall].Kind <> nkCall) then
+    Exit;
+  LCallee := ATree.Nodes[LCall].FirstChild;
+  if LCallee = NIL_NODE then
+    Exit;
+  LArg := ATree.Nodes[LCallee].NextSibling;
+  if LArg = NIL_NODE then
+    Exit;
+  LF := AFacts(LCallee, 0);
+  if LF.Role <> scrIntrinsic then
+    Exit;
+  LName := LF.Intrinsic;
+  if (LName <> 'hi') and (LName <> 'lo') and (LName <> 'swap') and
+     (LName <> 'succ') and (LName <> 'pred') and (LName <> 'ord') and
+     (LName <> 'high') and (LName <> 'low') then
+    Exit;
+  if ConstExprKind(ATree, LCall, 0, AFacts) = sckNone then
+    Exit;
+  if (LName = 'high') or (LName = 'low') or (LName = 'ord') then
+  begin
+    AArg(LArg, LOrd, LArgF);
+    if LName <> 'ord' then
+    begin
+      if (LArgF.Cat = tcInteger) and (LArgF.Rank > 0) then
+      begin
+        AF.Rank := LArgF.Rank;
+        AF.Unsigned := LArgF.Unsigned;
+      end;
+      Exit;
+    end;
+    if (LArgF.Cat = tcInteger) and
+       (ConstExprKind(ATree, LArg, 0, AFacts) = sckValue) and
+       FoldedIntValue(ATree, LArg, 0, AFacts, AName, LV) then
+    begin
+      LOrd := Default(TSemaOrdFacts);
+      LOrd.HasRange := True;
+      LOrd.Lo := LV;
+      LOrd.Hi := LV;
+    end;
+    LAns := OrdAnswer(LOrd);
+    if LAns = oaLeft then
+    begin
+      AF.Rank := LArgF.Rank;
+      AF.Unsigned := LArgF.Unsigned;
+    end
+    else
+      OrdAnswerShape(LAns, AF.Rank, AF.Unsigned);
+    Exit;
+  end;
+  AF.IntConst := FoldedIntValue(ATree, LCall, 0, AFacts, AName, AF.IntValue);
+  if not AF.IntConst and ((LName = 'hi') or (LName = 'lo')) then
+  begin
+    AF.Rank := 1;
+    AF.Unsigned := True;
+  end;
+end;
+
 function RealLiteralNode(const ATree: TPasTree; ANode: Integer): Integer;
 begin
   Result := PeelParens(ATree, ANode);
@@ -2497,6 +2739,9 @@ begin
   Result.Rank := M.Symbols[LB].NumRank;
   Result.Unsigned := (LB = Byt) or (LB = Wrd) or (LB = Card) or
     (LB = LWord) or (LB = U64) or (LB = NUInt);
+  if (Result.Cat = tcInteger) and not Result.IntConst and (ANode <> NIL_NODE) then
+    FoldedCallOpFacts(T, ANode, ConstFacts(), OrdNameValue(), ArgFacts(),
+      Result);
   Result.Curr := (LB = Cur) and not Result.RealLit;
   Result.Comp := LB = Comp;
   if Result.Cat in [tcChar, tcString] then
@@ -2512,6 +2757,25 @@ begin
       Result.Text := stkAnsi
     else if LB = AChr then
       Result.Text := stkAnsiChar;
+end;
+
+// FoldedCallOpFacts' view of an intrinsic's argument here: its ExprType, a
+// one-character literal a Char (`Ord('A')` is Ord of a Char).
+function TPasSemaTyper.ArgFacts: TSemaArgFactsProc;
+begin
+  Result :=
+    procedure(AArg: Integer; out AOrd: TSemaOrdFacts; out AOp: TSemaOpFacts)
+    var
+      LA, LLit: Integer;
+    begin
+      LA := M.ExprType[AArg];
+      LLit := PeelParens(T, AArg);
+      if (LLit <> NIL_NODE) and ((Kind(LLit) = nkCaretChar) or
+         (Kind(LLit) = nkStrLit) and IsOneCharLiteralNode(T, LLit)) then
+        LA := Chr;
+      AOrd := OrdFacts(NIL_NODE, LA);   // NIL_NODE: read as a value
+      AOp := OpFacts(LA, NIL_NODE);
+    end;
 end;
 
 // The type symbol OperatorAnswer's AAns names for the operands ALeft /
@@ -3154,8 +3418,9 @@ end;
   element as this unit types it - its category, ScoreArgAs against AElem,
   and against a dynamic array whether an exact element is a constant
   (IsConstExpr, or a type name: a class reference) - the worst deciding; the
-  project's CtorFitX reads the same in project space. A range makes the
-  brackets a set constructor, which no array takes. }
+  project's CtorFitX reads the same in project space. A range, or
+  parentheses around the brackets (IsParenthesizedCtor), make them a set
+  constructor, which no array takes. }
 function TPasSemaTyper.CtorScore(ACtor, AElem: Integer;
   ATarget: TSemaCtorTarget): Integer;
 var
@@ -3163,6 +3428,8 @@ var
   LFirst, LOfConst, LParChar, LParString, LStatic, LConst: Boolean;
   LCat: TSemaTypeCat;
 begin
+  if IsParenthesizedCtor(T, ACtor) then
+    Exit(-1);
   Result := 0;
   LOfConst := ATarget = ctArrayOfConst;
   LParChar := False;
@@ -3556,6 +3823,11 @@ begin
       LSym, LType, LDecl, LInit, LDef: Integer;
     begin
       Result := Default(TSemaConstFacts);
+      // A true constant's facts read its initializer's, which may name it
+      // back (`const A = B; B = A;` in code that does not compile): the cap
+      // ConstExprKind applies, or the two recurse until the stack is gone.
+      if ADepth > 8 then
+        Exit;
       ANode := PeelParens(T, ANode);
       if ANode = NIL_NODE then
         Exit;
@@ -3581,6 +3853,10 @@ begin
       LSym := NIL_SYM;
       if Kind(ANode) in [nkIdent, nkMember, nkTypeArgs] then
         LSym := Head(ANode);
+      // A field read through a variable (`FR.A`) is bound by its base's type,
+      // not in RefMap: its inline type node says a static array (3.2.1).
+      if (LSym = NIL_SYM) and (Kind(ANode) = nkMember) then
+        LSym := MemberSym(ANode);
       if LSym <> NIL_SYM then
         case M.Symbols[LSym].Kind of
           skEnumValue:
@@ -3590,6 +3866,13 @@ begin
               Result.Role := scrConst   // True, False, MaxInt
             else if M.Symbols[LSym].TypeNode <> NIL_NODE then
               LDef := M.Symbols[LSym].TypeNode   // a typed constant: a value
+            else if IsResourceStringName(T, M.Symbols[LSym].DeclNode) then
+            begin
+              // A string value, not a constant (3.2.3).
+              Result.Cat := tcString;
+              Result.RunTime := True;
+              Exit;
+            end
             else
             begin
               Result.Role := scrConst;
@@ -3646,6 +3929,12 @@ begin
         Exit;
       end;
       Result.Cat := CatOf(LType);
+      if (Result.Role = scrType) and (Result.Cat = tcInteger) then
+      begin
+        var LOp := OpFacts(LType, NIL_NODE);
+        Result.Rank := LOp.Rank;
+        Result.Unsigned := LOp.Unsigned;
+      end;
       case Result.Cat of
         tcArray:
           begin
@@ -3683,8 +3972,10 @@ end;
   array (CtorElemFit) - one dcc folds and reads by VALUE (ConstExprKind's
   sckValue): a literal, a true constant, an enumeration value, an operator
   or an intrinsic over constants (`N + 1`, `Low(Integer)`). A typecast,
-  Default, Ptr and `nil` are values of their type (sckTyped), exact as any
-  value: `[Integer(5)]` takes TArray<Integer> over `array of const`. }
+  Default and Ptr are values of their type (sckTyped), exact as any value:
+  `[Integer(5)]` takes TArray<Integer> over `array of const`. `nil` is
+  sckTyped too, but no parameter type matches it exactly here, so `[nil]`
+  is not exact for `array of Pointer` (dcc: it is; docs/coverage.md 6.3.1). }
 function TPasSemaTyper.IsConstExpr(ANode: Integer): Boolean;
 begin
   Result := ConstExprKind(T, ANode, 0, ConstFacts()) = sckValue;
@@ -4040,28 +4331,37 @@ begin
   end;
 end;
 
-function TPasSemaTyper.MemberResult(N: Integer): Integer;
+// The member nkMember N names: its intra-unit binding, else the name looked
+// up in the member scope of its base's type. NIL_SYM when neither is known.
+function TPasSemaTyper.MemberSym(N: Integer): Integer;
 var
-  LName, LMem, LBaseTy, LScope: Integer;
+  LName, LBaseTy, LScope: Integer;
 begin
   Result := NIL_SYM;
   LName := Sib(Child(N));
   if LName = NIL_NODE then
     Exit;
-  LMem := M.RefMap[LName];                   // resolved intra-unit member?
-  if LMem = NIL_SYM then
-  begin
-    LBaseTy := M.ExprType[Child(N)];
-    if LBaseTy = NIL_SYM then
-      Exit;
-    LScope := M.Symbols[LBaseTy].MemberScope;
-    if LScope = NIL_SCOPE then
-      Exit;
-    // NodeNameLower, not LowerCase(Txt()): member keys are PasNameKey-
-    // normalized (leading '&' stripped), so the LowerCase form could never
-    // find an escaped member like X.&End - and it allocated twice.
-    LMem := M.FindLocal(LScope, PasNodeKey(T, LName));
-  end;
+  Result := M.RefMap[LName];                 // resolved intra-unit member?
+  if Result <> NIL_SYM then
+    Exit;
+  LBaseTy := M.ExprType[Child(N)];
+  if LBaseTy = NIL_SYM then
+    Exit;
+  LScope := M.Symbols[LBaseTy].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  // NodeNameLower, not LowerCase(Txt()): member keys are PasNameKey-
+  // normalized (leading '&' stripped), so the LowerCase form could never
+  // find an escaped member like X.&End - and it allocated twice.
+  Result := M.FindLocal(LScope, PasNodeKey(T, LName));
+end;
+
+function TPasSemaTyper.MemberResult(N: Integer): Integer;
+var
+  LMem: Integer;
+begin
+  Result := NIL_SYM;
+  LMem := MemberSym(N);
   if LMem <> NIL_SYM then
     Result := M.Symbols[LMem].TypeSym;
 end;

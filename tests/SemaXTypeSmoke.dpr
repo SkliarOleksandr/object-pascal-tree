@@ -611,8 +611,10 @@ const
     '  TFbGen<T> = class'#10 +
     '  public type'#10 +
     '    TItems = TArray<T>;'#10 +
+    '    TItems2 = TItems;'#10 +
     '  public'#10 +
     '    Items: TItems;'#10 +
+    '    Items2: TItems2;'#10 +
     '  end;'#10 +
     'function FbArr(const A: TArray<Integer>): TFbObj; overload;'#10 +
     'function FbArr(const A: TArray<TFbCust>): TFbCust; overload;'#10 +
@@ -639,6 +641,7 @@ const
     '  var FbDirect := FbPick(LD);'#10 +
     '  var FbBytesAlias := FbBytes(BB);'#10 +
     '  var FbNested := FbArr(G.Items);'#10 +
+    '  var FbNested2 := FbArr(G.Items2);'#10 +
     'end;'#10 +
     'end.'#10;
   UNIT_XFC =
@@ -2520,7 +2523,7 @@ const
   // The 64-bit side of the real rule: Currency constants stay Currency
   // through `+`, `/` is Extended.
   // B36: expression, its type on Win64, on Win32 (see the fixture).
-  CPROMO: array[0..41] of array[0..2] of string = (
+  CPROMO: array[0..61] of array[0..2] of string = (
     ('C + 1', 'Cardinal', 'Cardinal'),
     ('C and $FF', 'Cardinal', 'Cardinal'),
     ('C + K', 'Cardinal', 'Cardinal'),
@@ -2562,7 +2565,27 @@ const
     ('for C to I', 'Int64', 'Int64'),
     ('for B to W', 'Integer', 'Integer'),
     ('for U64 to 0', 'UInt64', 'UInt64'),
-    ('for 0 to C', 'Cardinal', 'Cardinal'));
+    ('for 0 to C', 'Cardinal', 'Cardinal'),
+    ('C + Integer(5)', 'Int64', 'Int64'),
+    ('C + Byte(5)', 'Cardinal', 'Cardinal'),
+    ('C + Ord(''A'')', 'Cardinal', 'Cardinal'),
+    ('C + Ord(5)', 'Int64', 'Int64'),
+    ('C + Ord(eB)', 'Int64', 'Int64'),
+    ('C + Ord(b200)', 'Cardinal', 'Cardinal'),
+    ('C + Hi(5)', 'Cardinal', 'Cardinal'),
+    ('C + Swap(Byte(5))', 'Cardinal', 'Cardinal'),
+    ('C + High(Byte)', 'Cardinal', 'Cardinal'),
+    ('C + High(Word)', 'Cardinal', 'Cardinal'),
+    ('C + Length(''abc'')', 'Int64', 'Int64'),
+    ('C + Low(Integer)', 'Int64', 'Int64'),
+    ('C + Succ(4)', 'Cardinal', 'Cardinal'),
+    ('C + Lo(Length(KS))', 'Cardinal', 'Cardinal'),
+    ('C + Ord(KW)', 'Cardinal', 'Cardinal'),
+    ('C + Ord(High(Ch))', 'Cardinal', 'Cardinal'),
+    ('C + Pred(Byte(5))', 'Cardinal', 'Cardinal'),
+    ('C + Abs(-5)', 'Int64', 'Int64'),
+    ('C + Ord(True)', 'Int64', 'Int64'),
+    ('C + Ord(Byte(5))', 'Cardinal', 'Cardinal'));
   // B38: an intrinsic call, its type on Win64, on Win32 - the type dcc USES
   // (overload choice, inference); the enumeration, subrange and constant
   // arguments are another unit's (see the fixture). NativeUInt is Cardinal on
@@ -2614,7 +2637,7 @@ const
   // `High(S)` of a string keep the argument's row; the same on dcc32 and
   // dcc64 (local/const-intrinsics-2026-11; N, KS, KC, KTI, TCC, TCS, TE and
   // TRec are another unit's, see the fixture).
-  CCONSTARG: array[0..29] of array[0..1] of string = (
+  CCONSTARG: array[0..33] of array[0..1] of string = (
     ('Ord(High(Char))', 'Integer'),
     ('Ord(High(Ch))', 'Integer'),
     ('Ord(Chr(65))', 'Integer'),
@@ -2644,7 +2667,11 @@ const
     ('Hi(Length(DA))', 'Word'),
     ('Ord(Byte(I))', 'Byte'),
     ('Hi(Length(TCS))', 'Word'),
-    ('Swap(W)', 'Word'));
+    ('Hi(Length(RS))', 'Word'),
+    ('Swap(W)', 'Word'),
+    ('Hi(Length(FR.A))', 'Integer'),
+    ('Hi(Length(FR.T))', 'Integer'),
+    ('Hi(High(FR.T))', 'Integer'));
   // B39: a string's and a character pointer's element, a `for var` over a
   // string, an inline `string[N]` (see the fixture; `for X` walks X).
   CSTRE: array[0..26] of array[0..1] of string = (
@@ -3373,6 +3400,8 @@ begin
     Eq('6.3.1: a generic''s nested alias of TArray<T>, read through '
       + 'TFbGen<TFbCust>, is TArray<TFbCust>', DeclTypeOf(LE, 'fbnested'),
       'TFbCust');
+    Eq('6.3.1: ...through an alias of that alias too (the frame kept on a '
+      + 'name step)', DeclTypeOf(LE, 'fbnested2'), 'TFbCust');
     LE := ModelByName('xfc');
     Ok('XFC loaded', Assigned(LE));
     Ok('XFC: no diags at all', Length(LE.Diags) = 0);
@@ -4041,12 +4070,14 @@ begin
     var LSrc :=
       'unit XPR;'#10'interface'#10 +
       'type TMyI64 = type Int64; TMyC = type Cardinal; TMyW = type Word;'#10 +
-      'const K = 5; KI = 5; KCur = 1.5; Half = 0.5;'#10 +
+      '  TPrE = (eA, eB, eC, eD); TPrBE = (b0 = 0, b200 = 200);'#10 +
+      'const K = 5; KI = 5; KCur = 1.5; Half = 0.5; KS = ''abc'';'#10 +
+      '  KW = Word(7);'#10 +
       'implementation'#10 +
       'procedure P;'#10 +
       'var B: Byte; Sh: ShortInt; W: Word; I: Integer; C: Cardinal;'#10 +
       '  I64: Int64; U64: UInt64; MI64: TMyI64; MC: TMyC; MW: TMyW;'#10 +
-      '  D: Double; Cu: Currency; Cm: Comp; DA: array of Integer;'#10 +
+      '  D: Double; Cu: Currency; Cm: Comp; DA: array of Integer; Ch: Char;'#10 +
       'begin'#10;
     for var LRow := 0 to High(CPROMO) do
       if CPROMO[LRow][0].StartsWith('for ') then
@@ -4142,27 +4173,32 @@ begin
   // operator (`Hi(N * 300)`), a true constant initialized by a typecast,
   // High / SizeOf / Length of a value its type alone gives; a variable, a
   // typed constant, a string's Length and High, a dynamic array's Length,
-  // a cast of a variable are not constants (dcc32 / dcc64 37.0,
-  // local/const-intrinsics-2026-11 p5 and the fixture's twin Fx.dpr). ----
+  // a resourcestring (3.2.3), a cast of a variable are not constants
+  // (dcc32 / dcc64 37.0, local/const-intrinsics-2026-11 p5 and the
+  // fixture's twin Fx.dpr). CA and CB name each other - code dcc rejects -
+  // and Ord of one still types without overflowing the stack (review
+  // 2026-11-03). ----
   begin
     var LSrcA :=
       'unit XCA;'#10'interface'#10 +
       'type TE = (e0, e1, e2); TRec = record A, B: Integer; end;'#10 +
       'const N = 5; KS = ''abc''; KC = ''A''; TCC: Char = ''A'';'#10 +
-      '  TCS: string = ''abc''; KTI = Integer(5);'#10 +
+      '  TCS: string = ''abc''; KTI = Integer(5); CA = CB; CB = CA;'#10 +
+      'resourcestring RS = ''abc'';'#10 +
       'implementation'#10'end.'#10;
     var LSrc :=
       'unit XCB;'#10'interface'#10'uses XCA;'#10 +
       'implementation'#10 +
       'procedure P;'#10 +
       'type TSA = array[0..7] of Byte;'#10 +
+      '  TFR = record A: array[0..3] of Integer; T: TSA; end;'#10 +
       'var Ch: Char; B: Byte; I: Integer; S: string; SS: ShortString;'#10 +
-      '  SA: TSA; DA: TArray<Integer>; W: Word;'#10 +
+      '  SA: TSA; DA: TArray<Integer>; W: Word; FR: TFR;'#10 +
       'begin'#10;
     for var LRow := 0 to High(CCONSTARG) do
       LSrc := LSrc + Format('  var P%.2d := %s;'#10,
         [LRow, CCONSTARG[LRow][0]]);
-    LSrc := LSrc + 'end;'#10'end.'#10;
+    LSrc := LSrc + '  var PCY := Ord(CA);'#10'end;'#10'end.'#10;
     for var LPlat in [pfWin64, pfWin32] do
     begin
       LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_constarg');
@@ -4179,6 +4215,8 @@ begin
         for var LRow := 0 to High(CCONSTARG) do
           Eq(Format('CI/%s: %s', [PlatformName(LPlat), CCONSTARG[LRow][0]]),
             XTypeOf(LE, Format('P%.2d', [LRow])), CCONSTARG[LRow][1]);
+        Ok(Format('CI/%s: Ord of a constant cycle is typed',
+          [PlatformName(LPlat)]), XTypeOf(LE, 'PCY') <> '');
       finally
         GProj.Free;
         if TDirectory.Exists(LDir) then

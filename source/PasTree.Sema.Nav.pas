@@ -4408,7 +4408,8 @@ end;
   the gate and the Find All commands see the class wherever the alias is
   written. An alias of an INSTANTIATION (`TIntBase = TBase<Integer>`) is
   keyed on the generic, exactly as a direct `class(TBase<Integer>)` is -
-  CanonTypeX stops at it, so the alias link is followed through AncestorOfX
+  CanonTypeX follows it to the instance, whose symbol is the generic. The
+  AncestorOfX loop below follows an alias link CanonTypeX does not take
   (audit A2-25). Anything that is not a type alias is left as it came. }
 procedure TPasNavigator.OvUnalias(var AMid, ASym: Integer);
 var

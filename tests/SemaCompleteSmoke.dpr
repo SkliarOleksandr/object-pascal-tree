@@ -747,6 +747,25 @@ const
     '    class function FirstOf<T>(const B: TBoxOv<T>): T; static;'#10 +
     '    class function Make<T>: T; static;'#10 +
     '  end;'#10 +
+    // An ancestor's generic overload beside a derived plain one (16.5.1), a
+    // generic method of a generic class (its result the class's T), and an
+    // anonymous-method literal beside an `of object` type (6.3.1).
+    '  TBaseOv = class'#10 +
+    '  public'#10 +
+    '    function GetV<T>: T; overload;'#10 +
+    '  end;'#10 +
+    '  TDerOv = class(TBaseOv)'#10 +
+    '  public'#10 +
+    '    function GetV: TObjOv; overload;'#10 +
+    '  end;'#10 +
+    '  TGenOv<T> = class'#10 +
+    '  public'#10 +
+    '    function Pair<U>(const A: U): T;'#10 +
+    '  end;'#10 +
+    '  TNotifyOv = procedure(Sender: TObject) of object;'#10 +
+    '  TProcOv = reference to procedure;'#10 +
+    'function URun(E: TNotifyOv): TObjOv; overload;'#10 +
+    'function URun(P: TProcOv): TCustOv; overload;'#10 +
     'function UPick(const S: string): TObjOv; overload;'#10 +
     'function UPick(const C: TCustOv): TCustOv; overload;'#10 +
     'function UJoin(const A: array of const): TObjOv; overload;'#10 +
@@ -757,6 +776,11 @@ const
     'class function TUtilU.FirstOf<T>(const B: TBoxOv<T>): T;'#10 +
     'begin'#10'end;'#10 +
     'class function TUtilU.Make<T>: T;'#10'begin'#10'end;'#10 +
+    'function TBaseOv.GetV<T>: T;'#10'begin'#10'end;'#10 +
+    'function TDerOv.GetV: TObjOv;'#10'begin'#10'end;'#10 +
+    'function TGenOv<T>.Pair<U>(const A: U): T;'#10'begin'#10'end;'#10 +
+    'function URun(E: TNotifyOv): TObjOv;'#10'begin'#10'end;'#10 +
+    'function URun(P: TProcOv): TCustOv;'#10'begin'#10'end;'#10 +
     'function UPick(const S: string): TObjOv;'#10'begin'#10'end;'#10 +
     'function UPick(const C: TCustOv): TCustOv;'#10'begin'#10'end;'#10 +
     'function UJoin(const A: array of const): TObjOv;'#10'begin'#10'end;'#10 +
@@ -779,7 +803,11 @@ const
     '    class function Make<T>: T; static;'#10 +
     '    class function Get: TObjOv; overload; static;'#10 +
     '    class function Get<T>: T; overload; static;'#10 +
+    '    class function Two<A, B>(const X: A): B; static;'#10 +
+    '    class procedure Inner; static;'#10 +
     '  end;'#10 +
+    'function MRun(E: TNotifyOv): TObjOv; overload;'#10 +
+    'function MRun(P: TProcOv): TCustOv; overload;'#10 +
     'function Pick(const S: string): TObjOv; overload;'#10 +
     'function Pick(const B: TBoxOv<TCustOv>): TCustOv; overload;'#10 +
     'function PickC(const S: string): TObjOv; overload;'#10 +
@@ -796,6 +824,10 @@ const
     'class function TUtilM.Make<T>: T;'#10'begin'#10'end;'#10 +
     'class function TUtilM.Get: TObjOv;'#10'begin'#10'end;'#10 +
     'class function TUtilM.Get<T>: T;'#10'begin'#10'end;'#10 +
+    'class function TUtilM.Two<A, B>(const X: A): B;'#10'begin'#10'end;'#10 +
+    'class procedure TUtilM.Inner;'#10'begin'#10'//OV2'#10'end;'#10 +
+    'function MRun(E: TNotifyOv): TObjOv;'#10'begin'#10'end;'#10 +
+    'function MRun(P: TProcOv): TCustOv;'#10'begin'#10'end;'#10 +
     'function Pick(const S: string): TObjOv;'#10'begin'#10'end;'#10 +
     'function Pick(const B: TBoxOv<TCustOv>): TCustOv;'#10'begin'#10'end;'#10 +
     'function PickC(const S: string): TObjOv;'#10'begin'#10'end;'#10 +
@@ -808,7 +840,7 @@ const
     'function MDyn(const A: TIntsM): TCustOv;'#10'begin'#10'end;'#10 +
     'procedure Go(BM: TCustBoxM; CM: TCustAliasM; CD: TCustOv;'#10 +
     '  BU: TCustBoxU; SU: TStrsU; SM: TStrsM; const OA: array of string;'#10 +
-    '  I: Integer);'#10 +
+    '  I: Integer; DD: TDerOv; GG: TGenOv<TCustOv>);'#10 +
     'begin'#10 +
     '//OV'#10 +
     'end;'#10 +
@@ -857,9 +889,10 @@ end;
 
 // One C1/C2 case: the marker `//OV` of OV_MAIN replaced by ALine, and the
 // list there holds AWant and not ANot ('' = no check).
-procedure OvCase(const ALine, AWant, ANot: string);
+procedure OvCase(const ALine, AWant, ANot: string;
+  const AMarker: string = '//OV'#10);
 begin
-  ProjCase(StringReplace(OV_MAIN, '//OV', '  ' + ALine, []));
+  ProjCase(StringReplace(OV_MAIN, AMarker, '  ' + ALine + #10, []));
   GCounter.Ok(Format('C1/C2 %s lists %s%s', [ALine, AWant,
     IfThen(ANot <> '', ', not ' + ANot, '')]),
     GHit and Has(AWant) and ((ANot = '') or not Has(ANot)),
@@ -2417,6 +2450,20 @@ begin
   OvCase('TUtilM.Get<TCustOv>.|', 'CreatedF', '');
   OvCase('TUtilM.Get<TCustOv>().|', 'CreatedF', '');
   OvCase('TUtilM.Get.|', 'IdF', 'CreatedF');
+  // Review of 0.146.7-0.146.13 (dcc64 37.0, 2026-11-03): an ancestor's
+  // generic overload reached past a derived plain one (16.5.1); a generic
+  // method of a generic class instance, its result the class's T closed
+  // over the instance; two written type arguments in an unqualified call,
+  // which the parser cannot tell from comparisons (nkAmbiguous); an
+  // anonymous-method literal takes the `reference to` overload over an `of
+  // object` one declared first (6.3.1, LiteralFits).
+  OvCase('DD.GetV<TCustOv>.|', 'CreatedF', '');
+  OvCase('DD.GetV<TCustOv>().|', 'CreatedF', '');
+  OvCase('DD.GetV.|', 'IdF', 'CreatedF');
+  OvCase('GG.Pair<Integer>(1).|', 'CreatedF', '');
+  OvCase('Two<Integer, TCustOv>(1).|', 'CreatedF', '', '//OV2'#10);
+  OvCase('URun(procedure begin end).|', 'CreatedF', '');
+  OvCase('MRun(procedure begin end).|', 'CreatedF', '');
   GComp.Free;
   GComp := nil;
   GProj.Free;

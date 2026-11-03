@@ -315,6 +315,24 @@ const
     no write of the object (B2-19), a for-in element is one (B2-20), and
     the implicit Result goes to the routine's NAME, not its qualifier or an
     anonymous method's result type (B2-21). }
+  { Find Destructions through an alias of an INSTANTIATION: CanonTypeX takes
+    `TIntBox = TGBox<Integer>` to the instance, whose symbol is the generic,
+    so `X.Free` of a TIntBox is a TGBox row (0.146.8). }
+  UNIT_GDA =
+    'unit NavGda;'#10 +                         // 1
+    'interface'#10 +                            // 2
+    'type'#10 +                                 // 3
+    '  TGBox<T> = class'#10 +                   // 4  TGBox col 3
+    '  end;'#10 +                               // 5
+    '  TIntBox = TGBox<Integer>;'#10 +          // 6
+    'implementation'#10 +                       // 7
+    'procedure Work;'#10 +                      // 8
+    'var X: TIntBox; O: TObject;'#10 +          // 9
+    'begin'#10 +                                // 10
+    '  X.Free;'#10 +                            // 11  X col 3
+    '  O.Free;'#10 +                            // 12
+    'end;'#10 +                                 // 13
+    'end.'#10;                                  // 14
   UNIT_B51 =
     'unit NavB51;'#10 +                         // 1
     'interface'#10 +                            // 2
@@ -4197,6 +4215,7 @@ begin
   TFile.WriteAllText(TPath.Combine(LDir, 'NavAsg.pas'), UNIT_ASG);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavCD.pas'), UNIT_CD);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavB51.pas'), UNIT_B51);
+  TFile.WriteAllText(TPath.Combine(LDir, 'NavGda.pas'), UNIT_GDA);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRen.pas'), UNIT_REN);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavRenP.pas'), UNIT_RENP);
   TFile.WriteAllText(TPath.Combine(LDir, 'NavFam.pas'), UNIT_FAM);
@@ -6057,6 +6076,16 @@ begin
       LHits := GNav.FindDestructions(LRTMid, LRSym);
       Ok('FindDestructions: TCdSub - `S.Free` only',
         (Length(LHits) = 1) and HasHitAt(LHits, 'NavCD.pas', 27, 3));
+
+      // An alias of an instantiation: `X.Free` of a TIntBox is a TGBox row.
+      var LMidGda := GNav.ModelIdOf(TPath.Combine(LDir, 'NavGda.pas'));
+      Ok('NavGda model found', LMidGda >= 0);
+      Ok('ClassAt: TGBox<T> at its declaration',
+        GNav.ClassAt(LMidGda, 4, 3, {out} LRTMid, {out} LRSym,
+          {out} LRName) and SameText(LRName, 'TGBox'));
+      LHits := GNav.FindDestructions(LRTMid, LRSym);
+      Ok('FindDestructions: TGBox - `X.Free` of a `TIntBox = TGBox<Integer>`',
+        (Length(LHits) = 1) and HasHitAt(LHits, 'NavGda.pas', 11, 3));
 
       // ---- audit B51 ----
       var LMid51 := GNav.ModelIdOf(TPath.Combine(LDir, 'NavB51.pas'));

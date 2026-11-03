@@ -43,7 +43,6 @@ object frmMain: TfrmMain
     Align = alTop
     BevelOuter = bvNone
     TabOrder = 0
-    ExplicitWidth = 1174
     object btnOpen: TButton
       Left = 8
       Top = 7
@@ -227,11 +226,11 @@ object frmMain: TfrmMain
       Width = 130
       Height = 17
       Hint = 
-        'Light libraries: units under the IDE'#39's library and browsing paths' +
-        ' and the Studio sources are analyzed interface-only - much faster' +
-        ' and lighter; the project'#39's own units bind exactly as before. A' +
-        ' library file opened in a tab is promoted to a full analysis (wi' +
-        'th Incremental on). Re-analyzes when toggled.'
+        'Light libraries: units under the IDE'#39's library and browsing path' +
+        's and the Studio sources are analyzed interface-only - much fast' +
+        'er and lighter; the project'#39's own units bind exactly as before. ' +
+        'A library file opened in a tab is promoted to a full analysis (w' +
+        'ith Incremental on). Re-analyzes when toggled.'
       Caption = 'Light libraries'
       ParentShowHint = False
       ShowHint = True
@@ -266,8 +265,6 @@ object frmMain: TfrmMain
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 2
-    ExplicitTop = 539
-    ExplicitWidth = 1174
     object pgcBottom: TPageControl
       Left = 0
       Top = 0
@@ -278,7 +275,6 @@ object frmMain: TfrmMain
       PopupMenu = BottomTabsPopupMenu
       TabOrder = 0
       OnMouseDown = pgcBottomMouseDown
-      ExplicitWidth = 1174
       object tsMessages: TTabSheet
         Caption = 'Messages'
         object Panel1: TPanel
@@ -290,7 +286,6 @@ object frmMain: TfrmMain
           BevelOuter = bvNone
           ShowCaption = False
           TabOrder = 0
-          ExplicitWidth = 1166
           object chkShowErrors: TCheckBox
             Left = 8
             Top = 6
@@ -355,8 +350,6 @@ object frmMain: TfrmMain
     BevelOuter = bvNone
     ShowCaption = False
     TabOrder = 3
-    ExplicitWidth = 910
-    ExplicitHeight = 462
     object pgc: TPageControl
       Left = 0
       Top = 0
@@ -365,8 +358,6 @@ object frmMain: TfrmMain
       ActivePage = tsCoverage
       Align = alClient
       TabOrder = 0
-      ExplicitWidth = 910
-      ExplicitHeight = 429
       object tsJson: TTabSheet
         Caption = 'AST JSON'
         TabVisible = False
@@ -396,8 +387,6 @@ object frmMain: TfrmMain
           IndentGuides.Visible = False
           IndentGuides.StructureHighlight = False
           ScrollbarAnnotations = <>
-          ExplicitWidth = 902
-          ExplicitHeight = 419
         end
       end
       object tsPrint: TTabSheet
@@ -416,6 +405,7 @@ object frmMain: TfrmMain
           Font.Style = []
           Font.Quality = fqClearTypeNatural
           TabOrder = 0
+          UseCodeFolding = False
           Gutter.Font.Charset = DEFAULT_CHARSET
           Gutter.Font.Color = clWindowText
           Gutter.Font.Height = -11
@@ -482,8 +472,6 @@ object frmMain: TfrmMain
           Gutter.Font.Quality = fqClearTypeNatural
           Gutter.Bands = <>
           ScrollbarAnnotations = <>
-          ExplicitWidth = 902
-          ExplicitHeight = 419
         end
       end
     end
@@ -496,8 +484,6 @@ object frmMain: TfrmMain
       BevelOuter = bvNone
       ShowCaption = False
       TabOrder = 1
-      ExplicitTop = 429
-      ExplicitWidth = 910
       object lblProgress: TPanel
         AlignWithMargins = True
         Left = 784
@@ -508,7 +494,6 @@ object frmMain: TfrmMain
         BevelOuter = bvLowered
         Caption = 'progress'
         TabOrder = 4
-        ExplicitLeft = 778
       end
       object lblDiagCount: TPanel
         AlignWithMargins = True
@@ -520,7 +505,6 @@ object frmMain: TfrmMain
         BevelOuter = bvLowered
         Caption = 'errors'
         TabOrder = 5
-        ExplicitLeft = 643
       end
       object btnShowASTJson: TButton
         Left = 4
@@ -536,7 +520,7 @@ object frmMain: TfrmMain
         Top = 2
         Width = 101
         Height = 25
-        Hint =
+        Hint = 
           'The unit printed from its tree (expressions and statements regen' +
           'erated, declarations copied); the T3 / T3r checks in the message' +
           's'
@@ -714,7 +698,7 @@ object frmMain: TfrmMain
     end
     object FindOptionsAtAction: TAction
       Caption = 'Options at cursor'
-      Hint =
+      Hint = 
         'The compiler options in effect at the caret - what an $IFOPT wri' +
         'tten there would see, each pointing at the directive that set it'
       OnExecute = FindOptionsAtActionExecute
@@ -722,15 +706,15 @@ object frmMain: TfrmMain
     end
     object FindUnusedUnitsAction: TAction
       Caption = 'Unused Units'
-      Hint =
-        'The units in this unit'#39's uses clauses none of whose names it u' +
-        'ses'
+      Hint = 
+        'The units in this unit'#39's uses clauses none of whose names it use' +
+        's'
       OnExecute = FindUnusedUnitsActionExecute
       OnUpdate = FindUnusedUnitsActionUpdate
     end
     object FindProjectUnusedUnitsAction: TAction
       Caption = 'Unused Units in the Project'
-      Hint =
+      Hint = 
         'The units in the uses clauses of every project unit (library sou' +
         'rces left out) that the unit does not use'
       OnExecute = FindProjectUnusedUnitsActionExecute
@@ -738,7 +722,7 @@ object frmMain: TfrmMain
     end
     object FindUnreferencedUnitsAction: TAction
       Caption = 'Units Nobody Uses'
-      Hint =
+      Hint = 
         'The project units the program would no longer take in once every' +
         ' unused uses entry is gone - the .dpr'#39's own list included'
       OnExecute = FindUnreferencedUnitsActionExecute

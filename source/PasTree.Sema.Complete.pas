@@ -2129,7 +2129,7 @@ begin
             LCores[LIdx], LRefs[LIdx], LArrs[LIdx])
         else
           LFit := FProj.ArgFitX(LArgXs[LIdx], LParX, FModel.Tree, LCores[LIdx],
-            LProcs[LIdx], LRefs[LIdx], LArrs[LIdx]);
+            LProcs[LIdx], LRefs[LIdx], LArrs[LIdx], FModel);
         if LFit < 0 then
         begin
           LScore := -1;
@@ -2347,7 +2347,9 @@ function TPasCompletion.WrittenCallType(AMid, ASym, ACtx, ACallee,
   ADepth: Integer): TPasComplTypeRef;
 var
   LM: TPasSemaModel;
-  LCount, LCur, LHop, LFrame: Integer;
+  LCount, LCur, LHop, LFrame, LClimb, LHead, LOwner, LAMid, LASym,
+    LACtx: Integer;
+  LHit: Boolean;
   LX: TSemaXType;
 begin
   Result := ComplNilRef;
@@ -2361,14 +2363,41 @@ begin
   // The first child is the name they follow.
   LCount := PasChildCount(FModel.Tree, ACallee) - 1;
   LCur := ASym;
-  for LHop := 1 to 64 do
+  LHit := False;
+  for LClimb := 0 to 16 do
   begin
-    if (LCur = NIL_SYM) or (LM.Symbols[LCur].Kind <> skRoutine) then
-      Exit;
-    if TPasSemaProject.GenericParamCountOf(LM, LCur) = LCount then
+    LHead := LCur;
+    for LHop := 1 to 64 do
+    begin
+      if (LCur = NIL_SYM) or (LM.Symbols[LCur].Kind <> skRoutine) then
+        Break;
+      if TPasSemaProject.GenericParamCountOf(LM, LCur) = LCount then
+      begin
+        LHit := True;
+        Break;
+      end;
+      LCur := LM.Symbols[LCur].NextOverload;
+    end;
+    if LHit or (AMid < 0) or (LHead = NIL_SYM) or
+       (LM.Symbols[LHead].Scope = NIL_SCOPE) then
       Break;
-    LCur := LM.Symbols[LCur].NextOverload;
+    // A method set spans the ancestry (16.5.1, 6.3.1): a derived `GetV;
+    // overload;` beside an ancestor's `GetV<T>` - the set the analysis's
+    // SelectCallTarget walks through ConsiderAncestors.
+    LOwner := LM.Scopes[LM.Symbols[LHead].Scope].StructSym;
+    if (LOwner = NIL_SYM) or not FProj.FindMemberX(AMid,
+       FProj.AncestorOfX(XPlain(AMid, LOwner)), LM.Symbols[LHead].NameLower,
+       LAMid, LASym, LACtx) or
+       not SymModelOf(LAMid, 'WrittenCallType', LM, False) or
+       (LM.Symbols[LASym].Kind <> skRoutine) then
+      Break;
+    AMid := LAMid;
+    LCur := LASym;
+    if LACtx <> NIL_INST then
+      ACtx := LACtx;
   end;
+  if not LHit then
+    Exit;
   if AMid < 0 then
   begin
     AMid := FProjMid;
