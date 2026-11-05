@@ -92,11 +92,17 @@ type
     Currency (3.1.3); CurrNamed: that constant is a NAME (`KCur + 1` is
     Currency where `1.5 + 1` is Extended). Text: the string kind of a text
     operand. SetCtor: the operand is a `[...]`, which has no type of its own
-    (E3-43). }
+    (E3-43). IntFolded: IntConst is an operator folded (FoldedIntValue) - it
+    adapts by its value beside a variable when its operator's type (Rank /
+    Unsigned) is 32 bits or less, never when it is 64 (`I * (Int64(5) * 2)`
+    is Int64), and beside another constant it is that type, as dcc types the
+    whole constant expression: `(UInt64(1) shl 48) - 1` is UInt64, where a
+    value ladder says Int64. }
   TSemaOpFacts = record
     Cat: TSemaTypeCat;
     Rank: Byte;
-    Unsigned, Curr, Comp, IntConst, RealLit, CurrLit, CurrNamed: Boolean;
+    Unsigned, Curr, Comp, IntConst, IntFolded, RealLit, CurrLit,
+      CurrNamed: Boolean;
     IntValue: Int64;
     SetCtor: Boolean;
     Text: TSemaTextKind;
@@ -225,6 +231,10 @@ type
     procedure CheckSetCardinality;
     function StorageBase(ASym: Integer): Integer;
     function OpFacts(ASym, ANode: Integer): TSemaOpFacts;
+    function TrueConstInit(ASym: Integer): Integer;
+    function TrueConstType(ASym: Integer): Integer;
+    function ConstOperandValue(ANode: Integer; out AValue: Int64;
+      out AFolded: Boolean): Boolean;
     function ArgFacts: TSemaArgFactsProc;
     function OpSym(AAns: TSemaOpAnswer; ALeft, ARight: Integer;
       AKeepOwn: Boolean): Integer;
@@ -724,16 +734,28 @@ function OrdinalNodeValue(const ATree: TPasTree; ANode, ADepth: Integer;
 function ConstExprKind(const ATree: TPasTree; ANode, ADepth: Integer;
   const AFacts: TSemaConstFactsFunc): TSemaConstKind;
 
+{ Is ANode of ATree - a true constant's initializer - one ConstExprKind may
+  answer sckTyped: `nil`, a name, a call, by its top node? An operator or a
+  literal never is, and the full test of one walks its operands - through
+  every constant it names, at each link of a chain of constants (`P2 = P1 +
+  1`), which the facts of a name ask for its Typed. }
+function MayBeTypedConst(const ATree: TPasTree; ANode: Integer): Boolean;
+
 { The ordinal of enumeration element AElem (an nkEnumValue node of ATree):
   its explicit value, else one past the previous element's (the first is
-  0). dcc keeps an explicit value's low 32 bits, signed (2.2.4). }
+  0). dcc keeps an explicit value's low 32 bits, signed (2.2.4). AFacts,
+  when given, folds a value written with operators (`eB = K * 2`,
+  FoldedIntValue); without it only what OrdinalNodeValue reads. }
 function EnumElemValue(const ATree: TPasTree; AElem, ADepth: Integer;
-  const AName: TSemaOrdNameValue; out AValue: Int64): Boolean;
+  const AName: TSemaOrdNameValue; out AValue: Int64;
+  const AFacts: TSemaConstFactsFunc = nil): Boolean;
 
 { The ordinal range of type definition ADef of ATree - an nkEnumType (its
-  elements' least and greatest values) or an nkSubrange (its bounds). }
+  elements' least and greatest values) or an nkSubrange (its bounds); AFacts
+  as EnumElemValue's (`0..K * 2`). }
 function OrdinalDefRange(const ATree: TPasTree; ADef: Integer;
-  const AName: TSemaOrdNameValue; out ALo, AHi: Int64): Boolean;
+  const AName: TSemaOrdNameValue; out ALo, AHi: Int64;
+  const AFacts: TSemaConstFactsFunc = nil): Boolean;
 
 { Ord's result (4.11.4; dcc32 / dcc64 37.0, local/probe-b38 T64 T32 Q2): a
   constant argument is Integer; a builtin integer keeps its type (oaLeft)
@@ -752,11 +774,18 @@ function OrdStepAnswer(const AF: TSemaOrdFacts): TSemaOpAnswer;
 
 { The value of integer constant ANode of ATree as dcc folds it, as far as it
   is read here: what OrdinalNodeValue reads, a typecast of one to an integer
-  type cut to that type (`Byte(300)` is 44, `ShortInt(200)` -56), and Ord /
-  Hi / Lo / Swap / Succ / Pred of one - Swap swaps the low word's bytes and
-  drops the rest (`Swap(Integer($12345678))` is $7856, dcc64 37.0). AFacts
-  tells a type name and an intrinsic apart (ConstExprKind's). False for
-  anything else, and past ADepth 8. }
+  type cut to that type (`Byte(300)` is 44, `ShortInt(200)` -56), Ord / Hi /
+  Lo / Swap / Succ / Pred of one - Swap swaps the low word's bytes and drops
+  the rest (`Swap(Integer($12345678))` is $7856) - High / Low of an integer
+  type, and an integer operator over any of them (4.2.1, 4.4; dcc64 37.0,
+  2026-11-05): `+ - * div mod` in the type 4.2.1 gives the pair, no value
+  where dcc says E2099 or E2098; `and or xor` over 64 bits; `not` and the
+  shifts in the left operand's type, Integer below 32 bits, the count
+  masked to the width, wrapping (`not 200` -201, `-8 shr 1` 2147483644,
+  `2147483647 shl 1` -2). AFacts tells a type name and an intrinsic apart
+  and a name's category (an operand must be an integer: `not True` is no
+  value). False for anything else, past ADepth 8 names, 64 nested
+  operators and High(Int64). }
 function FoldedIntValue(const ATree: TPasTree; ANode, ADepth: Integer;
   const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
   out AValue: Int64): Boolean;
@@ -775,8 +804,10 @@ function OrdAnswerShape(AAns: TSemaOpAnswer; out ARank: Byte;
   by FoldedIntValue's value; Hi / Lo whose value is not read here are a
   Byte's 0..255). Ord of one is Ord's answer for the argument read as a
   value (`Ord('A')` Word, `Ord(eB)` and `Ord(True)` ShortInt, `Ord(Word(5))`
-  Word), and of an integer read by value the narrowest type holding it
-  (`Ord(200)` Byte, `Ord(5)` ShortInt). High / Low of an integer is the
+  Word, `Ord(Low(Byte))` Byte), and of an integer read by value - a literal,
+  a folded operator - a ShortInt in -128..127 that beyond it adapts as a
+  literal (`Ord(5)` ShortInt, `C + Ord(300)` Cardinal, dcc64 37.0,
+  2026-11-05). High / Low of an integer is the
   argument's type (`High(Byte)` Byte). Anything else - Length, Abs, SizeOf,
   a call that does not fold - leaves AF as it is. AFacts / AName / AArg are
   the asking typer's (ConstExprKind's, OrdinalNodeValue's,
@@ -1394,11 +1425,24 @@ begin
   end;
   if not AF.IntConst then
     Exit;
+  // A folded operator of a 64-bit type keeps it: `I * (Int64(5) * 2)` and
+  // `I + (5000000000 - 4999999990)` are Int64, where one of 32 bits or less
+  // adapts by its value (`B and (Cardinal(5) * 2)` Byte; dcc64 37.0,
+  // 2026-11-05).
+  if AF.IntFolded and (AF.Rank = 4) then
+    Exit;
   if (AOther.Cat = tcInteger) and not AOther.IntConst then
   begin
     OpShape(AOther, AF, ARank, AUns);
     if OpFits(AF.IntValue, ARank, AUns) then
       Exit;
+  end
+  else if AF.IntFolded and (AF.Rank > 0) then
+  begin
+    // Beside another constant a folded operator is its own type.
+    ARank := AF.Rank;
+    AUns := AF.Unsigned;
+    Exit;
   end;
   LV := AF.IntValue;
   AUns := False;
@@ -2016,8 +2060,27 @@ begin
   end;
 end;
 
+function MayBeTypedConst(const ATree: TPasTree; ANode: Integer): Boolean;
+begin
+  ANode := PeelParens(ATree, ANode);
+  Result := (ANode <> NIL_NODE) and
+    (ATree.Nodes[ANode].Kind in [nkNilLit, nkIdent, nkMember, nkCall]);
+end;
+
+// A bound or an enumeration value: folded when AFacts is given.
+function OrdinalBoundValue(const ATree: TPasTree; ANode, ADepth: Integer;
+  const AName: TSemaOrdNameValue; const AFacts: TSemaConstFactsFunc;
+  out AValue: Int64): Boolean;
+begin
+  if Assigned(AFacts) then
+    Result := FoldedIntValue(ATree, ANode, ADepth, AFacts, AName, AValue)
+  else
+    Result := OrdinalNodeValue(ATree, ANode, ADepth, AName, AValue);
+end;
+
 function EnumElemValue(const ATree: TPasTree; AElem, ADepth: Integer;
-  const AName: TSemaOrdNameValue; out AValue: Int64): Boolean;
+  const AName: TSemaOrdNameValue; out AValue: Int64;
+  const AFacts: TSemaConstFactsFunc): Boolean;
 var
   LCur, LValue: Integer;
   LNext: Int64;
@@ -2037,7 +2100,8 @@ begin
         LValue := ATree.Nodes[LValue].NextSibling;
       if LValue = NIL_NODE then
         Inc(AValue)
-      else if OrdinalNodeValue(ATree, LValue, ADepth + 1, AName, LNext) then
+      else if OrdinalBoundValue(ATree, LValue, ADepth + 1, AName, AFacts,
+              LNext) then
       begin
         AValue := LNext and $FFFFFFFF;
         if AValue > High(Integer) then
@@ -2053,7 +2117,8 @@ begin
 end;
 
 function OrdinalDefRange(const ATree: TPasTree; ADef: Integer;
-  const AName: TSemaOrdNameValue; out ALo, AHi: Int64): Boolean;
+  const AName: TSemaOrdNameValue; out ALo, AHi: Int64;
+  const AFacts: TSemaConstFactsFunc): Boolean;
 var
   LCur: Integer;
   LV: Int64;
@@ -2073,7 +2138,7 @@ begin
         begin
           if ATree.Nodes[LCur].Kind = nkEnumValue then
           begin
-            if not EnumElemValue(ATree, LCur, 0, AName, LV) then
+            if not EnumElemValue(ATree, LCur, 0, AName, LV, AFacts) then
               Exit;
             if not LAny or (LV < ALo) then
               ALo := LV;
@@ -2089,10 +2154,10 @@ begin
       begin
         LCur := ATree.Nodes[ADef].FirstChild;
         Result := (LCur <> NIL_NODE) and
-          OrdinalNodeValue(ATree, LCur, 0, AName, ALo) and
+          OrdinalBoundValue(ATree, LCur, 0, AName, AFacts, ALo) and
           (ATree.Nodes[LCur].NextSibling <> NIL_NODE) and
-          OrdinalNodeValue(ATree, ATree.Nodes[LCur].NextSibling, 0, AName,
-            AHi) and (ALo <= AHi);
+          OrdinalBoundValue(ATree, ATree.Nodes[LCur].NextSibling, 0, AName,
+            AFacts, AHi) and (ALo <= AHi);
       end;
   end;
 end;
@@ -2156,69 +2221,427 @@ begin
     Result := oaInteger;
 end;
 
+// The (rank, signedness) of integer answer AAns: OrdAnswerShape's, and the
+// two 64-bit ones.
+function IntAnswerShape(AAns: TSemaOpAnswer; out ARank: Byte;
+  out AUns: Boolean): Boolean;
+begin
+  Result := True;
+  case AAns of
+    oaInt64:
+      begin
+        ARank := 4;
+        AUns := False;
+      end;
+    oaUInt64:
+      begin
+        ARank := 4;
+        AUns := True;
+      end;
+  else
+    Result := OrdAnswerShape(AAns, ARank, AUns);
+  end;
+end;
+
+// The constant AValue read by its value: it adapts to another operand as a
+// literal of that value does (TSemaOpFacts.IntConst).
+function ByValueFacts(AValue: Int64): TSemaOpFacts;
+begin
+  Result := Default(TSemaOpFacts);
+  Result.Cat := tcInteger;
+  Result.IntConst := True;
+  Result.IntValue := AValue;
+end;
+
+{ FoldedIntValue's walk: the value of ANode and the facts it mixes by as an
+  operator's operand - by its value (ByValueFacts), or a typecast's or a
+  typed true constant's Rank / Unsigned, which do not adapt (4.2.1).
+  AOperand: ANode is an operator's operand and must be an INTEGER - a
+  character, a Boolean, an enumeration value are ordinals OrdinalNodeValue
+  reads too, but `not True` is no integer `not`. ADepth counts the names
+  and calls followed (the cap a cycle of constants needs, 8), ANest the
+  operators and calls ANode is nested in: an operator chain's left spine is
+  as deep as the chain is long (audit A1-01), and every integer operand is
+  folded (OpFacts) - a chain past 64 has no value here. }
+function FoldIntNode(const ATree: TPasTree; ANode, ADepth, ANest: Integer;
+  AOperand: Boolean; const AFacts: TSemaConstFactsFunc;
+  const AName: TSemaOrdNameValue; out AF: TSemaOpFacts): Boolean;
+var
+  LOp: TPasTokenKind;
+  LV: Int64;
+
+  function OpTok(N: Integer): TPasTokenKind;
+  begin
+    if (ATree.Nodes[N].Aux >= 0) and
+       (ATree.Nodes[N].Aux <= High(ATree.Source.Visible)) then
+      Result := ATree.Source.VisibleKind(ATree.Nodes[N].Aux)
+    else
+      Result := tkUnknown;
+  end;
+
+  // `-X`, `+X`, `not X`: `not` in X's type, Integer below 32 bits (`not
+  // Byte(5)` is -6, `not Cardinal(5)` 4294967290, `not 200` -201); a result
+  // outside `-`'s type is dcc's E2099 (`-KMin`), so no value.
+  function Unary(N: Integer): Boolean;
+  var
+    LA: TSemaOpFacts;
+    LRank: Integer;
+    LR: Byte;
+    LUns: Boolean;
+  begin
+    Result := False;
+    if not FoldIntNode(ATree, ATree.Nodes[N].FirstChild, ADepth, ANest + 1,
+       True, AFacts, AName, LA) then
+      Exit;
+    LV := LA.IntValue;
+    case LOp of
+      tkPlus:
+        ;
+      tkMinus:
+        begin
+          if (LV = Low(Int64)) or
+             not IntAnswerShape(OperatorAnswer(tkMinus, True, LA,
+               Default(TSemaOpFacts), False, False), LR, LUns) or
+             not OpFits(-LV, LR, LUns) then
+            Exit;
+          LV := -LV;
+        end;
+      tkNot:
+        begin
+          OpShape(LA, Default(TSemaOpFacts), LRank, LUns);
+          if LRank < 3 then
+          begin
+            LRank := 3;
+            LUns := False;
+          end;
+          if LRank = 3 then
+          begin
+            if LUns then
+              LV := (not LV) and $FFFFFFFF
+            else
+              LV := Integer((not LV) and $FFFFFFFF);
+          end
+          else if LUns then
+            Exit   // past High(Int64)
+          else
+            LV := not LV;
+        end;
+    else
+      Exit;
+    end;
+    AF := ByValueFacts(LV);
+    Result := True;
+  end;
+
+  // `L op R`: + - * div mod in the type 4.2.1 gives the pair (a result
+  // outside it is E2099, a zero divisor E2098: no value); and / or / xor
+  // over 64 bits, as dcc widens a mixed-sign pair; shl / shr in the left
+  // operand's type, Integer below 32 bits, the count masked to its width,
+  // wrapping - shr logical (`-8 shr 1` 2147483644, `1 shl 33` 2,
+  // `2147483647 shl 1` -2). dcc64 37.0, 2026-11-05.
+  function Binary(N: Integer): Boolean;
+  var
+    LL, LR: TSemaOpFacts;
+    LLeft, LRank: Integer;
+    LShR: Byte;
+    LUns: Boolean;
+    A, B: Int64;
+    LU: UInt64;
+  begin
+    Result := False;
+    LLeft := ATree.Nodes[N].FirstChild;
+    if (LLeft = NIL_NODE) or (ATree.Nodes[LLeft].NextSibling = NIL_NODE) or
+       not FoldIntNode(ATree, LLeft, ADepth, ANest + 1, True, AFacts, AName,
+         LL) or
+       not FoldIntNode(ATree, ATree.Nodes[LLeft].NextSibling, ADepth,
+         ANest + 1, True, AFacts, AName, LR) then
+      Exit;
+    A := LL.IntValue;
+    B := LR.IntValue;
+    case LOp of
+      tkPlus, tkMinus, tkStar, tkDiv, tkMod:
+        begin
+          if not IntAnswerShape(OperatorAnswer(LOp, False, LL, LR, False,
+             False), LShR, LUns) then
+            Exit;
+          case LOp of
+            tkPlus:
+              begin
+                if ((B > 0) and (A > High(Int64) - B)) or
+                   ((B < 0) and (A < Low(Int64) - B)) then
+                  Exit;
+                LV := A + B;
+              end;
+            tkMinus:
+              begin
+                if ((B < 0) and (A > High(Int64) + B)) or
+                   ((B > 0) and (A < Low(Int64) + B)) then
+                  Exit;
+                LV := A - B;
+              end;
+            tkStar:
+              begin
+                if (A <> 0) and (B <> 0) then
+                begin
+                  if (A = Low(Int64)) or (B = Low(Int64)) or
+                     (Abs(A) > High(Int64) div Abs(B)) then
+                    Exit;
+                end;
+                LV := A * B;
+              end;
+          else
+            // div / mod: truncating, as Int64's; Low(Int64) by -1 overflows.
+            if B = 0 then
+              Exit;
+            if B = -1 then
+            begin
+              if A = Low(Int64) then
+                Exit;
+              if LOp = tkDiv then
+                LV := -A
+              else
+                LV := 0;
+            end
+            else if LOp = tkDiv then
+              LV := A div B
+            else
+              LV := A mod B;
+          end;
+          if not OpFits(LV, LShR, LUns) then
+            Exit;
+        end;
+      tkAnd:
+        LV := A and B;
+      tkOr:
+        LV := A or B;
+      tkXor:
+        LV := A xor B;
+      tkShl, tkShr:
+        begin
+          OpShape(LL, Default(TSemaOpFacts), LRank, LUns);
+          if LRank < 3 then
+          begin
+            LRank := 3;
+            LUns := False;
+          end;
+          if LRank = 3 then
+          begin
+            LU := UInt64(A) and $FFFFFFFF;
+            if LOp = tkShl then
+              LU := (LU shl (B and 31)) and $FFFFFFFF
+            else
+              LU := LU shr (B and 31);
+            if LUns then
+              LV := Int64(LU)
+            else
+              LV := Integer(LU);
+          end
+          else
+          begin
+            if LUns and (A < 0) then
+              Exit;   // past High(Int64)
+            LU := UInt64(A);
+            if LOp = tkShl then
+              LU := LU shl (B and 63)
+            else
+              LU := LU shr (B and 63);
+            if LUns and (LU > UInt64(High(Int64))) then
+              Exit;
+            LV := Int64(LU);
+          end;
+        end;
+    else
+      Exit;   // a comparison, `in`, `/`, `as`, `is`: no integer
+    end;
+    AF := ByValueFacts(LV);
+    Result := True;
+  end;
+
+  function Call(N: Integer): Boolean;
+  var
+    LCallee, LArg: Integer;
+    LF: TSemaConstFacts;
+    LA: TSemaOpFacts;
+  begin
+    Result := False;
+    LCallee := ATree.Nodes[N].FirstChild;
+    if LCallee = NIL_NODE then
+      Exit;
+    LArg := ATree.Nodes[LCallee].NextSibling;
+    if (LArg = NIL_NODE) or (ATree.Nodes[LArg].NextSibling <> NIL_NODE) then
+      Exit;
+    LF := AFacts(LCallee, ADepth + 1);
+    if not (LF.Role in [scrType, scrIntrinsic]) then
+      Exit;
+    // High / Low of an integer type, or of a variable or a typed constant
+    // of one (`High(Integer) - 1`, `Low(B)`): a value of that type. Of a
+    // true constant it would be the type of its value (3.2.1), not read
+    // here; of a subrange (no Rank) neither.
+    if (LF.Role = scrIntrinsic) and
+       ((LF.Intrinsic = 'high') or (LF.Intrinsic = 'low')) then
+    begin
+      var LT := AFacts(LArg, ADepth + 1);
+      if not (LT.Role in [scrType, scrValue]) or (LT.Cat <> tcInteger) then
+        Exit;
+      case LT.Rank of
+        1: if LT.Unsigned then LV := 255 else LV := 127;
+        2: if LT.Unsigned then LV := 65535 else LV := 32767;
+        3: if LT.Unsigned then LV := 4294967295 else LV := 2147483647;
+        4: if LT.Unsigned then
+           begin
+             if LF.Intrinsic = 'high' then
+               Exit;   // past High(Int64)
+             LV := 0;
+           end
+           else
+             LV := High(Int64);
+      else
+        Exit;
+      end;
+      if LF.Intrinsic = 'low' then
+      begin
+        if LT.Unsigned then
+          LV := 0
+        else
+          LV := -LV - 1;
+      end;
+      AF := Default(TSemaOpFacts);
+      AF.Cat := tcInteger;
+      AF.Rank := LT.Rank;
+      AF.Unsigned := LT.Unsigned;
+      AF.IntValue := LV;
+      Exit(True);
+    end;
+    // The argument of a typecast or of Ord may be any ordinal (`Integer('A')`,
+    // `Ord(True)`); Succ / Pred of a character or an enumeration is one again,
+    // no integer.
+    if not FoldIntNode(ATree, LArg, ADepth + 1, ANest + 1,
+       AOperand and (LF.Role = scrIntrinsic) and (LF.Intrinsic <> 'ord'),
+       AFacts, AName, LA) then
+      Exit;
+    LV := LA.IntValue;
+    if LF.Role = scrType then
+    begin
+      if LF.Cat <> tcInteger then
+        Exit;
+      case LF.Rank of
+        1: if LF.Unsigned then LV := LV and $FF else LV := ShortInt(LV and $FF);
+        2: if LF.Unsigned then LV := LV and $FFFF
+           else LV := SmallInt(LV and $FFFF);
+        3: if LF.Unsigned then LV := LV and $FFFFFFFF
+           else LV := Integer(LV and $FFFFFFFF);
+        4: ;
+      else
+        Exit;
+      end;
+      // A value of the cast's type: it does not adapt.
+      AF := Default(TSemaOpFacts);
+      AF.Cat := tcInteger;
+      AF.Rank := LF.Rank;
+      AF.Unsigned := LF.Unsigned;
+      AF.IntValue := LV;
+      Exit(True);
+    end;
+    if LF.Intrinsic = 'hi' then
+      LV := (LV shr 8) and $FF
+    else if LF.Intrinsic = 'lo' then
+      LV := LV and $FF
+    else if LF.Intrinsic = 'swap' then
+      LV := ((LV and $FF) shl 8) or ((LV shr 8) and $FF)
+    else if LF.Intrinsic = 'succ' then
+    begin
+      if LV = High(Int64) then
+        Exit;
+      Inc(LV);
+    end
+    else if LF.Intrinsic = 'pred' then
+    begin
+      if LV = Low(Int64) then
+        Exit;
+      Dec(LV);
+    end
+    else if LF.Intrinsic <> 'ord' then
+      Exit;
+    AF := ByValueFacts(LV);
+    Result := True;
+  end;
+
+var
+  LF: TSemaConstFacts;
+begin
+  Result := False;
+  AF := Default(TSemaOpFacts);
+  LF := Default(TSemaConstFacts);
+  if (ADepth > 8) or (ANest > 64) then
+    Exit;
+  ANode := PeelParens(ATree, ANode);
+  if ANode = NIL_NODE then
+    Exit;
+  case ATree.Nodes[ANode].Kind of
+    nkIntLit:
+      if IntLiteralValue(ATree, ANode, LV) then
+      begin
+        AF := ByValueFacts(LV);
+        Result := True;
+      end;
+    nkUnaryOp:
+      if IntLiteralValue(ATree, ANode, LV) then
+      begin
+        AF := ByValueFacts(LV);
+        Result := True;
+      end
+      else
+      begin
+        LOp := OpTok(ANode);
+        Result := (LOp in [tkMinus, tkPlus, tkNot]) and Unary(ANode);
+      end;
+    nkBinaryOp:
+      begin
+        LOp := OpTok(ANode);
+        Result := Binary(ANode);
+      end;
+    nkCall:
+      Result := Call(ANode);
+    nkIdent, nkMember:
+      begin
+        // The value first: a chain of constants past the depth cap then
+        // fails without asking each link's facts as well.
+        if not OrdinalNodeValue(ATree, ANode, ADepth, AName, LV) then
+          Exit;
+        if AOperand then
+        begin
+          LF := AFacts(ANode, ADepth);
+          if (LF.Role <> scrConst) or (LF.Cat <> tcInteger) then
+            Exit;
+        end;
+        AF := ByValueFacts(LV);
+        // A true constant initialized by a typecast is a value of its type
+        // (`not KC` of `KC = Cardinal(5)` is 4294967290).
+        if AOperand and LF.Typed and (LF.Rank > 0) then
+        begin
+          AF.IntConst := False;
+          AF.Rank := LF.Rank;
+          AF.Unsigned := LF.Unsigned;
+        end;
+        Result := True;
+      end;
+    nkStrLit, nkCaretChar:
+      if not AOperand and OrdinalNodeValue(ATree, ANode, ADepth, AName, LV) then
+      begin
+        AF := ByValueFacts(LV);
+        Result := True;
+      end;
+  end;
+end;
+
 function FoldedIntValue(const ATree: TPasTree; ANode, ADepth: Integer;
   const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
   out AValue: Int64): Boolean;
 var
-  LCallee, LArg: Integer;
-  LF: TSemaConstFacts;
-  LV: Int64;
+  LF: TSemaOpFacts;
 begin
-  Result := False;
-  AValue := 0;
-  if ADepth > 8 then
-    Exit;
-  if OrdinalNodeValue(ATree, ANode, ADepth, AName, AValue) then
-    Exit(True);
-  ANode := PeelParens(ATree, ANode);
-  if (ANode = NIL_NODE) or (ATree.Nodes[ANode].Kind <> nkCall) then
-    Exit;
-  LCallee := ATree.Nodes[ANode].FirstChild;
-  if LCallee = NIL_NODE then
-    Exit;
-  LArg := ATree.Nodes[LCallee].NextSibling;
-  if (LArg = NIL_NODE) or (ATree.Nodes[LArg].NextSibling <> NIL_NODE) then
-    Exit;
-  LF := AFacts(LCallee, ADepth + 1);
-  if not (LF.Role in [scrType, scrIntrinsic]) or
-     not FoldedIntValue(ATree, LArg, ADepth + 1, AFacts, AName, LV) then
-    Exit;
-  if LF.Role = scrType then
-  begin
-    if LF.Cat <> tcInteger then
-      Exit;
-    case LF.Rank of
-      1: if LF.Unsigned then LV := LV and $FF else LV := ShortInt(LV and $FF);
-      2: if LF.Unsigned then LV := LV and $FFFF else LV := SmallInt(LV and $FFFF);
-      3: if LF.Unsigned then LV := LV and $FFFFFFFF
-         else LV := Integer(LV and $FFFFFFFF);
-      4: ;
-    else
-      Exit;
-    end;
-  end
-  else if LF.Intrinsic = 'hi' then
-    LV := (LV shr 8) and $FF
-  else if LF.Intrinsic = 'lo' then
-    LV := LV and $FF
-  else if LF.Intrinsic = 'swap' then
-    LV := ((LV and $FF) shl 8) or ((LV shr 8) and $FF)
-  else if LF.Intrinsic = 'succ' then
-  begin
-    if LV = High(Int64) then
-      Exit;
-    Inc(LV);
-  end
-  else if LF.Intrinsic = 'pred' then
-  begin
-    if LV = Low(Int64) then
-      Exit;
-    Dec(LV);
-  end
-  else if LF.Intrinsic <> 'ord' then
-    Exit;
-  AValue := LV;
-  Result := True;
+  Result := FoldIntNode(ATree, ANode, ADepth, 0, False, AFacts, AName, LF);
+  AValue := LF.IntValue;
 end;
 
 function OrdAnswerShape(AAns: TSemaOpAnswer; out ARank: Byte;
@@ -2244,9 +2667,11 @@ var
   LF: TSemaConstFacts;
   LName: string;
   LOrd: TSemaOrdFacts;
-  LArgF: TSemaOpFacts;
+  LArgF, LFold: TSemaOpFacts;
   LAns: TSemaOpAnswer;
   LV: Int64;
+  LPeeled: Integer;
+  LIsOp: Boolean;
 begin
   LCall := PeelParens(ATree, ANode);
   if (LCall = NIL_NODE) or (ATree.Nodes[LCall].Kind <> nkCall) then
@@ -2279,14 +2704,33 @@ begin
       end;
       Exit;
     end;
-    if (LArgF.Cat = tcInteger) and
+    // An integer read by value is a ShortInt in -128..127 and beyond it
+    // adapts as a literal of its value: `C + Ord(5)` Int64, `C + Ord(300)`
+    // Cardinal, `B and Ord(300)` as `B and 300`, `C + Ord(KB + 300)`
+    // Cardinal; High / Low of an integer type are that type's value
+    // (`C + Ord(Low(Byte))` Cardinal), a typecast its type's. An operator
+    // folds only over integers, whatever its argument facts say (dcc64 37.0,
+    // 2026-11-05).
+    LPeeled := PeelParens(ATree, LArg);
+    LIsOp := (LPeeled <> NIL_NODE) and
+      (ATree.Nodes[LPeeled].Kind in [nkBinaryOp, nkUnaryOp]);
+    if ((LArgF.Cat = tcInteger) or LIsOp) and
        (ConstExprKind(ATree, LArg, 0, AFacts) = sckValue) and
-       FoldedIntValue(ATree, LArg, 0, AFacts, AName, LV) then
+       FoldIntNode(ATree, LArg, 0, 0, LIsOp, AFacts, AName, LFold) and
+       LFold.IntConst then
     begin
-      LOrd := Default(TSemaOrdFacts);
-      LOrd.HasRange := True;
-      LOrd.Lo := LV;
-      LOrd.Hi := LV;
+      LV := LFold.IntValue;
+      if (LV >= Low(ShortInt)) and (LV <= High(ShortInt)) then
+      begin
+        AF.Rank := 1;
+        AF.Unsigned := False;
+      end
+      else
+      begin
+        AF.IntConst := True;
+        AF.IntValue := LV;
+      end;
+      Exit;
     end;
     LAns := OrdAnswer(LOrd);
     if LAns = oaLeft then
@@ -3109,7 +3553,8 @@ begin
   end;
   case Result.Cat of
     tcInteger:
-      Result.IntConst := IntLiteralValue(T, ANode, Result.IntValue);
+      Result.IntConst := ConstOperandValue(ANode, Result.IntValue,
+        Result.IntFolded);
     tcFloat:
       begin
         LLit := RealLiteralNode(T, ANode);
@@ -3150,6 +3595,100 @@ begin
       Result.Text := stkAnsiChar;
 end;
 
+// The initializer of true constant ASym (a section `const X = ...`, no type
+// written, not a resourcestring) - NIL_NODE for any other symbol.
+function TPasSemaTyper.TrueConstInit(ASym: Integer): Integer;
+var
+  LDecl: Integer;
+begin
+  Result := NIL_NODE;
+  if (ASym = NIL_SYM) or (M.Symbols[ASym].Kind <> skConst) or
+     (sfBuiltin in M.Symbols[ASym].Flags) or
+     (M.Symbols[ASym].TypeNode <> NIL_NODE) then
+    Exit;
+  LDecl := M.Symbols[ASym].DeclNode;
+  if (LDecl = NIL_NODE) or (T.Nodes[LDecl].Parent = NIL_NODE) or
+     (Kind(T.Nodes[LDecl].Parent) <> nkConstDecl) or
+     IsResourceStringName(T, LDecl) then
+    Exit;
+  Result := Sib(LDecl);
+end;
+
+{ The type of an INTEGER true constant of this unit (3.2.1), as `var X := K`
+  infers it: its initializer's, typed before any use (TypeNode is bottom-up
+  in source order), a literal by its value (`5000000000` Int64). NIL_SYM for
+  any other constant - a text one types as a string here, where it may be a
+  Char, so it stays the cross typer's (InferredDeclTypeX). Without it every
+  operand naming a constant was untyped in this pass: `KB + 300` had no
+  type, nor the overload chosen for it. }
+function TPasSemaTyper.TrueConstType(ASym: Integer): Integer;
+var
+  LInit, LLit: Integer;
+  LNeg: Boolean;
+  LName: string;
+begin
+  Result := NIL_SYM;
+  LInit := TrueConstInit(ASym);
+  if (LInit = NIL_NODE) or (CatOf(M.ExprType[LInit]) <> tcInteger) then
+    Exit;
+  Result := M.ExprType[LInit];
+  LLit := PeelParens(T, LInit);
+  LNeg := False;
+  while (LLit <> NIL_NODE) and (Kind(LLit) = nkUnaryOp) and
+        (OpKind(LLit) in [tkMinus, tkPlus]) do
+  begin
+    if OpKind(LLit) = tkMinus then
+      LNeg := not LNeg;
+    LLit := PeelParens(T, Child(LLit));
+  end;
+  if (LLit = NIL_NODE) or (Kind(LLit) <> nkIntLit) then
+    Exit;
+  LName := PasLiteralTypeName(T, LLit, LNeg, FIs64);
+  if LName = 'cardinal' then
+    Result := Card
+  else if LName = 'int64' then
+    Result := I64
+  else if LName = 'uint64' then
+    Result := U64;
+  if Result = NIL_SYM then
+    Result := M.ExprType[LInit];
+end;
+
+{ Integer operand ANode as a constant read by its VALUE, which adapts to the
+  other operand (OpShape): a literal, an operator over constants (`KB +
+  300`, `-KB`, `not KB`, folded - FoldedIntValue), or a true constant naming
+  either, followed through this unit's constants (4.2.1: `C + K2` of `K2 =
+  KB + 300` is Cardinal). AFolded: the operator case (IntFolded). }
+function TPasSemaTyper.ConstOperandValue(ANode: Integer;
+  out AValue: Int64; out AFolded: Boolean): Boolean;
+var
+  LNode, LDepth: Integer;
+begin
+  Result := False;
+  AValue := 0;
+  AFolded := False;
+  if ANode = NIL_NODE then
+    Exit;
+  LNode := PeelParens(T, ANode);
+  for LDepth := 1 to 8 do
+  begin
+    if (LNode = NIL_NODE) or not (Kind(LNode) in [nkIdent, nkMember]) then
+      Break;
+    LNode := TrueConstInit(Head(LNode));
+    LNode := PeelParens(T, LNode);
+  end;
+  if LNode = NIL_NODE then
+    Exit;
+  if IntLiteralValue(T, LNode, AValue) then
+    Exit(True);
+  if Kind(LNode) in [nkBinaryOp, nkUnaryOp] then
+  begin
+    Result := FoldedIntValue(T, LNode, 0, ConstFacts(), OrdNameValue(),
+      AValue);
+    AFolded := Result;
+  end;
+end;
+
 // FoldedCallOpFacts' view of an intrinsic's argument here: its ExprType, a
 // one-character literal a Char (`Ord('A')` is Ord of a Char).
 function TPasSemaTyper.ArgFacts: TSemaArgFactsProc;
@@ -3163,7 +3702,24 @@ begin
       LLit := PeelParens(T, AArg);
       if (LLit <> NIL_NODE) and ((Kind(LLit) = nkCaretChar) or
          (Kind(LLit) = nkStrLit) and IsOneCharLiteralNode(T, LLit)) then
-        LA := Chr;
+        LA := Chr
+      // High / Low of an integer type is a value of that type, not the
+      // Integer `var V := High(Byte)` infers: `C + Ord(Low(Byte))` is
+      // Cardinal (dcc64 37.0, 2026-11-05; ArgFactsX reads it alike).
+      else if (LLit <> NIL_NODE) and (Kind(LLit) = nkCall) and
+              (Child(LLit) <> NIL_NODE) and (Sib(Child(LLit)) <> NIL_NODE) and
+              (Sib(Sib(Child(LLit))) = NIL_NODE) then
+      begin
+        var LCallee := Head(Child(LLit));
+        var LTy := Head(Sib(Child(LLit)));
+        if (LCallee <> NIL_SYM) and (sfBuiltin in M.Symbols[LCallee].Flags) and
+           ((M.Symbols[LCallee].NameLower = 'high') or
+            (M.Symbols[LCallee].NameLower = 'low')) and
+           (LTy <> NIL_SYM) and
+           (M.Symbols[LTy].Kind in [skType, skBuiltinType]) and
+           (CatOf(LTy) = tcInteger) then
+          LA := LTy;
+      end;
       AOrd := OrdFacts(NIL_NODE, LA);   // NIL_NODE: read as a value
       AOp := OpFacts(LA, NIL_NODE);
     end;
@@ -3303,6 +3859,10 @@ begin
     skVar, skConst, skField, skParam, skRoutine, skProperty, skEnumValue:
       begin
         Result := M.Symbols[LSym].TypeSym;   // value / result / property type
+        // A true constant writes no type: an integer one is its
+        // initializer's (3.2.1).
+        if (Result = NIL_SYM) and (M.Symbols[LSym].Kind = skConst) then
+          Result := TrueConstType(LSym);
         // An inline `string[N]` slot names no type symbol: a ShortString
         // (audit E2-36).
         if (Result = NIL_SYM) and (M.Symbols[LSym].TypeNode <> NIL_NODE) and
@@ -4285,7 +4845,8 @@ begin
 end;
 
 // The ordinal value of a name bound here: an enumeration value of this
-// unit, a true constant (its value, followed), True / False.
+// unit, a true constant (its initializer folded, FoldedIntValue), True /
+// False.
 function TPasSemaTyper.OrdNameValue: TSemaOrdNameValue;
 begin
   Result :=
@@ -4314,7 +4875,7 @@ begin
             (T.Nodes[LDecl].Parent <> NIL_NODE) and
             (Kind(T.Nodes[LDecl].Parent) = nkEnumValue) and
             EnumElemValue(T, T.Nodes[LDecl].Parent, ADepth, OrdNameValue(),
-              AValue);
+              AValue, ConstFacts());
         skConst:
           if sfBuiltin in M.Symbols[LSym].Flags then
           begin
@@ -4325,8 +4886,9 @@ begin
           else if (M.Symbols[LSym].TypeNode = NIL_NODE) and
                   (LDecl <> NIL_NODE) and (T.Nodes[LDecl].Parent <> NIL_NODE)
                   and (Kind(T.Nodes[LDecl].Parent) = nkConstDecl) then
-            Result := OrdinalNodeValue(T, Sib(LDecl), ADepth, OrdNameValue(),
-              AValue);
+            // Its initializer folded (`K2 = KB + 300`, `KT = Byte(300)`).
+            Result := FoldedIntValue(T, Sib(LDecl), ADepth, ConstFacts(),
+              OrdNameValue(), AValue);
       end;
     end;
 end;
@@ -4402,8 +4964,9 @@ begin
                  (Kind(T.Nodes[LDecl].Parent) = nkConstDecl) then
               begin
                 LInit := Sib(LDecl);
-                Result.Typed := ConstExprKind(T, LInit, ADepth + 1,
-                  ConstFacts()) = sckTyped;
+                Result.Typed := MayBeTypedConst(T, LInit) and
+                  (ConstExprKind(T, LInit, ADepth + 1, ConstFacts()) =
+                   sckTyped);
                 if LType = NIL_SYM then
                 begin
                   // The type of the value it names.
@@ -4450,7 +5013,9 @@ begin
         Exit;
       end;
       Result.Cat := CatOf(LType);
-      if (Result.Role = scrType) and (Result.Cat = tcInteger) then
+      // An integer type name's storage, or an integer value's type's: a
+      // typed true constant does not adapt (FoldedIntValue).
+      if Result.Cat = tcInteger then
       begin
         var LOp := OpFacts(LType, NIL_NODE);
         Result.Rank := LOp.Rank;
@@ -4524,7 +5089,7 @@ begin
   end
   else if M.Symbols[LB].Kind = skType then
     Result.HasRange := OrdinalDefRange(T, TypeDefNode(LB), OrdNameValue(),
-      Result.Lo, Result.Hi);
+      Result.Lo, Result.Hi, ConstFacts());
 end;
 
 { Pred / Succ / Low / High of an ordinal of type ASym (4.11.4): an integer

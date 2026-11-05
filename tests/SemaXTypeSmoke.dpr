@@ -4225,6 +4225,85 @@ begin
     end;
   end;
 
+  // ---- FO: an operator over integer constants folds to a value
+  // (FoldedIntValue) as dcc computes it - `not` and the shifts in the left
+  // operand's type (below 32 bits Integer, the count masked to the width),
+  // wrapping - and the value adapts to a Cardinal as a literal of it does,
+  // through a true constant of another unit naming it, a subrange bound and
+  // an enumeration value too; Ord of a constant integer is a ShortInt in
+  // -128..127 and adapts beyond it (4.2.1, 4.4; dcc64 37.0, 2026-11-05). ----
+  begin
+    var FOLDOP: TArray<TArray<string>> := [
+      ['C + (KB + 300)', 'Cardinal'], ['C + K2', 'Cardinal'],
+      ['C + (KB - 300)', 'Int64'], ['C + K3', 'Int64'],
+      ['C + (not KB)', 'Int64'], ['C + (KB shl 2)', 'Cardinal'],
+      ['C + (-8 shr 1)', 'Cardinal'], ['C + (1 shl 31)', 'Int64'],
+      ['C + (not Cardinal(5))', 'Cardinal'], ['C + (not 200)', 'Int64'],
+      ['C + (KC shl 4)', 'Cardinal'], ['C + (2147483647 shl 1)', 'Int64'],
+      ['C + Succ(KB + 300)', 'Cardinal'], ['C + Succ(KB - 300)', 'Int64'],
+      ['C + Ord(300)', 'Cardinal'], ['C + Ord(KB + 300)', 'Cardinal'],
+      ['C + Ord(KB + 0)', 'Int64'], ['C + Hi(K2)', 'Cardinal'],
+      ['C + (KI * 2)', 'Cardinal'], ['C + (High(Integer) - 1)', 'Cardinal'],
+      ['C + (Byte(200) shl 1)', 'Cardinal'], ['C + (1 shl -1)', 'Int64'],
+      ['C + (KN div 3)', 'Int64'], ['C + (-KN mod 3)', 'Cardinal'],
+      ['C + (not KC)', 'Cardinal'], ['C + (-1 and $FFFFFFFF)', 'Cardinal'],
+      ['C + (Ord(''A'') + 1)', 'Cardinal'], ['C + Ord(S40)', 'Cardinal'],
+      ['C + Ord(EW)', 'Cardinal'], ['C + Lo(KB - 300)', 'Cardinal'],
+      ['C + Swap(K3)', 'Cardinal'], ['I + Ord(70000)', 'Integer'],
+      ['C + (KC - KC)', 'Cardinal'], ['C + (Byte(1) shl 40)', 'Cardinal'],
+      ['C + (5000000000 shl 65)', 'Int64'], ['C + Pred(-KB)', 'Int64'],
+      ['KB + 300', 'Integer'], ['C + Ord(Low(Byte))', 'Cardinal'],
+      ['C + Ord(High(Integer) - 1)', 'Cardinal'],
+      ['C + Succ(High(ShortInt))', 'Cardinal'],
+      ['C + (Low(Integer) + 1)', 'Int64'], ['C + (High(Word) * 2)', 'Cardinal'],
+      // Beside another constant a folded operator keeps its own type.
+      ['KM', 'UInt64'], ['(UInt64(1) shl 48) - 1', 'UInt64'], ['KO', 'Integer'],
+      ['KS1 or KS4', 'Integer'], ['C + (KS1 or KS4)', 'Cardinal'],
+      // A folded operator of a 64-bit type keeps it.
+      ['I * KTps', 'Int64'], ['I * (Int64(5) * 2)', 'Int64'],
+      ['I + KBig', 'Int64'], ['I + (Cardinal(5) * 2)', 'Integer'],
+      ['B and (Cardinal(5) * 2)', 'Byte'], ['C + (Integer(5) - 6)', 'Int64'],
+      ['KFL', 'Integer']];
+    var LSrcA := 'unit XFA;'#10'interface'#10 +
+      'const KS1 = 1 shl 0; KS4 = 1 shl 4; KM = (UInt64(1) shl 48) - 1;'#10 +
+      '  KX20 = $20; KX40 = $40; KX80 = $80; KX4000 = $4000;'#10 +
+      '  KFL = KX20 or KX40 or KX80 or KX4000;'#10 +
+      '  KO = not (KS1 or KS4);'#10 +
+      '  KMs = 10000; KTps = 1000 * Int64(KMs); KBig = 5000000000 - 4999999990;'#10 +
+      '  KB = 5; K2 = KB + 300; K3 = KB - 300; KN = -8;'#10 +
+      '  KC = 4294967295; KI = Integer(5);'#10 +
+      'type TS40 = 0..KB * 8000; TEW = (ew0, ew1 = KB * 8000);'#10 +
+      'implementation'#10'end.'#10;
+    var LSrc := 'unit XFB;'#10'interface'#10'uses XFA;'#10 +
+      'implementation'#10'procedure P;'#10 +
+      'var C: Cardinal; I: Integer; B: Byte; S40: TS40; EW: TEW;'#10'begin'#10;
+    for var LRow := 0 to High(FOLDOP) do
+      LSrc := LSrc + Format('  var P%.2d := %s;'#10, [LRow, FOLDOP[LRow][0]]);
+    LSrc := LSrc + 'end;'#10'end.'#10;
+    for var LPlat in [pfWin64, pfWin32] do
+    begin
+      LDir := TPath.Combine(TPath.GetTempPath, 'pastree_sema_xtype_foldop');
+      if TDirectory.Exists(LDir) then
+        TDirectory.Delete(LDir, True);
+      TDirectory.CreateDirectory(LDir);
+      TFile.WriteAllText(TPath.Combine(LDir, 'XFA.pas'), LSrcA);
+      TFile.WriteAllText(TPath.Combine(LDir, 'XFB.pas'), LSrc);
+      GProj := TPasSemaProject.Create(LPlat, [LDir], []);
+      try
+        GProj.AnalyzeDirectory(LDir);
+        LE := ModelByName('xfb');
+        Ok('XFB loaded', Assigned(LE));
+        for var LRow := 0 to High(FOLDOP) do
+          Eq(Format('FO/%s: %s', [PlatformName(LPlat), FOLDOP[LRow][0]]),
+            XTypeOf(LE, Format('P%.2d', [LRow])), FOLDOP[LRow][1]);
+      finally
+        GProj.Free;
+        if TDirectory.Exists(LDir) then
+          TDirectory.Delete(LDir, True);
+      end;
+    end;
+  end;
+
   // ---- B39: a 1-byte string - AnsiString, ShortString, `string[N]` named or
   // inline, a code-page `type AnsiString(CP)` - indexes and walks to AnsiChar,
   // a character pointer indexes to its character on any level (`AP[0][1]`),

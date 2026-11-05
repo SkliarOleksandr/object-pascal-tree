@@ -20463,7 +20463,7 @@ end;
 
 { TPasSemaTyper.OrdNameValue across models: the ordinal value of a name of
   model AMid - an enumeration value or a true constant of any unit (its
-  value followed in its own model), True / False. }
+  initializer folded in its own model, FoldedIntValue), True / False. }
 function TPasSemaProject.OrdNameValueX(AMid: Integer): TSemaOrdNameValue;
 begin
   Result :=
@@ -20486,7 +20486,7 @@ begin
             (LT.Nodes[LDecl].Parent <> NIL_NODE) and
             (LT.Nodes[LT.Nodes[LDecl].Parent].Kind = nkEnumValue) and
             EnumElemValue(LT, LT.Nodes[LDecl].Parent, ADepth,
-              OrdNameValueX(LBMid), AValue);
+              OrdNameValueX(LBMid), AValue, ConstFactsX(LBMid));
         skConst:
           if sfBuiltin in LS.Flags then
           begin
@@ -20496,8 +20496,9 @@ begin
           else if (LS.TypeNode = NIL_NODE) and (LDecl <> NIL_NODE) and
                   (LT.Nodes[LDecl].Parent <> NIL_NODE) and
                   (LT.Nodes[LT.Nodes[LDecl].Parent].Kind = nkConstDecl) then
-            Result := OrdinalNodeValue(LT, LT.Nodes[LDecl].NextSibling,
-              ADepth, OrdNameValueX(LBMid), AValue);
+            // Its initializer folded (`K2 = KB + 300`, `KT = Byte(300)`).
+            Result := FoldedIntValue(LT, LT.Nodes[LDecl].NextSibling,
+              ADepth, ConstFactsX(LBMid), OrdNameValueX(LBMid), AValue);
       end;
     end;
 end;
@@ -20581,8 +20582,10 @@ begin
                 if (LVNode <> NIL_NODE) and
                    ((LVMid <> AMid) or (LVNode <> ANode)) then
                 begin
-                  Result.Typed := ConstExprKind(FModels[LVMid].Tree, LVNode,
-                    ADepth + 1, ConstFactsX(LVMid)) = sckTyped;
+                  Result.Typed :=
+                    MayBeTypedConst(FModels[LVMid].Tree, LVNode) and
+                    (ConstExprKind(FModels[LVMid].Tree, LVNode, ADepth + 1,
+                     ConstFactsX(LVMid)) = sckTyped);
                   if not XValid(LX) then
                   begin
                     // The type of the value it names.
@@ -20638,7 +20641,9 @@ begin
         Exit;
       end;
       Result.Cat := XCatOf(LX);
-      if (Result.Role = scrType) and (Result.Cat = tcInteger) then
+      // An integer type name's storage, or an integer value's type's: a
+      // typed true constant does not adapt (FoldedIntValue).
+      if Result.Cat = tcInteger then
       begin
         var LOp := OpFactsX(AMid, NIL_NODE, LX);
         Result.Rank := LOp.Rank;
@@ -20787,7 +20792,7 @@ begin
   else if LS.Kind = skType then
     Result.HasRange := OrdinalDefRange(FModels[LB.UnitId].Tree,
       TypeDefNodeOf(LB.UnitId, LB.Sym), OrdNameValueX(LB.UnitId), Result.Lo,
-      Result.Hi);
+      Result.Hi, ConstFactsX(LB.UnitId));
 end;
 
 { TPasSemaTyper.OrdStep across models: Pred / Succ / Low / High of an
@@ -21527,8 +21532,20 @@ begin
   if (ANode <> NIL_NODE) and (Result.Cat in [tcInteger, tcFloat]) then
   begin
     if Result.Cat = tcInteger then
+    begin
       Result.IntConst := IntLiteralValue(FModels[LVMid].Tree, LVNode,
-        Result.IntValue)
+        Result.IntValue);
+      // An operator over constants is read by its value too, folded (4.2.1:
+      // `C + (KB + 300)` and `C + K2` of `K2 = KB + 300` are Cardinal).
+      LLit := PeelParens(FModels[LVMid].Tree, LVNode);
+      if not Result.IntConst and (LLit <> NIL_NODE) and
+         (FModels[LVMid].Tree.Nodes[LLit].Kind in [nkBinaryOp, nkUnaryOp]) then
+      begin
+        Result.IntConst := FoldedIntValue(FModels[LVMid].Tree, LVNode, 0,
+          ConstFactsX(LVMid), OrdNameValueX(LVMid), Result.IntValue);
+        Result.IntFolded := Result.IntConst;
+      end;
+    end
     else
     begin
       LLit := RealLiteralNode(FModels[LVMid].Tree, LVNode);

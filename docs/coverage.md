@@ -240,9 +240,13 @@ of less work, not a gap in following the language; its consequences are in
   (`100` finds TShortIntHelper, `200` TByteHelper, `Ord('A')` TWordHelper,
   `High(Byte)` TByteHelper - here all TIntegerHelper), a Currency-shaped
   real literal is Currency on Win32 too, `Double(1.5)` is Extended, and a
-  folded `not Byte(5)` is a signed value, not a Byte. Modelling it needs a
-  constant folder, which PasTree does not have; the navigation that results
-  lands on a sibling helper of the same family, never on nothing.
+  folded `not Byte(5)` is a signed value, not a Byte. The integer folder
+  (FoldedIntValue) has the value, but the declared type stays the widened
+  one; the navigation that results lands on a sibling helper of the same
+  family, never on nothing.
+- the intra-unit typer types an INTEGER true constant of its own unit (its
+  initializer's type, a literal by its value); a text, real or other
+  constant stays untyped there and is the project level's.
 - a set constructor (`[1, 2]`, `[meA, meB]`) and `nil` give a constant no
   type: dcc's are anonymous, and nothing in PasTree can name them.
 
@@ -265,13 +269,15 @@ of less work, not a gap in following the language; its consequences are in
   Integer in dcc, and so is `B and 300` (dcc's E2010 names both Integer,
   but its overload resolution then prefers a narrower parameter); PasTree
   says Integer. A rankless subrange operand computes as an Integer
-  (`Sub and Sub` over `0..9` is ShortInt in dcc). A true constant
-  operand adapts to the other operand by its value only when it is a
-  literal or names one - a folded constant expression (`N + 1` in a
-  constant), `Succ(4)` and `SizeOf(X)`, which dcc adapts as well (`C +
-  SizeOf(X)` over a Cardinal is Cardinal there, Int64 here), are read as
-  their declared shape: adapting needs the value, and PasTree has no
-  constant folder. A typecast or a typed intrinsic (`C + Integer(5)`, `C +
+  (`Sub and Sub` over `0..9` is ShortInt in dcc). A constant operand
+  adapts to the other operand by its value when it is a literal, an
+  integer operator over constants folded as dcc folds it (FoldedIntValue:
+  `C + (N + 1)`, `C + (K shl 2)`, `not`, the shifts wrapping), `Hi` / `Lo`
+  / `Swap` / `Succ` / `Pred` of one, or a true constant naming any of
+  them. Not folded: `SizeOf`, `Length`, `Abs`, `Sqr`, `Chr` and a value
+  past High(Int64) - `C + SizeOf(X)` over a Cardinal is Cardinal in dcc,
+  Int64 here - nor a chain of more than 8 constants or 64 nested
+  operators. A typecast or a typed intrinsic (`C + Integer(5)`, `C +
   High(Integer)`) adapts in neither. `AnsiChar + AnsiChar` (dcc's
   anonymous short string) is typed ShortString; pointer minus pointer is
   left untyped. The intra-unit typer cannot tell a code-page string declared
@@ -293,9 +299,9 @@ of less work, not a gap in following the language; its consequences are in
 ### 4.11.4 Result types of the value-returning intrinsics
 - the result rules are implemented in both typers from the spec's probe
   table, with these edges left out: `Ord` of an enumeration or subrange
-  reads its range only from literal bounds and values, enumeration values
-  and true constants naming them - a bound or an explicit value that is an
-  expression (`N + 1`, `Ord(X)`) leaves the range unknown and `Ord` Integer;
+  reads its range from bounds and values the integer folder reads (`0..N *
+  8000` is Word) - one it cannot (`SizeOf(T)`, `Length('abc')`) leaves the
+  range unknown and `Ord` Integer;
   `Abs` of a subrange past 32 bits reads Integer where dcc says Int64;
   `GetTypeKind` is typed at the
   project level only (System.TTypeKind is a real declaration the intra-unit

@@ -10640,15 +10640,15 @@ end;
 // E2003. An integer constant by its value (A, B, C, N), a variable by its
 // type (D, E, G, H), a real literal Extended (J) and a true constant Currency
 // holds a Currency on either target (L), a cast constant its own type then
-// its value (M), the string kinds (P, Q, R, T, U), and no rank for a `var`
+// its value (M), an operator over constants by its folded value (O: `O(KB +
+// 300)` takes O(Word), FoldedIntValue), the string kinds (P, Q, R, T, U), and no rank for a `var`
 // parameter, which takes its own type only (V: a Single for `var X: Single`
 // although the other argument ranks the Double overload higher); an
 // enumeration for a record without operators puts the candidate out (Z:
 // TextToFloat's shape, where the string conversion of the first argument
 // outranked it); a helper's constant ranks by its value (ER: `EnsureRange(R,
 // Integer.MinValue, Integer.MaxValue)` for an Int64 R). Y differs by target - Currency to Variant over Extended on
-// Win64, the reverse where Extended is 10 bytes. O is not called: `O(KB + 300)` takes O(Word) in dcc, but
-// FoldedIntValue folds no operator, so the sum still ranks as its Integer.
+// Win64, the reverse where Extended is 10 bytes.
 procedure TestConvRanking;
 const
   SRC_UNIT =
@@ -10772,6 +10772,7 @@ const
     '  K := L(KR).W;'#10 +
     '  K := M(Byte(5)).W;'#10 +
     '  K := N(KB).W;'#10 +
+    '  K := O(KB + 300).W;'#10 +
     '  K := P(S).W;'#10 +
     '  K := Q(AS_).W;'#10 +
     '  K := R(''abc'').W;'#10 +
