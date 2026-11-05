@@ -584,6 +584,98 @@ const
     '  X := RC([1, 2]);'#10 +
     'end;'#10'end.'#10;
 
+  { dcc's ranking of number and string conversions in the unit's own typer
+    (ConvRank, 6.3.1; local/type-conv-2026-11/n1), the project pass's rule:
+    the overload dcc does NOT pick is declared first. An integer literal by
+    its value (A, B), a variable by its type (D, E, G, H), a cast constant
+    its own type then its value (M), the string kinds (P, R, T, U), no rank
+    for a `var` parameter (V: TryTextToValue's shape). Each TRW
+    overload is dcc's pick; each typed TRA before 0.148.0. C (a literal
+    beyond Integer) and O (a constant expression) this typer leaves to the
+    project pass - it selects no overload for them; SemaProjectSmoke's
+    TestConvRanking has them. }
+  SRC_CONV =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    'const KB = 5;'#10 +
+    'function A(X: Integer): TRA; overload;'#10 +
+    'function A(X: Byte): TRW; overload;'#10 +
+    'function B(X: Byte): TRA; overload;'#10 +
+    'function B(X: Word): TRW; overload;'#10 +
+    'function C(X: Double): TRA; overload;'#10 +
+    'function C(X: Int64): TRW; overload;'#10 +
+    'function D(X: Integer): TRA; overload;'#10 +
+    'function D(X: SmallInt): TRW; overload;'#10 +
+    'function E(X: Int64): TRA; overload;'#10 +
+    'function E(X: Cardinal): TRW; overload;'#10 +
+    'function G(X: Double): TRA; overload;'#10 +
+    'function G(X: Single): TRW; overload;'#10 +
+    'function H(X: Single): TRA; overload;'#10 +
+    'function H(X: Double): TRW; overload;'#10 +
+    'function M(X: Integer): TRA; overload;'#10 +
+    'function M(X: ShortInt): TRW; overload;'#10 +
+    'function O(X: Integer): TRA; overload;'#10 +
+    'function O(X: Word): TRW; overload;'#10 +
+    'function P(const X: AnsiString): TRA; overload;'#10 +
+    'function P(const X: WideString): TRW; overload;'#10 +
+    'function R(const X: Variant): TRA; overload;'#10 +
+    'function R(X: PChar): TRW; overload;'#10 +
+    'function T(const X: Variant): TRA; overload;'#10 +
+    'function T(const X: WideString): TRW; overload;'#10 +
+    'function U(X: AnsiChar): TRA; overload;'#10 +
+    'function U(const X: WideString): TRW; overload;'#10 +
+    'function V(var X: Double; D: Double): TRA; overload;'#10 +
+    'function V(var X: Single; D: Single): TRW; overload;'#10 +
+    'implementation'#10 +
+    'function A(X: Integer): TRA; begin end;'#10 +
+    'function A(X: Byte): TRW; begin end;'#10 +
+    'function B(X: Byte): TRA; begin end;'#10 +
+    'function B(X: Word): TRW; begin end;'#10 +
+    'function C(X: Double): TRA; begin end;'#10 +
+    'function C(X: Int64): TRW; begin end;'#10 +
+    'function D(X: Integer): TRA; begin end;'#10 +
+    'function D(X: SmallInt): TRW; begin end;'#10 +
+    'function E(X: Int64): TRA; begin end;'#10 +
+    'function E(X: Cardinal): TRW; begin end;'#10 +
+    'function G(X: Double): TRA; begin end;'#10 +
+    'function G(X: Single): TRW; begin end;'#10 +
+    'function H(X: Single): TRA; begin end;'#10 +
+    'function H(X: Double): TRW; begin end;'#10 +
+    'function M(X: Integer): TRA; begin end;'#10 +
+    'function M(X: ShortInt): TRW; begin end;'#10 +
+    'function O(X: Integer): TRA; begin end;'#10 +
+    'function O(X: Word): TRW; begin end;'#10 +
+    'function P(const X: AnsiString): TRA; begin end;'#10 +
+    'function P(const X: WideString): TRW; begin end;'#10 +
+    'function R(const X: Variant): TRA; begin end;'#10 +
+    'function R(X: PChar): TRW; begin end;'#10 +
+    'function T(const X: Variant): TRA; begin end;'#10 +
+    'function T(const X: WideString): TRW; begin end;'#10 +
+    'function U(X: AnsiChar): TRA; begin end;'#10 +
+    'function U(const X: WideString): TRW; begin end;'#10 +
+    'function V(var X: Double; D: Double): TRA; begin end;'#10 +
+    'function V(var X: Single; D: Single): TRW; begin end;'#10 +
+    'procedure Test(Bt: Byte; Wd: Word; I: Integer; I64: Int64; S: string;'#10 +
+    '  C: Char; SG: Single; DV: Double);'#10 +
+    'var X: TRW;'#10 +
+    'begin'#10 +
+    '  X := A(5);'#10 +
+    '  X := B(300);'#10 +
+    '  X := C(5000000000);'#10 +
+    '  X := D(Bt);'#10 +
+    '  X := E(Wd);'#10 +
+    '  X := G(I);'#10 +
+    '  X := H(I64);'#10 +
+    '  X := M(Byte(5));'#10 +
+    '  X := O(KB + 300);'#10 +
+    '  X := P(S);'#10 +
+    '  X := R(''abc'');'#10 +
+    '  X := T(C);'#10 +
+    '  X := U(''a'');'#10 +
+    '  X := V(SG, DV);'#10 +
+    'end;'#10'end.'#10;
+
   { The Char-literal and nil exemptions of the assignment check (A4-10,
     A4-11; probe-b32 P1): dcc compiles every line but the last, where an
     operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
@@ -698,6 +790,14 @@ begin
     Ok('6.3.1 brackets: ' + LName + ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   Ok('([...]) is a set: no E2010', DiagCount('E2010') = 0);
+  GModel.Free;
+
+  Analyze(SRC_CONV);
+  for var LName in ['A', 'B', 'D', 'E', 'G', 'H', 'M', 'P', 'R', 'T',
+    'U', 'V'] do
+    Ok('conversion ranking (6.3.1): ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  Ok('conversion ranking: no E2010', DiagCount('E2010') = 0);
   GModel.Free;
 
   Analyze(SRC_ASSIGN);

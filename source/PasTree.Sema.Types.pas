@@ -53,6 +53,32 @@ type
     const`. }
   TSemaCtorTarget = (ctOpenArray, ctDynArray, ctArrayOfConst);
 
+  { What a value is to the overload ranking of numbers and strings
+    (ConvRank, 6.3.1): the predefined type it is stored as - an integer by
+    width and sign, a real, Variant, a string or character kind
+    (cnkCodePage `UTF8String` and any `type AnsiString(N)`), PChar /
+    PAnsiChar - and, for an argument only, a string literal or a
+    one-character one (cnkStrLit, cnkCharLit: a literal or a true constant
+    naming one). cnkNone: anything else, which the ranking leaves alone. }
+  TSemaConvKind = (cnkNone,
+    cnkShortInt, cnkByte, cnkSmallInt, cnkWord, cnkInteger, cnkCardinal,
+    cnkInt64, cnkUInt64,
+    cnkSingle, cnkDouble, cnkExtended, cnkCurrency, cnkComp, cnkVariant,
+    cnkUString, cnkWideString, cnkAnsiString, cnkCodePage, cnkRawByteString,
+    cnkShortString, cnkChar, cnkAnsiChar, cnkPChar, cnkPAnsiChar,
+    cnkStrLit, cnkCharLit);
+
+const
+  { An argument's score on a candidate's scale (ScoreCandidate, ScoreArgs):
+    its fit (ArgFitCanonX's 3 / 2 / 1 doubled, CtorElemFit's steps) times
+    this, plus the conversion's ConvRank when the fit is a conversion. A
+    rank is below 32, so the ranks of up to 32 arguments together never
+    outweigh one step of fit: the ranks only order candidates whose fits
+    tie, as dcc ranks conversions only against conversions. }
+  CConvScale = 1024;
+
+type
+
   { One operand, after its aliases are chased to the builtin they name - a
     distinct `type X` of a number too, whose storage is its base's (audit
     A3-32, B4-08). Rank: that builtin's NumRank (8-bit 1 .. 64-bit 4 for an
@@ -75,6 +101,20 @@ type
     SetCtor: Boolean;
     Text: TSemaTextKind;
   end;
+
+  { An argument as the conversion ranking reads it (ConvRank): its facts
+    and its conversion kind (ConvArgKindOf, a pointer's by the typer); an
+    integer constant expression folded to its value (IntConst), as dcc
+    ranks one by value.
+    Read once per argument of a call, not per candidate. }
+  TSemaArgConv = record
+    Kind: TSemaConvKind;
+    Facts: TSemaOpFacts;
+    // Facts.IntConst of a constant TYPED by a cast (`Byte(5)`, sckTyped):
+    // its own type is its exact match, the rest ranked by its value.
+    TypedConst: Boolean;
+  end;
+  PSemaArgConv = ^TSemaArgConv;
 
   { What Ord, Pred / Succ and Low / High read of an ordinal argument
     (4.11.4; OrdAnswer, OrdStepAnswer). Builtin: the NameLower of the
@@ -165,6 +205,7 @@ type
     NUInt, Cur, Comp, Card, LWord, AChr, WChr, UStr: Integer;
     Byt, ShInt, Wrd, SmInt, U64, WStr: Integer;
     FIs64: Boolean;   // the target's pointer width, read once (audit C2-15)
+    FWideExt: Boolean;   // Extended is wider than Double (ConvRank)
     function Kind(N: Integer): TPasNodeKind; inline;
     function Child(N: Integer): Integer; inline;
     function Sib(N: Integer): Integer; inline;
@@ -214,14 +255,30 @@ type
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
     { One argument against the parameter AParam: AArg its node, or NIL_NODE
       for a comparison an nkAmbiguous stands for (no node shape to read);
-      AAt its type. On the doubled scale of CtorElemFit: 6 a one-character
-      literal for a Char parameter, 4 exact, 2 assignable, 0 no evidence,
-      -1 rejected - a `[...]`'s odd steps between. }
+      AAt its type. A fit on the doubled scale of CtorElemFit - 6 a
+      one-character literal for a Char parameter, 4 exact, 2 assignable, 0
+      no evidence, a `[...]`'s odd steps between - times CConvScale, plus
+      a conversion's rank (ConvRank, ScoreArgRanked); -1 rejected. }
     function ScoreArg(AArg, AAt, AParam: Integer): Integer;
     // ScoreArg's rule against the type APt, on ArgFitCanonX's scale: 3 a
     // one-character literal for a Char, 2 exact, 1 assignable (the element
     // of an array a `[...]`'s element is scored against too).
     function ScoreArgAs(AArg, AAt, APt: Integer): Integer;
+    // ScoreArgAs with the rank (ConvRank) of a conversion fit (1) in ARank,
+    // 0 for any other fit - ArgFitCanonX's rule, on this unit's symbols.
+    // ARanked False: no ranking (a `var` / `out` parameter, ParamIsByRef;
+    // a `[...]`'s element, which CtorElemFit ranks its own way) - the fit
+    // alone, as before the ranking.
+    function ScoreArgRanked(AArg, AAt, APt: Integer; ARanked: Boolean;
+      out ARank: Integer): Integer;
+    // The conversion kind of a parameter of type ASym (ConvKindOf; PChar /
+    // PAnsiChar by name), or of an argument of that type, node ANode
+    // (ConvArgKindOf, with its facts in AFacts).
+    function ConvKindSym(ASym, ANode: Integer; AArgSide: Boolean;
+      out AFacts: TSemaOpFacts): TSemaConvKind;
+    // Is node N (parentheses peeled) a name or member access this unit binds
+    // to a constant (skConst)? FoldConvConst's name shape (IsConstNameX).
+    function IsConstName(N: Integer): Boolean;
     // ScoreArg for an open-array parameter - see the implementation.
     function OpenArrayScore(AArg, AAt, ADef: Integer): Integer;
     // ScoreArg for a `[...]` - see the implementation.
@@ -345,9 +402,14 @@ function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
   ScalarEnumMismatch, or an ordinal / float / Char value for an array.
 
   ArgStructRejects - two types already known NOT to be the same type: two
-  records, or an array against a record, class or interface, when no side
+  records, an array against a record, class or interface, or a number, a
+  Boolean, a character or an enumeration value for a record, when no side
   that could convert declares an Implicit / Explicit operator (AParConv,
-  AArgConv). }
+  AArgConv). A string is no such value: a string constant converts to
+  TGUID. `TextToFloat(PChar(S), E, fvExtended)` takes the `(Buffer:
+  PWideChar; var Value; ValueType: TFloatValue)` overload: the enumeration
+  puts `(const S: string; var Value: Extended; const AFormatSettings:
+  TFormatSettings)` out (dcc64 37.0, 6.3.1). }
 function ArgShapeRejects(ACoreKind: TPasNodeKind; AIsProcDesig: Boolean;
   AParCat: TSemaTypeCat; AParIsGenericParam: Boolean): Boolean;
 function ArgCatRejects(AParCat, AArgCat: TSemaTypeCat): Boolean;
@@ -439,6 +501,86 @@ function OpenArrayArgFit(AArgCat: TSemaTypeCat; AIsElem: Boolean;
 function CtorElemFit(ATarget: TSemaCtorTarget; AElemCat: TSemaTypeCat;
   AStaticArray, ACharValue, AConstant, AParChar, AParString: Boolean;
   AValueFit: Integer): Integer;
+
+{ The conversion kind of a value or a parameter of the facts AF
+  (TSemaConvKind): an integer by its rank and sign, a real (a Currency or
+  Comp one by name), Variant, a string or character kind by AF.Text.
+  cnkNone for anything else - a pointer included, whose PChar / PAnsiChar
+  kind only the typer can tell (it reads the type's name). }
+function ConvKindOf(const AF: TSemaOpFacts): TSemaConvKind;
+
+{ The conversion kind of an ARGUMENT of the facts AF: a string literal and a
+  one-character literal are kinds of their own (cnkStrLit, cnkCharLit), a
+  real literal is an Extended - but a true constant dcc64 reads as Currency
+  (AF.CurrNamed: `const K = 1.5`, a value that fits Currency) is a Currency;
+  the rest is ConvKindOf. An integer constant is ranked by its value
+  (ConvRank reads AF.IntConst). }
+function ConvArgKindOf(const AF: TSemaOpFacts): TSemaConvKind;
+
+{ How well the argument AArg (TSemaArgConv: its kind and facts)
+  converts to a parameter of kind AParKind, in dcc's overload ranking of
+  numbers, Variant and strings: above 0 the conversion's rank, a higher one
+  preferred; 0 the parameter does not take the argument; -1 the ranking
+  does not apply (a kind is cnkNone). AWideExt: Extended is wider than
+  Double on the target (10 or 16 bytes; TPasPlatformInfo.ExtendedBytes).
+
+  The table is dcc's, measured, not derived from a principle (spec 6.3.1):
+  every pair of the 14 numeric types and of the 11 string kinds, each
+  declaration order, against variables, literals, constants, typecasts and
+  expressions - no choice depended on the order, and each argument's
+  choices form one ranking. In short, for a variable of an integer type of
+  32 bits or less: its own type, the integers that hold it and the 64-bit
+  ones by width (signed first), Single = Currency = Comp, Double, Extended,
+  Variant, then the narrower integers (widest first, unsigned first); of a
+  64-bit one: its own, Comp, Variant, Extended / Currency, Double, Single,
+  the narrower integers. A real goes to the wider reals, Variant, the
+  narrower ones; Currency and Comp stand beside the reals unordered. A
+  Unicode string goes string > WideString > Variant > the Ansi kinds >
+  ShortString, an Ansi one to its own kinds first; a string literal takes
+  PChar after WideString and PAnsiChar after Variant, a one-character one
+  Char first and AnsiChar = PChar after WideString. Two character
+  variables never convert (Char / AnsiChar), PChar goes to no Variant.
+
+  An integer CONSTANT (AArg.Facts.IntConst: a literal, a true constant, a
+  constant expression dcc folds) has no type of its own here: the integers holding its value
+  in the order ShortInt, Byte, SmallInt, Word, Integer, Cardinal, Int64,
+  UInt64; then the reals and Variant as for a 32-bit or a 64-bit variable
+  by the value's size; then the integers that do not hold it (widest
+  first) - `F(5)` takes F(Byte) over F(Integer), `F(300)` F(Word) over
+  F(Byte), `F(5000000000)` F(Int64) over F(Double). A constant TYPED by a
+  cast (AArg.TypedConst) is its type's exact match, then the other
+  integers by its value, then the reals and Variant by the size of its
+  type: `Int64(5)` takes Int64, ShortInt, ..., Cardinal, UInt64, Comp,
+  Variant. dcc64 / dcc32 37.0, 2026-11-05 (local/type-conv-2026-11/n1). }
+function ConvRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
+  AWideExt: Boolean): Integer;
+
+{ An integer argument ANode of ATree that is a constant expression dcc folds
+  (ConstExprKind), read as ConvRank ranks it: its value in AArg.Facts
+  (IntConst, IntValue) - `KB + 1`, `-KB`, `High(Byte)` by value - and a
+  constant typed by a cast (sckTyped: `Byte(5)`) marked TypedConst. A
+  literal or a true constant the facts already read is left as it is; so
+  is anything not folded. AFacts / AName are the asking typer's. }
+procedure FoldConvConst(const ATree: TPasTree; ANode: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
+  var AArg: TSemaArgConv);
+
+{ May FoldConvConst find a value at ANode - a call, an operator? A name the
+  facts did not read as a constant is a variable, and FoldConvConst's
+  closures are made for nothing; asked first, by both typers. }
+function MayFoldConvConst(const ATree: TPasTree; ANode: Integer): Boolean;
+
+{ Is parameter ASym of AModel passed by reference - `var` or `out` (nfVar /
+  nfOut on its nkParam)? Such a parameter takes no conversion at all, only
+  its own type (E2033), so the conversion ranking (ConvRank) is not applied
+  to it: `TryTextToValue(S, V, D)` for a Single V calls the `var AValue:
+  Single` overload beside the `var AValue: Double` one. }
+function ParamIsByRef(const AModel: TPasSemaModel; ASym: Integer): Boolean;
+
+{ An argument's score on a candidate's scale (CConvScale) from its fit AFit
+  on the doubled scale (CtorElemFit) and, for a conversion fit, its rank
+  ARank (ConvRank): -1 for a rejection, 0 for no evidence. }
+function ScaledFit(AFit: Integer; ARank: Integer = 0): Integer;
 
 { The present arguments of the nkCall ACall - its children after the callee,
   the nkMissing slot a trailing comma leaves (`F(1, 2,)`, ParseArgList) not
@@ -825,6 +967,10 @@ begin
   // for - makes them so.
   if (AParCat = tcRecord) and (AArgCat = tcRecord) then
     Exit(not AParConv and not AArgConv);
+  // A scalar but a string for a record: only the record's operator converts.
+  if (AParCat = tcRecord) and
+     (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum]) then
+    Exit(not AParConv);
   // An array against a record, class or interface, either way round.
   Result := ((AParCat = tcArray) and
              (AArgCat in [tcRecord, tcClass, tcInterface]) and not AArgConv) or
@@ -883,10 +1029,249 @@ begin
     Dec(Result);
 end;
 
+function ConvKindOf(const AF: TSemaOpFacts): TSemaConvKind;
+const
+  INTS: array[1..4, Boolean] of TSemaConvKind = (
+    (cnkShortInt, cnkByte), (cnkSmallInt, cnkWord), (cnkInteger, cnkCardinal),
+    (cnkInt64, cnkUInt64));
+begin
+  Result := cnkNone;
+  case AF.Cat of
+    tcInteger:
+      if AF.Rank in [1..4] then
+        Result := INTS[AF.Rank, AF.Unsigned];
+    tcFloat:
+      if AF.Curr then
+        Result := cnkCurrency
+      else if AF.Comp then
+        Result := cnkComp
+      else
+        case AF.Rank of
+          1: Result := cnkSingle;
+          2: Result := cnkDouble;
+          3: Result := cnkExtended;
+        end;
+    tcVariant:
+      Result := cnkVariant;
+    tcString, tcChar:
+      case AF.Text of
+        stkUni: Result := cnkUString;
+        stkChar: Result := cnkChar;
+        stkWide: Result := cnkWideString;
+        stkShort: Result := cnkShortString;
+        stkAnsi: Result := cnkAnsiString;
+        stkCodePage: Result := cnkCodePage;
+        stkRaw: Result := cnkRawByteString;
+        stkAnsiChar: Result := cnkAnsiChar;
+      end;
+  end;
+end;
+
+function ConvArgKindOf(const AF: TSemaOpFacts): TSemaConvKind;
+begin
+  case AF.Text of
+    stkLit: Exit(cnkStrLit);
+    stkCharLit: Exit(cnkCharLit);
+  end;
+  if (AF.Cat = tcFloat) and AF.RealLit then
+  begin
+    if AF.CurrNamed then
+      Exit(cnkCurrency);
+    Exit(cnkExtended);
+  end;
+  Result := ConvKindOf(AF);
+end;
+
+{ The rank of an integer constant of value AV against a parameter of kind
+  AParKind (ConvRank): the integers holding the value in their own order,
+  above the reals and Variant, above the integers not holding it, widest
+  first and unsigned first at one width. A64: the reals and Variant ranked
+  as for a 64-bit value (Comp, Variant, Extended, ...), else as for a
+  32-bit one (Single, Double, Extended, Variant). }
+function IntConstRank(AV: Int64; AParKind: TSemaConvKind;
+  AWideExt, A64: Boolean): Integer;
+const
+  LO: array[cnkShortInt..cnkUInt64] of Int64 = (-128, 0, -32768, 0,
+    -2147483648, 0, Low(Int64), 0);
+  HI: array[cnkShortInt..cnkUInt64] of Int64 = (127, 255, 32767, 65535,
+    2147483647, 4294967295, High(Int64), High(Int64));
+var
+  L32: Boolean;
+begin
+  if AParKind in [cnkShortInt..cnkUInt64] then
+  begin
+    if (AV >= LO[AParKind]) and (AV <= HI[AParKind]) then
+      Exit(30 - (Ord(AParKind) - Ord(cnkShortInt)));
+    // Not holding it: UInt64 8 .. ShortInt 1.
+    Exit(1 + Ord(AParKind) - Ord(cnkShortInt));
+  end;
+  L32 := not A64;
+  Result := 0;
+  if L32 then
+    case AParKind of
+      cnkSingle, cnkCurrency, cnkComp: Result := 20;
+      cnkDouble: Result := 19;
+      cnkExtended: Result := 18;
+      cnkVariant: Result := 17;
+    end
+  else
+    case AParKind of
+      cnkComp: Result := 20;
+      cnkVariant: Result := 19;
+      cnkExtended: Result := 18;
+      cnkCurrency: Result := 18 - Ord(AWideExt);
+      cnkDouble: Result := 17;
+      cnkSingle: Result := 16;
+    end;
+end;
+
+const
+  // ConvRank's table: [Extended wider than Double, argument kind, parameter
+  // kind]; a row's highest entry is the argument's own type. Generated from
+  // the probe results (local/type-conv-2026-11/n1, table.ps1): dcc64 for
+  // the first half, dcc32 for the second.
+  CConvRanks: array[Boolean, TSemaConvKind, TSemaConvKind] of Byte = (
+    (
+      // target: No Sh By Sm Wo In Ca In UI Si Do Ex Cu Co Va st Wi An UT Ra Sh Ch An PC PA St Ch
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // None
+      ( 0,12, 1,11, 2,10, 3, 9, 8, 7, 6, 5, 7, 7, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // ShortInt
+      ( 0, 1,12,11,10, 9, 8, 7, 6, 5, 4, 3, 5, 5, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Byte
+      ( 0, 1, 2,12, 3,11, 4,10, 9, 8, 7, 6, 8, 8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // SmallInt
+      ( 0, 1, 2, 3,12,11,10, 9, 8, 7, 6, 5, 7, 7, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Word
+      ( 0, 1, 2, 3, 4,12, 5,11,10, 9, 8, 7, 9, 9, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Integer
+      ( 0, 1, 2, 3, 4, 5,12,11,10, 9, 8, 7, 9, 9, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Cardinal
+      ( 0, 1, 2, 3, 4, 5, 6,13, 7, 8, 9,10,10,12,11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Int64
+      ( 0, 1, 2, 3, 4, 5, 6, 7,13, 8, 9,10,10,12,11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // UInt64
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 5, 4, 2, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Single
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 5, 4, 2, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Double
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 5, 3, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Extended
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 4, 6, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Currency
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 4, 4, 6, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Comp
+      ( 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,11,11,12, 4, 5, 3, 3, 3, 2, 0, 0, 0, 0, 0, 0), // Variant
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 6, 5, 3, 3, 3, 2, 0, 0, 0, 0, 0, 0), // string
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 5, 6, 3, 3, 3, 2, 0, 0, 0, 0, 0, 0), // WideString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 4, 7, 6, 6, 2, 0, 0, 0, 0, 0, 0), // AnsiString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 4, 6, 7, 6, 2, 0, 0, 0, 0, 0, 0), // UTF8String
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 4, 6, 7, 8, 2, 0, 0, 0, 0, 0, 0), // RawByteString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 3, 5, 6, 6, 7, 0, 0, 0, 0, 0, 0), // ShortString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 6, 5, 3, 3, 3, 2, 7, 0, 0, 0, 0, 0), // Char
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 3, 6, 7, 7, 5, 0, 8, 0, 0, 0, 0), // AnsiChar
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 2, 2, 2, 1, 0, 0, 5, 0, 0, 0), // PChar
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 5, 6, 6, 2, 0, 0, 0, 7, 0, 0), // PAnsiChar
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 8, 7, 3, 3, 3, 2, 0, 0, 6, 4, 0, 0), // StrLit
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 7, 6, 2, 2, 2, 1, 8, 5, 5, 3, 0, 0)  // CharLit
+    ),
+    (
+      // target: No Sh By Sm Wo In Ca In UI Si Do Ex Cu Co Va st Wi An UT Ra Sh Ch An PC PA St Ch
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // None
+      ( 0,12, 1,11, 2,10, 3, 9, 8, 7, 6, 5, 7, 7, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // ShortInt
+      ( 0, 1,12,11,10, 9, 8, 7, 6, 5, 4, 3, 5, 5, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Byte
+      ( 0, 1, 2,12, 3,11, 4,10, 9, 8, 7, 6, 8, 8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // SmallInt
+      ( 0, 1, 2, 3,12,11,10, 9, 8, 7, 6, 5, 7, 7, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Word
+      ( 0, 1, 2, 3, 4,12, 5,11,10, 9, 8, 7, 9, 9, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Integer
+      ( 0, 1, 2, 3, 4, 5,12,11,10, 9, 8, 7, 9, 9, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Cardinal
+      ( 0, 1, 2, 3, 4, 5, 6,13, 7, 8, 9,10, 9,12,11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Int64
+      ( 0, 1, 2, 3, 4, 5, 6, 7,13, 8, 9,10, 9,12,11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // UInt64
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 5, 4, 2, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Single
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 5, 4, 2, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Double
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 5, 3, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Extended
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 5, 6, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Currency
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 5, 3, 6, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Comp
+      ( 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,10,10,12, 4, 5, 3, 3, 3, 2, 0, 0, 0, 0, 0, 0), // Variant
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 6, 5, 3, 3, 3, 2, 0, 0, 0, 0, 0, 0), // string
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 5, 6, 3, 3, 3, 2, 0, 0, 0, 0, 0, 0), // WideString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 4, 7, 6, 6, 2, 0, 0, 0, 0, 0, 0), // AnsiString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 4, 6, 7, 6, 2, 0, 0, 0, 0, 0, 0), // UTF8String
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 4, 6, 7, 8, 2, 0, 0, 0, 0, 0, 0), // RawByteString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 3, 5, 6, 6, 7, 0, 0, 0, 0, 0, 0), // ShortString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 6, 5, 3, 3, 3, 2, 7, 0, 0, 0, 0, 0), // Char
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 3, 6, 7, 7, 5, 0, 8, 0, 0, 0, 0), // AnsiChar
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 2, 2, 2, 1, 0, 0, 5, 0, 0, 0), // PChar
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 5, 6, 6, 2, 0, 0, 0, 7, 0, 0), // PAnsiChar
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 8, 7, 3, 3, 3, 2, 0, 0, 6, 4, 0, 0), // StrLit
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 7, 6, 2, 2, 2, 1, 8, 5, 5, 3, 0, 0)  // CharLit
+    )
+  );
+
+function ConvRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
+  AWideExt: Boolean): Integer;
+var
+  L64: Boolean;
+begin
+  if (AArg.Kind = cnkNone) or (AParKind in [cnkNone, cnkStrLit, cnkCharLit]) then
+    Exit(-1);
+  if AArg.Facts.IntConst and (AArg.Facts.Cat = tcInteger) then
+  begin
+    // The reals and Variant by the cast's type, or by the value's size.
+    if AArg.TypedConst then
+      L64 := AArg.Kind in [cnkInt64, cnkUInt64]
+    else
+      L64 := (AArg.Facts.IntValue < -2147483648) or
+        (AArg.Facts.IntValue > 4294967295);
+    Exit(IntConstRank(AArg.Facts.IntValue, AParKind, AWideExt, L64));
+  end;
+  Result := CConvRanks[AWideExt, AArg.Kind, AParKind];
+end;
+
+function MayFoldConvConst(const ATree: TPasTree; ANode: Integer): Boolean;
+begin
+  ANode := PeelParens(ATree, ANode);
+  Result := (ANode <> NIL_NODE) and
+    (ATree.Nodes[ANode].Kind in [nkCall, nkBinaryOp, nkUnaryOp]);
+end;
+
+procedure FoldConvConst(const ATree: TPasTree; ANode: Integer;
+  const AFacts: TSemaConstFactsFunc; const AName: TSemaOrdNameValue;
+  var AArg: TSemaArgConv);
+var
+  LKind: TSemaConstKind;
+  LV: Int64;
+begin
+  if (ANode = NIL_NODE) or (AArg.Facts.Cat <> tcInteger) or
+     AArg.Facts.IntConst then
+    Exit;
+  LKind := ConstExprKind(ATree, ANode, 0, AFacts);
+  if (LKind <> sckNone) and FoldedIntValue(ATree, ANode, 0, AFacts, AName, LV)
+  then
+  begin
+    AArg.Facts.IntConst := True;
+    AArg.Facts.IntValue := LV;
+    AArg.TypedConst := LKind = sckTyped;
+  end;
+end;
+
+function ParamIsByRef(const AModel: TPasSemaModel; ASym: Integer): Boolean;
+var
+  LDecl, LParam: Integer;
+begin
+  Result := False;
+  if (ASym < 0) or (ASym >= AModel.SymCount) or
+     (AModel.Symbols[ASym].Kind <> skParam) then
+    Exit;
+  LDecl := AModel.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LParam := AModel.Tree.Nodes[LDecl].Parent;
+  Result := (LParam <> NIL_NODE) and
+    (AModel.Tree.Nodes[LParam].Kind = nkParam) and
+    (AModel.Tree.Nodes[LParam].Flags * [nfVar, nfOut] <> []);
+end;
+
+function ScaledFit(AFit, ARank: Integer): Integer;
+begin
+  if AFit < 0 then
+    Exit(-1);
+  if AFit = 0 then
+    Exit(0);
+  Result := AFit * CConvScale + ARank;
+end;
+
 function ArgStructNeedsConv(AParCat, AArgCat: TSemaTypeCat): Boolean;
 begin
-  // ArgStructRejects' three cases, without the operators.
-  Result := ((AParCat = tcRecord) and (AArgCat = tcRecord)) or
+  // ArgStructRejects' cases, without the operators.
+  Result := ((AParCat = tcRecord) and
+             (AArgCat in [tcRecord, tcInteger, tcFloat, tcBoolean, tcChar,
+              tcEnum])) or
             ((AParCat = tcArray) and
              (AArgCat in [tcRecord, tcClass, tcInterface])) or
             ((AArgCat = tcArray) and
@@ -2739,7 +3124,10 @@ begin
   Result.Rank := M.Symbols[LB].NumRank;
   Result.Unsigned := (LB = Byt) or (LB = Wrd) or (LB = Card) or
     (LB = LWord) or (LB = U64) or (LB = NUInt);
-  if (Result.Cat = tcInteger) and not Result.IntConst and (ANode <> NIL_NODE) then
+  // Only a call folds there (FoldedCallOpFacts); asked first, as the three
+  // closures are made for the call whatever the node is.
+  if (Result.Cat = tcInteger) and not Result.IntConst and (ANode <> NIL_NODE) and
+     (Kind(PeelParens(T, ANode)) = nkCall) then
     FoldedCallOpFacts(T, ANode, ConstFacts(), OrdNameValue(), ArgFacts(),
       Result);
   Result.Curr := (LB = Cur) and not Result.RealLit;
@@ -3209,13 +3597,13 @@ end;
 
 function TPasSemaTyper.ScoreArg(AArg, AAt, AParam: Integer): Integer;
 var
-  LDef, LPt, LCore, LElem: Integer;
+  LDef, LPt, LCore, LElem, LRank: Integer;
 begin
   // A parameter's type is a type identifier or `array of` (6.2.6): an
   // array definition in the slot is an open array, which names no type.
   LDef := M.Symbols[AParam].TypeNode;
   if (LDef <> NIL_NODE) and (Kind(LDef) = nkArrayType) then
-    Exit(OpenArrayScore(AArg, AAt, LDef));
+    Exit(ScaledFit(OpenArrayScore(AArg, AAt, LDef)));
   LPt := M.Symbols[AParam].TypeSym;
   // A `[...]` for a dynamic array of a type this unit can see is scored by
   // its elements, as for the open array; one of an element not known here
@@ -3233,21 +3621,71 @@ begin
         LElem := ElemTypeSym(PasArrayElemNode(T, LDef));
         if LElem = NIL_SYM then
           Exit(0);
-        Exit(CtorScore(LCore, LElem, ctDynArray));
+        Exit(ScaledFit(CtorScore(LCore, LElem, ctDynArray)));
       end;
     end;
   end;
-  Result := ScoreArgAs(AArg, AAt, LPt);
-  if Result > 0 then
-    Result := 2 * Result;
+  Result := ScoreArgRanked(AArg, AAt, LPt, not ParamIsByRef(M, AParam),
+    LRank);
+  Result := ScaledFit(2 * Result, LRank);
 end;
 
 function TPasSemaTyper.ScoreArgAs(AArg, AAt, APt: Integer): Integer;
 var
-  LCore, LPt, LCAt, LCPt: Integer;
+  LRank: Integer;
+begin
+  Result := ScoreArgRanked(AArg, AAt, APt, False, LRank);
+end;
+
+function TPasSemaTyper.IsConstName(N: Integer): Boolean;
+begin
+  N := PeelParens(T, N);
+  if (N <> NIL_NODE) and (Kind(N) = nkMember) then
+    N := T.LastChild(N);
+  Result := (N <> NIL_NODE) and (Kind(N) = nkIdent) and
+    (M.RefMap[N] <> NIL_SYM) and (M.Symbols[M.RefMap[N]].Kind = skConst);
+end;
+
+function TPasSemaTyper.ConvKindSym(ASym, ANode: Integer; AArgSide: Boolean;
+  out AFacts: TSemaOpFacts): TSemaConvKind;
+var
+  LB: Integer;
+begin
+  AFacts := Default(TSemaOpFacts);
+  Result := cnkNone;
+  case CatOf(ASym) of
+    tcInteger, tcFloat, tcVariant, tcString, tcChar:
+      begin
+        AFacts := OpFacts(ASym, ANode);
+        if AArgSide then
+          Result := ConvArgKindOf(AFacts)
+        else
+          Result := ConvKindOf(AFacts);
+      end;
+    tcPointer:
+      begin
+        LB := PasBuiltinCanonSym(M, WeakAliasEnd(ASym), FPlatform);
+        if (LB <> NIL_SYM) and (M.Symbols[LB].Kind = skBuiltinType) then
+          if (M.Symbols[LB].NameLower = 'pchar') or
+             (M.Symbols[LB].NameLower = 'pwidechar') then
+            Result := cnkPChar
+          else if M.Symbols[LB].NameLower = 'pansichar' then
+            Result := cnkPAnsiChar;
+      end;
+  end;
+end;
+
+function TPasSemaTyper.ScoreArgRanked(AArg, AAt, APt: Integer;
+  ARanked: Boolean; out ARank: Integer): Integer;
+var
+  LCore, LPt, LCAt, LCPt, LRank: Integer;
   LParCat: TSemaTypeCat;
+  LArgC: TSemaArgConv;
+  LParF: TSemaOpFacts;
 begin
   Result := 0;
+  ARank := 0;
+  LCore := NIL_NODE;
   LPt := APt;
   if LPt = NIL_SYM then
     Exit;
@@ -3281,6 +3719,26 @@ begin
     if ArgShapeRejects(Kind(LCore), IsProcDesignator(LCore), LParCat,
        M.Symbols[LPt].Kind = skGenericParam) then
       Exit(-1);
+  end;
+  // A number, Variant or string against one: dcc's ranking of the
+  // conversion (ConvRank) - ArgFitCanonX's rule.
+  LRank := -1;
+  if ARanked and (AAt <> NIL_SYM) then
+  begin
+    LArgC.Kind := ConvKindSym(AAt, LCore, True, LArgC.Facts);
+    LArgC.TypedConst := False;
+    if LArgC.Kind <> cnkNone then
+    begin
+      if (LArgC.Facts.Cat = tcInteger) and not LArgC.Facts.IntConst and
+         (LCore <> NIL_NODE) and
+         (MayFoldConvConst(T, LCore) or IsConstName(LCore)) then
+        FoldConvConst(T, LCore, ConstFacts(), OrdNameValue(), LArgC);
+      LRank := ConvRank(LArgC, ConvKindSym(LPt, NIL_NODE, False, LParF),
+        FWideExt);
+    end;
+  end;
+  if AArg <> NIL_NODE then
+  begin
     // A one-character literal - through parentheses, or both branches of
     // an inline `if` - is typed `string` here but is a Char constant:
     // `Char` fits it best, `AnsiChar` below a string parameter
@@ -3289,11 +3747,26 @@ begin
     begin
       if PasBuiltinIsChar(M, WeakAliasEnd(LPt), FPlatform) then
         Exit(3);
+      if LRank > 0 then
+        ARank := LRank;
       Exit(1);
     end;
   end;
   if AAt <> NIL_SYM then
   begin
+    // A ranked conversion: a conversion fit of that rank, or the exact
+    // match below - but an integer or real constant is no type's exact
+    // match (ArgFitCanonX).
+    if LRank > 0 then
+    begin
+      if not (LArgC.Facts.IntConst and not LArgC.TypedConst or
+              LArgC.Facts.RealLit) and
+         ((AAt = LPt) or (PasBuiltinCanonSym(M, WeakAliasEnd(AAt), FPlatform) =
+          PasBuiltinCanonSym(M, WeakAliasEnd(LPt), FPlatform))) then
+        Exit(2);
+      ARank := LRank;
+      Exit(1);
+    end;
     // The same type under two names is an exact match: a weak alias
     // (WeakAliasEnd), one type under two seeded names (Integer /
     // LongInt, Char / WideChar - PasBuiltinCanonSym, audit A3-17).
@@ -4854,6 +5327,7 @@ begin
   UStr := NIL_SYM; Byt := NIL_SYM; ShInt := NIL_SYM; Wrd := NIL_SYM;
   SmInt := NIL_SYM; U64 := NIL_SYM;
   FIs64 := PlatformInfo(FPlatform).Is64Bit;
+  FWideExt := PlatformInfo(FPlatform).ExtendedBytes > 8;
   for LIdx := 0 to M.SymCount - 1 do
     if M.Symbols[LIdx].Kind = skBuiltinType then
       if M.Symbols[LIdx].NameLower = 'integer' then Int := LIdx

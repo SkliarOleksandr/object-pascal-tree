@@ -10568,6 +10568,189 @@ begin
   end;
 end;
 
+// dcc's ranking of number and string conversions (ConvRank, spec 6.3.1;
+// local/type-conv-2026-11/n1): each pair declares the overload dcc does NOT
+// pick first, and only the picked one's result has `.W` - a wrong binding is
+// E2003. An integer constant by its value (A, B, C, N), a variable by its
+// type (D, E, G, H), a real literal Extended (J) and a true constant Currency
+// holds a Currency on either target (L), a cast constant its own type then
+// its value (M), the string kinds (P, Q, R, T, U), and no rank for a `var`
+// parameter, which takes its own type only (V: a Single for `var X: Single`
+// although the other argument ranks the Double overload higher); an
+// enumeration for a record without operators puts the candidate out (Z:
+// TextToFloat's shape, where the string conversion of the first argument
+// outranked it); a helper's constant ranks by its value (ER: `EnsureRange(R,
+// Integer.MinValue, Integer.MaxValue)` for an Int64 R). Y differs by target - Currency to Variant over Extended on
+// Win64, the reverse where Extended is 10 bytes. O is not called: `O(KB + 300)` takes O(Word) in dcc, but
+// FoldedIntValue folds no operator, so the sum still ranks as its Integer.
+procedure TestConvRanking;
+const
+  SRC_UNIT =
+    'unit CvA;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TFV = (fvA, fvB); TFS = record F: Integer; end;'#10 +
+    '  TIH = record helper for Integer const MaxV = 2147483647;'#10 +
+    '    MinV = -2147483648; end;'#10 +
+    'const KB = 5; KR = 1.5;'#10 +
+    'function A(X: Integer): TRA; overload;'#10 +
+    'function A(X: Byte): TRW; overload;'#10 +
+    'function B(X: Byte): TRA; overload;'#10 +
+    'function B(X: Word): TRW; overload;'#10 +
+    'function C(X: Double): TRA; overload;'#10 +
+    'function C(X: Int64): TRW; overload;'#10 +
+    'function D(X: Integer): TRA; overload;'#10 +
+    'function D(X: SmallInt): TRW; overload;'#10 +
+    'function E(X: Int64): TRA; overload;'#10 +
+    'function E(X: Cardinal): TRW; overload;'#10 +
+    'function G(X: Double): TRA; overload;'#10 +
+    'function G(X: Single): TRW; overload;'#10 +
+    'function H(X: Single): TRA; overload;'#10 +
+    'function H(X: Double): TRW; overload;'#10 +
+    'function J(X: Double): TRA; overload;'#10 +
+    'function J(X: Extended): TRW; overload;'#10 +
+    'function L(X: Extended): TRA; overload;'#10 +
+    'function L(X: Currency): TRW; overload;'#10 +
+    'function M(X: Integer): TRA; overload;'#10 +
+    'function M(X: ShortInt): TRW; overload;'#10 +
+    'function N(X: Integer): TRA; overload;'#10 +
+    'function N(X: Byte): TRW; overload;'#10 +
+    'function O(X: Integer): TRA; overload;'#10 +
+    'function O(X: Word): TRW; overload;'#10 +
+    'function P(const X: AnsiString): TRA; overload;'#10 +
+    'function P(const X: WideString): TRW; overload;'#10 +
+    'function Q(const X: WideString): TRA; overload;'#10 +
+    'function Q(const X: string): TRW; overload;'#10 +
+    'function R(const X: Variant): TRA; overload;'#10 +
+    'function R(X: PChar): TRW; overload;'#10 +
+    'function T(const X: Variant): TRA; overload;'#10 +
+    'function T(const X: WideString): TRW; overload;'#10 +
+    'function U(X: AnsiChar): TRA; overload;'#10 +
+    'function U(const X: WideString): TRW; overload;'#10 +
+    'function V(var X: Double; D: Double): TRA; overload;'#10 +
+    'function V(var X: Single; D: Single): TRW; overload;'#10 +
+    'function Z(const S: string; var E: Extended; const F: TFS): TRA; overload;'#10 +
+    'function Z(B: PWideChar; var V; VT: TFV): TRW; overload;'#10 +
+    'function ER(const A, B, C: Integer): TRA; overload;'#10 +
+    'function ER(const A, B, C: Int64): TRW; overload;'#10 +
+    '{$IFDEF WIN64}'#10 +
+    'function Y(X: Extended): TRA; overload;'#10 +
+    'function Y(const X: Variant): TRW; overload;'#10 +
+    '{$ELSE}'#10 +
+    'function Y(const X: Variant): TRA; overload;'#10 +
+    'function Y(X: Extended): TRW; overload;'#10 +
+    '{$ENDIF}'#10 +
+    'implementation'#10 +
+    'function A(X: Integer): TRA; begin end;'#10 +
+    'function A(X: Byte): TRW; begin end;'#10 +
+    'function B(X: Byte): TRA; begin end;'#10 +
+    'function B(X: Word): TRW; begin end;'#10 +
+    'function C(X: Double): TRA; begin end;'#10 +
+    'function C(X: Int64): TRW; begin end;'#10 +
+    'function D(X: Integer): TRA; begin end;'#10 +
+    'function D(X: SmallInt): TRW; begin end;'#10 +
+    'function E(X: Int64): TRA; begin end;'#10 +
+    'function E(X: Cardinal): TRW; begin end;'#10 +
+    'function G(X: Double): TRA; begin end;'#10 +
+    'function G(X: Single): TRW; begin end;'#10 +
+    'function H(X: Single): TRA; begin end;'#10 +
+    'function H(X: Double): TRW; begin end;'#10 +
+    'function J(X: Double): TRA; begin end;'#10 +
+    'function J(X: Extended): TRW; begin end;'#10 +
+    'function L(X: Extended): TRA; begin end;'#10 +
+    'function L(X: Currency): TRW; begin end;'#10 +
+    'function M(X: Integer): TRA; begin end;'#10 +
+    'function M(X: ShortInt): TRW; begin end;'#10 +
+    'function N(X: Integer): TRA; begin end;'#10 +
+    'function N(X: Byte): TRW; begin end;'#10 +
+    'function O(X: Integer): TRA; begin end;'#10 +
+    'function O(X: Word): TRW; begin end;'#10 +
+    'function P(const X: AnsiString): TRA; begin end;'#10 +
+    'function P(const X: WideString): TRW; begin end;'#10 +
+    'function Q(const X: WideString): TRA; begin end;'#10 +
+    'function Q(const X: string): TRW; begin end;'#10 +
+    'function R(const X: Variant): TRA; begin end;'#10 +
+    'function R(X: PChar): TRW; begin end;'#10 +
+    'function T(const X: Variant): TRA; begin end;'#10 +
+    'function T(const X: WideString): TRW; begin end;'#10 +
+    'function U(X: AnsiChar): TRA; begin end;'#10 +
+    'function U(const X: WideString): TRW; begin end;'#10 +
+    'function V(var X: Double; D: Double): TRA; begin end;'#10 +
+    'function V(var X: Single; D: Single): TRW; begin end;'#10 +
+    'function Z(const S: string; var E: Extended; const F: TFS): TRA; begin end;'#10 +
+    'function Z(B: PWideChar; var V; VT: TFV): TRW; begin end;'#10 +
+    'function ER(const A, B, C: Integer): TRA; begin end;'#10 +
+    'function ER(const A, B, C: Int64): TRW; begin end;'#10 +
+    '{$IFDEF WIN64}'#10 +
+    'function Y(X: Extended): TRA; begin end;'#10 +
+    'function Y(const X: Variant): TRW; begin end;'#10 +
+    '{$ELSE}'#10 +
+    'function Y(const X: Variant): TRA; begin end;'#10 +
+    'function Y(X: Extended): TRW; begin end;'#10 +
+    '{$ENDIF}'#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program CvP;'#10'uses CvA;'#10 +
+    'var K: Integer; Bt: Byte; Wd: Word; I: Integer; I64: Int64;'#10 +
+    '  S: string; AS_: AnsiString; C: Char; CU: Currency; SG: Single; DV: Double;'#10 +
+    '  EX: Extended;'#10 +
+    'begin'#10 +
+    '  K := A(5).W;'#10 +
+    '  K := B(300).W;'#10 +
+    '  K := C(5000000000).W;'#10 +
+    '  K := D(Bt).W;'#10 +
+    '  K := E(Wd).W;'#10 +
+    '  K := G(I).W;'#10 +
+    '  K := H(I64).W;'#10 +
+    '  K := J(1.5).W;'#10 +
+    '  K := L(KR).W;'#10 +
+    '  K := M(Byte(5)).W;'#10 +
+    '  K := N(KB).W;'#10 +
+    '  K := P(S).W;'#10 +
+    '  K := Q(AS_).W;'#10 +
+    '  K := R(''abc'').W;'#10 +
+    '  K := T(C).W;'#10 +
+    '  K := U(''a'').W;'#10 +
+    '  K := V(SG, DV).W;'#10 +
+    '  K := Z(PChar(S), EX, fvA).W;'#10 +
+    '  K := ER(I64, Integer.MinV, Integer.MaxV).W;'#10 +
+    '  K := Y(CU).W;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LName: string;
+  LPlat: TPasPlatform;
+begin
+  for LPlat in [pfWin64, pfWin32] do
+  begin
+    LDir := FreshDir('pastree_sema_convrank');
+    TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+      'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+      'implementation'#10'end.'#10);
+    TFile.WriteAllText(TPath.Combine(LDir, 'CvA.pas'), SRC_UNIT);
+    TFile.WriteAllText(TPath.Combine(LDir, 'CvP.dpr'), SRC_PROG);
+    GProj := TPasSemaProject.Create(LPlat, [LDir], []);
+    try
+      GProj.ReportUnresolvedMembers := True;
+      GProj.AnalyzeProject(TPath.Combine(LDir, 'CvP.dpr'));
+      LName := 'Win32';
+      if LPlat = pfWin64 then
+        LName := 'Win64';
+      for var LD in ModelByName('cvp').Diags do
+        if LD.Code = 'E2003' then
+          LName := LName + ', line ' + IntToStr(LD.Line);
+      Ok('convrank ' + LName +
+        ': every call binds dcc''s overload - no E2003 [' +
+        IntToStr(DiagCount(ModelByName('cvp'), 'E2003')) + ']',
+        DiagCount(ModelByName('cvp'), 'E2003') = 0);
+    finally
+      GProj.Free;
+      if TDirectory.Exists(LDir) then
+        TDirectory.Delete(LDir, True);
+    end;
+  end;
+end;
+
 // B35: one operator rule table for both typers (4.2.1) - narrow and alias
 // operands, an enum-subrange array's bounds, a subrange whose bound is
 // another unit's enumeration value or constant, and an inherited cross-unit
@@ -17198,6 +17381,7 @@ begin
   TestOneScorer;
   TestOverloadSets;
   TestValueOverloads;
+  TestConvRanking;
   TestOperatorTable;
   TestTargetFacts;
   TestOracleDepth;

@@ -1541,10 +1541,27 @@ type
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
     function ParCatOf(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
     function IsStaticArrayX(const AX: TSemaXType): Boolean;
-    // ArgFitX over sides already canonicalized - see there.
+    // ArgFitX over sides already canonicalized - see there. AConv: the
+    // argument as the conversion ranking reads it (ArgConvX), nil for none;
+    // ARank: that ranking's rank of a conversion fit (1), else 0.
     function ArgFitCanonX(const AArgX, AParX, ACanonArgX,
       ACanonParX: TSemaXType; const ATree: TPasTree; ACore: Integer;
-      AProcDesig, AClassRef: Boolean): Integer;
+      AProcDesig, AClassRef: Boolean; AConv: PSemaArgConv;
+      out ARank: Integer): Integer;
+    { The argument node ANode of model AMid, typed AX, as the conversion
+      ranking reads it (TSemaArgConv): OpFactsX's facts, and its kind -
+      ConvArgKindOf, or PChar / PAnsiChar by ConvPtrKindX. }
+    function ArgConvX(AMid, ANode: Integer; const AX: TSemaXType): TSemaArgConv;
+    { Is ANode of model AMid (parentheses peeled) a name or a member access
+      bound to a constant (skConst)? The one name shape FoldConvConst may
+      fold (`Integer.MaxValue`), asked before its closures are made. }
+    function IsConstNameX(AMid, ANode: Integer): Boolean;
+    { The conversion kind of a parameter of type AX (ConvKindOf over
+      OpFactsX; a PChar / PAnsiChar by ConvPtrKindX). }
+    function ParConvKindX(const AX: TSemaXType): TSemaConvKind;
+    { cnkPChar / cnkPAnsiChar for the predefined PChar (PWideChar) and
+      PAnsiChar under any alias, cnkNone for every other type. }
+    function ConvPtrKindX(const AX: TSemaXType): TSemaConvKind;
     // OpenArgFitX over sides already canonicalized - see the implementation.
     function OpenArrFitX(const AArgX, ACanonArgX, ACanonElemX: TSemaXType;
       AOfConst: Boolean; const ATree: TPasTree; ACore: Integer;
@@ -13868,6 +13885,7 @@ function TPasSemaProject.ArgFitX(const AArgX, AParX: TSemaXType;
 var
   LArgX, LCanonArgX, LCanonParX, LElemX: TSemaXType;
   LCoreKind: TPasNodeKind;
+  LRank: Integer;
 begin
   LArgX := AArgX;
   LCoreKind := nkError;   // no node: none of the kinds tested below
@@ -13895,7 +13913,7 @@ begin
   if XValid(LArgX) and XValid(AParX) then
     LCanonArgX := CanonTypeX(LArgX);
   Result := ArgFitCanonX(LArgX, AParX, LCanonArgX, LCanonParX, ATree, ACore,
-    AProcDesig, AClassRef);
+    AProcDesig, AClassRef, nil, LRank);
   if Result > 0 then
     Result := 2 * Result;
 end;
@@ -14107,7 +14125,7 @@ function TPasSemaProject.CtorFitX(const ACanonElemX: TSemaXType;
   ATarget: TSemaCtorTarget; const ATree: TPasTree; ACtor: Integer;
   const AArg: TPasArrayArg): Integer;
 var
-  LKid, LIdx, LFit: Integer;
+  LKid, LIdx, LFit, LRank: Integer;
   LOfConst, LParChar, LParString: Boolean;
   LElem: TPasCtorElem;
 begin
@@ -14142,7 +14160,7 @@ begin
     LFit := 0;
     if not LOfConst then
       LFit := ArgFitCanonX(LElem.X, ACanonElemX, LElem.CanonX, ACanonElemX,
-        ATree, LKid, False, LElem.Kind = cekClassRef);
+        ATree, LKid, False, LElem.Kind = cekClassRef, nil, LRank);
     LFit := CtorElemFit(ATarget, LElem.Cat, LElem.StaticArray,
       LElem.CharValue, LElem.Kind <> cekValue, LParChar, LParString, LFit);
     if LFit < 0 then
@@ -14166,14 +14184,102 @@ begin
     Result := ArrayElemX(ACanonParX);
 end;
 
+function TPasSemaProject.ConvPtrKindX(const AX: TSemaXType): TSemaConvKind;
+var
+  LC: TSemaXType;
+begin
+  Result := cnkNone;
+  LC := CanonTypeX(AX);
+  if not XValid(LC) or
+     (FModels[LC.UnitId].Symbols[LC.Sym].Kind <> skBuiltinType) then
+    Exit;
+  if (FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'pchar') or
+     (FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'pwidechar') then
+    Result := cnkPChar
+  else if FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'pansichar' then
+    Result := cnkPAnsiChar;
+end;
+
+function TPasSemaProject.ParConvKindX(const AX: TSemaXType): TSemaConvKind;
+begin
+  if not XValid(AX) then
+    Exit(cnkNone);
+  case XCatOf(AX) of
+    tcInteger, tcFloat, tcVariant, tcString, tcChar:
+      Result := ConvKindOf(OpFactsX(AX.UnitId, NIL_NODE, AX));
+    tcPointer:
+      Result := ConvPtrKindX(AX);
+  else
+    Result := cnkNone;
+  end;
+end;
+
+function TPasSemaProject.IsConstNameX(AMid, ANode: Integer): Boolean;
+var
+  LNode, LBMid, LBSym: Integer;
+begin
+  // DesignatorSymX, the binding ConstFactsX reads: a helper's constant
+  // (`Integer.MaxValue`) is bound through it, not RefMap / ExtRefMap.
+  LNode := PeelParens(FModels[AMid].Tree, ANode);
+  Result := (LNode <> NIL_NODE) and
+    (FModels[AMid].Tree.Nodes[LNode].Kind in [nkIdent, nkMember]) and
+    DesignatorSymX(AMid, LNode, LBMid, LBSym) and
+    (FModels[LBMid].Symbols[LBSym].Kind = skConst);
+end;
+
+function TPasSemaProject.ArgConvX(AMid, ANode: Integer;
+  const AX: TSemaXType): TSemaArgConv;
+var
+  LVMid, LVNode, LLit: Integer;
+begin
+  Result := Default(TSemaArgConv);
+  if not XValid(AX) then
+    Exit;
+  case XCatOf(AX) of
+    tcInteger, tcFloat, tcVariant, tcString, tcChar:
+      begin
+        Result.Facts := OpFactsX(AMid, ANode, AX);
+        Result.Kind := ConvArgKindOf(Result.Facts);
+        if (Result.Facts.Cat = tcInteger) and not Result.Facts.IntConst and
+           (ANode <> NIL_NODE) and
+           (MayFoldConvConst(FModels[AMid].Tree, ANode) or
+            IsConstNameX(AMid, ANode)) then
+          FoldConvConst(FModels[AMid].Tree, ANode, ConstFactsX(AMid),
+            OrdNameValueX(AMid), Result);
+        // A true constant of a real value Currency holds ranks as a Currency
+        // on every target, dcc32 too, where inference (3.1.3) makes it an
+        // Extended: `const K = 1.5` takes F(Currency) over F(Extended).
+        if Result.Facts.RealLit and not Result.Facts.CurrNamed and
+           (RealLiteralNode(FModels[AMid].Tree, ANode) = NIL_NODE) then
+        begin
+          ConstValueNodeX(AMid, ANode, LVMid, LVNode);
+          if LVNode <> NIL_NODE then
+          begin
+            LLit := RealLiteralNode(FModels[LVMid].Tree, LVNode);
+            Result.Facts.CurrNamed := (LLit <> NIL_NODE) and
+              (PasLiteralTypeName(FModels[LVMid].Tree, LLit, False, True) =
+               'currency');
+            if Result.Facts.CurrNamed then
+              Result.Kind := cnkCurrency;
+          end;
+        end;
+      end;
+    tcPointer:
+      Result.Kind := ConvPtrKindX(AX);
+  end;
+end;
+
 function TPasSemaProject.ArgFitCanonX(const AArgX, AParX, ACanonArgX,
   ACanonParX: TSemaXType; const ATree: TPasTree; ACore: Integer;
-  AProcDesig, AClassRef: Boolean): Integer;
+  AProcDesig, AClassRef: Boolean; AConv: PSemaArgConv;
+  out ARank: Integer): Integer;
 var
   LParCat, LArgCat: TSemaTypeCat;
   LTarget: TSemaXType;
+  LRank: Integer;
 begin
   Result := 0;
+  ARank := 0;
   if not XValid(AParX) then
     Exit;
   // A class REFERENCE (CrossType's ArgScore says which nodes are one) fits
@@ -14228,6 +14334,22 @@ begin
     Exit(-1);
   if not XValid(AArgX) then
     Exit;
+  // A number, Variant or string against one: dcc's ranking of the
+  // conversion (ConvRank), read for the conversion fit below.
+  // Between variables of the same type that is the exact match, decided
+  // first: the most common pair needs no parameter kind (ParConvKindX). An
+  // integer constant and a real one are no type's exact match (ConvRank
+  // ranks them by value): `F(5)` takes F(Byte) over F(Integer), its
+  // literal's type here.
+  LRank := -1;
+  if (AConv <> nil) and (AConv.Kind <> cnkNone) then
+  begin
+    if not (AConv.Facts.IntConst and not AConv.TypedConst or
+            AConv.Facts.RealLit) and
+       (XSameType(AParX, AArgX) or XSameType(ACanonParX, ACanonArgX)) then
+      Exit(2);
+    LRank := ConvRank(AConv^, ParConvKindX(ACanonParX), FInfo.ExtendedBytes > 8);
+  end;
   // A one-character literal is a Char constant (IsCharLiteralExpr -
   // through parentheses and both branches of an inline `if`, every
   // piece of `#13#10` counted): a `Char` parameter fits it best, a
@@ -14240,6 +14362,15 @@ begin
     if PasBuiltinIsChar(FModels[ACanonParX.UnitId], ACanonParX.Sym,
        FPlatform) then
       Exit(3);
+    if LRank > 0 then
+      ARank := LRank;
+    Exit(1);
+  end;
+  // A ranked conversion is a conversion fit of that rank. The rejections
+  // below never apply to a pair the ranking takes.
+  if LRank > 0 then
+  begin
+    ARank := LRank;
     Exit(1);
   end;
   // Not the same SYMBOL - but it may still be the same TYPE reached
@@ -14914,6 +15045,10 @@ var
   // (WithTargetTypeX) - the with and xtype stages paid ~0.7% for it.
   LArrArgCore: Integer;
   LArrArg: ^TPasArrayArg;
+  // The argument the conversion ranking read last (ArgConvX) and its node:
+  // read once for all of a call's candidates, like LArrArg.
+  LArgConvCore: Integer;
+  LArgConv: TSemaArgConv;
 
   // The probe ElementX and PointeeOfDeclX are given: the walk's own in a
   // probe, where FX already holds the base; the pass's LFallback otherwise.
@@ -15359,7 +15494,8 @@ var
   end;
 
   // Conservative per-candidate match score, mirroring the intra-unit
-  // TPasSemaTyper.ScoreArgs: exact type = 2, assignable = 1 per argument,
+  // TPasSemaTyper.ScoreArgs: per argument its fit (exact, assignable, ... -
+  // ArgScore) times CConvScale plus a conversion's rank (ConvRank),
   // parameter types substituted in ACtx (the instantiation frame the callee
   // member was found in). -1 = the candidate's arity does not admit the call.
   // A candidate with NO param info (builtin) fits neutrally at 0.
@@ -15480,14 +15616,17 @@ var
 
     // One argument against the parameter type AParX: AArg its node, or
     // NIL_NODE for a comparison an nkAmbiguous stands for (16.3.1) - typed
-    // AArgX, with no node shape to read. On the doubled scale of
-    // CtorElemFit: above 0 a match, 0 no evidence, -1 rejects the
-    // candidate. AOpenArr: AParX is an open array's element type
-    // (ParamFitTypeX), AOfConst: of `array of const`.
+    // AArgX, with no node shape to read. A fit on the doubled scale of
+    // CtorElemFit (above 0 a match, 0 no evidence) times CConvScale, plus
+    // the conversion's rank (ConvRank) for a conversion fit; -1 rejects
+    // the candidate. AOpenArr: AParX is an open array's element type
+    // (ParamFitTypeX), AOfConst: of `array of const`; AByRef: a `var` /
+    // `out` parameter (ParamIsByRef), which no conversion reaches - no rank.
     function ArgScore(AArg: Integer; const AArgX, AParX: TSemaXType;
-      AOpenArr, AOfConst: Boolean): Integer;
+      AOpenArr, AOfConst, AByRef: Boolean): Integer;
     var
-      LCore, LCoreFirst, LFit: Integer;
+      LCore, LCoreFirst, LFit, LRank: Integer;
+      LConv: PSemaArgConv;
       LCoreKind: TPasNodeKind;
       LArgX, LParX, LCanonParX, LCanonArgX, LElemX: TSemaXType;
       LClassRef: Boolean;
@@ -15568,8 +15707,8 @@ var
         if LClassRef or not XValid(LParX) then
           Exit;
         ReadArrayArg(LCore, LArgX);
-        Exit(OpenArrFitX(LArgX, LCanonArgX, LCanonParX, AOfConst, LM.Tree,
-          LCore, LArrArg^));
+        Exit(ScaledFit(OpenArrFitX(LArgX, LCanonArgX, LCanonParX, AOfConst, LM.Tree,
+          LCore, LArrArg^)));
       end;
       // So has a `[...]` for a DYNAMIC array: its elements, a step below an
       // open array's (CtorElemFit).
@@ -15579,19 +15718,28 @@ var
         if XValid(LElemX) then
         begin
           ReadArrayArg(LCore, LArgX);
-          Exit(CtorFitX(CanonTypeX(LElemX), ctDynArray, LM.Tree, LCore,
-            LArrArg^));
+          Exit(ScaledFit(CtorFitX(CanonTypeX(LElemX), ctDynArray, LM.Tree, LCore,
+            LArrArg^)));
         end;
       end;
       // The rest - the class reference, the shape rejections, the character
       // literal, the types - is ArgFitCanonX, the rule the completion engine
-      // scores by too, doubled.
+      // scores by too, doubled; a conversion with its rank (ArgConvX, read
+      // once per argument node of the call).
+      LConv := nil;
+      if (LCore <> NIL_NODE) and not LClassRef and not AByRef then
+      begin
+        if LArgConvCore <> LCore then
+        begin
+          LArgConv := ArgConvX(AId, LCore, LArgX);
+          LArgConvCore := LCore;
+        end;
+        LConv := @LArgConv;
+      end;
       LFit := ArgFitCanonX(LArgX, LParX, LCanonArgX, LCanonParX, LM.Tree,
         LCore, (LCore <> NIL_NODE) and not LClassRef and XValid(LParX) and
-        IsProcedureDesignator(LCore), LClassRef);
-      if LFit < 0 then
-        Exit(-1);
-      Inc(Result, 2 * LFit);
+        IsProcedureDesignator(LCore), LClassRef, LConv, LRank);
+      Result := ScaledFit(2 * LFit, LRank);
     end;
 
     // The next parameter of the candidate's param scope after LPos (or the
@@ -15652,10 +15800,12 @@ var
             LArgX := XNil;
             if XValid(GetX(LL)) and XValid(GetX(LR)) then
               LArgX := BuiltinX(AId, 'boolean');
-            LS := ArgScore(NIL_NODE, LArgX, LParX, LOpenArr, LOfConst);
+            LS := ArgScore(NIL_NODE, LArgX, LParX, LOpenArr, LOfConst,
+              ParamIsByRef(LPM, LPList[LPos]));
           end
           else
-            LS := ArgScore(LL, GetX(LL), LParX, LOpenArr, LOfConst);
+            LS := ArgScore(LL, GetX(LL), LParX, LOpenArr, LOfConst,
+              ParamIsByRef(LPM, LPList[LPos]));
           if LS < 0 then
             Exit(-1);
           Inc(Result, LS);
@@ -15665,7 +15815,8 @@ var
       else
       begin
         LParX := ParamFitTypeX(AMid, LPList[LPos], ACtx, LOpenArr, LOfConst);
-        LS := ArgScore(LArg, GetX(LArg), LParX, LOpenArr, LOfConst);
+        LS := ArgScore(LArg, GetX(LArg), LParX, LOpenArr, LOfConst,
+          ParamIsByRef(LPM, LPList[LPos]));
         if LS < 0 then
           Exit(-1);
         Inc(Result, LS);
@@ -15895,6 +16046,7 @@ var
       LArrArg.Elems := nil;
       LArrArg.InlineElemX := XNil;
     end;
+    LArgConvCore := NIL_NODE;
     LBestScore := -1;
     ABestMid := -1;
     ABestSym := NIL_SYM;
@@ -17610,6 +17762,7 @@ begin
   LFallback := nil;
   LArrArgCore := NIL_NODE;
   LArrArg := nil;
+  LArgConvCore := NIL_NODE;
   if LProbe <> nil then
   begin
     // A PROBE: the probe's tables in place of the arrays and overlays, the
@@ -21416,7 +21569,10 @@ begin
   Result.Rank := LS.NumRank;
   Result.Unsigned := NameIs(['byte', 'word', 'cardinal', 'longword', 'uint64',
     'nativeuint']);
-  if (Result.Cat = tcInteger) and not Result.IntConst and (ANode <> NIL_NODE) then
+  // Only a call folds there (FoldedCallOpFacts); asked first, as the three
+  // closures are made for the call whatever the node is.
+  if (Result.Cat = tcInteger) and not Result.IntConst and (ANode <> NIL_NODE) and
+     (FModels[AMid].Tree.Nodes[PeelParens(FModels[AMid].Tree, ANode)].Kind = nkCall) then
     FoldedCallOpFacts(FModels[AMid].Tree, ANode, ConstFactsX(AMid),
       OrdNameValueX(AMid), ArgFactsX(AMid), Result);
   Result.Curr := NameIs(['currency']) and not Result.RealLit;
