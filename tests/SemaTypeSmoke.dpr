@@ -807,6 +807,74 @@ begin
     IntToStr(DiagCount('E2028')) + ']', DiagCount('E2028') = 1);
   GModel.Free;
 
+  // An integer literal is the narrowest of Integer, Cardinal, Int64, UInt64
+  // holding its value after the sign is applied (3.1.3, B.5.1), in the unit's
+  // own typer as in the project pass: every literal used to be Integer here,
+  // so `C(5000000000)` over C(Double) / C(Int64) selected no overload, where
+  // dcc calls the Int64 one (dcc32 / dcc64 37.0, 2026-11-05).
+  Analyze(
+    'unit u;'#10'interface'#10 +
+    'type TCD = class end; TCI = class end;'#10 +
+    'function C(X: Double): TCD; overload;'#10 +
+    'function C(X: Int64): TCI; overload;'#10 +
+    'implementation'#10 +
+    'function C(X: Double): TCD; begin Result := nil; end;'#10 +
+    'function C(X: Int64): TCI; begin Result := nil; end;'#10 +
+    'procedure P;'#10 +
+    'var R01, R02, R03, R04, R05, R06, R07, R08, R09, R10, R11: Variant;'#10 +
+    '  R12, R13, R14, R15, R16: Variant; I: Integer; I64: Int64;'#10 +
+    '  O1: TCI; O2: TCD;'#10 +
+    'begin'#10 +
+    '  R01 := 5000000000;'#10 +
+    '  R02 := 18446744073709551615;'#10 +
+    '  R03 := 9223372036854775808;'#10 +
+    '  R04 := $8000000000000000;'#10 +
+    '  R05 := 2147483648;'#10 +
+    '  R06 := -2147483648;'#10 +
+    '  R07 := -2147483649;'#10 +
+    '  R08 := -9223372036854775808;'#10 +
+    '  R09 := (4294967296);'#10 +
+    '  R10 := 2147483647;'#10 +
+    '  R11 := %1000000000000000000000000000000000000000000000000000000000000000;'#10 +
+    '  O1 := C(5000000000);'#10 +
+    '  R12 := I + 18446744073709551615;'#10 +
+    '  R13 := I64 + 9223372036854775808;'#10 +
+    '  R14 := 9223372036854775808 - 1;'#10 +
+    '  R15 := 5000000000 + I;'#10 +
+    '  R16 := +18446744073709551615;'#10 +
+    '  O2 := C(18446744073709551615);'#10 +
+    'end;'#10 +
+    'end.'#10);
+  Eq('3.1.3: 5000000000 is Int64', AssignedType('R01'), 'Int64');
+  Eq('3.1.3: 18446744073709551615 is UInt64', AssignedType('R02'), 'UInt64');
+  Eq('3.1.3: 9223372036854775808 is UInt64', AssignedType('R03'), 'UInt64');
+  Eq('3.1.3: $8000000000000000 is UInt64', AssignedType('R04'), 'UInt64');
+  Eq('3.1.3: 2147483648 is Cardinal', AssignedType('R05'), 'Cardinal');
+  Eq('3.1.3: -2147483648 is Integer', AssignedType('R06'), 'Integer');
+  Eq('3.1.3: -2147483649 is Int64', AssignedType('R07'), 'Int64');
+  Eq('3.1.3: -9223372036854775808 is Int64', AssignedType('R08'), 'Int64');
+  Eq('3.1.3: (4294967296) is Int64', AssignedType('R09'), 'Int64');
+  Eq('3.1.3: 2147483647 is Integer', AssignedType('R10'), 'Integer');
+  Eq('3.1.3: a binary 2^63 is UInt64', AssignedType('R11'), 'UInt64');
+  Eq('6.3.1: C(5000000000) takes C(Int64) over C(Double)',
+    AssignedType('O1'), 'TCI');
+  // A literal above High(Int64) is a UInt64 VALUE to every operator - dcc
+  // types each of these UInt64 (W1073 beside a signed operand) - so no
+  // constant reading of it is needed (IntLiteralValue stops at High(Int64)).
+  Eq('4.2.1: I + 18446744073709551615 is UInt64', AssignedType('R12'),
+    'UInt64');
+  Eq('4.2.1: I64 + 9223372036854775808 is UInt64', AssignedType('R13'),
+    'UInt64');
+  Eq('4.2.1: 9223372036854775808 - 1 stays UInt64', AssignedType('R14'),
+    'UInt64');
+  Eq('4.2.1: 5000000000 + I is Int64', AssignedType('R15'), 'Int64');
+  Eq('3.1.3: +18446744073709551615 is UInt64', AssignedType('R16'), 'UInt64');
+  Eq('6.3.1: C(18446744073709551615) takes C(Double): no Int64 holds it',
+    AssignedType('O2'), 'TCD');
+  Ok('6.3.1: ...and no diagnostic [' + IntToStr(Length(GModel.Diags)) + ']',
+    Length(GModel.Diags) = 0);
+  GModel.Free;
+
   if GCounter.Finish('SemaTypeSmoke') then
     ExitCode := 1;
   GPP.Free;

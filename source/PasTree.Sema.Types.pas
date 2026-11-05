@@ -232,6 +232,7 @@ type
     function InlineIfResult(N: Integer): Integer;
     function BinaryResult(N: Integer): Integer;
     function UnaryResult(N: Integer): Integer;
+    function IntLitType(ALit: Integer; ANegated: Boolean): Integer;
     function CallResult(N: Integer): Integer;
     function ProcTypeResult(ASym: Integer): Integer;
     function IntrinsicResult(ACall, AHead: Integer): Integer;
@@ -683,7 +684,9 @@ function InlineIfAnswer(const AL, AR: TSemaOpFacts;
 
 { The value of integer constant ANode of ATree - a decimal, `$` hex or `%`
   binary literal with digit separators, under parentheses and signs. False
-  for anything else, and for a literal above High(Int64). }
+  for anything else, and for a literal above High(Int64): that one is a
+  UInt64 (3.1.3), which dcc reads as a UInt64 value in every operator and
+  overload choice, so its type alone answers (TPasSemaTyper.IntLitType). }
 function IntLiteralValue(const ATree: TPasTree; ANode: Integer;
   out AValue: Int64): Boolean;
 
@@ -3374,6 +3377,40 @@ begin
   Result := OpSym(LAns, LL, LR, False);
 end;
 
+{ The type dcc gives integer literal ALit, ANegated when a `-` stands in
+  front of it (3.1.3, B.5.1): the narrowest of Integer, Cardinal, Int64 and
+  UInt64 holding its value after the sign - `2147483648` Cardinal,
+  `-2147483648` Integer, `5000000000` Int64, `9223372036854775808`,
+  `$8000000000000000` and `18446744073709551615` UInt64. One rule with the
+  project pass (PasLiteralTypeName, TPasSemaProject.LiteralTypeX). NIL_SYM
+  for a literal dcc rejects (`18446744073709551616` E2102,
+  `-9223372036854775809` E2099). A literal of at most nine characters
+  starting with a digit is a decimal below 10^9, Integer without reading
+  it - nearly every literal of a unit. }
+function TPasSemaTyper.IntLitType(ALit: Integer; ANegated: Boolean): Integer;
+var
+  LName: string;
+  LP: PChar;
+  LLen: Integer;
+begin
+  if T.Nodes[ALit].FirstToken = T.Nodes[ALit].LastToken then
+  begin
+    T.Source.VisibleSlice(T.Nodes[ALit].FirstToken, LP, LLen);
+    if (LLen >= 1) and (LLen <= 9) and CharInSet(LP^, ['0'..'9']) then
+      Exit(Int);
+  end;
+  Result := NIL_SYM;
+  LName := PasLiteralTypeName(T, ALit, ANegated, FIs64);
+  if LName = 'integer' then
+    Result := Int
+  else if LName = 'cardinal' then
+    Result := Card
+  else if LName = 'int64' then
+    Result := I64
+  else if LName = 'uint64' then
+    Result := U64;
+end;
+
 function TPasSemaTyper.UnaryResult(N: Integer): Integer;
 var
   LOperand, LO: Integer;
@@ -3386,6 +3423,17 @@ begin
   LOp := OpKind(N);
   if LOp = tkAt then
     Exit(Ptr);
+  // A sign over an integer literal is part of the literal: dcc applies it
+  // before it picks the type (3.1.3), so `-2147483648` is an Integer though
+  // 2147483648 alone is a Cardinal, and `-9223372036854775808` an Int64.
+  // A value past Low(Int64) is dcc's E2099; the operator below types it.
+  if (LOp in [tkMinus, tkPlus]) and (LOperand <> NIL_NODE) and
+     (Kind(LOperand) = nkIntLit) then
+  begin
+    Result := IntLitType(LOperand, LOp = tkMinus);
+    if Result <> NIL_SYM then
+      Exit;
+  end;
   if (LO = NIL_SYM) or IsTypeNameOperand(LOperand) then
     Exit;
   LAns := OperatorAnswer(LOp, True, OpFacts(LO, LOperand),
@@ -5084,7 +5132,13 @@ begin
   end;
 
   case LKind of
-    nkIntLit: Result := Int;
+    nkIntLit:
+      begin
+        // By its value (3.1.3): `5000000000` is an Int64, not an Integer.
+        Result := IntLitType(N, False);
+        if Result = NIL_SYM then
+          Result := Int;   // dcc's E2102; the category is all that is left
+      end;
     nkRealLit: Result := Ext;
     nkStrLit: Result := Str;
     nkCaretChar: Result := Chr;

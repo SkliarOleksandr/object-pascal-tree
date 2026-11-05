@@ -9990,6 +9990,72 @@ begin
   end;
 end;
 
+{ An integer literal above High(Int64) is a UInt64 (3.1.3, B.5.1) - written
+  in decimal, hex or binary - as a call argument and as an inline var's
+  initializer alike; `5000000000` is an Int64 (dcc32 / dcc64 37.0,
+  2026-11-05). The literal argument was the unit typer's Integer, so
+  `F(18446744073709551615)` took F(Integer) over F(UInt64). }
+procedure TestBigIntLiterals;
+var
+  LDir: string;
+  LM: TPasSemaModel;
+begin
+  LDir := FreshDir('pastree_sema_bigintlit');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BlA.pas'),
+    'unit BlA;'#10'interface'#10'type'#10 +
+    '  TFI = class IOnly: Integer; end;'#10 +
+    '  TFU = class UOnly: Integer; end;'#10 +
+    '  TCD = class DOnly: Integer; end;'#10 +
+    '  TCI = class LOnly: Integer; end;'#10 +
+    'function F(X: Integer): TFI; overload;'#10 +
+    'function F(X: UInt64): TFU; overload;'#10 +
+    'function C(X: Double): TCD; overload;'#10 +
+    'function C(X: Int64): TCI; overload;'#10 +
+    'implementation'#10 +
+    'function F(X: Integer): TFI; begin Result := nil; end;'#10 +
+    'function F(X: UInt64): TFU; begin Result := nil; end;'#10 +
+    'function C(X: Double): TCD; begin Result := nil; end;'#10 +
+    'function C(X: Int64): TCI; begin Result := nil; end;'#10 +
+    'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'BlP.dpr'),
+    'program BlP;'#10'uses BlA;'#10 +
+    'procedure Go;'#10 +
+    'var I: Integer;'#10 +
+    'begin'#10 +
+    '  I := F(18446744073709551615).UOnly;'#10 +
+    '  I := F(9223372036854775808).UOnly;'#10 +
+    '  I := F($8000000000000000).UOnly;'#10 +
+    '  I := F((18446744073709551615)).UOnly;'#10 +
+    '  var A := 18446744073709551615;'#10 +
+    '  I := F(A).UOnly;'#10 +
+    '  var B := 9223372036854775808;'#10 +
+    '  I := F(B).UOnly;'#10 +
+    '  I := C(5000000000).LOnly;'#10 +
+    '  I := C(-5000000000).LOnly;'#10 +
+    'end;'#10 +
+    'begin'#10'end.'#10);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'BlP.dpr'));
+    LM := ModelByName('blp');
+    Ok('bigintlit: a literal above High(Int64) takes F(UInt64), 5000000000' +
+      ' C(Int64) over C(Double) [' + IntToStr(DiagCount(LM, 'E2003')) + ']',
+      DiagCount(LM, 'E2003') = 0);
+    if DiagCount(LM, 'E2003') <> 0 then
+      for var LIdx := 0 to High(LM.Diags) do
+        Writeln('  ', LM.Diags[LIdx].Msg, ' at ', LM.Diags[LIdx].Line);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 { Block scopes for inline declarations, audit B43 (local/probe-b43, dcc64
   37.0): an inline var's own type and initializer see the outer name it
   hides (A2-09: `var G: Integer := G.Count`); an initialization section's
@@ -17375,6 +17441,7 @@ begin
   TestHelperIdentity;
   TestTypeSlotsAndOwners;
   TestConstTyping;
+  TestBigIntLiterals;
   TestBlockScopes;
   TestWithRecheck;
   TestObjectNewDispose;
