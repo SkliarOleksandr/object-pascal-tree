@@ -128,6 +128,25 @@ type
     cbKeyword,
     cbUnitName);    // uses-clause candidates
 
+  { How a candidate fits the type the position EXPECTS - the right side of
+    `X := |` and of a comparison `X = |` (`<>`, `<`, `>`, `<=`, `>=`), whose
+    left side is a designator the engine can type. Declaration order is the
+    rank a host sorts by, ahead of the bucket: a value of the left side's
+    own type first, then one assignable to it, then what may still lead to
+    a fitting value through `.` `[` `(`, then what is proven wrong. Every
+    item is cmOther where nothing is expected. }
+  TPasComplMatch = (
+    cmExact,        // the same type (after aliases)
+    cmCompatible,   // assignable with evidence: a descendant class, a wider
+                    // number, a Char for a string, `nil` for a reference
+    cmLeads,        // may lead to it: a value with members (class, record,
+                    // interface, a class reference), an array, a pointer, a
+                    // procedural value, a type (`TFoo.Create`, a cast), a
+                    // unit name, a function the engine cannot type
+                    // (`Ord`, `Copy`, `GetValue<T>`)
+    cmOther);       // proven wrong - a scalar, a string, an enumeration or
+                    // a set of no fit - or nothing expected
+
   { LIFETIME: Name/Kind/Bucket/Overloads are plain values, but Mid/Sym/Ctx
     (and everything derived from them - ItemHeadWord, a host's SymDeclTypeX
     detail) are only meaningful while BOTH the overlay model (Mid = -1) and
@@ -142,6 +161,7 @@ type
     Sym: Integer;              // NIL_SYM for keywords/unit names
     Ctx: Integer;              // instantiation frame (project members)
     Overloads: Integer;        // same-name routines collapsed into this item
+    Match: TPasComplMatch;     // fit to the expected type; cmOther if none
   end;
 
   { A type answer that may live in either space: the last-good PROJECT
@@ -306,6 +326,16 @@ type
     // The nkTypeDecl that heritage list belongs to - the type being declared,
     // which cannot be its own ancestor; NIL_NODE outside one.
     FHeritageDecl: Integer;
+    // The type the caret's operand must fit (ExpectedTypeAt), canonical, in
+    // project space; XNil when the position expects nothing knowable. Its
+    // category, read once. A type only the overlay knows (declared since the
+    // last analysis) is FExpectOv instead.
+    FExpect: TSemaXType;
+    FExpectCat: TSemaTypeCat;
+    FExpectOv: Integer;
+    // The operand of `:=` / a comparison whose left side is known and of no
+    // procedural type: a procedure cannot stand there, and is not listed.
+    FNoProcedures: Boolean;
 
     function RawTokenAt(AOffset: Integer): Integer;
     function CaretOffset(ALine, ACol: Integer; out AOffset: Integer): Boolean;
@@ -433,6 +463,12 @@ type
     procedure CollectUnitInterface(AUid: Integer; ABucket: TPasComplBucket);
     procedure CollectUnitNames;
     procedure AddContextKeywords(const AInfo: TPasCaretInfo);
+    // expected-type ranking
+    function ExpectedTypeAt(const AInfo: TPasCaretInfo): TPasComplTypeRef;
+    function RefValueX(const ARef: TPasComplTypeRef;
+      out AOvSym: Integer): TSemaXType;
+    function MatchOf(const AItem: TPasComplItem): TPasComplMatch;
+    procedure RankItems;
   public
     constructor Create(AModel: TPasSemaModel;
       AProject: TPasSemaProject = nil; AProjectMid: Integer = -1);
@@ -3201,6 +3237,7 @@ begin
   FItems[FCount].Sym := ASym;
   FItems[FCount].Ctx := ACtx;
   FItems[FCount].Overloads := 0;
+  FItems[FCount].Match := cmOther;
   Inc(FCount);
 end;
 
@@ -3237,6 +3274,23 @@ begin
   if (LM.Symbols[ASym].Kind = skRoutine) and
      ((LM.RoutineHead(ASym) = rhOperator) or LM.IsClassCtorDtor(ASym)) then
     Exit;
+  // The right side of `:=` or a comparison takes a value: a procedure (or
+  // a destructor) is none, unless the left side is procedural - then it is
+  // the value assigned, and FNoProcedures is off (pastree-lsp, 2026-11-04).
+  if FNoProcedures and (LM.Symbols[ASym].Kind = skRoutine) then
+  begin
+    if LM.RoutineHead(ASym) in [rhProcedure, rhDestructor] then
+      Exit;
+    // A seed has no head token: the table says whether it is a function
+    // (Str, Inc, Exit are procedures; High, Copy, Abs functions).
+    if sfBuiltin in LM.Symbols[ASym].Flags then
+    begin
+      var LSig: TPasBuiltinSig;
+      if PasBuiltinSignature(LM.Symbols[ASym].NameLower, LSig) and
+         not LSig.IsFunction then
+        Exit;
+    end;
+  end;
   // Type positions take what can name a type - consts and enum values
   // included, because a SUBRANGE type's bounds are constant expressions
   // (`TVCLElements = teCategoryButtons..teTextLabel`, 2.2.5).
@@ -4855,6 +4909,318 @@ begin
   end;
 end;
 
+{ The type the operand at the caret must fit: the caret starts the right
+  side of `:=` or of a comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`), and the
+  left side is a designator - a name, a member chain, a call, an index, a
+  dereference - that the engine types. Only the FIRST operand right of the
+  operator: `X := A + |` expects nothing here, since the sum's other operand
+  decides as much as X does.
+
+  The left side is found by tokens and the tree together: the designator
+  node ending on the token before the operator, grown up its parents while
+  they end there too. It must START the comparison: the token before it
+  opens an expression or a statement (`if`, `(`, `,`, `;`, `then`, ...). A
+  binary operator there means the left operand is longer than the
+  designator - `A + B = |` compares the sum, `X and Y = |` the conjunction
+  (`=` binds loosest, 5.2.1) - and nothing is expected rather than the
+  wrong thing. A type name on the left after a colon is a declaration's
+  type (`var X: Integer := |`, `const C: T = |`, a default parameter
+  value), and that type is expected; any other type name (a type
+  declaration) expects nothing. ComplNilRef when nothing is expected. }
+function TPasCompletion.ExpectedTypeAt(
+  const AInfo: TPasCaretInfo): TPasComplTypeRef;
+const
+  OPERATORS = [tkAssign, tkEqual, tkNotEqual, tkLess, tkGreater,
+    tkLessEqual, tkGreaterEqual];
+  DESIGNATORS = [nkIdent, nkMember, nkCall, nkIndex, nkDeref, nkParen,
+    nkTypeArgs];
+  // What may stand before an operand that starts its expression.
+  OPENERS = [tkIf, tkWhile, tkUntil, tkLParen, tkLBracket, tkComma,
+    tkSemicolon, tkColon, tkAssign, tkBegin, tkThen, tkElse, tkDo,
+    tkRepeat, tkTry, tkFinally, tkExcept, tkOf];
+var
+  LTS: TPasTokenStream;
+  LOp, LEnd, LVis, LNode, LParent, LLeft, LBefore: Integer;
+begin
+  Result := ComplNilRef;
+  if (FProj = nil) or (AInfo.Kind = ckNone) then
+    Exit;
+  LTS := FModel.Tree.Source.Files[0];
+  if (FContext = ccMember) and (AInfo.DotBase <> NIL_NODE) then
+  begin
+    // `X := Obj.Sub.|`: the operator stands before the whole chain. Climb
+    // from the dot's base while it is the base of a longer designator (the
+    // same leftmost token) - not an argument (`F(A.|`), whose call starts
+    // elsewhere and is no value of the left side's type.
+    LNode := AInfo.DotBase;
+    LLeft := FModel.Tree.NodeLeftmostVis(LNode);
+    while True do
+    begin
+      LParent := FModel.Tree.Nodes[LNode].Parent;
+      if (LParent = NIL_NODE) or
+         not (FModel.Tree.Nodes[LParent].Kind in DESIGNATORS) or
+         (FModel.Tree.NodeLeftmostVis(LParent) <> LLeft) then
+        Break;
+      LNode := LParent;
+    end;
+    if (LLeft < 0) or (LLeft > High(FModel.Tree.Source.Visible)) or
+       (FModel.Tree.Source.Visible[LLeft].FileId <> 0) then
+      Exit;
+    LOp := PrevVisibleRaw(FModel.Tree.Source.Visible[LLeft].TokenIndex - 1);
+  end
+  else if AInfo.Kind = ckIdent then
+    LOp := PrevVisibleRaw(AInfo.RawToken - 1)
+  else
+    LOp := AInfo.RawToken;
+  if (LOp < 1) or not (LTS.Tokens[LOp].Kind in OPERATORS) then
+    Exit;
+  LEnd := PrevVisibleRaw(LOp - 1);
+  if LEnd < 0 then
+    Exit;
+  LVis := FVisOfRaw[LEnd];
+  LNode := InnermostNodeAt(LVis);
+  if (LNode = NIL_NODE) or
+     not (FModel.Tree.Nodes[LNode].Kind in DESIGNATORS) then
+    Exit;
+  while True do
+  begin
+    LParent := FModel.Tree.Nodes[LNode].Parent;
+    if (LParent = NIL_NODE) or
+       (FModel.Tree.Nodes[LParent].LastToken <> LVis) or
+       not (FModel.Tree.Nodes[LParent].Kind in DESIGNATORS) then
+      Break;
+    LNode := LParent;
+  end;
+  LLeft := FModel.Tree.NodeLeftmostVis(LNode);
+  if (LLeft < 0) or (LLeft > High(FModel.Tree.Source.Visible)) or
+     (FModel.Tree.Source.Visible[LLeft].FileId <> 0) then
+    Exit;
+  LBefore := PrevVisibleRaw(FModel.Tree.Source.Visible[LLeft].TokenIndex - 1);
+  if (LBefore < 0) or not (LTS.Tokens[LBefore].Kind in OPENERS) then
+    Exit;
+  Result := DesignatorType(LNode, 0);
+  if Result.IsTypeRef then
+  begin
+    // A declaration's type before its initializer - `var X: T := |`,
+    // `const C: T = |`, a default `(A: T = |)` - is the type expected, as
+    // the variable's would be in `X := |`. Any other type name (a type
+    // declaration's `T = |`) expects nothing.
+    if LTS.Tokens[LBefore].Kind = tkColon then
+      Result.IsTypeRef := False
+    else
+      Result := ComplNilRef;
+  end;
+end;
+
+{ A value's type as one canonical project-space type (CanonTypeX: aliases
+  followed), for comparing two of them - XNil for what has no such name: a
+  type reference, a unit, an inline array, a pointer the slot spells `^T`.
+  A type only the overlay knows (declared since the last analysis) comes
+  back in AOvSym instead. }
+function TPasCompletion.RefValueX(const ARef: TPasComplTypeRef;
+  out AOvSym: Integer): TSemaXType;
+begin
+  Result := XNil;
+  AOvSym := NIL_SYM;
+  if ARef.IsTypeRef or (ARef.UnitMid >= 0) or (ARef.ArrNode <> NIL_NODE) or
+     ARef.ViaPointer or (FProj = nil) then
+    Exit;
+  if XValid(ARef.X) then
+    Result := ARef.X
+  else if ARef.OvSym <> NIL_SYM then
+  begin
+    Result := OwnModelTypeX(ARef.OvSym);
+    if not XValid(Result) then
+    begin
+      AOvSym := ARef.OvSym;
+      Exit;
+    end;
+  end;
+  if XValid(Result) then
+    Result := FProj.CanonTypeX(Result);
+end;
+
+{ One candidate against the expected type (FExpect / FExpectOv). A value -
+  a variable, a field, a parameter, a constant, a property, an enumeration
+  value, a function by its result - is typed as completion types a
+  designator and asked TPasSemaProject.XConvX, the one conversion test:
+  identical is cmExact, an implicit conversion cmCompatible. Beyond it what
+  completion alone needs: what may still LEAD to a fitting value through
+  `.` `[` `(` `^` is cmLeads, and only a value proven not to convert that
+  has nothing to reach through (a number, a string, a Char, an
+  enumeration, a set) is cmOther. A comparison makes a Boolean of any
+  value (`B := I > 0`), so nothing is cmOther where a Boolean is expected.
+  A scalar's record helper (`I.ToString`) is the one way out this ignores. }
+function TPasCompletion.MatchOf(const AItem: TPasComplItem): TPasComplMatch;
+const
+  NOTHING_TO_REACH = [tcInteger, tcFloat, tcBoolean, tcChar, tcString,
+    tcEnum, tcSet, tcNil, tcFile];
+var
+  LRef: TPasComplTypeRef;
+  LX: TSemaXType;
+  LOv: Integer;
+  LCat: TSemaTypeCat;
+  LM: TPasSemaModel;
+
+  // A value of type AX against the expected type: AIdentical when it is
+  // that type, cmCompatible when it converts, cmOther when it provably does
+  // not and has nothing to reach through, cmLeads otherwise.
+  function FitOf(const AX: TSemaXType; AIdentical: TPasComplMatch):
+    TPasComplMatch;
+  begin
+    case FProj.XConvX(FExpect, AX) of
+      scIdentical:
+        Result := AIdentical;
+      scImplicit:
+        Result := cmCompatible;
+      scNone:
+        if (FExpectCat <> tcBoolean) and
+           (FProj.XCatOf(FProj.CanonTypeX(AX)) in NOTHING_TO_REACH) then
+          Result := cmOther
+        else
+          Result := cmLeads;
+    else
+      Result := cmLeads;
+    end;
+  end;
+
+begin
+  Result := cmOther;
+  // `nil` - a keyword or a seeded constant, whichever list it came from -
+  // fits every reference.
+  if SameText(AItem.Name, 'nil') then
+  begin
+    if (FExpectCat in [tcClass, tcInterface, tcPointer, tcProc, tcClassOf])
+       or ((FExpectCat = tcArray) and XValid(FExpect) and
+           FProj.IsDynArrayTypeX(FExpect)) then
+      Result := cmCompatible;
+    Exit;
+  end;
+  // The seeded True and False carry no type the overlay can read.
+  if (AItem.Sym <> NIL_SYM) and (AItem.Kind = skConst) and
+     (SameText(AItem.Name, 'True') or SameText(AItem.Name, 'False')) then
+  begin
+    if AItem.Mid < 0 then
+      LM := FModel
+    else
+      LM := ProjModel(AItem.Mid, 'MatchOf');
+    if sfBuiltin in LM.Symbols[AItem.Sym].Flags then
+    begin
+      if FExpectCat = tcBoolean then
+        Result := cmExact;
+      Exit;
+    end;
+  end;
+  if AItem.Bucket = cbKeyword then
+    Exit;
+  // A unit name (`Unit.Name`) produces no value itself but starts one.
+  if (AItem.Bucket = cbUnitName) or
+     (AItem.Kind in [skGenericParam, skUnitRef]) then
+    Exit(cmLeads);
+  // A type name is judged as a value of its type would be - the expected
+  // type itself is a cast (`TKind(5)`), `string(X)` is no enumeration, a
+  // class leads (`TFoo.Create`).
+  if AItem.Kind in [skType, skBuiltinType] then
+  begin
+    Result := cmLeads;
+    if (AItem.Mid < 0) or (AItem.Sym = NIL_SYM) or not XValid(FExpect) then
+      Exit;
+    LX := FProj.CanonTypeX(XPlain(AItem.Mid, AItem.Sym));
+    if XValid(LX) then
+      Result := FitOf(LX, cmCompatible);
+    Exit;
+  end;
+  if (AItem.Sym = NIL_SYM) or
+     not (AItem.Kind in [skVar, skParam, skField, skConst, skProperty,
+       skEnumValue, skRoutine]) then
+    Exit;
+  // From here a value; one the engine cannot type leads somewhere.
+  Result := cmLeads;
+  LOv := NIL_SYM;
+  LX := XNil;
+  if AItem.Mid < 0 then
+    LX := RefValueX(TypeOfOverlaySym(AItem.Sym, 0), LOv)
+  else
+  begin
+    LM := ProjModel(AItem.Mid, 'MatchOf');
+    // An enumeration value of another unit is typed by its enumeration,
+    // an untyped constant (`CRed = clRed`) by its initializer - neither
+    // has a declared type for TypeOfProjectSym to read.
+    if AItem.Kind = skEnumValue then
+    begin
+      if LM.Symbols[AItem.Sym].TypeSym <> NIL_SYM then
+        LX := FProj.CanonTypeX(XPlain(AItem.Mid, LM.Symbols[AItem.Sym].TypeSym));
+    end
+    else
+    begin
+      LRef := TypeOfProjectSym(AItem.Mid, AItem.Sym, AItem.Ctx, 0);
+      LX := RefValueX(LRef, LOv);
+      if not XValid(LX) and (AItem.Kind = skConst) and
+         (LM.Symbols[AItem.Sym].TypeNode = NIL_NODE) then
+      begin
+        LX := FProj.DeclTypeX(AItem.Mid, AItem.Sym);
+        if XValid(LX) then
+          LX := FProj.CanonTypeX(LX);
+      end;
+    end;
+  end;
+  // A type only the overlay knows (declared since the last analysis) has
+  // no project type to convert to: its own values by identity, a scalar of
+  // a project type is wrong for it.
+  if FExpectOv <> NIL_SYM then
+  begin
+    if LOv = FExpectOv then
+      Result := cmExact
+    else if XValid(LX) and (FExpectCat <> tcBoolean) and
+       (FProj.XCatOf(FProj.CanonTypeX(LX)) in NOTHING_TO_REACH) then
+      Result := cmOther;
+    Exit;
+  end;
+  if not XValid(LX) or not XValid(FExpect) then
+    Exit;
+  case FProj.XConvX(FExpect, LX) of
+    scIdentical:
+      Exit(cmExact);
+    scImplicit:
+      Exit(cmCompatible);
+  end;
+  LCat := FProj.XCatOf(FProj.CanonTypeX(LX));
+  // A dynamic array whose element fits is the start of `A[I]` - the most
+  // common way such a value is read (`LSym := FModel.RefMap[N]`). Not where
+  // the left side is an array itself: there the array is the value.
+  if (LCat = tcArray) and (FExpectCat <> tcArray) and
+     FProj.IsDynArrayTypeX(LX) then
+  begin
+    LX := FProj.DynArrayElemX(LX);
+    if XValid(LX) then
+      Result := FitOf(FProj.CanonTypeX(LX), cmCompatible);
+    Exit;
+  end;
+  // A pointer leads through `^` to what it points at - nowhere when that is
+  // a scalar of no fit (`StrAlloc`'s PChar for an enumeration).
+  if (LCat = tcPointer) and (FExpectCat <> tcPointer) then
+  begin
+    LX := FProj.PointeeX(LX);
+    if XValid(LX) then
+    begin
+      Result := FitOf(FProj.CanonTypeX(LX), cmLeads);
+      if Result = cmCompatible then
+        Result := cmLeads;
+    end;
+    Exit;
+  end;
+  Result := FitOf(LX, cmExact);
+end;
+
+// Every collected item against the expected type (see MatchOf).
+procedure TPasCompletion.RankItems;
+var
+  LIdx: Integer;
+begin
+  for LIdx := 0 to FCount - 1 do
+    FItems[LIdx].Match := MatchOf(FItems[LIdx]);
+end;
+
 function TPasCompletion.CompleteAt(ALine, ACol: Integer;
   out AContext: TPasComplContext; out AItems: TArray<TPasComplItem>): Boolean;
 var
@@ -5704,6 +6070,23 @@ begin
     FHeritageDecl := UpChainNode(LInfo.Node, nkTypeDecl)
   else
     FHeritageDecl := NIL_NODE;
+  // The right side of `:=` or a comparison: what the left side wants ranks
+  // first (RankItems), and a procedure is no operand unless the left side
+  // is of a procedural type - or of a type whose category is not known.
+  // After a dot (`X := Obj.|`) the members are ranked the same way.
+  FExpect := XNil;
+  FExpectCat := tcUnknown;
+  FExpectOv := NIL_SYM;
+  FNoProcedures := False;
+  if FContext in [ccExpression, ccMember] then
+  begin
+    FExpect := RefValueX(ExpectedTypeAt(LInfo), FExpectOv);
+    if XValid(FExpect) then
+      FExpectCat := FProj.XCatOf(FExpect)
+    else if FExpectOv <> NIL_SYM then
+      FExpectCat := FModel.Symbols[FExpectOv].TypeCat;
+    FNoProcedures := not (FExpectCat in [tcUnknown, tcProc]);
+  end;
   case FContext of
     ccNone:
       Exit(False);
@@ -5808,6 +6191,8 @@ begin
       AddContextKeywords(LInfo);
     end;
   end;
+  if XValid(FExpect) or (FExpectOv <> NIL_SYM) then
+    RankItems;
   SetLength(FItems, FCount);
   AItems := FItems;
   FItems := nil;

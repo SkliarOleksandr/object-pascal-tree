@@ -396,6 +396,23 @@ type
     from the path, a depth cap) - a diagnostic acts on xdNo only. }
   TPasDescent = (xdYes, xdNo, xdUnknown);
 
+  { TPasSemaProject.XConvX: how a value of one type converts to another
+    where the language converts implicitly (an assignment, a value
+    argument). Declaration order is the preference. FIRST VERSION - the
+    plan for the full one (widening distance, Implicit by signature,
+    implements, sets, procedural types, overload resolution on top) is
+    local/TYPE-CONVERSION-PLAN.md. }
+  TSemaConv = (
+    scIdentical,  // the same type, builtin alias groups included
+    scImplicit,   // converts with evidence: integer to integer or float,
+                  // Char/PChar to string, a descendant class, nil to a
+                  // reference, a scalar to or from a Variant
+    scMaybe,      // no evidence either way: an unknown category, a record
+                  // with a conversion operator, structured types this
+                  // version does not compare
+    scNone);      // proven not to convert: two scalar categories that do
+                  // not, two enumerations, unrelated classes
+
   { One `uses` entry's ResolveUnit answer as the load engine's discovery got
     it, with the arguments and the source manager's ResolveEpoch then: what
     ResolveUses reuses while the epoch has not moved. }
@@ -1518,12 +1535,10 @@ type
       .Win's `Style.Slant.IsRegular` without FMX.Graphics). }
     function ActiveHelperOf(AFromMid: Integer; const ACur: TSemaXType;
       out AExt: TPasExtRef): Boolean;
-    // Cross-model overload selection (CrossType's call typing):
-    function XCatOf(const AX: TSemaXType): TSemaTypeCat;
+    // Cross-model overload selection (CrossType's call typing; XCatOf and
+    // XSameType are public, below):
     function SubrangeCatX(AMid, ASym: Integer): TSemaTypeCat;
-    function XSameType(const A, B: TSemaXType): Boolean;
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
-    function HasConversionOperator(const AX: TSemaXType): Boolean;
     function ParCatOf(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
     function IsStaticArrayX(const AX: TSemaXType): Boolean;
     // ArgFitX over sides already canonicalized - see there.
@@ -1537,8 +1552,6 @@ type
     // A `[...]` against an array parameter - see the implementation.
     function CtorFitX(const ACanonElemX: TSemaXType; ATarget: TSemaCtorTarget;
       const ATree: TPasTree; ACtor: Integer; const AArg: TPasArrayArg): Integer;
-    // The element of a dynamic-array parameter type - see the implementation.
-    function DynArrayElemX(const ACanonParX: TSemaXType): TSemaXType;
     // The element type of an array type - see the implementation.
     function ArrayElemX(const AX: TSemaXType): TSemaXType;
     // ACallMid / AArgNodes: the call site's model and argument nodes, read
@@ -2044,6 +2057,25 @@ type
       out AVariadic: Boolean): Boolean;
     // XDescent = xdYes: for a caller that acts on a proven descent only.
     function XDescendsFrom(const ADesc, ABase: TSemaXType): Boolean;
+    { The category of a type (a subrange's through its bound), and whether
+      two types are one - across models, builtin alias groups included.
+      Promoted for the completion engine's expected-type ranking
+      (TPasCompletion: a candidate of the type the left side wants first). }
+    function XCatOf(const AX: TSemaXType): TSemaTypeCat;
+    function XSameType(const A, B: TSemaXType): Boolean;
+    { The element of a dynamic array type (canonical) - XNil for anything
+      else. Promoted for the same ranking: an array whose element fits starts
+      `A[I]`. }
+    function DynArrayElemX(const ACanonParX: TSemaXType): TSemaXType;
+    { Whether AX declares `class operator Implicit` or `Explicit` - not
+      which types they take. Promoted for the same ranking: a record that
+      converts makes no value provably wrong for it (`V: TValue := 5`). }
+    function HasConversionOperator(const AX: TSemaXType): Boolean;
+    { How a value of type ASrc converts to ADst implicitly (TSemaConv). One
+      place for the language's assignment-compatibility rules, to replace
+      the copies in the typer, the argument scorer and the completion
+      ranking - first version, see TSemaConv. }
+    function XConvX(const ADst, ASrc: TSemaXType): TSemaConv;
     { Is ADesc ABase (canonicalized: a constraint named through an alias is
       the class, spec 16.4.1) or a descendant of it? xdNo only when the walk
       reached the end of ADesc's ancestry without meeting it; xdUnknown at a
@@ -13149,12 +13181,17 @@ end;
   bound's binding (RefMap / ExtRefMap) followed as TPasSemaTyper's
   CatOfSubrangeBound follows a same-unit one, a true constant through its
   value in its own model. Read, never stored: the cross passes write only
-  their own model. tcUnknown for anything else. }
+  their own model. Also a bound Phase 1 does not read at all: an arithmetic
+  one (`-$7FFFFFFF-1`, System.UITypes.TColor) by its left operand, and a
+  call of Low/High/Pred/Succ/Ord/SizeOf/Length/Chr (`Low(Integer)`,
+  TModalResult) - both went uncategorized, so completion could not tell a
+  TColor value from one with members. tcUnknown for anything else. }
 function TPasSemaProject.SubrangeCatX(AMid, ASym: Integer): TSemaTypeCat;
 var
   LM: TPasSemaModel;
   LNode, LDepth, LName, LBMid, LBSym: Integer;
   LExt: TPasExtRef;
+  LTypeArg: Boolean;
 begin
   Result := tcUnknown;
   LM := FModels[AMid];
@@ -13169,15 +13206,43 @@ begin
   if (LNode = NIL_NODE) or (LM.Tree.Nodes[LNode].Kind <> nkSubrange) then
     Exit;
   LNode := LM.Tree.Nodes[LNode].FirstChild;
+  LTypeArg := False;
   for LDepth := 1 to 8 do
   begin
-    while (LNode <> NIL_NODE) and (LM.Tree.Nodes[LNode].Kind = nkUnaryOp) do
+    // A sign, brackets, and the left operand of arithmetic decide the
+    // category: `-$7FFFFFFF-1..$7FFFFFFF` (System.UITypes.TColor) is an
+    // integer subrange as `-5..5` is.
+    while (LNode <> NIL_NODE) and
+          (LM.Tree.Nodes[LNode].Kind in [nkUnaryOp, nkBinaryOp, nkParen]) do
       LNode := LM.Tree.Nodes[LNode].FirstChild;
     if LNode = NIL_NODE then
       Exit;
     case LM.Tree.Nodes[LNode].Kind of
       nkIntLit:
         Exit(tcInteger);
+      // `Low(Integer)..High(Integer)` (TModalResult): Low, High, Pred and
+      // Succ are of their argument's category, Ord, SizeOf and Length
+      // integers, Chr a Char.
+      nkCall:
+        begin
+          LName := LM.Tree.Nodes[LNode].FirstChild;
+          if (LName = NIL_NODE) or (LM.Tree.Nodes[LName].Kind <> nkIdent) then
+            Exit;
+          if LM.Tree.NodeTextEquals(LName, 'Ord') or
+             LM.Tree.NodeTextEquals(LName, 'SizeOf') or
+             LM.Tree.NodeTextEquals(LName, 'Length') then
+            Exit(tcInteger);
+          if LM.Tree.NodeTextEquals(LName, 'Chr') then
+            Exit(tcChar);
+          if not (LM.Tree.NodeTextEquals(LName, 'Low') or
+                  LM.Tree.NodeTextEquals(LName, 'High') or
+                  LM.Tree.NodeTextEquals(LName, 'Pred') or
+                  LM.Tree.NodeTextEquals(LName, 'Succ')) then
+            Exit;
+          LTypeArg := True;
+          LNode := LM.Tree.Nodes[LName].NextSibling;
+          Continue;
+        end;
       nkCaretChar:
         Exit(tcChar);
       nkStrLit:
@@ -13208,6 +13273,16 @@ begin
             Exit;
           LM := FModels[LBMid];
           AMid := LBMid;
+          // The type argument of Low/High (`Low(Integer)`).
+          if LTypeArg and
+             (LM.Symbols[LBSym].Kind in [skType, skBuiltinType]) then
+          begin
+            Result := LM.Symbols[LBSym].TypeCat;
+            if (Result = tcUnknown) and (LM.Symbols[LBSym].Kind = skType) and
+               (LBSym <> ASym) then
+              Result := SubrangeCatX(LBMid, LBSym);
+            Exit;
+          end;
           case LM.Symbols[LBSym].Kind of
             skEnumValue, skConst:
               if LM.Symbols[LBSym].TypeSym <> NIL_SYM then
@@ -13532,6 +13607,104 @@ begin
       (FModels[LRec.UnitId].DeclaresOperator(LScope, 'implicit')));
   end;
   Result := CatAssignable(D, S, False);
+end;
+
+{ The first version of the one conversion test (TSemaConv,
+  local/TYPE-CONVERSION-PLAN.md has the rest). Rules, each a plain
+  statement of the language's assignment compatibility (spec 6.3, 7.x):
+  - the same type (XSameType) is identical;
+  - an integer converts to an integer or a float, a Char or a PChar to a
+    string, Char to Char, Boolean to Boolean, a pointer or nil to a
+    pointer, a scalar to a Variant and a Variant to a scalar;
+  - nil converts to a class, an interface, a class reference, a procedural
+    type and a dynamic array;
+  - a class converts to its ancestors (XDescent: xdNo is scNone, xdUnknown
+    scMaybe); an interface to its ancestors likewise; a class to an
+    interface is not checked (scMaybe);
+  - a record with a conversion operator on either side is scMaybe - which
+    types the operators take is not read yet;
+  - two scalar categories that none of the above joins are scNone, as are
+    two different enumerations, and a scalar against a structured type;
+  - everything else is scMaybe. }
+function TPasSemaProject.XConvX(const ADst, ASrc: TSemaXType): TSemaConv;
+const
+  SCALARS = [tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum];
+  STRUCTURED = [tcPointer, tcSet, tcArray, tcRecord, tcClass, tcInterface,
+    tcProc, tcClassOf, tcFile];
+var
+  LD, LS, LPointee: TSemaXType;
+  D, S: TSemaTypeCat;
+begin
+  if not XValid(ADst) or not XValid(ASrc) then
+    Exit(scMaybe);
+  LD := CanonTypeX(ADst);
+  LS := CanonTypeX(ASrc);
+  if not XValid(LD) or not XValid(LS) then
+    Exit(scMaybe);
+  if XSameType(LD, LS) then
+    Exit(scIdentical);
+  D := XCatOf(LD);
+  S := XCatOf(LS);
+  if (D = tcUnknown) or (S = tcUnknown) then
+    Exit(scMaybe);
+  if ((D = tcRecord) and HasConversionOperator(LD)) or
+     ((S = tcRecord) and HasConversionOperator(LS)) then
+    Exit(scMaybe);
+  if S = tcNil then
+  begin
+    if (D in [tcPointer, tcClass, tcInterface, tcClassOf, tcProc,
+              tcVariant]) or
+       ((D = tcArray) and IsDynArrayTypeX(LD)) then
+      Exit(scImplicit);
+    Exit(scNone);
+  end;
+  if (D = tcVariant) and (S in SCALARS) then
+    Exit(scImplicit);
+  if (S = tcVariant) and (D in SCALARS) then
+    Exit(scImplicit);
+  case D of
+    tcInteger:
+      if S = tcInteger then
+        Exit(scImplicit);
+    tcFloat:
+      if S in [tcInteger, tcFloat] then
+        Exit(scImplicit);
+    tcString:
+      begin
+        if S in [tcString, tcChar] then
+          Exit(scImplicit);
+        if S = tcPointer then
+        begin
+          LPointee := PointeeX(LS);
+          if XValid(LPointee) and (XCatOf(CanonTypeX(LPointee)) = tcChar) then
+            Exit(scImplicit);
+          Exit(scMaybe);
+        end;
+      end;
+    tcChar, tcBoolean:
+      if S = D then
+        Exit(scImplicit);
+    tcPointer:
+      if S = tcPointer then
+        Exit(scImplicit);
+    tcClass, tcInterface:
+      if S = D then
+        case XDescent(LS, LD) of
+          xdYes: Exit(scImplicit);
+          xdNo: Exit(scNone);
+        else
+          Exit(scMaybe);
+        end;
+  end;
+  if (D in SCALARS) and (S in SCALARS) then
+    Exit(scNone);
+  // A scalar and a structured type (a class, an array, a set, a record
+  // without operators, a pointer, ...) never convert implicitly; the
+  // exceptions - Variant, a PChar to a string - are handled above.
+  if ((D in SCALARS) and (S in STRUCTURED)) or
+     ((S in SCALARS) and (D in STRUCTURED)) then
+    Exit(scNone);
+  Result := scMaybe;
 end;
 
 { Does AX's type declare a conversion operator - the one thing that can make

@@ -909,11 +909,13 @@ end;
 // index, a set constructor: the list is the members of what stands before the
 // dot, never the scope's names (pastree-lsp, 2026-10-22: `Assigned(Decl.|)`
 // listed every global).
-procedure DotCase(const ALine: string);
+// AMember is one member the list must hold: a function where the left side
+// of `:=` expects a value, since a procedure is then left out.
+procedure DotCase(const ALine: string; const AMember: string = 'Pub');
 begin
   ProjCase(PROJ_HEAD + '  ' + ALine + #10 + PROJ_TAIL);
   GCounter.Ok(Format('dot in context: %s lists the members only', [ALine]),
-    GHit and (GCtx = ccMember) and Has('Pub') and not Has('ImplVar') and
+    GHit and (GCtx = ccMember) and Has(AMember) and not Has('ImplVar') and
     not Has('ExtProc'),
     procedure
     begin
@@ -980,6 +982,138 @@ begin
       for var LFi := 0 to Min(High(GItems), 9) do
         Write(' ', GItems[LFi].Name);
       Writeln;
+    end);
+end;
+
+const
+  // Expected-type ranking (pastree-lsp, 2026-11-04): a mini-project of its
+  // own - an enumeration and a class hierarchy in a used unit, a procedural
+  // type, an enumeration of the edited unit itself.
+  EXP_EXT =
+    'unit extexp;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TColor2 = (clRed, clGreen);'#10 +
+    '  TShape2 = (shRound, shSquare);'#10 +
+    '  TAnimal = class end;'#10 +
+    '  TDog = class(TAnimal) end;'#10 +
+    '  TCar = class end;'#10 +
+    '  TNotify = procedure;'#10 +
+    '  TIntArr = array of Integer;'#10 +
+    '  TColorArr = array of TColor2;'#10 +
+    '  TSub = -5..5;'#10 +
+    '  TBig = Low(Integer)..High(Integer);'#10 +
+    '  TVal = record class operator Implicit(A: Integer): TVal; end;'#10 +
+    '  THuge = -$7FFFFFFF-1..$7FFFFFFF;'#10 +
+    '  TQual = extexp.THuge;'#10 +
+    '  TOwner = class'#10 +
+    '    Pet: TAnimal;'#10 +
+    '    Dog: TDog;'#10 +
+    '    Color: TColor2;'#10 +
+    '    Count: Integer;'#10 +
+    '    Next: TOwner;'#10 +
+    '    procedure Reset;'#10 +
+    '    function Car: TCar;'#10 +
+    '  end;'#10 +
+    'const'#10 +
+    '  CRed = clRed;'#10 +
+    'var'#10 +
+    '  ExtColor: TColor2;'#10 +
+    '  ExtCount: Integer;'#10 +
+    '  ExtOwner: TOwner;'#10 +
+    '  ExtFlags: TIntArr;'#10 +
+    '  ExtColors: TColorArr;'#10 +
+    '  ExtP: PChar;'#10 +
+    '  ExtPOwner: ^TOwner;'#10 +
+    '  ExtSub: TSub;'#10 +
+    '  ExtVal: TVal;'#10 +
+    '  ExtBig: TBig;'#10 +
+    '  ExtHuge: THuge;'#10 +
+    '  ExtQual: TQual;'#10 +
+    'function ExtColorOf: TColor2;'#10 +
+    'procedure ExtReset;'#10 +
+    'function ExtSubOf(const S: string): TSub;'#10 +
+    'function ExtIntOf(const S: string): Integer;'#10 +
+    'implementation'#10 +
+    'function ExtSubOf(const S: string): TSub;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
+    'function ExtIntOf(const S: string): Integer;'#10'begin'#10'  Result := 0;'#10'end;'#10 +
+    'class operator TVal.Implicit(A: Integer): TVal;'#10'begin'#10'end;'#10 +
+    'function ExtColorOf: TColor2;'#10'begin'#10'  Result := clRed;'#10 +
+    'end;'#10 +
+    'procedure ExtReset;'#10'begin'#10'end;'#10 +
+    'procedure TOwner.Reset;'#10'begin'#10'end;'#10 +
+    'function TOwner.Car: TCar;'#10'begin'#10'  Result := nil;'#10'end;'#10 +
+    'end.'#10;
+  EXP_HEAD_A =                      // TYPES_HERE marks the overlay's extras
+    'unit mainu;'#10 +
+    'interface'#10 +
+    'uses extexp;'#10 +
+    'type'#10 +
+    '  TLocalEnum = (leOne, leTwo);'#10;
+  EXP_HEAD_B =
+    'implementation'#10 +
+    'procedure LocalProc;'#10'begin'#10'end;'#10 +
+    'procedure Run;'#10 +
+    'var'#10 +
+    '  C: TColor2;'#10 +
+    '  S: TShape2;'#10 +
+    '  A: TAnimal;'#10 +
+    '  D: TDog;'#10 +
+    '  K: TCar;'#10 +
+    '  N: TNotify;'#10 +
+    '  I: Integer;'#10 +
+    '  F: Double;'#10 +
+    '  LE: TLocalEnum;'#10 +
+    '  B: Boolean;'#10 +
+    '  Arr: TIntArr;'#10 +
+    'begin'#10;
+
+{ One expected-type case: ALine is the statement typed in Run's body (with
+  the caret marker), AExtra a type declaration the overlay alone has. Each
+  list is comma-separated, '' = no check: AExact / ACompat / AOther / ALeads
+  must be listed with that match, AAbsent must not be listed at all. }
+procedure ExpCase(const ALine, AExact, ACompat, AOther, AAbsent: string;
+  const AExtra: string = ''; const ALeads: string = '');
+var
+  LOk: Boolean;
+  LWhy: string;
+
+  procedure Want(const ANames: string; AMatch: TPasComplMatch);
+  begin
+    for var LName in ANames.Split([',']) do
+      if LName <> '' then
+        if not Has(LName) then
+        begin
+          LOk := False;
+          LWhy := LWhy + ' missing ' + LName;
+        end
+        else if ItemNamed(LName).Match <> AMatch then
+        begin
+          LOk := False;
+          LWhy := LWhy + Format(' %s=%d', [LName,
+            Ord(ItemNamed(LName).Match)]);
+        end;
+  end;
+
+begin
+  ProjCase(EXP_HEAD_A + AExtra + EXP_HEAD_B + '  ' + ALine + #10 +
+    PROJ_TAIL);
+  LOk := GHit and (GCtx in [ccExpression, ccMember]);
+  LWhy := '';
+  Want(AExact, cmExact);
+  Want(ACompat, cmCompatible);
+  Want(AOther, cmOther);
+  Want(ALeads, cmLeads);
+  for var LName in AAbsent.Split([',']) do
+    if (LName <> '') and Has(LName) then
+    begin
+      LOk := False;
+      LWhy := LWhy + ' has ' + LName;
+    end;
+  GCounter.Ok(Format('expected type: %s', [ALine]), LOk,
+    procedure
+    begin
+      Writeln('    ctx=', Ord(GCtx), ' items=', Length(GItems), ':', LWhy);
     end);
 end;
 
@@ -1173,7 +1307,7 @@ begin
   DotCase('M.Over(1, B.|);');
   DotCase('M.Over(B.|, 1);');
   DotCase('ImplVar := Ord(B.|);');
-  DotCase('ImplVar := B.| + 1;');
+  DotCase('ImplVar := B.| + 1;', 'CF');
   DotCase('ImplVar := 1 + B.|;');
   DotCase('if B.| then;');
   DotCase('if not B.| then;');
@@ -2464,6 +2598,99 @@ begin
   OvCase('Two<Integer, TCustOv>(1).|', 'CreatedF', '', '//OV2'#10);
   OvCase('URun(procedure begin end).|', 'CreatedF', '');
   OvCase('MRun(procedure begin end).|', 'CreatedF', '');
+  GComp.Free;
+  GComp := nil;
+  GProj.Free;
+  GProj := nil;
+  GProjMid := -1;
+  TDirectory.Delete(GDir, True);
+
+  // ======== expected-type ranking (pastree-lsp, 2026-11-04) ================
+  GDir := TPath.Combine(TPath.GetTempPath, 'pastree_complete_smoke_exp');
+  if TDirectory.Exists(GDir) then
+    TDirectory.Delete(GDir, True);
+  TDirectory.CreateDirectory(GDir);
+  TFile.WriteAllText(TPath.Combine(GDir, 'extexp.pas'), EXP_EXT);
+  TFile.WriteAllText(TPath.Combine(GDir, 'mainu.pas'),
+    EXP_HEAD_A + EXP_HEAD_B + PROJ_TAIL);
+  GProj := TPasSemaProject.Create(pfWin32, [GDir], []);
+  GProjMid := GProj.AnalyzeProject(TPath.Combine(GDir, 'mainu.pas'));
+  GCounter.Ok('expected-type mini-project analyzed', GProjMid >= 0);
+  // The enumeration of the left side first - its values, its variables,
+  // its constants, a function returning it; another enumeration, an
+  // integer after them, proven wrong; the type itself fits as a cast
+  // (`TColor2(X)`), another enumeration type does not; a class and a class
+  // value lead somewhere (`A.Color`); no procedure at all.
+  ExpCase('if C = | then;', 'clRed,clGreen,C,ExtColor,ExtColorOf,CRed',
+    'TColor2', 'shRound,S,I,TShape2', 'ExtReset,LocalProc', '', 'A,TAnimal');
+  ExpCase('C := |;', 'clRed,C,ExtColor,ExtColorOf', '', 'shSquare,I',
+    'ExtReset,LocalProc');
+  ExpCase('if C <> cl| then;', 'clRed,clGreen', '', '', 'ExtReset');
+  ExpCase('if (I = 1) and (C = |) then;', 'clRed', '', 'shRound', 'ExtReset');
+  // A class: itself, then a descendant and nil; an unrelated class leads
+  // through its members, an enumeration is wrong.
+  ExpCase('A := |;', 'A', 'D,nil', 'C', 'ExtReset', '', 'K');
+  ExpCase('if A <> | then;', 'A', 'D,nil', '', 'ExtReset', '', 'K');
+  // Numbers: an integer fits a float, not the reverse.
+  ExpCase('I := |;', 'I,ExtCount', '', 'F,C', 'ExtReset');
+  // The compiler's own routines by the seed table: Str and Inc are
+  // procedures, High and Copy functions.
+  GCounter.Ok('expected type: I := | leaves out Str and Inc, keeps High',
+    not Has('Str') and not Has('Inc') and Has('High') and Has('Copy'));
+  ExpCase('F := |;', 'F', 'I,ExtCount', 'C', 'ExtReset');
+  // The edited unit's own enumeration, which the analysis knows...
+  ExpCase('LE := |;', 'leOne,leTwo,LE', '', 'clRed', 'ExtReset');
+  // ...and one only the overlay has (declared since the last analysis).
+  ExpCase('var Fresh: TFresh := frA; if Fresh = | then;', 'frA,frB', '',
+    'clRed,leOne', 'ExtReset', '  TFresh = (frA, frB);'#10);
+  // A procedural left side takes a procedure: nothing is filtered.
+  ExpCase('N := |;', '', 'nil', '', '');
+  GCounter.Ok('expected type: N := | lists the procedures',
+    Has('ExtReset') and Has('LocalProc') and Has('Str'));
+  // Past the first operand, or with a longer left operand, nothing is
+  // expected and nothing is filtered.
+  ExpCase('I := I + |;', '', '', 'I,F,C,clRed', '');
+  GCounter.Ok('expected type: I := I + | keeps the procedures',
+    Has('ExtReset'));
+  ExpCase('if I + 1 = | then;', '', '', 'I,F', '');
+  GCounter.Ok('expected type: I + 1 = | keeps the procedures',
+    Has('ExtReset'));
+  // The seeded True and False are Booleans; nil fits a dynamic array; a
+  // dynamic array whose element fits starts `A[I]`.
+  // A comparison makes a Boolean of any value: nothing is wrong there.
+  ExpCase('B := |;', 'True,False,B', '', '', 'ExtReset', '', 'I,C');
+  ExpCase('Arr := |;', 'Arr,ExtFlags', 'nil', 'I', 'ExtReset', '',
+    'ExtColors');
+  ExpCase('I := |;', 'I', 'ExtFlags,Arr', 'ExtColors', 'ExtReset');
+  ExpCase('C := |;', 'C', 'ExtColors', 'ExtFlags', 'ExtReset');
+  // After a dot the same holds for the members: the operator stands before
+  // the whole chain.
+  ExpCase('A := ExtOwner.|;', 'Pet', 'Dog', 'Color,Count', 'Reset', '',
+    'Car,Next');
+  ExpCase('C := ExtOwner.Next.|;', 'Color', '', 'Count', 'Reset', '', 'Pet');
+  // A compiler function the engine cannot type leads somewhere.
+  ExpCase('I := |;', '', '', '', 'ExtReset', '', 'Ord,Copy');
+  // An inline declaration expects its own type, as an assignment would.
+  ExpCase('var Z: TColor2 := |;', 'clRed,C', '', 'shSquare,I', 'ExtReset');
+  ExpCase('const Z: TColor2 = |;', 'clRed', '', 'shSquare', 'ExtReset');
+  ExpCase('var Z: TAnimal := |;', 'A', 'D,nil', '', 'ExtReset', '', 'K');
+  ExpCase('I := 0;', 'clRed', '', 'shSquare', '',
+    '  TCb = procedure(Z: TColor2 = |);'#10);
+  // A subrange is its base type, a function with parameters its result.
+  ExpCase('C := |;', '', '', 'ExtSub,ExtSubOf,ExtIntOf,ExtBig,ExtHuge,ExtQual', 'ExtReset');
+  ExpCase('I := |;', 'ExtIntOf', 'ExtSub,ExtSubOf', '', 'ExtReset');
+  // A record with a conversion operator takes values of other types.
+  ExpCase('ExtVal := |;', 'ExtVal', '', '', 'ExtReset', '', 'I,C,ExtCount');
+  // A pointer leads where it points: to members, not to a Char.
+  ExpCase('C := |;', '', '', 'ExtP', 'ExtReset', '', 'ExtPOwner');
+  ExpCase('if C = ExtOwner.Co| then;', 'Color', '', 'Count', 'Reset');
+  // A member access as an argument is no value of the left side's type.
+  ExpCase('I := Ord(ExtOwner.|);', '', '', 'Color,Pet', '');
+  GCounter.Ok('expected type: members in an argument keep the procedures',
+    Has('Reset'));
+  ExpCase('ExtOwner.|;', '', '', 'Color,Pet', '');
+  GCounter.Ok('expected type: members in a statement keep the procedures',
+    Has('Reset'));
   GComp.Free;
   GComp := nil;
   GProj.Free;
