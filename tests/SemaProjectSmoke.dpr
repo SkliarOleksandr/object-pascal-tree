@@ -10818,6 +10818,171 @@ begin
   end;
 end;
 
+// 6.3.1 / 9.3.1: `class operator Implicit` by its signature, ranked against
+// the built-in conversions (local/type-conv-2026-11/n2). Each call binds the
+// TRW overload, whose `.W` the TRA one lacks - E2003 otherwise; the TRA
+// overload is declared first in each pair, so a tie binds it. A built-in
+// conversion losing nothing over a user one (IB: an Integer for Double over
+// TRi; IM: a class to its ancestor over `Implicit(A: TBase)`), a user one
+// over a lossy built-in one (IA: an Integer for TRi over Byte; ID: an Int64
+// for TRv over Double; INs: a Variant for TRv over Double; IO: 'abc' for TRv
+// over AnsiString; IP: 300 for TRi over Byte), two user ones by the level of
+// their built-in part (IC: a Byte for TRb over TRi), the operators' types
+// (IFs: a string for TRs, not TRi; IE: `Explicit` converts nothing; IQ: TC's
+// `Implicit(A: Integer)` takes no TA), the result side through one operator
+// by the result's ranking (IG: Byte over ShortInt; IJ: Int64 over Double)
+// and by the exact result between two (IH: string over Int64), and a
+// generic record through its instance (IK, IL: TNul<Integer> for an
+// Integer, TNul<string> for a string). dcc64 37.0, 2026-11-05.
+procedure TestImplicitRanking;
+const
+  SRC_UNIT =
+    'unit CvI;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TBase = class end;'#10 +
+    '  TDer = class(TBase) end;'#10 +
+    '  TRi = record class operator Implicit(A: Integer): TRi; end;'#10 +
+    '  TRb = record class operator Implicit(A: Byte): TRb; end;'#10 +
+    '  TRv = record class operator Implicit(const A: Variant): TRv; end;'#10 +
+    '  TRs = record class operator Implicit(const A: string): TRs; end;'#10 +
+    '  TRe = record class operator Explicit(A: Integer): TRe; end;'#10 +
+    '  TRo = record class operator Implicit(A: TBase): TRo; end;'#10 +
+    '  TOi = record class operator Implicit(const A: TOi): Integer; end;'#10 +
+    '  TOis = record'#10 +
+    '    class operator Implicit(const A: TOis): Integer;'#10 +
+    '    class operator Implicit(const A: TOis): string;'#10 +
+    '  end;'#10 +
+    '  TA = record X: Integer; end;'#10 +
+    '  TB = record class operator Implicit(const A: TA): TB; end;'#10 +
+    '  TC = record class operator Implicit(A: Integer): TC; end;'#10 +
+    '  TNul<T> = record X: T; class operator Implicit(const A: T): TNul<T>; end;'#10 +
+    'function IA(X: Byte): TRA; overload;'#10 +
+    'function IA(const X: TRi): TRW; overload;'#10 +
+    'function IB(const X: TRi): TRA; overload;'#10 +
+    'function IB(X: Double): TRW; overload;'#10 +
+    'function IC(const X: TRi): TRA; overload;'#10 +
+    'function IC(const X: TRb): TRW; overload;'#10 +
+    'function ID(X: Double): TRA; overload;'#10 +
+    'function ID(const X: TRv): TRW; overload;'#10 +
+    'function IE(const X: TRe): TRA; overload;'#10 +
+    'function IE(X: Byte): TRW; overload;'#10 +
+    'function IFs(const X: TRi): TRA; overload;'#10 +
+    'function IFs(const X: TRs): TRW; overload;'#10 +
+    'function IG(X: ShortInt): TRA; overload;'#10 +
+    'function IG(X: Byte): TRW; overload;'#10 +
+    'function IH(X: Int64): TRA; overload;'#10 +
+    'function IH(const X: string): TRW; overload;'#10 +
+    'function IJ(X: Double): TRA; overload;'#10 +
+    'function IJ(X: Int64): TRW; overload;'#10 +
+    'function IK(const X: TNul<string>): TRA; overload;'#10 +
+    'function IK(const X: TNul<Integer>): TRW; overload;'#10 +
+    'function IL(const X: TNul<Integer>): TRA; overload;'#10 +
+    'function IL(const X: TNul<string>): TRW; overload;'#10 +
+    'function IM(const X: TRo): TRA; overload;'#10 +
+    'function IM(X: TBase): TRW; overload;'#10 +
+    'function INs(X: Double): TRA; overload;'#10 +
+    'function INs(const X: TRv): TRW; overload;'#10 +
+    'function IO(const X: AnsiString): TRA; overload;'#10 +
+    'function IO(const X: TRv): TRW; overload;'#10 +
+    'function IP(X: Byte): TRA; overload;'#10 +
+    'function IP(const X: TRi): TRW; overload;'#10 +
+    'function IQ(const X: TC): TRA; overload;'#10 +
+    'function IQ(const X: TB): TRW; overload;'#10 +
+    'implementation'#10 +
+    'class operator TRi.Implicit(A: Integer): TRi; begin end;'#10 +
+    'class operator TRb.Implicit(A: Byte): TRb; begin end;'#10 +
+    'class operator TRv.Implicit(const A: Variant): TRv; begin end;'#10 +
+    'class operator TRs.Implicit(const A: string): TRs; begin end;'#10 +
+    'class operator TRe.Explicit(A: Integer): TRe; begin end;'#10 +
+    'class operator TRo.Implicit(A: TBase): TRo; begin end;'#10 +
+    'class operator TOi.Implicit(const A: TOi): Integer; begin Result := 0; end;'#10 +
+    'class operator TOis.Implicit(const A: TOis): Integer; begin Result := 0; end;'#10 +
+    'class operator TOis.Implicit(const A: TOis): string; begin Result := ''''; end;'#10 +
+    'class operator TB.Implicit(const A: TA): TB; begin end;'#10 +
+    'class operator TC.Implicit(A: Integer): TC; begin end;'#10 +
+    'class operator TNul<T>.Implicit(const A: T): TNul<T>; begin Result.X := A; end;'#10 +
+    'function IA(X: Byte): TRA; begin end;'#10 +
+    'function IA(const X: TRi): TRW; begin end;'#10 +
+    'function IB(const X: TRi): TRA; begin end;'#10 +
+    'function IB(X: Double): TRW; begin end;'#10 +
+    'function IC(const X: TRi): TRA; begin end;'#10 +
+    'function IC(const X: TRb): TRW; begin end;'#10 +
+    'function ID(X: Double): TRA; begin end;'#10 +
+    'function ID(const X: TRv): TRW; begin end;'#10 +
+    'function IE(const X: TRe): TRA; begin end;'#10 +
+    'function IE(X: Byte): TRW; begin end;'#10 +
+    'function IFs(const X: TRi): TRA; begin end;'#10 +
+    'function IFs(const X: TRs): TRW; begin end;'#10 +
+    'function IG(X: ShortInt): TRA; begin end;'#10 +
+    'function IG(X: Byte): TRW; begin end;'#10 +
+    'function IH(X: Int64): TRA; begin end;'#10 +
+    'function IH(const X: string): TRW; begin end;'#10 +
+    'function IJ(X: Double): TRA; begin end;'#10 +
+    'function IJ(X: Int64): TRW; begin end;'#10 +
+    'function IK(const X: TNul<string>): TRA; begin end;'#10 +
+    'function IK(const X: TNul<Integer>): TRW; begin end;'#10 +
+    'function IL(const X: TNul<Integer>): TRA; begin end;'#10 +
+    'function IL(const X: TNul<string>): TRW; begin end;'#10 +
+    'function IM(const X: TRo): TRA; begin end;'#10 +
+    'function IM(X: TBase): TRW; begin end;'#10 +
+    'function INs(X: Double): TRA; begin end;'#10 +
+    'function INs(const X: TRv): TRW; begin end;'#10 +
+    'function IO(const X: AnsiString): TRA; begin end;'#10 +
+    'function IO(const X: TRv): TRW; begin end;'#10 +
+    'function IP(X: Byte): TRA; begin end;'#10 +
+    'function IP(const X: TRi): TRW; begin end;'#10 +
+    'function IQ(const X: TC): TRA; begin end;'#10 +
+    'function IQ(const X: TB): TRW; begin end;'#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program CvIP;'#10'uses CvI;'#10 +
+    'var K, I: Integer; Bt: Byte; I64: Int64; S: string; V: Variant;'#10 +
+    '  ROi: TOi; ROis: TOis; Der: TDer; RA: TA;'#10 +
+    'begin'#10 +
+    '  K := IA(I).W;'#10 +
+    '  K := IB(I).W;'#10 +
+    '  K := IC(Bt).W;'#10 +
+    '  K := ID(I64).W;'#10 +
+    '  K := IE(I).W;'#10 +
+    '  K := IFs(S).W;'#10 +
+    '  K := IG(ROi).W;'#10 +
+    '  K := IH(ROis).W;'#10 +
+    '  K := IJ(ROi).W;'#10 +
+    '  K := IK(I).W;'#10 +
+    '  K := IL(S).W;'#10 +
+    '  K := IM(Der).W;'#10 +
+    '  K := INs(V).W;'#10 +
+    '  K := IO(''abc'').W;'#10 +
+    '  K := IP(300).W;'#10 +
+    '  K := IQ(RA).W;'#10 +
+    'end.'#10;
+var
+  LDir, LName: string;
+begin
+  LDir := FreshDir('pastree_sema_implicitrank');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type TObject = class end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CvI.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CvIP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CvIP.dpr'));
+    LName := '';
+    for var LD in ModelByName('cvip').Diags do
+      if LD.Code = 'E2003' then
+        LName := LName + ' line ' + IntToStr(LD.Line);
+    Ok('implicit ranking: every call binds dcc''s overload - no E2003 [' +
+      LName + ' ]', DiagCount(ModelByName('cvip'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // B35: one operator rule table for both typers (4.2.1) - narrow and alias
 // operands, an enum-subrange array's bounds, a subrange whose bound is
 // another unit's enumeration value or constant, and an inherited cross-unit
@@ -17450,6 +17615,7 @@ begin
   TestOverloadSets;
   TestValueOverloads;
   TestConvRanking;
+  TestImplicitRanking;
   TestOperatorTable;
   TestTargetFacts;
   TestOracleDepth;

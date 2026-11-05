@@ -60,6 +60,25 @@ type
     PAnsiChar - and, for an argument only, a string literal or a
     one-character one (cnkStrLit, cnkCharLit: a literal or a true constant
     naming one). cnkNone: anything else, which the ranking leaves alone. }
+  { TPasSemaProject.XConvX: how a value of one type converts to another
+    where the language converts implicitly (an assignment, a value
+    argument). Declaration order is the preference. FIRST VERSION - the
+    plan for the full one (widening distance, implements, sets, procedural
+    types, overload resolution on top) is local/TYPE-CONVERSION-PLAN.md.
+    Here because the unit typer's UserConvSym answers it too. }
+  TSemaConv = (
+    scIdentical,  // the same type, builtin alias groups included
+    scImplicit,   // converts with evidence: integer to integer or float,
+                  // Char/PChar to string, a descendant class, nil to a
+                  // reference, a scalar to or from a Variant, a record's
+                  // `class operator Implicit` that takes it
+    scMaybe,      // no evidence either way: an unknown category, a record
+                  // operator whose types are not known, structured types
+                  // this version does not compare
+    scNone);      // proven not to convert: two scalar categories that do
+                  // not, two enumerations, unrelated classes, a record
+                  // whose operators do not take it
+
   TSemaConvKind = (cnkNone,
     cnkShortInt, cnkByte, cnkSmallInt, cnkWord, cnkInteger, cnkCardinal,
     cnkInt64, cnkUInt64,
@@ -71,11 +90,28 @@ type
 const
   { An argument's score on a candidate's scale (ScoreCandidate, ScoreArgs):
     its fit (ArgFitCanonX's 3 / 2 / 1 doubled, CtorElemFit's steps) times
-    this, plus the conversion's ConvRank when the fit is a conversion. A
-    rank is below 32, so the ranks of up to 32 arguments together never
-    outweigh one step of fit: the ranks only order candidates whose fits
-    tie, as dcc ranks conversions only against conversions. }
-  CConvScale = 1024;
+    this, plus the conversion's rank when the fit is a conversion (ConvRank,
+    UserConvRank). A rank is below 1024, so the ranks of up to 64 arguments
+    together never outweigh one step of fit: the ranks only order
+    candidates whose fits tie, as dcc ranks conversions only against
+    conversions. }
+  CConvScale = 65536;
+
+  { The tiers of a conversion's rank (6.3.1), one argument's conversions
+    against each other: a built-in conversion that loses nothing (its raw
+    rank at or above the argument's ConvThreshold) above a user conversion
+    through `class operator Implicit` whose built-in part loses nothing,
+    above a lossy built-in conversion, above a user conversion through a
+    lossy one (UserConvRank: 1 .. 31). Each tier adds the raw rank (below
+    32) or, for a user conversion, 32 times its level (UserConvLevel) plus
+    the raw rank of its built-in part. A value the ranking does not cover
+    (a class, a record, nil) converts by a built-in conversion of rank 0 -
+    a class to its ancestor, nil to a pointer - so a user conversion of one
+    ranks below 0, CRankLossless under its tier: a TMemoryStream takes
+    F(TStream) over F(TRec) with `Implicit(A: TObject): TRec`. }
+  CRankLossless = 768;
+  CRankUser = 512;
+  CRankLossy = 256;
 
 type
 
@@ -263,6 +299,14 @@ type
     function ClassRefTarget(ASym: Integer): Integer;
     function IsValuePos(N: Integer): Boolean;
     function DeclaresConversion(ASym: Integer; AExplicitToo: Boolean): Boolean;
+    { TPasSemaProject.UserConvX's rule on this unit's symbols: a user
+      conversion of a value of type ASrc (the argument AArg, its node's
+      facts, when given) to ADst through a `class operator Implicit` of
+      either - its rank in ARank, AOps whether either declares one. A leg
+      whose types this unit cannot compare (a generic parameter, a type
+      it does not bind) is scMaybe. }
+    function UserConvSym(ADst, ASrc: Integer; AArg: PSemaArgConv;
+      out ARank: Integer; out AOps: Boolean): TSemaConv;
     function ScoreArgs(ACall: Integer; const AParams: TArray<Integer>): Integer;
     { One argument against the parameter AParam: AArg its node, or NIL_NODE
       for a comparison an nkAmbiguous stands for (no node shape to read);
@@ -414,9 +458,10 @@ function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
 
   ArgStructRejects - two types already known NOT to be the same type: two
   records, an array against a record, class or interface, or a number, a
-  Boolean, a character or an enumeration value for a record, when no side
-  that could convert declares an Implicit / Explicit operator (AParConv,
-  AArgConv). A string is no such value: a string constant converts to
+  Boolean, a character, an enumeration value, a class instance, a pointer
+  or a set for a record (not an interface: its type name is a TGUID), when
+  no side that could convert declares an Implicit operator (AParConv, AArgConv;
+  `Explicit` converts nothing implicitly). A string is no such value: a string constant converts to
   TGUID. `TextToFloat(PChar(S), E, fvExtended)` takes the `(Buffer:
   PWideChar; var Value; ValueType: TFloatValue)` overload: the enumeration
   puts `(const S: string; var Value: Extended; const AFormatSettings:
@@ -534,6 +579,9 @@ function ConvArgKindOf(const AF: TSemaOpFacts): TSemaConvKind;
   preferred; 0 the parameter does not take the argument; -1 the ranking
   does not apply (a kind is cnkNone). AWideExt: Extended is wider than
   Double on the target (10 or 16 bytes; TPasPlatformInfo.ExtendedBytes).
+  ConvRawRank is the rank as measured (below 32); ConvRank puts it in its
+  tier - CRankLossless or CRankLossy plus the raw rank, by the argument's
+  ConvThreshold - the scale a user conversion (UserConvRank) sits on too.
 
   The table is dcc's, measured, not derived from a principle (spec 6.3.1):
   every pair of the 14 numeric types and of the 11 string kinds, each
@@ -565,6 +613,44 @@ function ConvArgKindOf(const AF: TSemaOpFacts): TSemaConvKind;
   Variant. dcc64 / dcc32 37.0, 2026-11-05 (local/type-conv-2026-11/n1). }
 function ConvRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
   AWideExt: Boolean): Integer;
+function ConvRawRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
+  AWideExt: Boolean): Integer;
+
+{ The lowest raw rank (ConvRawRank) at which a conversion of the argument
+  AArg loses nothing: its rank of Variant - every row of the ranking puts
+  the conversions that keep every value above Variant and the narrowing
+  ones below it (an Integer: Single .. Int64 above, Cardinal and the
+  narrower integers below; an Int64: Comp only; a string: WideString; an
+  integer constant: the integers holding it and, by its size, the reals) -
+  or, for a PChar / PAnsiChar, which Variant refuses, its rank of
+  WideString. The line between dcc's tiers of a built-in and a user
+  conversion (CRankLossless, CRankLossy; 6.3.1, local/type-conv-2026-11/n2
+  Set U: 1,440 calls, none order-dependent). }
+function ConvThreshold(const AArg: TSemaArgConv; AWideExt: Boolean): Integer;
+
+{ The level of a user conversion (`class operator Implicit`) whose built-in
+  part takes the argument AArg to the operator's parameter kind AQKind - or,
+  on the result side, a variable of the operator's result kind (AArg) to the
+  parameter's kind (AQKind): 7 the argument's own type (an integer constant:
+  any integer of 32 bits or less holding it), 2 .. 6 a conversion that loses
+  nothing, by dcc's order between them (an Ansi string to an Ansi kind above
+  the Unicode ones; a one-character literal to a string above PChar /
+  AnsiChar; the integers and reals one level), 1 Variant, 0 a lossy one or
+  none. dcc compares two user conversions through different operators by
+  these levels alone: a Byte for F(TRecInt) or F(TRecDouble) is ambiguous,
+  for F(TRecByte) or F(TRecInt) takes TRecByte. Measured on dcc64 37.0
+  (local/type-conv-2026-11/n2 Set V: 16,560 calls, table.ps1). }
+function UserConvLevel(const AArg: TSemaArgConv; AQKind: TSemaConvKind;
+  AWideExt: Boolean): Integer;
+
+{ The rank of a user conversion of level ALevel (UserConvLevel) whose
+  built-in part has the raw rank AFine (ConvRawRank; 0 when not ranked):
+  in the user tier for a level above 0 (CRankUser + 32 * level + AFine),
+  else below the lossy built-in ones (1 .. 31). AFine orders two routes of
+  one level - through the same operator dcc ranks its result's conversion
+  as for a variable of that type: a record with `Implicit(R): Integer` takes
+  F(Byte) over F(ShortInt), F(Int64) over F(Double). }
+function UserConvRank(ALevel, AFine: Integer): Integer;
 
 { An integer argument ANode of ATree that is a constant expression dcc folds
   (ConstExprKind), read as ConvRank ranks it: its value in AArg.Facts
@@ -590,7 +676,8 @@ function ParamIsByRef(const AModel: TPasSemaModel; ASym: Integer): Boolean;
 
 { An argument's score on a candidate's scale (CConvScale) from its fit AFit
   on the doubled scale (CtorElemFit) and, for a conversion fit, its rank
-  ARank (ConvRank): -1 for a rejection, 0 for no evidence. }
+  ARank (ConvRank, UserConvRank; below 0 for a user conversion of a value
+  the ranking does not cover): -1 for a rejection, 0 for no evidence. }
 function ScaledFit(AFit: Integer; ARank: Integer = 0): Integer;
 
 { The present arguments of the nkCall ACall - its children after the callee,
@@ -1001,9 +1088,14 @@ begin
   // for - makes them so.
   if (AParCat = tcRecord) and (AArgCat = tcRecord) then
     Exit(not AParConv and not AArgConv);
-  // A scalar but a string for a record: only the record's operator converts.
+  // A scalar but a string, a class instance, a pointer or a set for a
+  // record: only the record's operator converts (`ShowHint(Self)` takes
+  // ShowHint(Control: TControl) beside the TRect overload; dcc64 E2010 for
+  // each, 6.3.1). Not an interface: its type name is a TGUID
+  // (`Supports(X, IFoo)`).
   if (AParCat = tcRecord) and
-     (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum]) then
+     (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum, tcClass,
+      tcPointer, tcSet]) then
     Exit(not AParConv);
   // An array against a record, class or interface, either way round.
   Result := ((AParCat = tcArray) and
@@ -1227,7 +1319,42 @@ const
     )
   );
 
-function ConvRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
+  // UserConvLevel's table: [argument kind, the kind it converts to]; 7 the
+  // argument's own type, 2 .. 6 the lossless conversions in dcc's order
+  // between them, 1 Variant, 0 lossy or none. Generated from the probe
+  // results (local/type-conv-2026-11/n2, table.ps1), dcc64.
+  CConvUserLevels: array[TSemaConvKind, TSemaConvKind] of Byte = (
+      // param: No Sh By Sm Wo In Ca In UI Si Do Ex Cu Co Va st Wi An UT Ra Sh Ch An PC PA St Ch
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // None
+      ( 0, 7, 0, 2, 0, 2, 0, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // ShortInt
+      ( 0, 0, 7, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Byte
+      ( 0, 0, 0, 7, 0, 2, 0, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // SmallInt
+      ( 0, 0, 0, 0, 7, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Word
+      ( 0, 0, 0, 0, 0, 7, 0, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Integer
+      ( 0, 0, 0, 0, 0, 0, 7, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Cardinal
+      ( 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Int64
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // UInt64
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 2, 2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Single
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Double
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Extended
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Currency
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Comp
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // Variant
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 7, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // string
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), // WideString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 7, 3, 3, 0, 0, 0, 0, 0, 0, 0), // AnsiString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 3, 7, 3, 0, 0, 0, 0, 0, 0, 0), // UTF8String
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 3, 3, 7, 0, 0, 0, 0, 0, 0, 0), // RawByteString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 3, 3, 3, 7, 0, 0, 0, 0, 0, 0), // ShortString
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0), // Char
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 4, 4, 4, 3, 0, 7, 0, 0, 0, 0), // AnsiChar
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0), // PChar
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 3, 3, 3, 0, 0, 0, 0, 7, 0, 0), // PAnsiChar
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 7, 2, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0), // StrLit
+      ( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 3, 3, 0, 0, 0, 0, 7, 2, 2, 0, 0, 0)  // CharLit
+  );
+
+function ConvRawRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
   AWideExt: Boolean): Integer;
 var
   L64: Boolean;
@@ -1245,6 +1372,60 @@ begin
     Exit(IntConstRank(AArg.Facts.IntValue, AParKind, AWideExt, L64));
   end;
   Result := CConvRanks[AWideExt, AArg.Kind, AParKind];
+end;
+
+function ConvThreshold(const AArg: TSemaArgConv; AWideExt: Boolean): Integer;
+begin
+  if AArg.Kind in [cnkPChar, cnkPAnsiChar] then
+    Result := ConvRawRank(AArg, cnkWideString, AWideExt)
+  else
+    Result := ConvRawRank(AArg, cnkVariant, AWideExt);
+end;
+
+function ConvRank(const AArg: TSemaArgConv; AParKind: TSemaConvKind;
+  AWideExt: Boolean): Integer;
+begin
+  Result := ConvRawRank(AArg, AParKind, AWideExt);
+  if Result <= 0 then
+    Exit;
+  if Result >= ConvThreshold(AArg, AWideExt) then
+    Inc(Result, CRankLossless)
+  else
+    Inc(Result, CRankLossy);
+end;
+
+function UserConvLevel(const AArg: TSemaArgConv; AQKind: TSemaConvKind;
+  AWideExt: Boolean): Integer;
+var
+  LRaw: Integer;
+begin
+  if (AArg.Kind = cnkNone) or (AQKind in [cnkNone, cnkStrLit, cnkCharLit]) then
+    Exit(0);
+  if AArg.Facts.IntConst and (AArg.Facts.Cat = tcInteger) and
+     not (AArg.TypedConst and (AArg.Kind = AQKind)) then
+  begin
+    // An integer constant by its value: its own type is any integer of 32
+    // bits or less holding it (`5` for TRecByte or TRecInt is ambiguous),
+    // a 64-bit integer or a real holding it a lossless conversion.
+    LRaw := ConvRawRank(AArg, AQKind, AWideExt);
+    if LRaw < ConvThreshold(AArg, AWideExt) then
+      Exit(0);
+    if AQKind = cnkVariant then
+      Exit(1);
+    if AQKind in [cnkShortInt..cnkCardinal] then
+      Exit(7);
+    Exit(2);
+  end;
+  Result := CConvUserLevels[AArg.Kind, AQKind];
+end;
+
+function UserConvRank(ALevel, AFine: Integer): Integer;
+begin
+  if AFine < 0 then
+    AFine := 0;
+  if ALevel <= 0 then
+    Exit(1 + AFine);
+  Result := CRankUser + 32 * ALevel + AFine;
 end;
 
 function MayFoldConvConst(const ATree: TPasTree; ANode: Integer): Boolean;
@@ -1305,7 +1486,7 @@ begin
   // ArgStructRejects' cases, without the operators.
   Result := ((AParCat = tcRecord) and
              (AArgCat in [tcRecord, tcInteger, tcFloat, tcBoolean, tcChar,
-              tcEnum])) or
+              tcEnum, tcClass, tcPointer, tcSet])) or
             ((AParCat = tcArray) and
              (AArgCat in [tcRecord, tcClass, tcInterface])) or
             ((AArgCat = tcArray) and
@@ -4283,17 +4464,163 @@ begin
   end;
 end;
 
+function TPasSemaTyper.UserConvSym(ADst, ASrc: Integer; AArg: PSemaArgConv;
+  out ARank: Integer; out AOps: Boolean): TSemaConv;
+var
+  LMaybe, LAny: Boolean;
+  LBest: Integer;
+
+  // One built-in leg: a value of type AFrom (the argument AFromArg when
+  // given) to ATo, as UserConvX's LegRank: -1 no conversion, else its user
+  // rank; ALeg the verdict.
+  function LegRank(ATo, AFrom: Integer; AFromArg: PSemaArgConv;
+    out ALeg: TSemaConv): Integer;
+  var
+    LArg: TSemaArgConv;
+    LTo: TSemaConvKind;
+    LF: TSemaOpFacts;
+    LRaw: Integer;
+    LCt, LCf: TSemaTypeCat;
+  begin
+    ALeg := scMaybe;
+    Result := -1;
+    if (ATo = NIL_SYM) or (AFrom = NIL_SYM) or
+       (M.Symbols[ATo].Kind = skGenericParam) or
+       (M.Symbols[AFrom].Kind = skGenericParam) then
+      Exit;
+    if (ATo = AFrom) or (PasBuiltinCanonSym(M, ATo, FPlatform) =
+        PasBuiltinCanonSym(M, AFrom, FPlatform)) then
+      ALeg := scIdentical
+    else
+    begin
+      LCt := CatOf(ATo);
+      LCf := CatOf(AFrom);
+      if (LCt = tcUnknown) or (LCf = tcUnknown) then
+        Exit;
+      // No chain: a record converts to nothing but itself here.
+      if (LCt = tcRecord) or (LCf = tcRecord) or ArgCatRejects(LCt, LCf) or
+         not Assignable(ATo, AFrom) then
+      begin
+        ALeg := scNone;
+        Exit;
+      end;
+      ALeg := scImplicit;
+    end;
+    if AFromArg <> nil then
+      LArg := AFromArg^
+    else
+    begin
+      LArg := Default(TSemaArgConv);
+      LArg.Kind := ConvKindSym(AFrom, NIL_NODE, False, LArg.Facts);
+    end;
+    LTo := ConvKindSym(ATo, NIL_NODE, False, LF);
+    if (LArg.Kind = cnkNone) or (LTo = cnkNone) then
+    begin
+      // A value the ranking does not cover: under the built-in conversions
+      // of rank 0 (a class to its ancestor).
+      if ALeg = scIdentical then
+        Exit(UserConvRank(7, 0) - CRankLossless);
+      Exit(UserConvRank(2, 0) - CRankLossless);
+    end;
+    LRaw := ConvRawRank(LArg, LTo, FWideExt);
+    if LRaw <= 0 then
+    begin
+      ALeg := scNone;
+      Exit;
+    end;
+    Result := UserConvRank(UserConvLevel(LArg, LTo, FWideExt), LRaw);
+  end;
+
+  procedure Consider(AOwner: Integer);
+  var
+    LScope, LSym, LRank, LRank2: Integer;
+    LParams: TArray<Integer>;
+    LPre, LPost: TSemaConv;
+  begin
+    if (AOwner = NIL_SYM) or (CatOf(AOwner) <> tcRecord) then
+      Exit;
+    LScope := M.Symbols[AOwner].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    // Walked in declaration order, not looked up by name: a member that
+    // shares the operator's name owns the name (9.3.1).
+    for LSym in M.Scopes[LScope].Symbols do
+    begin
+      if (M.Symbols[LSym].Kind <> skRoutine) or
+         (M.Symbols[LSym].NameLower <> 'implicit') or
+         (M.RoutineHead(LSym) <> rhOperator) then
+        Continue;
+      AOps := True;
+      LParams := ParamsOf(M.Symbols[LSym].MemberScope);
+      if Length(LParams) <> 1 then
+        Continue;
+      // The argument to the operator's parameter, then its result to the
+      // wanted type; one of the two is the record itself.
+      LRank := LegRank(WeakAliasEnd(M.Symbols[LParams[0]].TypeSym), ASrc,
+        AArg, LPre);
+      if LPre = scNone then
+        Continue;
+      LRank2 := LegRank(ADst, WeakAliasEnd(M.Symbols[LSym].TypeSym), nil,
+        LPost);
+      if LPost = scNone then
+        Continue;
+      if (LPre = scMaybe) or (LPost = scMaybe) then
+      begin
+        LMaybe := True;
+        Continue;
+      end;
+      // As UserConvX: the converting leg's rank, or the better one.
+      if (LPre = scIdentical) and (LPost <> scIdentical) then
+        LRank := LRank2
+      else if (LPre = scIdentical) and (LRank2 > LRank) then
+        LRank := LRank2;
+      LAny := True;
+      if LRank > LBest then
+        LBest := LRank;
+    end;
+  end;
+
+begin
+  Result := scNone;
+  ARank := 0;
+  AOps := False;
+  ADst := WeakAliasEnd(ADst);
+  ASrc := WeakAliasEnd(ASrc);
+  if (ADst = NIL_SYM) or (ASrc = NIL_SYM) or (ADst = ASrc) then
+    Exit;
+  // A side of no known category - a generic parameter - may be anything.
+  if (CatOf(ADst) = tcUnknown) or (CatOf(ASrc) = tcUnknown) or
+     (M.Symbols[ADst].Kind = skGenericParam) or
+     (M.Symbols[ASrc].Kind = skGenericParam) then
+    Exit(scMaybe);
+  LMaybe := False;
+  LAny := False;
+  LBest := -MaxInt;
+  Consider(ADst);
+  Consider(ASrc);
+  if LAny then
+  begin
+    ARank := LBest;
+    Result := scImplicit;
+  end
+  else if LMaybe then
+    Result := scMaybe;
+end;
+
 function TPasSemaTyper.ScoreArgRanked(AArg, AAt, APt: Integer;
   ARanked: Boolean; out ARank: Integer): Integer;
 var
   LCore, LPt, LCAt, LCPt, LRank: Integer;
   LParCat: TSemaTypeCat;
   LArgC: TSemaArgConv;
+  LArgP: PSemaArgConv;
   LParF: TSemaOpFacts;
+  LOps: Boolean;
 begin
   Result := 0;
   ARank := 0;
   LCore := NIL_NODE;
+  LArgC.Kind := cnkNone;
   LPt := APt;
   if LPt = NIL_SYM then
     Exit;
@@ -4381,12 +4708,31 @@ begin
     LCAt := PasBuiltinCanonSym(M, WeakAliasEnd(AAt), FPlatform);
     LCPt := PasBuiltinCanonSym(M, WeakAliasEnd(LPt), FPlatform);
     if (AAt = LPt) or (LCAt = LCPt) then
-      Result := 2
-    else if ArgCatRejects(LParCat, CatOf(AAt)) or
+      Exit(2);
+    // A record with `class operator Implicit` on either side: its
+    // operators decide (UserConvSym - ArgFitCanonX's UserConvX).
+    LOps := False;
+    if (LParCat = tcRecord) or (CatOf(AAt) = tcRecord) then
+    begin
+      if LArgC.Kind <> cnkNone then
+        LArgP := @LArgC
+      else
+        LArgP := nil;
+      case UserConvSym(LPt, AAt, LArgP, LRank, LOps) of
+        scImplicit:
+          begin
+            ARank := LRank;
+            Exit(1);
+          end;
+        scNone:
+          if LOps then
+            Exit(-1);
+      end;
+    end;
+    if ArgCatRejects(LParCat, CatOf(AAt)) or
        (ArgStructNeedsConv(LParCat, CatOf(AAt)) and
-        ArgStructRejects(LParCat, CatOf(AAt),
-          DeclaresConversion(LPt, True),
-          DeclaresConversion(AAt, True))) then
+        ArgStructRejects(LParCat, CatOf(AAt), LOps and (LParCat = tcRecord),
+          LOps and (CatOf(AAt) = tcRecord))) then
       Result := -1
     else if Assignable(LPt, AAt) then
       Result := 1;

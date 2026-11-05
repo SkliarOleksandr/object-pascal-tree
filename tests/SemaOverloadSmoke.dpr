@@ -584,6 +584,120 @@ const
     '  X := RC([1, 2]);'#10 +
     'end;'#10'end.'#10;
 
+  { `class operator Implicit` by its signature in the unit's own typer
+    (UserConvSym, the project's UserConvX rule; 6.3.1, 9.3.1,
+    local/type-conv-2026-11/n2): SemaProjectSmoke's TestImplicitRanking in
+    one unit. The overload dcc does NOT pick is declared first. }
+  SRC_IMPL =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TBase = class end;'#10 +
+    '  TDer = class(TBase) end;'#10 +
+    '  TRi = record class operator Implicit(A: Integer): TRi; end;'#10 +
+    '  TRb = record class operator Implicit(A: Byte): TRb; end;'#10 +
+    '  TRv = record class operator Implicit(const A: Variant): TRv; end;'#10 +
+    '  TRs = record class operator Implicit(const A: string): TRs; end;'#10 +
+    '  TRe = record class operator Explicit(A: Integer): TRe; end;'#10 +
+    '  TRo = record class operator Implicit(A: TBase): TRo; end;'#10 +
+    '  TOi = record class operator Implicit(const A: TOi): Integer; end;'#10 +
+    '  TOis = record'#10 +
+    '    class operator Implicit(const A: TOis): Integer;'#10 +
+    '    class operator Implicit(const A: TOis): string;'#10 +
+    '  end;'#10 +
+    '  TA = record X: Integer; end;'#10 +
+    '  TB = record class operator Implicit(const A: TA): TB; end;'#10 +
+    '  TC = record class operator Implicit(A: Integer): TC; end;'#10 +
+    'function IA(X: Byte): TRA; overload;'#10 +
+    'function IA(const X: TRi): TRW; overload;'#10 +
+    'function IB(const X: TRi): TRA; overload;'#10 +
+    'function IB(X: Double): TRW; overload;'#10 +
+    'function IC(const X: TRi): TRA; overload;'#10 +
+    'function IC(const X: TRb): TRW; overload;'#10 +
+    'function ID(X: Double): TRA; overload;'#10 +
+    'function ID(const X: TRv): TRW; overload;'#10 +
+    'function IE(const X: TRe): TRA; overload;'#10 +
+    'function IE(X: Byte): TRW; overload;'#10 +
+    'function IFs(const X: TRi): TRA; overload;'#10 +
+    'function IFs(const X: TRs): TRW; overload;'#10 +
+    'function IG(X: ShortInt): TRA; overload;'#10 +
+    'function IG(X: Byte): TRW; overload;'#10 +
+    'function IH(X: Int64): TRA; overload;'#10 +
+    'function IH(const X: string): TRW; overload;'#10 +
+    'function IJ(X: Double): TRA; overload;'#10 +
+    'function IJ(X: Int64): TRW; overload;'#10 +
+    'function IM(const X: TRo): TRA; overload;'#10 +
+    'function IM(X: TBase): TRW; overload;'#10 +
+    'function INs(X: Double): TRA; overload;'#10 +
+    'function INs(const X: TRv): TRW; overload;'#10 +
+    'function IO(const X: AnsiString): TRA; overload;'#10 +
+    'function IO(const X: TRv): TRW; overload;'#10 +
+    'function IP(X: Byte): TRA; overload;'#10 +
+    'function IP(const X: TRi): TRW; overload;'#10 +
+    'function IQ(const X: TC): TRA; overload;'#10 +
+    'function IQ(const X: TB): TRW; overload;'#10 +
+    'implementation'#10 +
+    'class operator TRi.Implicit(A: Integer): TRi; begin end;'#10 +
+    'class operator TRb.Implicit(A: Byte): TRb; begin end;'#10 +
+    'class operator TRv.Implicit(const A: Variant): TRv; begin end;'#10 +
+    'class operator TRs.Implicit(const A: string): TRs; begin end;'#10 +
+    'class operator TRe.Explicit(A: Integer): TRe; begin end;'#10 +
+    'class operator TRo.Implicit(A: TBase): TRo; begin end;'#10 +
+    'class operator TOi.Implicit(const A: TOi): Integer; begin end;'#10 +
+    'class operator TOis.Implicit(const A: TOis): Integer; begin end;'#10 +
+    'class operator TOis.Implicit(const A: TOis): string; begin end;'#10 +
+    'class operator TB.Implicit(const A: TA): TB; begin end;'#10 +
+    'class operator TC.Implicit(A: Integer): TC; begin end;'#10 +
+    'function IA(X: Byte): TRA; begin end;'#10 +
+    'function IA(const X: TRi): TRW; begin end;'#10 +
+    'function IB(const X: TRi): TRA; begin end;'#10 +
+    'function IB(X: Double): TRW; begin end;'#10 +
+    'function IC(const X: TRi): TRA; begin end;'#10 +
+    'function IC(const X: TRb): TRW; begin end;'#10 +
+    'function ID(X: Double): TRA; begin end;'#10 +
+    'function ID(const X: TRv): TRW; begin end;'#10 +
+    'function IE(const X: TRe): TRA; begin end;'#10 +
+    'function IE(X: Byte): TRW; begin end;'#10 +
+    'function IFs(const X: TRi): TRA; begin end;'#10 +
+    'function IFs(const X: TRs): TRW; begin end;'#10 +
+    'function IG(X: ShortInt): TRA; begin end;'#10 +
+    'function IG(X: Byte): TRW; begin end;'#10 +
+    'function IH(X: Int64): TRA; begin end;'#10 +
+    'function IH(const X: string): TRW; begin end;'#10 +
+    'function IJ(X: Double): TRA; begin end;'#10 +
+    'function IJ(X: Int64): TRW; begin end;'#10 +
+    'function IM(const X: TRo): TRA; begin end;'#10 +
+    'function IM(X: TBase): TRW; begin end;'#10 +
+    'function INs(X: Double): TRA; begin end;'#10 +
+    'function INs(const X: TRv): TRW; begin end;'#10 +
+    'function IO(const X: AnsiString): TRA; begin end;'#10 +
+    'function IO(const X: TRv): TRW; begin end;'#10 +
+    'function IP(X: Byte): TRA; begin end;'#10 +
+    'function IP(const X: TRi): TRW; begin end;'#10 +
+    'function IQ(const X: TC): TRA; begin end;'#10 +
+    'function IQ(const X: TB): TRW; begin end;'#10 +
+    'procedure Test(I: Integer; Bt: Byte; I64: Int64; const S: string;'#10 +
+    '  const V: Variant; const ROi: TOi; const ROis: TOis; Der: TDer;'#10 +
+    '  const RA: TA);'#10 +
+    'var'#10 +
+    '  X: TRW;'#10 +
+    'begin'#10 +
+    '  X := IA(I);'#10 +
+    '  X := IB(I);'#10 +
+    '  X := IC(Bt);'#10 +
+    '  X := ID(I64);'#10 +
+    '  X := IE(I);'#10 +
+    '  X := IFs(S);'#10 +
+    '  X := IG(ROi);'#10 +
+    '  X := IH(ROis);'#10 +
+    '  X := IJ(ROi);'#10 +
+    '  X := IM(Der);'#10 +
+    '  X := INs(V);'#10 +
+    '  X := IO(''abc'');'#10 +
+    '  X := IP(300);'#10 +
+    '  X := IQ(RA);'#10 +
+    'end;'#10'end.'#10;
+
   { dcc's ranking of number and string conversions in the unit's own typer
     (ConvRank, 6.3.1; local/type-conv-2026-11/n1), the project pass's rule:
     the overload dcc does NOT pick is declared first. An integer literal by
@@ -798,6 +912,13 @@ begin
     Ok('conversion ranking (6.3.1): ' + LName + ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   Ok('conversion ranking: no E2010', DiagCount('E2010') = 0);
+  GModel.Free;
+
+  Analyze(SRC_IMPL);
+  for var LName in ['IA', 'IB', 'IC', 'ID', 'IE', 'IFs', 'IG', 'IH', 'IJ',
+    'IM', 'INs', 'IO', 'IP', 'IQ'] do
+    Ok('Implicit by signature (6.3.1): ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   GModel.Free;
 
   Analyze(SRC_ASSIGN);

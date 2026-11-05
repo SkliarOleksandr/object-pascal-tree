@@ -396,23 +396,6 @@ type
     from the path, a depth cap) - a diagnostic acts on xdNo only. }
   TPasDescent = (xdYes, xdNo, xdUnknown);
 
-  { TPasSemaProject.XConvX: how a value of one type converts to another
-    where the language converts implicitly (an assignment, a value
-    argument). Declaration order is the preference. FIRST VERSION - the
-    plan for the full one (widening distance, Implicit by signature,
-    implements, sets, procedural types, overload resolution on top) is
-    local/TYPE-CONVERSION-PLAN.md. }
-  TSemaConv = (
-    scIdentical,  // the same type, builtin alias groups included
-    scImplicit,   // converts with evidence: integer to integer or float,
-                  // Char/PChar to string, a descendant class, nil to a
-                  // reference, a scalar to or from a Variant
-    scMaybe,      // no evidence either way: an unknown category, a record
-                  // with a conversion operator, structured types this
-                  // version does not compare
-    scNone);      // proven not to convert: two scalar categories that do
-                  // not, two enumerations, unrelated classes
-
   { One `uses` entry's ResolveUnit answer as the load engine's discovery got
     it, with the arguments and the source manager's ResolveEpoch then: what
     ResolveUses reuses while the epoch has not moved. }
@@ -1541,6 +1524,9 @@ type
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
     function ParCatOf(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
     function IsStaticArrayX(const AX: TSemaXType): Boolean;
+    // XConvX; AUser False leaves the user conversions out (UserConvX's
+    // built-in parts: no chain of two operators).
+    function XConvCoreX(const ADst, ASrc: TSemaXType; AUser: Boolean): TSemaConv;
     // ArgFitX over sides already canonicalized - see there. AConv: the
     // argument as the conversion ranking reads it (ArgConvX), nil for none;
     // ARank: that ranking's rank of a conversion fit (1), else 0.
@@ -2084,15 +2070,29 @@ type
       else. Promoted for the same ranking: an array whose element fits starts
       `A[I]`. }
     function DynArrayElemX(const ACanonParX: TSemaXType): TSemaXType;
-    { Whether AX declares `class operator Implicit` or `Explicit` - not
-      which types they take. Promoted for the same ranking: a record that
-      converts makes no value provably wrong for it (`V: TValue := 5`). }
-    function HasConversionOperator(const AX: TSemaXType): Boolean;
+    { Whether AX declares `class operator Implicit` - not which types it
+      takes (UserConvX reads that). `Explicit` never converts implicitly
+      (9.3.1). }
+    function HasImplicitOperator(const AX: TSemaXType): Boolean;
     { How a value of type ASrc converts to ADst implicitly (TSemaConv). One
       place for the language's assignment-compatibility rules, to replace
       the copies in the typer, the argument scorer and the completion
       ranking - first version, see TSemaConv. }
     function XConvX(const ADst, ASrc: TSemaXType): TSemaConv;
+    { A user conversion of ASrc to ADst (both canonical, one a record)
+      through a `class operator Implicit` of either (9.3.1, 6.3.1): an
+      operator `Implicit(A: Q): R` of ADst or of ASrc converts when ASrc
+      goes to Q and R to ADst by a BUILT-IN conversion - one operator, no
+      chain (`TA -> TB -> TC` through two operators is E2010), `Explicit`
+      never; a generic record's operators in its instance's frame
+      (`TNul<Integer>` takes an Integer, not a string). scImplicit with the
+      best operator's rank in ARank (UserConvRank: the level and raw rank of
+      the built-in part, read for the argument AConv when given, else for a
+      variable of type ASrc), scMaybe when an operator's types are not
+      known, else scNone. AOps: ADst or ASrc declares an Implicit at all -
+      scNone without one says nothing. }
+    function UserConvX(const ADst, ASrc: TSemaXType; AConv: PSemaArgConv;
+      out ARank: Integer; out AOps: Boolean): TSemaConv;
     { Is ADesc ABase (canonicalized: a constraint named through an alias is
       the class, spec 16.4.1) or a descendant of it? xdNo only when the walk
       reached the end of ADesc's ancestry without meeting it; xdUnknown at a
@@ -13638,12 +13638,19 @@ end;
   - a class converts to its ancestors (XDescent: xdNo is scNone, xdUnknown
     scMaybe); an interface to its ancestors likewise; a class to an
     interface is not checked (scMaybe);
-  - a record with a conversion operator on either side is scMaybe - which
-    types the operators take is not read yet;
+  - a record with `class operator Implicit` on either side converts as its
+    operators say (UserConvX), and two different records without one do
+    not convert;
   - two scalar categories that none of the above joins are scNone, as are
     two different enumerations, and a scalar against a structured type;
   - everything else is scMaybe. }
 function TPasSemaProject.XConvX(const ADst, ASrc: TSemaXType): TSemaConv;
+begin
+  Result := XConvCoreX(ADst, ASrc, True);
+end;
+
+function TPasSemaProject.XConvCoreX(const ADst, ASrc: TSemaXType;
+  AUser: Boolean): TSemaConv;
 const
   SCALARS = [tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum];
   STRUCTURED = [tcPointer, tcSet, tcArray, tcRecord, tcClass, tcInterface,
@@ -13651,6 +13658,8 @@ const
 var
   LD, LS, LPointee: TSemaXType;
   D, S: TSemaTypeCat;
+  LRank: Integer;
+  LOps: Boolean;
 begin
   if not XValid(ADst) or not XValid(ASrc) then
     Exit(scMaybe);
@@ -13664,16 +13673,24 @@ begin
   S := XCatOf(LS);
   if (D = tcUnknown) or (S = tcUnknown) then
     Exit(scMaybe);
-  if ((D = tcRecord) and HasConversionOperator(LD)) or
-     ((S = tcRecord) and HasConversionOperator(LS)) then
-    Exit(scMaybe);
+  if (D = tcRecord) or (S = tcRecord) then
+  begin
+    if AUser then
+    begin
+      Result := UserConvX(LD, LS, nil, LRank, LOps);
+      if LOps then
+        Exit;
+    end;
+    // No operator: a record converts to and from nothing but itself.
+    Exit(TSemaConv.scNone);
+  end;
   if S = tcNil then
   begin
     if (D in [tcPointer, tcClass, tcInterface, tcClassOf, tcProc,
               tcVariant]) or
        ((D = tcArray) and IsDynArrayTypeX(LD)) then
       Exit(scImplicit);
-    Exit(scNone);
+    Exit(TSemaConv.scNone);
   end;
   if (D = tcVariant) and (S in SCALARS) then
     Exit(scImplicit);
@@ -13708,27 +13725,27 @@ begin
       if S = D then
         case XDescent(LS, LD) of
           xdYes: Exit(scImplicit);
-          xdNo: Exit(scNone);
+          xdNo: Exit(TSemaConv.scNone);
         else
           Exit(scMaybe);
         end;
   end;
   if (D in SCALARS) and (S in SCALARS) then
-    Exit(scNone);
+    Exit(TSemaConv.scNone);
   // A scalar and a structured type (a class, an array, a set, a record
   // without operators, a pointer, ...) never convert implicitly; the
   // exceptions - Variant, a PChar to a string - are handled above.
   if ((D in SCALARS) and (S in STRUCTURED)) or
      ((S in SCALARS) and (D in STRUCTURED)) then
-    Exit(scNone);
+    Exit(TSemaConv.scNone);
   Result := scMaybe;
 end;
 
-{ Does AX's type declare a conversion operator - the one thing that can make
-  a value of another record type acceptable where AX is wanted (`class
-  operator Implicit`/`Explicit`, 6 sec. 6.7)? Only the type's OWN members are
+{ Does AX's type declare `class operator Implicit` - the one thing that can
+  make a value of another type acceptable where a record is wanted, or a
+  record where another type is (9.3.1)? Only the type's OWN members are
   read: an operator is not inherited. }
-function TPasSemaProject.HasConversionOperator(const AX: TSemaXType): Boolean;
+function TPasSemaProject.HasImplicitOperator(const AX: TSemaXType): Boolean;
 var
   LScope: Integer;
 begin
@@ -13738,8 +13755,140 @@ begin
   LScope := FModels[AX.UnitId].Symbols[AX.Sym].MemberScope;
   if LScope = NIL_SCOPE then
     Exit;
-  Result := (FModels[AX.UnitId].DeclaresOperator(LScope, 'implicit')) or
-            (FModels[AX.UnitId].DeclaresOperator(LScope, 'explicit'));
+  Result := FModels[AX.UnitId].DeclaresOperator(LScope, 'implicit');
+end;
+
+function TPasSemaProject.UserConvX(const ADst, ASrc: TSemaXType;
+  AConv: PSemaArgConv; out ARank: Integer; out AOps: Boolean): TSemaConv;
+var
+  LWide, LMaybe, LAny: Boolean;
+  LBest: Integer;
+
+  // One built-in leg: AFrom (the argument AConv when given, else a variable
+  // of type AFromX) to ATo. -1 no conversion, else its user rank; ALeg the
+  // leg's own verdict (XConvCoreX without the user conversions).
+  function LegRank(const AToX, AFromX: TSemaXType; AFrom: PSemaArgConv;
+    out ALeg: TSemaConv): Integer;
+  var
+    LArg: TSemaArgConv;
+    LTo: TSemaConvKind;
+    LRaw: Integer;
+  begin
+    ALeg := XConvCoreX(AToX, AFromX, False);
+    if ALeg = TSemaConv.scNone then
+      Exit(-1);
+    if AFrom <> nil then
+      LArg := AFrom^
+    else
+      LArg := ArgConvX(AFromX.UnitId, NIL_NODE, AFromX);
+    LTo := ParConvKindX(AToX);
+    if (LArg.Kind = cnkNone) or (LTo = cnkNone) then
+    begin
+      // A value the ranking does not cover (a class, a record, nil): under
+      // its built-in conversions of rank 0 (a class to its ancestor, nil
+      // to a pointer) - one lossless level, or its own type.
+      if ALeg = scIdentical then
+        Exit(UserConvRank(7, 0) - CRankLossless);
+      Exit(UserConvRank(2, 0) - CRankLossless);
+    end;
+    LRaw := ConvRawRank(LArg, LTo, LWide);
+    if LRaw <= 0 then
+    begin
+      // The ranking refuses it (Char / AnsiChar, a PChar for a Variant).
+      ALeg := TSemaConv.scNone;
+      Exit(-1);
+    end;
+    Result := UserConvRank(UserConvLevel(LArg, LTo, LWide), LRaw);
+  end;
+
+  procedure Consider(const AOwner: TSemaXType);
+  var
+    LOm: TPasSemaModel;
+    LScope, LSym, LRank, LRank2: Integer;
+    LParams: TArray<Integer>;
+    LQ, LR: TSemaXType;
+    LPre, LPost: TSemaConv;
+  begin
+    if XCatOf(AOwner) <> tcRecord then
+      Exit;
+    LOm := FModels[AOwner.UnitId];
+    LScope := LOm.Symbols[AOwner.Sym].MemberScope;
+    if LScope = NIL_SCOPE then
+      Exit;
+    // Walked in declaration order, not looked up by name: a member that
+    // shares the operator's name owns the name (9.3.1).
+    for LSym in LOm.Scopes[LScope].Symbols do
+    begin
+      if (LOm.Symbols[LSym].Kind <> skRoutine) or
+         (LOm.Symbols[LSym].NameLower <> 'implicit') or
+         (LOm.RoutineHead(LSym) <> rhOperator) then
+        Continue;
+      AOps := True;
+      LParams := XParamSyms(AOwner.UnitId, LSym);
+      if Length(LParams) <> 1 then
+        Continue;
+      LQ := SubstX(DeclTypeX(AOwner.UnitId, LParams[0]), AOwner.Inst, 0);
+      LR := SubstX(DeclTypeX(AOwner.UnitId, LSym), AOwner.Inst, 0);
+      if not XValid(LQ) or not XValid(LR) then
+      begin
+        LMaybe := True;
+        Continue;
+      end;
+      LQ := CanonTypeX(LQ);
+      LR := CanonTypeX(LR);
+      // The argument to the operator's parameter, then its result to the
+      // wanted type; one of the two is the record itself.
+      LRank := LegRank(LQ, ASrc, AConv, LPre);
+      if LPre = TSemaConv.scNone then
+        Continue;
+      LRank2 := LegRank(ADst, LR, nil, LPost);
+      if LPost = TSemaConv.scNone then
+        Continue;
+      if (LPre = scMaybe) or (LPost = scMaybe) then
+      begin
+        LMaybe := True;
+        Continue;
+      end;
+      // The leg that converts carries the rank: the argument's to the
+      // parameter, or (the parameter being the record) the result's; when
+      // neither converts, the better of the two (an Integer for
+      // `Implicit(A: Integer)`, a record for `Implicit(A: R): string` to a
+      // string parameter).
+      if (LPre = scIdentical) and (LPost <> scIdentical) then
+        LRank := LRank2
+      else if (LPre = scIdentical) and (LRank2 > LRank) then
+        LRank := LRank2;
+      LAny := True;
+      if LRank > LBest then
+        LBest := LRank;
+    end;
+  end;
+
+begin
+  Result := TSemaConv.scNone;
+  ARank := 0;
+  AOps := False;
+  if not XValid(ADst) or not XValid(ASrc) or XSameType(ADst, ASrc) then
+    Exit;
+  // A side of no known category - a generic parameter (`From<T>(const
+  // Value: T)` before its frame is applied) - may be anything.
+  if (XCatOf(ADst) = tcUnknown) or (XCatOf(ASrc) = tcUnknown) or
+     (FModels[ADst.UnitId].Symbols[ADst.Sym].Kind = skGenericParam) or
+     (FModels[ASrc.UnitId].Symbols[ASrc.Sym].Kind = skGenericParam) then
+    Exit(scMaybe);
+  LWide := FInfo.ExtendedBytes > 8;
+  LMaybe := False;
+  LAny := False;
+  LBest := -MaxInt;
+  Consider(ADst);
+  Consider(ASrc);
+  if LAny then
+  begin
+    ARank := LBest;
+    Result := scImplicit;
+  end
+  else if LMaybe then
+    Result := scMaybe;
 end;
 
 // The parameter's category for the rejections: a Byte or a record is not
@@ -14277,6 +14426,8 @@ var
   LParCat, LArgCat: TSemaTypeCat;
   LTarget: TSemaXType;
   LRank: Integer;
+  LUser: TSemaConv;
+  LOps: Boolean;
 begin
   Result := 0;
   ARank := 0;
@@ -14401,9 +14552,32 @@ begin
   // "nothing in the type's own chain fits, so this means an
   // INHERITED routine" fallback do its job. `nil` and untyped
   // arguments never reach here - they are tcNil/tcUnknown.
+  //
+  // A record with `class operator Implicit` on either side converts as
+  // its operators say (UserConvX): a user conversion of its rank, or no
+  // candidate when none of them takes the argument (`F(S)` for a string
+  // against F(TRecInt) with `Implicit(A: Integer)`); `Explicit` is no
+  // conversion here. Ranked against the built-in ones (6.3.1): a built-in
+  // conversion losing nothing first, then the user one, then a lossy
+  // built-in one - an Integer takes F(Double) over F(TRecInt), F(TRecInt)
+  // over F(Byte).
+  LOps := False;
+  if (LParCat = tcRecord) or (LArgCat = tcRecord) then
+  begin
+    LUser := UserConvX(ACanonParX, ACanonArgX, AConv, LRank, LOps);
+    if LOps then
+      case LUser of
+        scImplicit:
+          begin
+            ARank := LRank;
+            Exit(1);
+          end;
+        TSemaConv.scNone: Exit(-1);
+      end;
+  end;
   if ArgStructNeedsConv(LParCat, LArgCat) and
-     ArgStructRejects(LParCat, LArgCat, HasConversionOperator(ACanonParX),
-       HasConversionOperator(ACanonArgX)) then
+     ArgStructRejects(LParCat, LArgCat, LOps and (LParCat = tcRecord),
+       LOps and (LArgCat = tcRecord)) then
     Exit(-1);
   // A static array where a dynamic one is wanted: no conversion
   // (`Image.Read(List^, N)` with List^ a static array takes TStream's

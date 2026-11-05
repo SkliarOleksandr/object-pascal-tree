@@ -2679,8 +2679,9 @@ begin
   // A subrange is its base type, a function with parameters its result.
   ExpCase('C := |;', '', '', 'ExtSub,ExtSubOf,ExtIntOf,ExtBig,ExtHuge,ExtQual', 'ExtReset');
   ExpCase('I := |;', 'ExtIntOf', 'ExtSub,ExtSubOf', '', 'ExtReset');
-  // A record with a conversion operator takes values of other types.
-  ExpCase('ExtVal := |;', 'ExtVal', '', '', 'ExtReset', '', 'I,C,ExtCount');
+  // A record with a conversion operator takes the values its operators
+  // take - `Implicit(A: Integer)` an Integer, not an enumeration.
+  ExpCase('ExtVal := |;', 'ExtVal', 'I,ExtCount', 'C', 'ExtReset');
   // A pointer leads where it points: to members, not to a Char.
   ExpCase('C := |;', '', '', 'ExtP', 'ExtReset', '', 'ExtPOwner');
   ExpCase('if C = ExtOwner.Co| then;', 'Color', '', 'Count', 'Reset');
