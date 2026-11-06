@@ -11738,6 +11738,178 @@ begin
   end;
 end;
 
+// Pointers in implicit conversion and overload ranking (6.3.1, 10.1.2, 4.8;
+// local/type-conv-2026-11/n7): a typed pointer type is nominal under {$T-}
+// (YA: PI for PI2 out), typed pointers of one base meet under {$T+} at the
+// call (YH), `@X` there is a pointer to X's type (YJ) and `@` of a routine
+// the untyped Pointer alone (YK); a number goes to no pointer and a pointer
+// to no number, string (but a PChar), Variant, class (YB, YE, YP, YQ, YR,
+// YS); a literal 0 to a typed pointer over Pointer (YC); a PChar to Pointer
+// over AnsiString (YD) and to a record's Implicit from Pointer over
+// AnsiString (YM); a class reference to its ancestor's over Pointer (YF), to
+// no dynamic array (YG); a dynamic array to no typed pointer (YL); an
+// untyped Pointer variable to a typed pointer over `array of Pointer` (YN);
+// nil to a record's Implicit from Pointer over one from PChar (YU); a
+// distinct copy `type Pointer` is the untyped Pointer, which a class takes
+// over an untyped parameter (YV, the bigflat gate's Vcl.Themes handle). The
+// overload dcc picks is declared second; each call compiles with dcc64.
+procedure TestPtrConvRanking;
+const
+  SRC_UNIT =
+    'unit PtR;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  PI = ^Integer;'#10 +
+    '  PI2 = ^Integer;'#10 +
+    '  PB = ^Byte;'#10 +
+    '  TDA = array of Integer;'#10 +
+    '  TCls = class end;'#10 +
+    '  TClsD = class(TCls) end;'#10 +
+    '  TClsC = class of TCls;'#10 +
+    '  TClsDC = class of TClsD;'#10 +
+    '  TRp = record X: Integer; class operator Implicit(A: Pointer): TRp; end;'#10 +
+    '  TRpc = record X: Integer; class operator Implicit(A: PChar): TRpc; end;'#10 +
+    '  THnd = type Pointer;'#10 +
+    'procedure Proc;'#10 +
+    'function YA(A: PI2): TRA; overload;'#10 +
+    'function YA(A: Pointer): TRW; overload;'#10 +
+    'function YB(A: Integer): TRA; overload;'#10 +
+    'function YB(A: Pointer): TRW; overload;'#10 +
+    'function YC(A: Pointer): TRA; overload;'#10 +
+    'function YC(A: PI): TRW; overload;'#10 +
+    'function YD(A: AnsiString): TRA; overload;'#10 +
+    'function YD(A: Pointer): TRW; overload;'#10 +
+    'function YE(A: TCls): TRA; overload;'#10 +
+    'function YE(A: Pointer): TRW; overload;'#10 +
+    'function YF(A: Pointer): TRA; overload;'#10 +
+    'function YF(A: TClsC): TRW; overload;'#10 +
+    'function YG(A: TDA): TRA; overload;'#10 +
+    'function YG(A: Pointer): TRW; overload;'#10 +
+    'function YH(A: Pointer): TRA; overload;'#10 +
+    'function YH(A: PI2): TRW; overload;'#10 +
+    'function YJ(A: PB): TRA; overload;'#10 +
+    'function YJ(A: PI): TRW; overload;'#10 +
+    'function YK(A: PI): TRA; overload;'#10 +
+    'function YK(A: TRp): TRW; overload;'#10 +
+    'function YL(A: PI): TRA; overload;'#10 +
+    'function YL(A: TRp): TRW; overload;'#10 +
+    'function YM(A: AnsiString): TRA; overload;'#10 +
+    'function YM(A: TRp): TRW; overload;'#10 +
+    'function YN(const A: array of Pointer): TRA; overload;'#10 +
+    'function YN(A: PI): TRW; overload;'#10 +
+    'function YP(A: PI): TRA; overload;'#10 +
+    'function YP(const A): TRW; overload;'#10 +
+    'function YQ(A: string): TRA; overload;'#10 +
+    'function YQ(const A): TRW; overload;'#10 +
+    'function YR(A: Pointer): TRA; overload;'#10 +
+    'function YR(const A): TRW; overload;'#10 +
+    'function YS(A: Pointer): TRA; overload;'#10 +
+    'function YS(const A): TRW; overload;'#10 +
+    'function YU(A: TRpc): TRA; overload;'#10 +
+    'function YU(A: TRp): TRW; overload;'#10 +
+    'function YV(const A): TRA; overload;'#10 +
+    'function YV(A: TCls): TRW; overload;'#10 +
+    'implementation'#10 +
+    'class operator TRp.Implicit(A: Pointer): TRp; begin end;'#10 +
+    'class operator TRpc.Implicit(A: PChar): TRpc; begin end;'#10 +
+    'procedure Proc; begin end;'#10 +
+    'function YA(A: PI2): TRA; begin end;'#10 +
+    'function YA(A: Pointer): TRW; begin end;'#10 +
+    'function YB(A: Integer): TRA; begin end;'#10 +
+    'function YB(A: Pointer): TRW; begin end;'#10 +
+    'function YC(A: Pointer): TRA; begin end;'#10 +
+    'function YC(A: PI): TRW; begin end;'#10 +
+    'function YD(A: AnsiString): TRA; begin end;'#10 +
+    'function YD(A: Pointer): TRW; begin end;'#10 +
+    'function YE(A: TCls): TRA; begin end;'#10 +
+    'function YE(A: Pointer): TRW; begin end;'#10 +
+    'function YF(A: Pointer): TRA; begin end;'#10 +
+    'function YF(A: TClsC): TRW; begin end;'#10 +
+    'function YG(A: TDA): TRA; begin end;'#10 +
+    'function YG(A: Pointer): TRW; begin end;'#10 +
+    'function YH(A: Pointer): TRA; begin end;'#10 +
+    'function YH(A: PI2): TRW; begin end;'#10 +
+    'function YJ(A: PB): TRA; begin end;'#10 +
+    'function YJ(A: PI): TRW; begin end;'#10 +
+    'function YK(A: PI): TRA; begin end;'#10 +
+    'function YK(A: TRp): TRW; begin end;'#10 +
+    'function YL(A: PI): TRA; begin end;'#10 +
+    'function YL(A: TRp): TRW; begin end;'#10 +
+    'function YM(A: AnsiString): TRA; begin end;'#10 +
+    'function YM(A: TRp): TRW; begin end;'#10 +
+    'function YN(const A: array of Pointer): TRA; begin end;'#10 +
+    'function YN(A: PI): TRW; begin end;'#10 +
+    'function YP(A: PI): TRA; begin end;'#10 +
+    'function YP(const A): TRW; begin end;'#10 +
+    'function YQ(A: string): TRA; begin end;'#10 +
+    'function YQ(const A): TRW; begin end;'#10 +
+    'function YR(A: Pointer): TRA; begin end;'#10 +
+    'function YR(const A): TRW; begin end;'#10 +
+    'function YS(A: Pointer): TRA; begin end;'#10 +
+    'function YS(const A): TRW; begin end;'#10 +
+    'function YU(A: TRpc): TRA; begin end;'#10 +
+    'function YU(A: TRp): TRW; begin end;'#10 +
+    'function YV(const A): TRA; begin end;'#10 +
+    'function YV(A: TCls): TRW; begin end;'#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program PtRP;'#10 +
+    'uses PtR;'#10 +
+    'var K: Integer; vPI: PI; vPChar: PChar; vDC: TClsDC; vI: Integer; vDA: TDA; vPtr: Pointer; vV: Variant; vH: THnd;'#10 +
+    'begin'#10 +
+    '  K := YA(vPI).W;'#10 +
+    '  K := YB(vPI).W;'#10 +
+    '  K := YC(0).W;'#10 +
+    '  K := YD(vPChar).W;'#10 +
+    '  K := YE(vPI).W;'#10 +
+    '  K := YF(vDC).W;'#10 +
+    '  K := YG(vDC).W;'#10 +
+    '  {$T+}'#10 +
+    '  K := YH(vPI).W;'#10 +
+    '  K := YJ(@vI).W;'#10 +
+    '  K := YK(@Proc).W;'#10 +
+    '  {$T-}'#10 +
+    '  K := YL(vDA).W;'#10 +
+    '  K := YM(vPChar).W;'#10 +
+    '  K := YN(vPtr).W;'#10 +
+    '  K := YP(vI).W;'#10 +
+    '  K := YQ(vPI).W;'#10 +
+    '  K := YR(vV).W;'#10 +
+    '  K := YS(''abc'').W;'#10 +
+    '  K := YU(nil).W;'#10 +
+    '  K := YV(vH).W;'#10 +
+    'end.'#10;
+var
+  LDir, LName: string;
+begin
+  LDir := FreshDir('pastree_sema_ptrconvrank');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TVarRec = record VType: Byte; end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PtR.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PtRP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'PtRP.dpr'));
+    LName := '';
+    for var LD in ModelByName('ptrp').Diags do
+      if LD.Code = 'E2003' then
+        LName := LName + ' line ' + IntToStr(LD.Line);
+    Ok('pointer ranking: every call binds dcc''s overload - no E2003 [' +
+      LName + ' ]', DiagCount(ModelByName('ptrp'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // B35: one operator rule table for both typers (4.2.1) - narrow and alias
 // operands, an enum-subrange array's bounds, a subrange whose bound is
 // another unit's enumeration value or constant, and an inherited cross-unit
@@ -18375,6 +18547,7 @@ begin
   TestSetConvRanking;
   TestProcConvRanking;
   TestArrConvRanking;
+  TestPtrConvRanking;
   TestOperatorTable;
   TestTargetFacts;
   TestOracleDepth;

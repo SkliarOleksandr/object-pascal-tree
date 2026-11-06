@@ -2176,9 +2176,25 @@ type
       to ADst, canonical and not the same type, of the categories S and D:
       1 with its rank (RefConvRank) in ARank and the rank of a user
       conversion through it (RefUserRank) in AUserRank, -1 when the pair
-      does not convert, 0 when it is no reference pair or a link is unknown. }
+      does not convert, 0 when it is no reference pair or a link is unknown.
+      ATypedAddr: $T+ is in effect where the value is passed - two typed
+      pointers of one base then convert (10.1.2). }
     function XRefConvX(const ADst, ASrc: TSemaXType; D, S: TSemaTypeCat;
-      out ARank, AUserRank: Integer): Integer;
+      out ARank, AUserRank: Integer; ATypedAddr: Boolean = False): Integer;
+    { Typed pointers ADst and ASrc (canonical, not the same type): -1 two
+      types that do not convert - a typed pointer type is nominal under
+      $T- (10.1.2) -, 1 two of one base under $T+ (ATypedAddr), 0 a side
+      not read (a pointer type in a generic, a base not resolved). }
+    function TypedPointersMeetX(const ADst, ASrc: TSemaXType;
+      ATypedAddr: Boolean): Integer;
+    { `@X` under $T+ (4.8: a typed pointer to X's type, though the unit's
+      typer typed it Pointer) for a parameter of the canonical type
+      ACanonParX - APointeeX X's type, ARoutine X a routine (`@G1`, whose
+      address is the untyped Pointer alone; n7 Set T): 1 with ARank as a
+      typed pointer of that base converts (XRefConvX), -1 out, -2 not
+      decided here (a record, a parameter not read, a base not read). }
+    function AddrArgFitX(const ACanonParX, APointeeX: TSemaXType;
+      ARoutine: Boolean; out ARank: Integer): Integer;
     // Is AX (canonical) System's TGUID?
     function IsGuidTypeX(const AX: TSemaXType): Boolean;
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
@@ -13865,18 +13881,85 @@ begin
     Result := (LRMid = AX.UnitId) and (LRSym = AX.Sym);
 end;
 
+function TPasSemaProject.TypedPointersMeetX(const ADst, ASrc: TSemaXType;
+  ATypedAddr: Boolean): Integer;
+var
+  LDB, LSB: TSemaXType;
+begin
+  Result := 0;
+  if not XValid(ADst) or not XValid(ASrc) or (ADst.Inst <> NIL_INST) or
+     (ASrc.Inst <> NIL_INST) or NestedInGenericX(ADst) or
+     NestedInGenericX(ASrc) then
+    Exit;
+  if not ATypedAddr then
+    Exit(-1);
+  LDB := PointeeX(ADst);
+  LSB := PointeeX(ASrc);
+  if not XValid(LDB) or not XValid(LSB) then
+    Exit;
+  LDB := CanonTypeX(LDB);
+  LSB := CanonTypeX(LSB);
+  if not XValid(LDB) or not XValid(LSB) or OpenX(LDB) or OpenX(LSB) then
+    Exit;
+  if XSameType(LDB, LSB) then
+    Result := 1
+  else
+    Result := -1;
+end;
+
+function TPasSemaProject.AddrArgFitX(const ACanonParX, APointeeX: TSemaXType;
+  ARoutine: Boolean; out ARank: Integer): Integer;
+var
+  LPB, LXB: TSemaXType;
+begin
+  ARank := 0;
+  case XCatOf(ACanonParX) of
+    tcPointer:
+      begin
+        if IsUntypedPointerX(ACanonParX) then
+        begin
+          ARank := RefConvRank(rcTypedPointer, 0);
+          Exit(1);
+        end;
+        LXB := XNil;
+        if XValid(APointeeX) then
+          LXB := CanonTypeX(APointeeX);
+        if ARoutine or (XValid(LXB) and (XCatOf(LXB) = tcProc)) then
+          Exit(-1);
+        LPB := PointeeX(ACanonParX);
+        if XValid(LPB) then
+          LPB := CanonTypeX(LPB);
+        if not XValid(LPB) or not XValid(LXB) or OpenX(LPB) or OpenX(LXB) then
+          Exit(-2);
+        if not XSameType(LPB, LXB) then
+          Exit(-1);
+        ARank := RefConvRank(rcTypedSameBase, 0);
+        Result := 1;
+      end;
+    tcRecord, tcUnknown:
+      Result := -2;
+  else
+    Result := -1;
+  end;
+end;
+
 function TPasSemaProject.XRefConvX(const ADst, ASrc: TSemaXType;
-  D, S: TSemaTypeCat; out ARank, AUserRank: Integer): Integer;
+  D, S: TSemaTypeCat; out ARank, AUserRank: Integer;
+  ATypedAddr: Boolean): Integer;
 var
   LConv: TSemaRefConv;
   LRel: TPasDescent;
   LStep, LDef: Integer;
   LSig: TPasProcSig;
 
+  // The untyped Pointer, a distinct copy `type Pointer` too (Vcl.Themes'
+  // TStyleServicesHandle goes to a TStream as a Pointer does; n7 gate).
   function Untyped(const AX: TSemaXType): Boolean;
   begin
-    Result := (FModels[AX.UnitId].Symbols[AX.Sym].Kind = skBuiltinType) and
-      (FModels[AX.UnitId].Symbols[AX.Sym].NameLower = 'pointer');
+    Result := ((FModels[AX.UnitId].Symbols[AX.Sym].Kind = skBuiltinType) and
+      (FModels[AX.UnitId].Symbols[AX.Sym].NameLower = 'pointer')) or
+      (FModels[AX.UnitId].Symbols[AX.Sym].Kind = skType) and
+      IsUntypedPointerX(AX);
   end;
 
 begin
@@ -13972,12 +14055,44 @@ begin
     // An untyped Pointer value - a variable, `@X` (6.3.1; n3 Set C, n5 Set
     // B): a typed pointer, a plain procedural type, a class (deeper first,
     // a class reference between TObject and the rest); no interface, method
-    // pointer, `reference to` type or Variant. A typed pointer's own
-    // conversions are not ranked here.
+    // pointer, `reference to` type or Variant.
     tcPointer:
       begin
+        // A typed pointer value (n7 Sets A, T): the untyped Pointer; under
+        // {$T+} another typed pointer of its base, under {$T-} none (a
+        // typed pointer type is nominal, 10.1.2); nothing else - no class,
+        // class reference, procedural type, array, interface. A PChar's
+        // conversions to the strings are ConvRank's, decided before.
         if not Untyped(ASrc) then
-          Exit(0);
+        begin
+          case D of
+            tcPointer:
+              if Untyped(ADst) then
+                LConv := rcTypedPointer
+              else
+                case TypedPointersMeetX(ADst, ASrc, ATypedAddr) of
+                  1: LConv := rcTypedSameBase;
+                  -1: Exit(-1);
+                else
+                  Exit(0);
+                end;
+            // A PChar / PAnsiChar to a string is the ranking's; no other
+            // pointer to a character is a string (`PC2 = ^Char`: E2010).
+            tcString:
+              if ConvPtrKindX(ASrc) <> cnkNone then
+                Exit(0)
+              else
+                Exit(-1);
+            tcClass, tcClassOf, tcProc, tcArray, tcInterface, tcVariant,
+            tcInteger, tcFloat, tcBoolean, tcChar, tcEnum, tcSet:
+              Exit(-1);
+          else
+            Exit(0);
+          end;
+          ARank := RefConvRank(LConv, 0);
+          AUserRank := RefUserRank(LConv);
+          Exit(1);
+        end;
         case D of
           tcPointer:
             LConv := rcPtrTypedPointer;
@@ -14002,6 +14117,32 @@ begin
         else
           Exit(0);
         end;
+      end;
+    // A class reference value (n7): its ancestors' class references, the
+    // nearer first, then the untyped Pointer; no typed pointer, class,
+    // interface, procedural type, Variant or scalar.
+    tcClassOf:
+      case D of
+        tcClassOf:
+          begin
+            var LSrcT := CanonTypeX(ClassRefTargetX(ASrc));
+            var LDstT := CanonTypeX(ClassRefTargetX(ADst));
+            if not XValid(LSrcT) or not XValid(LDstT) or OpenX(LSrcT) or
+               OpenX(LDstT) then
+              Exit(0);
+            LConv := rcClassRefUp;
+            LRel := XDescentDistX(LSrcT, LDstT, LStep);
+          end;
+        tcPointer:
+          if Untyped(ADst) then
+            LConv := rcClassRefPointer
+          else
+            Exit(-1);
+        tcClass, tcInterface, tcProc, tcVariant, tcInteger, tcFloat, tcArray,
+        tcBoolean, tcChar, tcString, tcEnum, tcSet:
+          Exit(-1);
+      else
+        Exit(0);
       end;
   else
     Exit(0);
@@ -14061,7 +14202,7 @@ const
   STRUCTURED = [tcPointer, tcSet, tcArray, tcRecord, tcClass, tcInterface,
     tcProc, tcClassOf, tcFile];
 var
-  LD, LS, LPointee: TSemaXType;
+  LD, LS: TSemaXType;
   D, S: TSemaTypeCat;
   LRank, LUserRank: Integer;
   LOps: Boolean;
@@ -14098,7 +14239,7 @@ begin
     Exit(TSemaConv.scNone);
   end;
   // A class, an interface, nil: XRefConvX (14.2.1, 6.3.1).
-  if S in [tcNil, tcClass, tcInterface, tcPointer] then
+  if S in [tcNil, tcClass, tcInterface, tcPointer, tcClassOf] then
     case XRefConvX(LD, LS, D, S, LRank, LUserRank) of
       1: Exit(scImplicit);
       -1: Exit(TSemaConv.scNone);
@@ -14152,12 +14293,13 @@ begin
       begin
         if S in [tcString, tcChar] then
           Exit(scImplicit);
+        // PChar / PAnsiChar alone: a pointer type of the source's own to a
+        // character is no string (`PC2 = ^Char`: E2010; n7 Set D).
         if S = tcPointer then
         begin
-          LPointee := PointeeX(LS);
-          if XValid(LPointee) and (XCatOf(CanonTypeX(LPointee)) = tcChar) then
+          if ConvPtrKindX(LS) <> cnkNone then
             Exit(scImplicit);
-          Exit(scMaybe);
+          Exit(TSemaConv.scNone);
         end;
       end;
     tcChar, tcBoolean:
@@ -14212,6 +14354,12 @@ var
     LRaw: Integer;
   begin
     ALeg := XConvCoreX(AToX, AFromX, False);
+    // A string literal goes to PChar / PAnsiChar, a string variable does
+    // not: the ranking below decides (n7 Set A: `'abc'` for TRpc).
+    if (ALeg = TSemaConv.scNone) and (AFrom <> nil) and
+       (AFrom.Kind in [cnkStrLit, cnkCharLit]) and
+       (ParConvKindX(AToX) in [cnkPChar, cnkPAnsiChar]) then
+      ALeg := scImplicit;
     if ALeg = TSemaConv.scNone then
       Exit(-1);
     if AFrom <> nil then
@@ -14226,11 +14374,18 @@ var
       // to a pointer) - one lossless level, or its own type; a reference
       // conversion by RefUserRank (a class to Pointer below a class to its
       // ancestor; nil to a pointer above nil to a class).
+      // A PChar the ranking covers keeps its own scale: through Pointer it
+      // is a user conversion of the user tier, above its lossy AnsiString
+      // (n7 Set B: F(TRp) with `Implicit(A: Pointer)` over F(AnsiString)).
       if ALeg = scIdentical then
         Exit(UserConvRank(7, 0) - CRankLossless);
       if XRefConvX(AToX, AFromX, XCatOf(AToX), XCatOf(AFromX), LRaw,
          Result) = 1 then
+      begin
+        if LArg.Kind <> cnkNone then
+          Inc(Result, CRankLossless);
         Exit;
+      end;
       Exit(UserConvRank(2, 0) - CRankLossless);
     end;
     LRaw := ConvRawRank(LArg, LTo, LWide);
@@ -14446,14 +14601,16 @@ begin
     LIdent := ArrayIdentityX(ACanonParX, ACanonArgX, LPDyn, LADyn);
   Result := ArrayArgFit(AParCat, AArgCat, LPDyn, LPStatic, LADyn, LAStatic,
     LCharArr, LCharArr and (AParCat = tcPointer) and
-    (ConvPtrKindX(ACanonParX) in [cnkPChar, cnkPAnsiChar]), LIdent, ARank);
+    (ConvPtrKindX(ACanonParX) in [cnkPChar, cnkPAnsiChar]),
+    (AParCat = tcPointer) and IsUntypedPointerX(ACanonParX), LIdent, ARank);
 end;
 
 function TPasSemaProject.IsUntypedPointerX(const AX: TSemaXType): Boolean;
 var
   LC: TSemaXType;
 begin
-  LC := CanonTypeX(AX);
+  // A distinct copy `type Pointer` is one too (StorageBaseX; n7 gate).
+  LC := StorageBaseX(AX);
   Result := XValid(LC) and
     (FModels[LC.UnitId].Symbols[LC.Sym].Kind = skBuiltinType) and
     (FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'pointer');
@@ -14961,6 +15118,11 @@ begin
       LElemFit := 1
     else
       LElemFit := -1;
+  // An untyped Pointer variable for `array of Pointer`: a conversion
+  // (CPtrRankOpenElem), below a typed pointer.
+  if AArg.IsVar and XValid(AArgX) and IsUntypedPointerX(ACanonElemX) and
+     IsUntypedPointerX(ACanonArgX) then
+    Exit(ScaledFit(2, CPtrRankOpenElem));
   Result := ScaledFit(OpenArrayArgFit(LArgCat,
     XValid(AArgX) and XSameType(ACanonArgX, ACanonElemX), AArg.IsVar,
     LElemFit));
@@ -15439,6 +15601,9 @@ begin
       begin
         Result.Facts := OpFactsX(AMid, ANode, AX);
         Result.Kind := ConvArgKindOf(Result.Facts);
+        Result.StrConstName := (Result.Facts.Cat in [tcString, tcChar]) and
+          (Result.Kind <> cnkStrLit) and (Result.Kind <> cnkCharLit) and
+          (ANode <> NIL_NODE) and IsConstNameX(AMid, ANode);
         if (Result.Facts.Cat = tcInteger) and not Result.Facts.IntConst and
            (ANode <> NIL_NODE) and
            (MayFoldConvConst(FModels[AMid].Tree, ANode) or
@@ -15696,6 +15861,23 @@ begin
   // (ScalarEnumMismatch: `Seek(0, soCurrent)` takes Seek(Int64;
   // TSeekOrigin) over Seek(Longint; Word), local/probe-b31 O3); an
   // ordinal for an array.
+  // An integer constant 0 written as a literal or folded from literals
+  // (`0`, `$0`, `0 + 0`; a named constant is no such value) goes to every
+  // pointer - a typed one above Pointer, both below Variant (ZeroPointerRank;
+  // n7 Sets A, C: `K0` is E2010).
+  if (LParCat = tcPointer) and (LArgCat = tcInteger) and (AConv <> nil) and
+     AConv.Facts.IntConst and (AConv.Facts.IntValue = 0) and
+     not AConv.TypedConst and (ACore <> NIL_NODE) and
+     not (ATree.Nodes[ACore].Kind in [nkIdent, nkMember]) then
+  begin
+    ARank := ZeroPointerRank(not IsUntypedPointerX(ACanonParX),
+      ConvThreshold(AConv^, FInfo.ExtendedBytes > 8));
+    Exit(1);
+  end;
+  // A named string constant the ranking could not read (StrConstName):
+  // a conversion of no rank, as before the pointer rules.
+  if (LParCat = tcPointer) and (AConv <> nil) and AConv.StrConstName then
+    Exit(1);
   if ArgCatRejects(LParCat, LArgCat) then
     Exit(-1);
   // An instance where a class reference is wanted: `RegC(Self)` in
@@ -15710,10 +15892,15 @@ begin
   // to its nearer ancestor over a farther one, over an interface it
   // implements, over Pointer; out where it does not convert - an unrelated
   // class, an interface no class of its chain lists (`ShowHint(Self)`), an
-  // interface to a class or a pointer, nil to a Variant or a string.
-  if LArgCat in [tcNil, tcClass, tcInterface, tcPointer] then
+  // interface to a class or a pointer, nil to a Variant or a string; a
+  // typed pointer to Pointer, under {$T+} at the argument to another of its
+  // base; a class reference to its ancestors' (n7).
+  if LArgCat in [tcNil, tcClass, tcInterface, tcPointer, tcClassOf] then
     case XRefConvX(ACanonParX, ACanonArgX, LParCat, LArgCat, LRank,
-           LUserRank) of
+           LUserRank, (LArgCat = tcPointer) and (LParCat = tcPointer) and
+           (ACore <> NIL_NODE) and
+           (Length(ATree.Source.TypedAddressEvents) > 0) and
+           ATree.Source.TypedAddressAt(ATree.Nodes[ACore].FirstToken)) of
       -1:
         Exit(-1);
       1:
@@ -17314,6 +17501,23 @@ var
           ReadArrayArg(LCore, LArgX);
           Exit((CtorFitX(CanonTypeX(LElemX), ctDynArray, LM.Tree, LCore,
             LArrArg^)));
+        end;
+      end;
+      // `@X` under {$T+} is a typed pointer to X's type (4.8) - typed Pointer
+      // by the unit's typer, so read here (AddrArgFitX): `@I` goes to PI,
+      // PInteger and Pointer, `@G1` to Pointer alone (n7 Set T).
+      if (LCoreKind = nkUnaryOp) and not AByRef and XValid(LParX) and
+         LM.AnonTypeSyms.ContainsKey(LCore) then
+      begin
+        var LOpd := LM.Tree.Nodes[LCore].FirstChild;
+        if LOpd <> NIL_NODE then
+        begin
+          var LOMid, LOSym: Integer;
+          var LRoutine := TargetSym(PeelParens(LM.Tree, LOpd), LOMid, LOSym) and
+            (FModels[LOMid].Symbols[LOSym].Kind = skRoutine);
+          LFit := AddrArgFitX(LCanonParX, GetX(LOpd), LRoutine, LRank);
+          if LFit <> -2 then
+            Exit(ScaledFit(2 * LFit, LRank));
         end;
       end;
       // The rest - the class reference, the shape rejections, the character

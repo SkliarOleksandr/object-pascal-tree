@@ -1124,6 +1124,139 @@ const
     'end;'#10'end.'#10;
   ARR_NAMES: array[0..16] of string = ('XA', 'XB', 'XD', 'XE', 'XF', 'XG', 'XH', 'XJ', 'XK', 'XL', 'XM', 'XN', 'XO', 'XQ', 'XS', 'XV', 'XW');
 
+  { Pointers in the unit's own typer (RefConvSym's typed-pointer and class
+    reference rows, AddrArgSym, ZeroPointerRank, ArgCatRejects' pointer
+    rows, ArrayArgFit's untyped Pointer, OpenArrayScore's `array of Pointer`;
+    6.3.1, 10.1.2, 4.8, local/type-conv-2026-11/n7): the cases of
+    SemaProjectSmoke's TestPtrConvRanking. The overload dcc does NOT pick is
+    declared first. }
+  SRC_PTR =
+    'unit U;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  PI = ^Integer;'#10 +
+    '  PI2 = ^Integer;'#10 +
+    '  PB = ^Byte;'#10 +
+    '  TDA = array of Integer;'#10 +
+    '  TCls = class end;'#10 +
+    '  TClsD = class(TCls) end;'#10 +
+    '  TClsC = class of TCls;'#10 +
+    '  TClsDC = class of TClsD;'#10 +
+    '  TRp = record X: Integer; class operator Implicit(A: Pointer): TRp; end;'#10 +
+    '  TRpc = record X: Integer; class operator Implicit(A: PChar): TRpc; end;'#10 +
+    '  THnd = type Pointer;'#10 +
+    'procedure Proc;'#10 +
+    'function YA(A: PI2): TRA; overload;'#10 +
+    'function YA(A: Pointer): TRW; overload;'#10 +
+    'function YB(A: Integer): TRA; overload;'#10 +
+    'function YB(A: Pointer): TRW; overload;'#10 +
+    'function YC(A: Pointer): TRA; overload;'#10 +
+    'function YC(A: PI): TRW; overload;'#10 +
+    'function YD(A: AnsiString): TRA; overload;'#10 +
+    'function YD(A: Pointer): TRW; overload;'#10 +
+    'function YE(A: TCls): TRA; overload;'#10 +
+    'function YE(A: Pointer): TRW; overload;'#10 +
+    'function YF(A: Pointer): TRA; overload;'#10 +
+    'function YF(A: TClsC): TRW; overload;'#10 +
+    'function YG(A: TDA): TRA; overload;'#10 +
+    'function YG(A: Pointer): TRW; overload;'#10 +
+    'function YH(A: Pointer): TRA; overload;'#10 +
+    'function YH(A: PI2): TRW; overload;'#10 +
+    'function YJ(A: PB): TRA; overload;'#10 +
+    'function YJ(A: PI): TRW; overload;'#10 +
+    'function YK(A: PI): TRA; overload;'#10 +
+    'function YK(A: TRp): TRW; overload;'#10 +
+    'function YL(A: PI): TRA; overload;'#10 +
+    'function YL(A: TRp): TRW; overload;'#10 +
+    'function YM(A: AnsiString): TRA; overload;'#10 +
+    'function YM(A: TRp): TRW; overload;'#10 +
+    'function YN(const A: array of Pointer): TRA; overload;'#10 +
+    'function YN(A: PI): TRW; overload;'#10 +
+    'function YP(A: PI): TRA; overload;'#10 +
+    'function YP(const A): TRW; overload;'#10 +
+    'function YQ(A: string): TRA; overload;'#10 +
+    'function YQ(const A): TRW; overload;'#10 +
+    'function YR(A: Pointer): TRA; overload;'#10 +
+    'function YR(const A): TRW; overload;'#10 +
+    'function YS(A: Pointer): TRA; overload;'#10 +
+    'function YS(const A): TRW; overload;'#10 +
+    'function YU(A: TRpc): TRA; overload;'#10 +
+    'function YU(A: TRp): TRW; overload;'#10 +
+    'function YV(const A): TRA; overload;'#10 +
+    'function YV(A: TCls): TRW; overload;'#10 +
+    'implementation'#10 +
+    'class operator TRp.Implicit(A: Pointer): TRp; begin end;'#10 +
+    'class operator TRpc.Implicit(A: PChar): TRpc; begin end;'#10 +
+    'procedure Proc; begin end;'#10 +
+    'function YA(A: PI2): TRA; begin end;'#10 +
+    'function YA(A: Pointer): TRW; begin end;'#10 +
+    'function YB(A: Integer): TRA; begin end;'#10 +
+    'function YB(A: Pointer): TRW; begin end;'#10 +
+    'function YC(A: Pointer): TRA; begin end;'#10 +
+    'function YC(A: PI): TRW; begin end;'#10 +
+    'function YD(A: AnsiString): TRA; begin end;'#10 +
+    'function YD(A: Pointer): TRW; begin end;'#10 +
+    'function YE(A: TCls): TRA; begin end;'#10 +
+    'function YE(A: Pointer): TRW; begin end;'#10 +
+    'function YF(A: Pointer): TRA; begin end;'#10 +
+    'function YF(A: TClsC): TRW; begin end;'#10 +
+    'function YG(A: TDA): TRA; begin end;'#10 +
+    'function YG(A: Pointer): TRW; begin end;'#10 +
+    'function YH(A: Pointer): TRA; begin end;'#10 +
+    'function YH(A: PI2): TRW; begin end;'#10 +
+    'function YJ(A: PB): TRA; begin end;'#10 +
+    'function YJ(A: PI): TRW; begin end;'#10 +
+    'function YK(A: PI): TRA; begin end;'#10 +
+    'function YK(A: TRp): TRW; begin end;'#10 +
+    'function YL(A: PI): TRA; begin end;'#10 +
+    'function YL(A: TRp): TRW; begin end;'#10 +
+    'function YM(A: AnsiString): TRA; begin end;'#10 +
+    'function YM(A: TRp): TRW; begin end;'#10 +
+    'function YN(const A: array of Pointer): TRA; begin end;'#10 +
+    'function YN(A: PI): TRW; begin end;'#10 +
+    'function YP(A: PI): TRA; begin end;'#10 +
+    'function YP(const A): TRW; begin end;'#10 +
+    'function YQ(A: string): TRA; begin end;'#10 +
+    'function YQ(const A): TRW; begin end;'#10 +
+    'function YR(A: Pointer): TRA; begin end;'#10 +
+    'function YR(const A): TRW; begin end;'#10 +
+    'function YS(A: Pointer): TRA; begin end;'#10 +
+    'function YS(const A): TRW; begin end;'#10 +
+    'function YU(A: TRpc): TRA; begin end;'#10 +
+    'function YU(A: TRp): TRW; begin end;'#10 +
+    'function YV(const A): TRA; begin end;'#10 +
+    'function YV(A: TCls): TRW; begin end;'#10 +
+    'procedure Test(vPI: PI; vPChar: PChar; vDC: TClsDC; vI: Integer; vDA: TDA; vPtr: Pointer; vV: Variant; vH: THnd);'#10 +
+    'var'#10 +
+    '  X: TRW;'#10 +
+    'begin'#10 +
+    '  X := YA(vPI);'#10 +
+    '  X := YB(vPI);'#10 +
+    '  X := YC(0);'#10 +
+    '  X := YD(vPChar);'#10 +
+    '  X := YE(vPI);'#10 +
+    '  X := YF(vDC);'#10 +
+    '  X := YG(vDC);'#10 +
+    '  {$T+}'#10 +
+    '  X := YH(vPI);'#10 +
+    '  X := YJ(@vI);'#10 +
+    '  X := YK(@Proc);'#10 +
+    '  {$T-}'#10 +
+    '  X := YL(vDA);'#10 +
+    '  X := YM(vPChar);'#10 +
+    '  X := YN(vPtr);'#10 +
+    '  X := YP(vI);'#10 +
+    '  X := YQ(vPI);'#10 +
+    '  X := YR(vV);'#10 +
+    '  X := YS(''abc'');'#10 +
+    '  X := YU(nil);'#10 +
+    '  X := YV(vH);'#10 +
+    'end;'#10 +
+    'end.'#10;
+  PTR_NAMES: array[0..18] of string = ('YA', 'YB', 'YC', 'YD', 'YE', 'YF', 'YG', 'YH', 'YJ', 'YK', 'YL', 'YM', 'YN', 'YP', 'YQ', 'YR', 'YS', 'YU', 'YV');
+
   { Procedural types and Pointer values in the unit's own typer (ProcArgSym
     - the project's ProcArgScore; RefConvSym's Pointer and nil rows; 6.3.1,
     6.6.1, local/type-conv-2026-11/n5): the cases of SemaProjectSmoke's
@@ -1455,6 +1588,12 @@ begin
   Analyze(SRC_ARR);
   for var LName in ARR_NAMES do
     Ok('array ranking (6.3.1, 8.1.1): ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  GModel.Free;
+
+  Analyze(SRC_PTR);
+  for var LName in PTR_NAMES do
+    Ok('pointer ranking (6.3.1, 10.1.2): ' + LName + ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   GModel.Free;
 

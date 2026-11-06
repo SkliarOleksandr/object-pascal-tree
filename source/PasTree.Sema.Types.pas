@@ -161,6 +161,22 @@ const
   CArrRankVariant = CRankLossless;
   CArrRankFromVariant = CRankLossy;
 
+  { The ranks of a TYPED POINTER value's conversions (RefConvRank; 6.3.1,
+    10.1.2; local/type-conv-2026-11/n7): under $T+ at the call to another
+    typed pointer of its base (PI2 for a PI, PChar for a ^Char) above the
+    untyped Pointer, both above every other conversion of the value - a
+    PChar takes F(Pointer) over F(string) - and above a record's `Implicit`. }
+  CPtrRankSameBase = CRankLossless + 34;
+  CPtrRankPointer = CRankLossless + 32;
+
+  { An untyped Pointer VARIABLE as the single element of `array of Pointer`
+    (OpenArrFitX, OpenArrayScore): a conversion of this rank on the
+    reference scale (RefConvRank), below a typed pointer (29), above a plain
+    procedural type (27) and a class - not the exact match a single element
+    of another type is (n7 Set B: `F(P)` takes F(PInteger) over
+    F(array of Pointer), F(array of Pointer) over F(TObject)). }
+  CPtrRankOpenElem = 28;
+
 type
 
   { One operand, after its aliases are chased to the builtin they name - a
@@ -203,6 +219,11 @@ type
     // Facts.IntConst of a constant TYPED by a cast (`Byte(5)`, sckTyped):
     // its own type is its exact match, the rest ranked by its value.
     TypedConst: Boolean;
+    // A string or character argument that names a true constant: a PChar
+    // takes it as it takes a literal (n7), though its facts may not say
+    // so (`sLineBreak`, its value under $IFDEFs): ArgCatRejects is no rule
+    // for it.
+    StrConstName: Boolean;
   end;
   PSemaArgConv = ^TSemaArgConv;
 
@@ -426,9 +447,19 @@ type
       unit has no category here and ranks 0, so a conversion that may rank
       below such a one - a class to an interface or to Pointer (TObject,
       another unit's ancestor, wins over both), an interface to Variant -
-      ranks below 0 here (RefConvRank - 32), above the user conversions. }
+      ranks below 0 here (RefConvRank - 32), above the user conversions.
+      ATypedAddr: $T+ where the value is passed (XRefConvX). }
     function RefConvSym(ADst, ASrc: Integer; D, S: TSemaTypeCat;
-      out ARank, AUserRank: Integer): Integer;
+      out ARank, AUserRank: Integer; ATypedAddr: Boolean = False): Integer;
+    { The base type of the pointer type APtr declared in this unit (`^T`,
+      through weak aliases; PasBuiltinCanonSym), NIL_SYM when it is no such
+      type or the base is not bound here (a PChar: compiler-provided). }
+    function PointeeSym(APtr: Integer): Integer;
+    { AddrArgFitX over this unit's symbols: `@X` under $T+ for the
+      parameter type APt, APointee X's type (NIL_SYM not read), ARoutine X a
+      routine. 1 with ARank, -1 out, 0 not known, -2 not decided here. }
+    function AddrArgSym(APt, APointee: Integer; ARoutine: Boolean;
+      out ARank: Integer): Integer;
     { Procedural types on this unit's symbols - TPasSemaProject's
       ProcTypeSigX, RoutineSigX, ProcSigsMeetX: the nkProcType a type of
       this unit is (through weak aliases and distinct copies), the
@@ -586,7 +617,11 @@ function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
   procedural values too (n5 Set A: E2250).
 
   ArgCatRejects - decided on the two categories: IsScalarToReference,
-  ScalarEnumMismatch, or an ordinal / float / Char value for an array.
+  ScalarEnumMismatch, or an ordinal / float / Char value for an array; a
+  number, Boolean, character, string, enumeration value or Variant for a
+  pointer, a pointer for any of them (n7: E2250; a PChar for a string, a
+  string literal for a PChar and a literal 0 for a pointer are ranked
+  before this, so never reach it).
 
   ArgStructRejects - two types already known NOT to be the same type: two
   records, an array against a record, class or interface, or a number, a
@@ -665,7 +700,8 @@ function OpenArrayArgFit(AArgCat: TSemaTypeCat; AIsElem, AIsVar: Boolean;
   copy, a static array of the same shape, an array of another element are
   each E2250 - and the generic instances of one element (TArray<Integer>,
   `TG<Integer>.TDyn` for `TDyn = array of T`) are one type. A dynamic array
-  goes to Pointer (CArrRankPointer), then Variant (CArrRankVariant), above
+  goes to the untyped Pointer (AParUntypedPtr - to no typed pointer, n7)
+  (CArrRankPointer), then Variant (CArrRankVariant), above
   a record's `Implicit` from it; a static one to neither; neither to a class,
   an interface, a class reference, a number, a character or a set (a string
   only from a static array of Char). Variant goes to a dynamic array with
@@ -675,8 +711,8 @@ function OpenArrayArgFit(AArgCat: TSemaTypeCat; AIsElem, AIsVar: Boolean;
   local/type-conv-2026-11/n6 Sets A-C: 2,214 lone calls, 3,764 pair calls,
   223 structural, none answered by the order). }
 function ArrayArgFit(AParCat, AArgCat: TSemaTypeCat;
-  AParDyn, AParStatic, AArgDyn, AArgStatic, ACharArr, AParCharPtr: Boolean;
-  AIdentity: Integer; out ARank: Integer): Integer;
+  AParDyn, AParStatic, AArgDyn, AArgStatic, ACharArr, AParCharPtr,
+  AParUntypedPtr: Boolean; AIdentity: Integer; out ARank: Integer): Integer;
 
 { One ELEMENT of a `[...]` against what the brackets are passed to (ATarget:
   an open array, a dynamic array, `array of const`) - the rule both scorers
@@ -933,11 +969,15 @@ type
     interface, a class reference, a dynamic array. A `reference to` type is
     an interface here (nil ranks it as one of depth 1). An untyped Pointer
     value - a variable, `@X` - to a typed pointer, a plain procedural type, a
-    class, a class reference (rcPtr*, n5). }
+    class, a class reference (rcPtr*, n5). A typed pointer value to the
+    untyped Pointer, under $T+ to another typed pointer of its base
+    (rcTyped*); a class reference to its ancestors' class references, the
+    nearer first, then to Pointer (rcClassRef*, n7). }
   TSemaRefConv = (rcClassUp, rcClassIntf, rcClassPointer, rcIntfUp,
     rcIntfVariant, rcNilPointer, rcNilTypedPointer, rcNilProc, rcNilClass,
     rcNilIntf, rcNilClassRef, rcNilDynArray, rcPtrTypedPointer, rcPtrProc,
-    rcPtrClass, rcPtrClassRef);
+    rcPtrClass, rcPtrClassRef, rcTypedPointer, rcTypedSameBase, rcClassRefUp,
+    rcClassRefPointer);
 
 { The rank of a reference conversion AConv (a lossless built-in one, 1 ..
   31, above every user conversion of the value and below no other built-in
@@ -956,11 +996,23 @@ type
   - an untyped Pointer value: Pointer > a typed pointer > a plain procedural
     type > a class deeper first, a class reference between TObject (AStep
     0) and its descendants; no interface, method pointer or `reference to`
-    type (n3, n5 Set B).
+    type (n3, n5 Set B);
+  - a typed pointer value: its own type > (under $T+) another typed
+    pointer of its base > Pointer, above every other conversion of the
+    value (CPtrRank*; n7);
+  - a class reference value: its ancestors' class references, the nearer
+    first, > Pointer (n7).
   Where dcc ties (two unrelated interfaces, two classes off one chain) a
   depth decides here: a call between such candidates is E2251 in dcc, so
   no code that compiles meets it. }
 function RefConvRank(AConv: TSemaRefConv; AStep: Integer): Integer;
+
+{ The rank of an integer constant 0 written as a literal or folded from
+  literals (`0`, `$0`, `0 + 0`; not a named constant) for a pointer
+  parameter (6.3.1, 10.1.2; n7): a typed pointer (every one alike) above the
+  untyped Pointer, both below the value's Variant - below every number - and
+  above a record's `Implicit`. AThreshold: the value's ConvThreshold. }
+function ZeroPointerRank(ATyped: Boolean; AThreshold: Integer): Integer;
 
 { The rank of a user conversion (`class operator Implicit`) whose built-in
   part is the reference conversion AConv - UserConvRank's levels, below 0
@@ -1446,7 +1498,17 @@ begin
   // enumeration, Variant, pointer, nil, class, interface or array (n4 Sets A,
   // D: E2250 for each). A procedural value is left out - a parameterless
   // function in a value position is called.
+  // A pointer takes no number, Boolean, character, string, enumeration
+  // value or Variant and goes to none of them (n7 Set A: E2250): what
+  // converts - a PChar to a string, a string literal to a PChar, a literal
+  // 0 to a pointer - is ranked before this.
   Result := IsScalarToReference(AParCat, AArgCat) or
+    ((AParCat = tcPointer) and
+     (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum,
+      tcVariant])) or
+    ((AArgCat = tcPointer) and
+     (AParCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum,
+      tcVariant])) or
     ScalarEnumMismatch(AParCat, AArgCat) or
     ((AParCat = tcArray) and
      (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum])) or
@@ -1473,10 +1535,12 @@ begin
   // overload; dcc64 E2010 for each, 6.3.1). An interface TYPE NAME, a
   // TGUID (`Supports(X, IFoo)`), is the scorers' own case before this.
   // nil too: a record takes it through an Implicit from a pointer, a class,
-  // an interface or a procedural type alone (6.3.1; n5 Set A: TMethod).
+  // an interface or a procedural type alone (6.3.1; n5 Set A: TMethod). A
+  // class reference value as well (n7 Set A: TClass for a record of
+  // `Implicit(A: Pointer)` alone).
   if (AParCat = tcRecord) and
      (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum, tcClass,
-      tcPointer, tcSet, tcInterface, tcNil]) then
+      tcPointer, tcSet, tcInterface, tcNil, tcClassOf]) then
     Exit(not AParConv);
   // An array against a record, class or interface, either way round.
   Result := ((AParCat = tcArray) and
@@ -1507,8 +1571,8 @@ begin
 end;
 
 function ArrayArgFit(AParCat, AArgCat: TSemaTypeCat;
-  AParDyn, AParStatic, AArgDyn, AArgStatic, ACharArr, AParCharPtr: Boolean;
-  AIdentity: Integer; out ARank: Integer): Integer;
+  AParDyn, AParStatic, AArgDyn, AArgStatic, ACharArr, AParCharPtr,
+  AParUntypedPtr: Boolean; AIdentity: Integer; out ARank: Integer): Integer;
 begin
   ARank := 0;
   Result := -2;
@@ -1520,8 +1584,12 @@ begin
           1: Result := 2;
           -1: Result := -1;
         end;
+      // A dynamic array to the untyped Pointer alone (n7 Set A: E2250 for
+      // PInteger, PChar).
       tcPointer:
-        if AArgDyn then
+        if AArgDyn and not AParUntypedPtr then
+          Result := -1
+        else if AArgDyn then
         begin
           ARank := CArrRankPointer;
           Result := 1;
@@ -2042,8 +2110,14 @@ begin
   if AStep < 0 then
     AStep := 0;
   case AConv of
-    rcClassUp, rcIntfUp:
+    rcClassUp, rcIntfUp, rcClassRefUp:
       Result := 31 - Min(AStep, 15);
+    rcClassRefPointer:
+      Result := 2;
+    rcTypedPointer:
+      Result := CPtrRankPointer;
+    rcTypedSameBase:
+      Result := CPtrRankSameBase;
     rcClassIntf, rcNilIntf:
       Result := 8 + Min(AStep, 7);
     rcClassPointer:
@@ -2076,12 +2150,26 @@ begin
   end;
 end;
 
+function ZeroPointerRank(ATyped: Boolean; AThreshold: Integer): Integer;
+begin
+  // An integer constant's raw ranks below its Variant (IntConstRank: 17 or
+  // 19) and above the integers not holding it (1 .. 8) are free.
+  Result := CRankLossless + AThreshold - 2;
+  if ATyped then
+    Inc(Result);
+  if Result < CRankLossless then
+    Result := CRankLossless;
+end;
+
 function RefUserRank(AConv: TSemaRefConv): Integer;
 begin
   case AConv of
-    rcClassPointer, rcIntfVariant:
+    rcClassPointer, rcIntfVariant, rcTypedPointer, rcClassRefPointer:
       Result := UserConvRank(1, 0);
-    rcNilPointer, rcNilTypedPointer:
+    // nil: to Pointer above a typed pointer (TRp over TRpc), above a class.
+    rcNilPointer:
+      Result := UserConvRank(2, 3);
+    rcNilTypedPointer:
       Result := UserConvRank(2, 2);
     rcNilProc, rcNilClass:
       Result := UserConvRank(2, 1);
@@ -2296,7 +2384,8 @@ begin
   // ArgStructRejects' cases, without the operators.
   Result := ((AParCat = tcRecord) and
              (AArgCat in [tcRecord, tcInteger, tcFloat, tcBoolean, tcChar,
-              tcEnum, tcClass, tcPointer, tcSet, tcInterface, tcNil])) or
+              tcEnum, tcClass, tcPointer, tcSet, tcInterface, tcNil,
+              tcClassOf])) or
             ((AParCat = tcArray) and
              (AArgCat in [tcRecord, tcClass, tcInterface])) or
             ((AArgCat = tcArray) and
@@ -5326,11 +5415,17 @@ var
       if (LCt = tcUnknown) or (LCf = tcUnknown) then
         Exit;
       // No chain: a record converts to nothing but itself here.
-      if (LCt = tcRecord) or (LCf = tcRecord) or ArgCatRejects(LCt, LCf) or
+      // A string literal for a PChar / PAnsiChar leg is the ranking's
+      // (ConvRawRank below), not ArgCatRejects' (a string VARIABLE is out
+      // there too).
+      if (LCt = tcRecord) or (LCf = tcRecord) or
+         ArgCatRejects(LCt, LCf) and
+         not ((LCt = tcPointer) and (LCf in [tcString, tcChar]) or
+              (LCt = tcString) and (LCf = tcPointer)) or
          (LCt = tcArray) and (LCf = tcArray) and
          (ArrayIdentitySym(ATo, AFrom) = -1) or
          not Assignable(ATo, AFrom) or
-         (LCf in [tcNil, tcClass, tcInterface]) and
+         (LCf in [tcNil, tcClass, tcInterface, tcPointer, tcClassOf]) and
          (RefConvSym(ATo, AFrom, LCt, LCf, LRaw, LUr) = -1) then
       begin
         ALeg := scNone;
@@ -5355,7 +5450,12 @@ var
         Exit(UserConvRank(7, 0) - CRankLossless);
       if RefConvSym(ATo, AFrom, CatOf(ATo), CatOf(AFrom), LRaw,
          Result) = 1 then
+      begin
+        // A PChar keeps the ranking's scale (UserConvX's LegRank).
+        if LArg.Kind <> cnkNone then
+          Inc(Result, CRankLossless);
         Exit;
+      end;
       Exit(UserConvRank(2, 0) - CRankLossless);
     end;
     LRaw := ConvRawRank(LArg, LTo, FWideExt);
@@ -5468,17 +5568,61 @@ begin
   Result := 1;
 end;
 
+function TPasSemaTyper.PointeeSym(APtr: Integer): Integer;
+var
+  LDef: Integer;
+begin
+  Result := NIL_SYM;
+  APtr := WeakAliasEnd(APtr);
+  if (APtr = NIL_SYM) or (M.Symbols[APtr].Kind <> skType) then
+    Exit;
+  LDef := TypeDefNode(APtr);
+  if (LDef = NIL_NODE) or (Kind(LDef) <> nkPointerType) or
+     (Child(LDef) = NIL_NODE) then
+    Exit;
+  Result := Head(Child(LDef));
+  if Result <> NIL_SYM then
+    Result := PasBuiltinCanonSym(M, WeakAliasEnd(Result), FPlatform);
+end;
+
+function TPasSemaTyper.AddrArgSym(APt, APointee: Integer; ARoutine: Boolean;
+  out ARank: Integer): Integer;
+var
+  LPB: Integer;
+begin
+  ARank := 0;
+  case CatOf(APt) of
+    tcPointer:
+      begin
+        if IsPointerSym(APt) then
+        begin
+          ARank := RefConvRank(rcTypedPointer, 0);
+          Exit(1);
+        end;
+        if ARoutine or (CatOf(APointee) = tcProc) then
+          Exit(-1);
+        LPB := PointeeSym(APt);
+        if (LPB = NIL_SYM) or (APointee = NIL_SYM) or
+           (M.Symbols[LPB].Kind = skGenericParam) or
+           (M.Symbols[APointee].Kind = skGenericParam) then
+          Exit(0);
+        if LPB <> PasBuiltinCanonSym(M, WeakAliasEnd(APointee), FPlatform) then
+          Exit(-1);
+        ARank := RefConvRank(rcTypedSameBase, 0);
+        Result := 1;
+      end;
+    tcRecord, tcUnknown:
+      Result := -2;
+  else
+    Result := -1;
+  end;
+end;
+
 function TPasSemaTyper.RefConvSym(ADst, ASrc: Integer; D, S: TSemaTypeCat;
-  out ARank, AUserRank: Integer): Integer;
+  out ARank, AUserRank: Integer; ATypedAddr: Boolean): Integer;
 var
   LConv: TSemaRefConv;
   LStep, LShift, LDef: Integer;
-
-  function IsPointerSym(ASym: Integer): Boolean;
-  begin
-    Result := (M.Symbols[ASym].Kind = skBuiltinType) and
-      (M.Symbols[ASym].NameLower = 'pointer');
-  end;
 
   // The hops from ADesc up to ABase: -1 when the walk reached the root
   // without it, -2 when it left the unit.
@@ -5594,8 +5738,47 @@ begin
     // interface, method pointer, `reference to` type or Variant.
     tcPointer:
       begin
+        // A typed pointer value (XRefConvX): Pointer; under $T+ another
+        // typed pointer of its base; nothing else.
         if not IsPointerSym(ASrc) then
-          Exit(0);
+        begin
+          case D of
+            tcPointer:
+              if IsPointerSym(ADst) then
+                LConv := rcTypedPointer
+              else if not ATypedAddr then
+                Exit(-1)
+              else
+              begin
+                LDef := PointeeSym(ADst);
+                LStep := PointeeSym(ASrc);
+                if (LDef = NIL_SYM) or (LStep = NIL_SYM) or
+                   (M.Symbols[LDef].Kind = skGenericParam) or
+                   (M.Symbols[LStep].Kind = skGenericParam) then
+                  Exit(0);
+                if LDef <> LStep then
+                  Exit(-1);
+                LConv := rcTypedSameBase;
+              end;
+            // A PChar / PAnsiChar to a string is the ranking's.
+            tcString:
+              begin
+                var LF: TSemaOpFacts;
+                if ConvKindSym(ASrc, NIL_NODE, False, LF) in
+                   [cnkPChar, cnkPAnsiChar] then
+                  Exit(0);
+                Exit(-1);
+              end;
+            tcClass, tcClassOf, tcProc, tcArray, tcInterface, tcVariant,
+            tcInteger, tcFloat, tcBoolean, tcChar, tcEnum, tcSet:
+              Exit(-1);
+          else
+            Exit(0);
+          end;
+          ARank := RefConvRank(LConv, 0);
+          AUserRank := RefUserRank(LConv);
+          Exit(1);
+        end;
         case D of
           tcPointer:
             LConv := rcPtrTypedPointer;
@@ -5673,6 +5856,37 @@ begin
             LShift := 32;
           end;
         tcClass, tcPointer, tcClassOf:
+          Exit(-1);
+      else
+        Exit(0);
+      end;
+    // A class reference value (XRefConvX): its ancestors' class references,
+    // nearer first, then Pointer.
+    tcClassOf:
+      case D of
+        tcClassOf:
+          begin
+            LDef := ClassRefTarget(ASrc);
+            LStep := ClassRefTarget(ADst);
+            if (LDef = NIL_SYM) or (LStep = NIL_SYM) then
+              Exit(0);
+            LStep := Dist(LDef, LStep);
+            if LStep = -1 then
+              Exit(-1);
+            if LStep < 0 then
+              Exit(0);
+            LConv := rcClassRefUp;
+          end;
+        tcPointer:
+          if IsPointerSym(ADst) then
+          begin
+            LConv := rcClassRefPointer;
+            LShift := 32;
+          end
+          else
+            Exit(-1);
+        tcClass, tcInterface, tcProc, tcVariant, tcInteger, tcFloat, tcArray,
+        tcBoolean, tcChar, tcString, tcEnum, tcSet:
           Exit(-1);
       else
         Exit(0);
@@ -6006,6 +6220,22 @@ begin
         ARank := LRank;
       Exit;
     end;
+    // `@X` under $T+: a typed pointer to X's type, typed Pointer here
+    // (AddrArgSym - CrossType's AddrArgFitX).
+    if ARanked and (Kind(LCore) = nkUnaryOp) and
+       M.AnonTypeSyms.ContainsKey(LCore) and (Child(LCore) <> NIL_NODE) then
+    begin
+      var LOpd := PeelParens(T, Child(LCore));
+      var LRoutine := (Kind(LOpd) in [nkIdent, nkMember]) and
+        (Head(LOpd) <> NIL_SYM) and (M.Symbols[Head(LOpd)].Kind = skRoutine);
+      LUserRank := AddrArgSym(LPt, M.IntraType(Child(LCore)), LRoutine, LRank);
+      if LUserRank <> -2 then
+      begin
+        if LUserRank = 1 then
+          ARank := LRank;
+        Exit(LUserRank);
+      end;
+    end;
   end;
   // A number, Variant or string against one: dcc's ranking of the
   // conversion (ConvRank) - ArgFitCanonX's rule.
@@ -6110,7 +6340,7 @@ begin
         LAStatic, LACharArr,
         (LParCat = tcPointer) and LACharArr and
         (ConvKindSym(LPt, NIL_NODE, False, LParF) in [cnkPChar, cnkPAnsiChar]),
-        LIdent, LRank);
+        (LParCat = tcPointer) and IsPointerSym(LPt), LIdent, LRank);
       if LUserRank <> -2 then
       begin
         if LUserRank = 1 then
@@ -6118,11 +6348,25 @@ begin
         Exit(LUserRank);
       end;
     end;
-    // A class instance, an interface, nil: RefConvSym (ArgFitCanonX's
-    // XRefConvX over this unit's types).
-    if CatOf(AAt) in [tcNil, tcClass, tcInterface, tcPointer] then
+    // An integer constant 0 written as a literal or folded from literals:
+    // every pointer, a typed one above Pointer (ArgFitCanonX).
+    if (LParCat = tcPointer) and (CatOf(AAt) = tcInteger) and
+       (LArgC.Kind <> cnkNone) and LArgC.Facts.IntConst and
+       (LArgC.Facts.IntValue = 0) and (LCore <> NIL_NODE) and
+       not (Kind(LCore) in [nkIdent, nkMember]) then
+    begin
+      ARank := ZeroPointerRank(not IsPointerSym(LPt),
+        ConvThreshold(LArgC, FWideExt));
+      Exit(1);
+    end;
+    // A class instance, an interface, nil, a pointer, a class reference:
+    // RefConvSym (ArgFitCanonX's XRefConvX over this unit's types).
+    if CatOf(AAt) in [tcNil, tcClass, tcInterface, tcPointer, tcClassOf] then
       case RefConvSym(WeakAliasEnd(LPt), WeakAliasEnd(AAt), LParCat,
-             CatOf(AAt), LRank, LUserRank) of
+             CatOf(AAt), LRank, LUserRank, (LParCat = tcPointer) and
+             (CatOf(AAt) = tcPointer) and (LCore <> NIL_NODE) and
+             (Length(T.Source.TypedAddressEvents) > 0) and
+             T.Source.TypedAddressAt(T.Nodes[LCore].FirstToken)) of
         -1:
           Exit(-1);
         1:
@@ -6139,6 +6383,11 @@ begin
         Exit(1);
       Exit(-1);
     end;
+    // A named string constant the ranking could not read: a conversion of
+    // no rank (TSemaArgConv.StrConstName).
+    if (LParCat = tcPointer) and (CatOf(AAt) in [tcString, tcChar]) and
+       (LCore <> NIL_NODE) and IsConstName(LCore) then
+      Exit(1);
     if ArgCatRejects(LParCat, CatOf(AAt)) or
        (ArgStructNeedsConv(LParCat, CatOf(AAt)) and
         ArgStructRejects(LParCat, CatOf(AAt), LOps and (LParCat = tcRecord),
@@ -6258,6 +6507,8 @@ begin
        (M.Symbols[LSym].Kind = skConst) and
        (M.Symbols[LSym].TypeNode <> NIL_NODE));
   end;
+  if LIsVar and IsPointerSym(LElem) and IsPointerSym(AAt) then
+    Exit(ScaledFit(2, CPtrRankOpenElem));
   Result := ScaledFit(OpenArrayArgFit(LArgCat,
     (AAt <> NIL_SYM) and IsElem(AAt), LIsVar, LElemFit));
 end;
@@ -7230,12 +7481,25 @@ end;
 
 function TPasSemaTyper.IsPointerSym(ASym: Integer): Boolean;
 var
-  LB: Integer;
+  LB, LDef, LDepth: Integer;
 begin
   Result := False;
   if ASym = NIL_SYM then
     Exit;
-  LB := PasBuiltinCanonSym(M, WeakAliasEnd(ASym), FPlatform);
+  // Through weak aliases and distinct copies (`type Pointer`; n7 gate).
+  LB := WeakAliasEnd(ASym);
+  for LDepth := 1 to 8 do
+  begin
+    if (LB = NIL_SYM) or (M.Symbols[LB].Kind <> skType) then
+      Break;
+    LDef := TypeDefNode(LB);
+    if (LDef = NIL_NODE) or not (Kind(LDef) in [nkIdent, nkMember]) then
+      Break;
+    LB := WeakAliasEnd(Head(LDef));
+  end;
+  if LB = NIL_SYM then
+    Exit;
+  LB := PasBuiltinCanonSym(M, LB, FPlatform);
   Result := (LB <> NIL_SYM) and (M.Symbols[LB].Kind = skBuiltinType) and
     (M.Symbols[LB].NameLower = 'pointer');
 end;
