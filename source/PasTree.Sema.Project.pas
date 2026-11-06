@@ -421,6 +421,8 @@ type
     Kind: TPasCtorElemKind;
     StaticArray: Boolean;    // a static array, which `array of const` refuses
     CharValue: Boolean;      // a one-character literal or a Char-typed value
+    ConvRead: Boolean;       // Conv read (CtorFitX, once per call)
+    Conv: TSemaArgConv;      // its conversion facts (ArgConvX)
   end;
 
   { What an argument for an ARRAY parameter - an open array, or a dynamic
@@ -433,6 +435,10 @@ type
   TPasArrayArg = record
     Elems: TArray<TPasCtorElem>;
     InlineElemX: TSemaXType;
+    IsVar: Boolean;   // the argument is a variable, a field, a parameter or
+                      // a typed constant: one value is a one-element array
+    Mid: Integer;     // the model a `[...]`'s element nodes are of, whose
+                      // conversion facts CtorFitX reads (ArgConvX); -1 none
   end;
 
   { One element of a `[...]` passed to a SET parameter - or one bound of a
@@ -444,6 +450,8 @@ type
     Cat: TSemaTypeCat;    // X's category; tcChar for a one-character literal
     Constant, HasValue: Boolean;
     Value: Int64;         // a constant's ordinal value, when HasValue
+    HasRange: Boolean;    // a variable's: its subrange type's bounds
+    Lo, Hi: Int64;
   end;
 
   { A `[...]` - written in the call, or the value of a true constant the
@@ -1556,6 +1564,15 @@ type
     function XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
     function ParCatOf(const APar, ACanonPar: TSemaXType): TSemaTypeCat;
     function IsStaticArrayX(const AX: TSemaXType): Boolean;
+    // ArrayArgFit over two canonical types - see the implementation.
+    function ArrayConvX(const ACanonParX, ACanonArgX: TSemaXType;
+      AParCat, AArgCat: TSemaTypeCat; out ARank: Integer): Integer;
+    // Is AX the untyped Pointer (after aliases)?
+    function IsUntypedPointerX(const AX: TSemaXType): Boolean;
+    // Are two array types one (ArrayArgFit's identity) - see the
+    // implementation.
+    function ArrayIdentityX(const ACanonPar, ACanonArg: TSemaXType;
+      APDyn, AADyn: Boolean): Integer;
     // XConvX; AUser False leaves the user conversions out (UserConvX's
     // built-in parts: no chain of two operators).
     function XConvCoreX(const ADst, ASrc: TSemaXType; AUser: Boolean): TSemaConv;
@@ -14023,6 +14040,20 @@ begin
   Result := XConvCoreX(ADst, ASrc, True);
 end;
 
+{ May the pair of categories be ArrayArgFit's - an array on one side, or a
+  category not read (a generic instance of a dynamic array may read
+  tcUnknown) beside one ArrayArgFit decides for an array: a pointer,
+  Variant, a string, nil? The cheap gate before ArrayConvX, asked for every
+  argument of every candidate (perf: asking it for every tcUnknown side cost
+  bigflat's xtype 15%). }
+function MayArrayPair(AParCat, AArgCat: TSemaTypeCat): Boolean;
+begin
+  Result := (AParCat = tcArray) or (AArgCat = tcArray) or
+    (AParCat = tcUnknown) and
+    (AArgCat in [tcPointer, tcVariant, tcString, tcNil]) or
+    (AArgCat = tcUnknown) and (AParCat in [tcPointer, tcVariant, tcString]);
+end;
+
 function TPasSemaProject.XConvCoreX(const ADst, ASrc: TSemaXType;
   AUser: Boolean): TSemaConv;
 const
@@ -14045,6 +14076,14 @@ begin
     Exit(scIdentical);
   D := XCatOf(LD);
   S := XCatOf(LS);
+  // An array on either side (ArrayConvX: an array type is nominal, a
+  // dynamic array goes to Pointer and Variant, Variant to a dynamic array).
+  if MayArrayPair(D, S) then
+    case ArrayConvX(LD, LS, D, S, LRank) of
+      -1: Exit(TSemaConv.scNone);
+      1: Exit(scImplicit);
+      2: Exit(scIdentical);
+    end;
   if (D = tcUnknown) or (S = tcUnknown) then
     Exit(scMaybe);
   if (D = tcRecord) or (S = tcRecord) then
@@ -14308,28 +14347,154 @@ begin
     Result := tcArray;
 end;
 
+{ Are the array types ACanonPar and ACanonArg (canonical; APDyn / AADyn
+  whether each is a dynamic array, IsDynArrayTypeX) one type - ArrayArgFit's
+  AIdentity: 1 one, -1 two, 0 not known. An array type is nominal (8.1.1):
+  two declarations are two types even of one shape, and a static and a
+  dynamic array are always two. A dynamic array declared in a generic type
+  and instantiated (Inst set: TArray<Integer>, TStringDynArray, a
+  `TG<Integer>.TDyn` for `TDyn = array of T`) is one type with every such
+  instance of its element (n6 Set C) and another than a plain declaration
+  of it (TDA = array of Integer). Two arrays of different elements are two
+  types. A side that mentions an open generic parameter (OpenX), or whose
+  element is not read (a seeded TArray / TBytes), is not known. }
+function TPasSemaProject.ArrayIdentityX(const ACanonPar,
+  ACanonArg: TSemaXType; APDyn, AADyn: Boolean): Integer;
+var
+  LPE, LAE: TSemaXType;
+  LPGen, LAGen: Boolean;
+begin
+  Result := 0;
+  if not XValid(ACanonPar) or not XValid(ACanonArg) then
+    Exit;
+  if XSameType(ACanonPar, ACanonArg) then
+    Exit(1);
+  if OpenX(ACanonPar) or OpenX(ACanonArg) then
+    Exit;
+  if APDyn <> AADyn then
+    Exit(-1);
+  LPE := ArrayElemX(ACanonPar);
+  LAE := ArrayElemX(ACanonArg);
+  if not XValid(LPE) or not XValid(LAE) then
+    Exit;
+  LPE := CanonTypeX(LPE);
+  LAE := CanonTypeX(LAE);
+  if not XValid(LPE) or not XValid(LAE) or OpenX(LPE) or OpenX(LAE) then
+    Exit;
+  if not XSameType(LPE, LAE) then
+    Exit(-1);
+  LPGen := APDyn and (ACanonPar.Inst <> NIL_INST);
+  LAGen := AADyn and (ACanonArg.Inst <> NIL_INST);
+  if LPGen and LAGen then
+    Exit(1);
+  Result := -1;
+end;
+
+{ ArrayArgFit (6.3.1, n6) for a value of the canonical type ACanonArgX
+  against ACanonParX, whose categories the caller read (AParCat, AArgCat; a
+  dynamic array may read tcUnknown): each side's shape (IsDynArrayTypeX,
+  IsStaticArrayX), whether the array side is a static array of a character
+  (a string too), a PChar / PAnsiChar parameter, and for two arrays their
+  identity (ArrayIdentityX). -2 when neither side is an array, or the pair
+  is not the rule's. ArgFitCanonX's and XConvCoreX's one reading. }
+function TPasSemaProject.ArrayConvX(const ACanonParX, ACanonArgX: TSemaXType;
+  AParCat, AArgCat: TSemaTypeCat; out ARank: Integer): Integer;
+var
+  LPDyn, LPStatic, LADyn, LAStatic, LCharArr: Boolean;
+  LIdent: Integer;
+  LElem: TSemaXType;
+begin
+  ARank := 0;
+  LPDyn := False;
+  LPStatic := False;
+  LADyn := False;
+  LAStatic := False;
+  // A category not read may be a dynamic array (a generic instance); a
+  // static array always reads tcArray.
+  if AParCat = tcArray then
+  begin
+    LPDyn := IsDynArrayTypeX(ACanonParX);
+    LPStatic := not LPDyn and IsStaticArrayX(ACanonParX);
+  end
+  else if (AParCat = tcUnknown) and IsDynArrayTypeX(ACanonParX) then
+  begin
+    LPDyn := True;
+    AParCat := tcArray;
+  end;
+  if AArgCat = tcArray then
+  begin
+    LADyn := IsDynArrayTypeX(ACanonArgX);
+    LAStatic := not LADyn and IsStaticArrayX(ACanonArgX);
+  end
+  else if (AArgCat = tcUnknown) and IsDynArrayTypeX(ACanonArgX) then
+  begin
+    LADyn := True;
+    AArgCat := tcArray;
+  end;
+  if (AParCat <> tcArray) and (AArgCat <> tcArray) then
+    Exit(-2);
+  LCharArr := False;
+  LElem := XNil;
+  if LAStatic then
+    LElem := ArrayElemX(ACanonArgX)
+  else if LPStatic and (AArgCat = tcString) then
+    LElem := ArrayElemX(ACanonParX);
+  if XValid(LElem) then
+    LCharArr := XCatOf(CanonTypeX(LElem)) = tcChar;
+  LIdent := 0;
+  if (AParCat = tcArray) and (AArgCat = tcArray) then
+    LIdent := ArrayIdentityX(ACanonParX, ACanonArgX, LPDyn, LADyn);
+  Result := ArrayArgFit(AParCat, AArgCat, LPDyn, LPStatic, LADyn, LAStatic,
+    LCharArr, LCharArr and (AParCat = tcPointer) and
+    (ConvPtrKindX(ACanonParX) in [cnkPChar, cnkPAnsiChar]), LIdent, ARank);
+end;
+
+function TPasSemaProject.IsUntypedPointerX(const AX: TSemaXType): Boolean;
+var
+  LC: TSemaXType;
+begin
+  LC := CanonTypeX(AX);
+  Result := XValid(LC) and
+    (FModels[LC.UnitId].Symbols[LC.Sym].Kind = skBuiltinType) and
+    (FModels[LC.UnitId].Symbols[LC.Sym].NameLower = 'pointer');
+end;
+
 // Is AX a STATIC array (`array[0..N] of T`, `TByteArray`)? Read off its
-// declaration after aliases: an nkArrayType with an index child.
+// declaration after aliases and distinct copies (`type TSA`): an
+// nkArrayType with an index child.
 function TPasSemaProject.IsStaticArrayX(const AX: TSemaXType): Boolean;
 var
-  LCanon: TSemaXType;
-  LDef, LFirst: Integer;
+  LCur: TSemaXType;
+  LDef, LFirst, LDepth: Integer;
   LTree: TPasTree;
 begin
   Result := False;
-  LCanon := CanonTypeX(AX);
-  if not XValid(LCanon) or (XCatOf(LCanon) <> tcArray) then
+  LCur := CanonTypeX(AX);
+  if not XValid(LCur) or (XCatOf(LCur) <> tcArray) then
     Exit;
-  LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
-  if LDef = NIL_NODE then
-    Exit;
-  LTree := FModels[LCanon.UnitId].Tree;
-  if (LTree.Nodes[LDef].Kind <> nkArrayType) or
-     (LTree.Nodes[LDef].Aux = 1) then
-    Exit;
-  LFirst := LTree.Nodes[LDef].FirstChild;
-  Result := (LFirst <> NIL_NODE) and
-    (LTree.Nodes[LFirst].NextSibling <> NIL_NODE);
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    LTree := FModels[LCur.UnitId].Tree;
+    case LTree.Nodes[LDef].Kind of
+      nkIdent, nkMember:
+        LCur := AliasStepX(LCur, LDef);   // a distinct copy
+      nkArrayType:
+        begin
+          if LTree.Nodes[LDef].Aux = 1 then
+            Exit;
+          LFirst := LTree.Nodes[LDef].FirstChild;
+          Exit((LFirst <> NIL_NODE) and
+            (LTree.Nodes[LFirst].NextSibling <> NIL_NODE));
+        end;
+    else
+      Exit;
+    end;
+  end;
 end;
 
 // The parameter count of a signature node of AModel - an nkAnonMethod literal
@@ -14602,10 +14767,8 @@ begin
   LCanonArgX := LArgX;
   if XValid(LArgX) and XValid(AParX) then
     LCanonArgX := CanonTypeX(LArgX);
-  Result := ArgFitCanonX(LArgX, AParX, LCanonArgX, LCanonParX, ATree, ACore,
-    AProcDesig, AClassRef, nil, LRank);
-  if Result > 0 then
-    Result := 2 * Result;
+  Result := ScaledFit(2 * ArgFitCanonX(LArgX, AParX, LCanonArgX, LCanonParX,
+    ATree, ACore, AProcDesig, AClassRef, nil, LRank));
 end;
 
 function TPasSemaProject.CtorElemX(const AX: TSemaXType;
@@ -14618,6 +14781,8 @@ begin
   Result.Kind := AKind;
   Result.StaticArray := False;
   Result.CharValue := IsCharLiteralExpr(ATree, ANode);
+  Result.ConvRead := False;
+  Result.Conv := Default(TSemaArgConv);
   if not XValid(AX) then
     Exit;
   Result.CanonX := CanonTypeX(AX);
@@ -14796,8 +14961,9 @@ begin
       LElemFit := 1
     else
       LElemFit := -1;
-  Result := OpenArrayArgFit(LArgCat,
-    XValid(AArgX) and XSameType(ACanonArgX, ACanonElemX), LElemFit);
+  Result := ScaledFit(OpenArrayArgFit(LArgCat,
+    XValid(AArgX) and XSameType(ACanonArgX, ACanonElemX), AArg.IsVar,
+    LElemFit));
 end;
 
 { The `[...]` ACtor against an array parameter (ATarget: an open array, a
@@ -14805,19 +14971,25 @@ end;
   (System.TVarRec for `array of const`): CtorElemFit, the rule, over each
   element as the caller read it in project space (AArg.Elems, in the
   brackets' order, CtorElemX) - its category, and against an array of T
-  its score as a value argument of T (ArgFitCanonX, the element node the
-  core whose shape and literal it reads, a type name scored as the class
-  reference it is) and whether it is a constant - the worst deciding; the
-  unit pass's CtorScore reads the same. A range makes the brackets a set
-  constructor, which no array takes. An element type that mentions an open
-  generic parameter (OpenX) decides nothing. }
+  its score as a value argument of T with its rank (ArgFitCanonX over the
+  element's conversion facts, Conv; the element node the core whose shape
+  and literal it reads, a type name scored as the class reference it is),
+  whether an integer constant is one T holds (CtorConstHeld) and whether it
+  is a constant - the worst deciding, on the candidates' scale; `[]`
+  CtorEmptyFit's. The unit pass's CtorScore reads the same. A range makes
+  the brackets a set constructor, which no array takes. An element type
+  that mentions an open generic parameter (OpenX) decides nothing. }
 function TPasSemaProject.CtorFitX(const ACanonElemX: TSemaXType;
   ATarget: TSemaCtorTarget; const ATree: TPasTree; ACtor: Integer;
   const AArg: TPasArrayArg): Integer;
+const
+  CMaxRankedCtor = 64;
 var
   LKid, LIdx, LFit, LRank: Integer;
-  LOfConst, LParChar, LParString: Boolean;
+  LOfConst, LParChar, LParString, LParVariant, LHeld, LParPointer: Boolean;
+  LParKind: TSemaConvKind;
   LElem: TPasCtorElem;
+  LConv: TSemaArgConv;
 begin
   // `[...]` in parentheses is a set constructor, which no array takes.
   if IsParenthesizedCtor(ATree, ACtor) then
@@ -14825,18 +14997,30 @@ begin
   Result := 0;
   if not XValid(ACanonElemX) or OpenX(ACanonElemX) then
     Exit;
+  if ATree.Nodes[ACtor].FirstChild = NIL_NODE then
+    Exit(CtorEmptyFit(ATarget));
   LOfConst := ATarget = ctArrayOfConst;
   LParChar := False;
   LParString := False;
+  LParVariant := False;
+  LParPointer := False;
+  LParKind := cnkNone;
   if not LOfConst then
+  begin
     case XCatOf(ACanonElemX) of
+      tcPointer:
+        LParPointer := IsUntypedPointerX(ACanonElemX);
       tcChar:
         LParChar := PasBuiltinIsChar(FModels[ACanonElemX.UnitId],
           ACanonElemX.Sym, FPlatform);
       tcString:
         LParString := PasBuiltinIsUString(FModels[ACanonElemX.UnitId],
           ACanonElemX.Sym, FPlatform);
+      tcVariant:
+        LParVariant := True;
     end;
+    LParKind := ParConvKindX(ACanonElemX);
+  end;
   LIdx := 0;
   LKid := ATree.Nodes[ACtor].FirstChild;
   while LKid <> NIL_NODE do
@@ -14848,11 +15032,40 @@ begin
     else
       LElem := CtorElemX(XNil, cekValue, ATree, LKid);
     LFit := 0;
+    LRank := 0;
+    LHeld := False;
     if not LOfConst then
+    begin
+      // Its conversion facts, read for a typed element alone and once per
+      // call - an `array of const` call (Format) needs none, and the
+      // candidates of a call share them; the element of the caller's array
+      // is written through the const record (Elems is a reference). Not
+      // for the brackets of a data table (over CMaxRankedCtor elements):
+      // bigflat passes 450,000 elements in 2,800 such calls, whose facts
+      // cost its xtype 11%; their elements are scored without a rank, as
+      // before the ranking.
+      if LElem.ConvRead or (LIdx > High(AArg.Elems)) then
+        LConv := LElem.Conv
+      else
+      begin
+        LConv := Default(TSemaArgConv);
+        if (AArg.Mid >= 0) and (LElem.Kind <> cekClassRef) and
+           (Length(AArg.Elems) <= CMaxRankedCtor) then
+          LConv := ArgConvX(AArg.Mid, LKid, LElem.X);
+        AArg.Elems[LIdx].Conv := LConv;
+        AArg.Elems[LIdx].ConvRead := True;
+      end;
       LFit := ArgFitCanonX(LElem.X, ACanonElemX, LElem.CanonX, ACanonElemX,
-        ATree, LKid, False, LElem.Kind = cekClassRef, nil, LRank);
+        ATree, LKid, False, LElem.Kind = cekClassRef, @LConv, LRank);
+      LFit := CtorValueFit(LFit, LConv, LParKind, LParPointer,
+        (LElem.Cat = tcNil) or (LElem.Cat = tcPointer) and
+        IsUntypedPointerX(LElem.CanonX), FInfo.ExtendedBytes > 8);
+      LHeld := (LFit = 1) and (LParKind <> cnkNone) and
+        CtorConstHeld(LConv, LParKind, FInfo.ExtendedBytes > 8);
+    end;
     LFit := CtorElemFit(ATarget, LElem.Cat, LElem.StaticArray,
-      LElem.CharValue, LElem.Kind <> cekValue, LParChar, LParString, LFit);
+      LElem.CharValue, LElem.Kind <> cekValue, LParChar, LParString, LFit,
+      LRank, LHeld, LParVariant);
     if LFit < 0 then
       Exit(-1);
     if (LIdx = 0) or (LFit < Result) then
@@ -15073,6 +15286,19 @@ begin
     if not XValid(Result.Host) then
       Result.Cat := tcUnknown;   // an enumeration not read: no evidence
   end;
+  // A variable of a subrange: its bounds, against the set's base range
+  // (SetCtorElemFit's AWithin: a widening).
+  if not Result.Constant and XValid(Result.X) and
+     (Result.Cat in [tcInteger, tcChar, tcEnum]) then
+  begin
+    var LF := OrdFactsX(AMid, NIL_NODE, Result.X);
+    if LF.HasRange then
+    begin
+      Result.HasRange := True;
+      Result.Lo := LF.Lo;
+      Result.Hi := LF.Hi;
+    end;
+  end;
 end;
 
 { The argument ANode of model AMid names a true constant whose value is a
@@ -15145,7 +15371,10 @@ begin
       XValid(LExact) and XValid(AArg.Elems[LIdx].X) and
         XSameType(AArg.Elems[LIdx].X, LExact),
       AArg.Elems[LIdx].Constant, AArg.Elems[LIdx].HasValue,
-      AArg.Elems[LIdx].Value);
+      AArg.Elems[LIdx].Value,
+      AArg.Elems[LIdx].HasRange and
+        (not LBase.HasRange or (AArg.Elems[LIdx].Lo >= LBase.Lo) and
+         (AArg.Elems[LIdx].Hi <= LBase.Hi)));
     if LFit < LWorst then
       LWorst := LFit;
     if LWorst = sefOut then
@@ -15442,12 +15671,25 @@ begin
      ArgStructRejects(LParCat, LArgCat, LOps and (LParCat = tcRecord),
        LOps and (LArgCat = tcRecord)) then
     Exit(-1);
-  // A static array where a dynamic one is wanted: no conversion
-  // (`Image.Read(List^, N)` with List^ a static array takes TStream's
-  // untyped Read, not the TBytes one).
-  if (LParCat = tcArray) and (LArgCat = tcArray) and
-     IsDynArrayTypeX(AParX) and IsStaticArrayX(AArgX) then
-    Exit(-1);
+  // An array value against a typed parameter, a Variant, nil or a Pointer
+  // against an array (ArrayArgFit, 6.3.1): an array type is nominal - a
+  // second declaration of the element, a distinct copy, a static array of
+  // the shape, a static array where a dynamic one is wanted (`Image.Read(
+  // List^, N)` takes TStream's untyped Read, not the TBytes one) are each
+  // out, the generic instances of one element one type (ArrayIdentityX); a
+  // dynamic array goes to Pointer, then Variant, a static one to neither.
+  if MayArrayPair(LParCat, LArgCat) then
+    case ArrayConvX(ACanonParX, ACanonArgX, LParCat, LArgCat, LRank) of
+      -1:
+        Exit(-1);
+      1:
+        begin
+          ARank := LRank;
+          Exit(1);
+        end;
+      2:
+        Exit(2);
+    end;
   // A scalar where a class, an interface or a class reference is
   // wanted (IsScalarToReference); an enumeration where another
   // ordinal, a Boolean, a Char or a float is wanted, or the reverse
@@ -16670,13 +16912,26 @@ var
         Exit;
       LArrArgCore := ACore;
       LArrArg.InlineElemX := XNil;
+      LArrArg.IsVar := False;
+      LArrArg.Mid := AId;
       if (ACore = NIL_NODE) or (LM.Tree.Nodes[ACore].Kind <> nkSetCtor) then
       begin
         LArrArg.Elems := nil;
-        if (ACore <> NIL_NODE) and not XValid(AArgX) and
+        if (ACore <> NIL_NODE) and
            (LM.Tree.Nodes[ACore].Kind in [nkIdent, nkMember]) and
            TargetSym(ACore, LMid, LSym) then
-          LArrArg.InlineElemX := InlineArrayElemX(LMid, LSym);
+        begin
+          if not XValid(AArgX) then
+            LArrArg.InlineElemX := InlineArrayElemX(LMid, LSym);
+          // A variable, a parameter, a field or a typed constant: one value
+          // of the element type is a one-element array (6.2.6).
+          case FModels[LMid].Symbols[LSym].Kind of
+            skVar, skParam, skField:
+              LArrArg.IsVar := True;
+            skConst:
+              LArrArg.IsVar := FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE;
+          end;
+        end;
         Exit;
       end;
       SetLength(LArrArg.Elems, PasChildCount(LM.Tree, ACore));
@@ -17041,8 +17296,13 @@ var
         if LClassRef or not XValid(LParX) then
           Exit;
         ReadArrayArg(LCore, LArgX);
-        Exit(ScaledFit(OpenArrFitX(LArgX, LCanonArgX, LCanonParX, AOfConst, LM.Tree,
-          LCore, LArrArg^)));
+        Result := OpenArrFitX(LArgX, LCanonArgX, LCanonParX, AOfConst, LM.Tree,
+          LCore, LArrArg^);
+        // A `var` open array is preferred to Pointer and to the single
+        // element where a value one ties them (n6 Set B).
+        if (Result > 0) and AByRef then
+          Inc(Result);
+        Exit;
       end;
       // So has a `[...]` for a DYNAMIC array: its elements, a step below an
       // open array's (CtorElemFit).
@@ -17052,7 +17312,7 @@ var
         if XValid(LElemX) then
         begin
           ReadArrayArg(LCore, LArgX);
-          Exit(ScaledFit(CtorFitX(CanonTypeX(LElemX), ctDynArray, LM.Tree, LCore,
+          Exit((CtorFitX(CanonTypeX(LElemX), ctDynArray, LM.Tree, LCore,
             LArrArg^)));
         end;
       end;

@@ -1005,6 +1005,125 @@ const
     '  X := VS(S);'#10 +
     'end;'#10'end.'#10;
 
+  { Arrays in the unit's own typer (ArrayArgFit through ArrayShapeSym /
+    ArrayIdentitySym, OpenArrayScore's single element, CtorScore's graded
+    conversions, SetCtorScore's widening; 6.3.1, 8.1.1,
+    local/type-conv-2026-11/n6): the cases of SemaProjectSmoke's
+    TestArrConvRanking whose types this unit declares (not XC, XT, XU). The
+    overload dcc does NOT pick is declared first. }
+  SRC_ARR =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TE = (e0, e1, e2);'#10 +
+    '  TESub = e1..e2;'#10 +
+    '  TSE = set of TE;'#10 +
+    '  TSetB = set of Byte;'#10 +
+    '  TDA = array of Integer;'#10 +
+    '  TDA2 = array of Integer;'#10 +
+    '  TDAd = type TDA;'#10 +
+    '  TDB = array of Byte;'#10 +
+    '  TDS = array of string;'#10 +
+    '  TSA = array[0..1] of Integer;'#10 +
+    '  TSA2 = array[0..1] of Integer;'#10 +
+    '  TCA = array[0..2] of Char;'#10 +
+    '  TRst = record X: Integer; class operator Implicit(const A: TSA2): TRst; end;'#10 +
+    '  TRdy = record X: Integer; class operator Implicit(const A: TDA): TRdy; end;'#10 +
+    'function XA(A: TDA2): TRA; overload;'#10 +
+    'function XA(A: Pointer): TRW; overload;'#10 +
+    'function XB(A: TDA2): TRA; overload;'#10 +
+    'function XB(const A: array of Integer): TRW; overload;'#10 +
+    'function XD(A: TSA2): TRA; overload;'#10 +
+    'function XD(const A: array of Integer): TRW; overload;'#10 +
+    'function XE(A: Variant): TRA; overload;'#10 +
+    'function XE(A: Pointer): TRW; overload;'#10 +
+    'function XF(A: Pointer): TRA; overload;'#10 +
+    'function XF(var A: array of Integer): TRW; overload;'#10 +
+    'function XG(A: Variant): TRA; overload;'#10 +
+    'function XG(const A: array of Byte): TRW; overload;'#10 +
+    'function XH(A: Integer): TRA; overload;'#10 +
+    'function XH(const A: array of Byte): TRW; overload;'#10 +
+    'function XJ(A: Variant): TRA; overload;'#10 +
+    'function XJ(const A: array of Integer): TRW; overload;'#10 +
+    'function XK(const A: array of Integer): TRA; overload;'#10 +
+    'function XK(const A: array of Byte): TRW; overload;'#10 +
+    'function XL(A: TDA): TRA; overload;'#10 +
+    'function XL(const A: array of Int64): TRW; overload;'#10 +
+    'function XM(A: TSetB): TRA; overload;'#10 +
+    'function XM(A: TDB): TRW; overload;'#10 +
+    'function XN(A: TSE): TRA; overload;'#10 +
+    'function XN(const A: array of TE): TRW; overload;'#10 +
+    'function XO(const A: array of Char): TRA; overload;'#10 +
+    'function XO(A: TDS): TRW; overload;'#10 +
+    'function XQ(A: PChar): TRA; overload;'#10 +
+    'function XQ(A: string): TRW; overload;'#10 +
+    'function XS(A: TDA): TRA; overload;'#10 +
+    'function XS(A: Pointer): TRW; overload;'#10 +
+    'function XV(A: TSA): TRA; overload;'#10 +
+    'function XV(A: TRst): TRW; overload;'#10 +
+    'function XW(A: TDS): TRA; overload;'#10 +
+    'function XW(A: TRdy): TRW; overload;'#10 +
+    'implementation'#10 +
+    'class operator TRst.Implicit(const A: TSA2): TRst; begin end;'#10 +
+    'class operator TRdy.Implicit(const A: TDA): TRdy; begin end;'#10 +
+    'function XA(A: TDA2): TRA; begin end;'#10 +
+    'function XA(A: Pointer): TRW; begin end;'#10 +
+    'function XB(A: TDA2): TRA; begin end;'#10 +
+    'function XB(const A: array of Integer): TRW; begin end;'#10 +
+    'function XD(A: TSA2): TRA; begin end;'#10 +
+    'function XD(const A: array of Integer): TRW; begin end;'#10 +
+    'function XE(A: Variant): TRA; begin end;'#10 +
+    'function XE(A: Pointer): TRW; begin end;'#10 +
+    'function XF(A: Pointer): TRA; begin end;'#10 +
+    'function XF(var A: array of Integer): TRW; begin end;'#10 +
+    'function XG(A: Variant): TRA; begin end;'#10 +
+    'function XG(const A: array of Byte): TRW; begin end;'#10 +
+    'function XH(A: Integer): TRA; begin end;'#10 +
+    'function XH(const A: array of Byte): TRW; begin end;'#10 +
+    'function XJ(A: Variant): TRA; begin end;'#10 +
+    'function XJ(const A: array of Integer): TRW; begin end;'#10 +
+    'function XK(const A: array of Integer): TRA; begin end;'#10 +
+    'function XK(const A: array of Byte): TRW; begin end;'#10 +
+    'function XL(A: TDA): TRA; begin end;'#10 +
+    'function XL(const A: array of Int64): TRW; begin end;'#10 +
+    'function XM(A: TSetB): TRA; begin end;'#10 +
+    'function XM(A: TDB): TRW; begin end;'#10 +
+    'function XN(A: TSE): TRA; begin end;'#10 +
+    'function XN(const A: array of TE): TRW; begin end;'#10 +
+    'function XO(const A: array of Char): TRA; begin end;'#10 +
+    'function XO(A: TDS): TRW; begin end;'#10 +
+    'function XQ(A: PChar): TRA; begin end;'#10 +
+    'function XQ(A: string): TRW; begin end;'#10 +
+    'function XS(A: TDA): TRA; begin end;'#10 +
+    'function XS(A: Pointer): TRW; begin end;'#10 +
+    'function XV(A: TSA): TRA; begin end;'#10 +
+    'function XV(A: TRst): TRW; begin end;'#10 +
+    'function XW(A: TDS): TRA; begin end;'#10 +
+    'function XW(A: TRdy): TRW; begin end;'#10 +
+    'procedure Test(vDA: TDA; vDAd: TDAd; vSA: TSA; vSA2: TSA2; vB: Byte; vI: Integer; vES: TESub; vV: Variant; vCA: TCA; vTD: TDA);'#10 +
+    'var'#10 +
+    '  X: TRW;'#10 +
+    'begin'#10 +
+    '  X := XA(vDA);'#10 +
+    '  X := XB(vDA);'#10 +
+    '  X := XD(vSA);'#10 +
+    '  X := XE(vDA);'#10 +
+    '  X := XF(vDA);'#10 +
+    '  X := XG(vB);'#10 +
+    '  X := XH(vB);'#10 +
+    '  X := XJ(vSA);'#10 +
+    '  X := XK([5]);'#10 +
+    '  X := XL([vB]);'#10 +
+    '  X := XM([vI]);'#10 +
+    '  X := XN([vES]);'#10 +
+    '  X := XO([vV]);'#10 +
+    '  X := XQ(vCA);'#10 +
+    '  X := XS(vDAd);'#10 +
+    '  X := XV(vSA2);'#10 +
+    '  X := XW(vTD);'#10 +
+    'end;'#10'end.'#10;
+  ARR_NAMES: array[0..16] of string = ('XA', 'XB', 'XD', 'XE', 'XF', 'XG', 'XH', 'XJ', 'XK', 'XL', 'XM', 'XN', 'XO', 'XQ', 'XS', 'XV', 'XW');
+
   { Procedural types and Pointer values in the unit's own typer (ProcArgSym
     - the project's ProcArgScore; RefConvSym's Pointer and nil rows; 6.3.1,
     6.6.1, local/type-conv-2026-11/n5): the cases of SemaProjectSmoke's
@@ -1330,6 +1449,12 @@ begin
     'WX', 'WY', 'WZ'] do
     Ok('procedural ranking (6.3.1, 6.6.1): ' + LName +
       ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  GModel.Free;
+
+  Analyze(SRC_ARR);
+  for var LName in ARR_NAMES do
+    Ok('array ranking (6.3.1, 8.1.1): ' + LName + ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   GModel.Free;
 

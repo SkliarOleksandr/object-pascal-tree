@@ -2214,6 +2214,8 @@ var
 begin
   Result.Elems := nil;
   Result.InlineElemX := XNil;
+  Result.IsVar := False;
+  Result.Mid := -1;   // the buffer model: no conversion facts read
   if FModel.Tree.Nodes[ACore].Kind = nkSetCtor then
   begin
     SetLength(Result.Elems, PasChildCount(FModel.Tree, ACore));

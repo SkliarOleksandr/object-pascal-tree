@@ -11566,6 +11566,178 @@ begin
   end;
 end;
 
+{ Arrays in implicit conversion and overload ranking (6.3.1, 8.1.1; dcc64
+  37.0, local/type-conv-2026-11/n6): an array type is nominal - a second
+  declaration of the element, a distinct copy, a static array of the same
+  shape are out, the generic instances of one element one type
+  (`TG<Integer>.TDyn` is TArray<Integer>); a dynamic array goes to Pointer
+  over Variant, a static one to neither; an open array over the single
+  element, a `var` open array over Pointer; a variable of the element type
+  is a one-element array above its conversions; a `[...]` ranked by its
+  worst element's conversion kind (open widening > dynamic widening, a
+  constant by its value, Variant to Char out, nil exact for Pointer); a
+  static array of Char goes to string over PChar; a record through its
+  Implicit from the exact array type. The overload dcc does NOT pick is
+  declared first; every call was compiled by dcc64 (each `.W` reads TRW). }
+procedure TestArrConvRanking;
+const
+  SRC_UNIT =
+    'unit ArR;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TE = (e0, e1, e2);'#10 +
+    '  TESub = e1..e2;'#10 +
+    '  TSE = set of TE;'#10 +
+    '  TSetB = set of Byte;'#10 +
+    '  TDA = array of Integer;'#10 +
+    '  TDA2 = array of Integer;'#10 +
+    '  TDAd = type TDA;'#10 +
+    '  TDB = array of Byte;'#10 +
+    '  TDS = array of string;'#10 +
+    '  TSA = array[0..1] of Integer;'#10 +
+    '  TSA2 = array[0..1] of Integer;'#10 +
+    '  TCA = array[0..2] of Char;'#10 +
+    '  TRst = record X: Integer; class operator Implicit(const A: TSA2): TRst; end;'#10 +
+    '  TRdy = record X: Integer; class operator Implicit(const A: TDA): TRdy; end;'#10 +
+    '  TG<T> = class type TDyn = array of T; end;'#10 +
+    'function XA(A: TDA2): TRA; overload;'#10 +
+    'function XA(A: Pointer): TRW; overload;'#10 +
+    'function XB(A: TDA2): TRA; overload;'#10 +
+    'function XB(const A: array of Integer): TRW; overload;'#10 +
+    'function XC(A: TDA): TRA; overload;'#10 +
+    'function XC(A: TArray<Integer>): TRW; overload;'#10 +
+    'function XD(A: TSA2): TRA; overload;'#10 +
+    'function XD(const A: array of Integer): TRW; overload;'#10 +
+    'function XE(A: Variant): TRA; overload;'#10 +
+    'function XE(A: Pointer): TRW; overload;'#10 +
+    'function XF(A: Pointer): TRA; overload;'#10 +
+    'function XF(var A: array of Integer): TRW; overload;'#10 +
+    'function XG(A: Variant): TRA; overload;'#10 +
+    'function XG(const A: array of Byte): TRW; overload;'#10 +
+    'function XH(A: Integer): TRA; overload;'#10 +
+    'function XH(const A: array of Byte): TRW; overload;'#10 +
+    'function XJ(A: Variant): TRA; overload;'#10 +
+    'function XJ(const A: array of Integer): TRW; overload;'#10 +
+    'function XK(const A: array of Integer): TRA; overload;'#10 +
+    'function XK(const A: array of Byte): TRW; overload;'#10 +
+    'function XL(A: TDA): TRA; overload;'#10 +
+    'function XL(const A: array of Int64): TRW; overload;'#10 +
+    'function XM(A: TSetB): TRA; overload;'#10 +
+    'function XM(A: TDB): TRW; overload;'#10 +
+    'function XN(A: TSE): TRA; overload;'#10 +
+    'function XN(const A: array of TE): TRW; overload;'#10 +
+    'function XO(const A: array of Char): TRA; overload;'#10 +
+    'function XO(A: TDS): TRW; overload;'#10 +
+    'function XQ(A: PChar): TRA; overload;'#10 +
+    'function XQ(A: string): TRW; overload;'#10 +
+    'function XS(A: TDA): TRA; overload;'#10 +
+    'function XS(A: Pointer): TRW; overload;'#10 +
+    'function XT(A: TArray<Integer>): TRA; overload;'#10 +
+    'function XT(const A: array of Integer): TRW; overload;'#10 +
+    'function XU(const A: array of const): TRA; overload;'#10 +
+    'function XU(A: TArray<Pointer>): TRW; overload;'#10 +
+    'function XV(A: TSA): TRA; overload;'#10 +
+    'function XV(A: TRst): TRW; overload;'#10 +
+    'function XW(A: TDS): TRA; overload;'#10 +
+    'function XW(A: TRdy): TRW; overload;'#10 +
+    'implementation'#10 +
+    'class operator TRst.Implicit(const A: TSA2): TRst; begin end;'#10 +
+    'class operator TRdy.Implicit(const A: TDA): TRdy; begin end;'#10 +
+    'function XA(A: TDA2): TRA; begin end;'#10 +
+    'function XA(A: Pointer): TRW; begin end;'#10 +
+    'function XB(A: TDA2): TRA; begin end;'#10 +
+    'function XB(const A: array of Integer): TRW; begin end;'#10 +
+    'function XC(A: TDA): TRA; begin end;'#10 +
+    'function XC(A: TArray<Integer>): TRW; begin end;'#10 +
+    'function XD(A: TSA2): TRA; begin end;'#10 +
+    'function XD(const A: array of Integer): TRW; begin end;'#10 +
+    'function XE(A: Variant): TRA; begin end;'#10 +
+    'function XE(A: Pointer): TRW; begin end;'#10 +
+    'function XF(A: Pointer): TRA; begin end;'#10 +
+    'function XF(var A: array of Integer): TRW; begin end;'#10 +
+    'function XG(A: Variant): TRA; begin end;'#10 +
+    'function XG(const A: array of Byte): TRW; begin end;'#10 +
+    'function XH(A: Integer): TRA; begin end;'#10 +
+    'function XH(const A: array of Byte): TRW; begin end;'#10 +
+    'function XJ(A: Variant): TRA; begin end;'#10 +
+    'function XJ(const A: array of Integer): TRW; begin end;'#10 +
+    'function XK(const A: array of Integer): TRA; begin end;'#10 +
+    'function XK(const A: array of Byte): TRW; begin end;'#10 +
+    'function XL(A: TDA): TRA; begin end;'#10 +
+    'function XL(const A: array of Int64): TRW; begin end;'#10 +
+    'function XM(A: TSetB): TRA; begin end;'#10 +
+    'function XM(A: TDB): TRW; begin end;'#10 +
+    'function XN(A: TSE): TRA; begin end;'#10 +
+    'function XN(const A: array of TE): TRW; begin end;'#10 +
+    'function XO(const A: array of Char): TRA; begin end;'#10 +
+    'function XO(A: TDS): TRW; begin end;'#10 +
+    'function XQ(A: PChar): TRA; begin end;'#10 +
+    'function XQ(A: string): TRW; begin end;'#10 +
+    'function XS(A: TDA): TRA; begin end;'#10 +
+    'function XS(A: Pointer): TRW; begin end;'#10 +
+    'function XT(A: TArray<Integer>): TRA; begin end;'#10 +
+    'function XT(const A: array of Integer): TRW; begin end;'#10 +
+    'function XU(const A: array of const): TRA; begin end;'#10 +
+    'function XU(A: TArray<Pointer>): TRW; begin end;'#10 +
+    'function XV(A: TSA): TRA; begin end;'#10 +
+    'function XV(A: TRst): TRW; begin end;'#10 +
+    'function XW(A: TDS): TRA; begin end;'#10 +
+    'function XW(A: TRdy): TRW; begin end;'#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program ArRP;'#10'uses ArR;'#10 +
+    'var K: Integer; vDA: TDA; vDAd: TDAd; vSA: TSA; vSA2: TSA2; vB: Byte; vI: Integer; vES: TESub; vV: Variant; vCA: TCA; vTD: TDA; vG: TG<Integer>.TDyn;'#10 +
+    'begin'#10 +
+    '  K := XA(vDA).W;'#10 +
+    '  K := XB(vDA).W;'#10 +
+    '  K := XC(vG).W;'#10 +
+    '  K := XD(vSA).W;'#10 +
+    '  K := XE(vDA).W;'#10 +
+    '  K := XF(vDA).W;'#10 +
+    '  K := XG(vB).W;'#10 +
+    '  K := XH(vB).W;'#10 +
+    '  K := XJ(vSA).W;'#10 +
+    '  K := XK([5]).W;'#10 +
+    '  K := XL([vB]).W;'#10 +
+    '  K := XM([vI]).W;'#10 +
+    '  K := XN([vES]).W;'#10 +
+    '  K := XO([vV]).W;'#10 +
+    '  K := XQ(vCA).W;'#10 +
+    '  K := XS(vDAd).W;'#10 +
+    '  K := XT(vDA).W;'#10 +
+    '  K := XU([nil]).W;'#10 +
+    '  K := XV(vSA2).W;'#10 +
+    '  K := XW(vTD).W;'#10 +
+    'end.'#10;
+var
+  LDir, LName: string;
+begin
+  LDir := FreshDir('pastree_sema_arrconvrank');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TVarRec = record VType: Byte; end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ArR.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'ArRP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'ArRP.dpr'));
+    LName := '';
+    for var LD in ModelByName('arrp').Diags do
+      if LD.Code = 'E2003' then
+        LName := LName + ' line ' + IntToStr(LD.Line);
+    Ok('array ranking: every call binds dcc''s overload - no E2003 [' +
+      LName + ' ]', DiagCount(ModelByName('arrp'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // B35: one operator rule table for both typers (4.2.1) - narrow and alias
 // operands, an enum-subrange array's bounds, a subrange whose bound is
 // another unit's enumeration value or constant, and an inherited cross-unit
@@ -18202,6 +18374,7 @@ begin
   TestRefConvRanking;
   TestSetConvRanking;
   TestProcConvRanking;
+  TestArrConvRanking;
   TestOperatorTable;
   TestTargetFacts;
   TestOracleDepth;
