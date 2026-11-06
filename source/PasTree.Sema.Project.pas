@@ -435,8 +435,10 @@ type
   TPasArrayArg = record
     Elems: TArray<TPasCtorElem>;
     InlineElemX: TSemaXType;
-    IsVar: Boolean;   // the argument is a variable, a field, a parameter or
-                      // a typed constant: one value is a one-element array
+    IsVar: Boolean;   // the argument is a value one element of an open
+                      // array is (SingleElemShape): a variable, a field, a
+                      // property, a result, an element - not a literal or
+                      // an operator
     Mid: Integer;     // the model a `[...]`'s element nodes are of, whose
                       // conversion facts CtorFitX reads (ArgConvX); -1 none
   end;
@@ -15792,6 +15794,19 @@ begin
   if (LParCat = tcSet) and (LArgCat = tcSet) then
   begin
     if SetsMeetX(ACanonParX, ACanonArgX) then
+    begin
+      ARank := CSetConvRank;
+      Exit(1);
+    end;
+    Exit(-1);
+  end;
+  // A Variant for an interface: IDispatch, IInterface / IUnknown, nothing
+  // else (VariantIntfRank, n8).
+  if (LParCat = tcInterface) and (LArgCat = tcVariant) then
+  begin
+    ARank := VariantIntfRank(FModels[ACanonParX.UnitId].Symbols[
+      ACanonParX.Sym].NameLower);
+    if ARank > 0 then
       Exit(1);
     Exit(-1);
   end;
@@ -17078,6 +17093,24 @@ var
          (LKind = nkTypeArgs) and not HeadIsRoutine(ANode));
     end;
 
+    // Is ANode `@P` of a procedural variable P (IsAddrOfExpr) - the variable
+    // itself, which an untyped or a `var` parameter takes, and the single
+    // element of `array of Pointer`?
+    function ProcVarAddr(ANode: Integer): Boolean;
+    var
+      LOpd, LVMid, LVSym: Integer;
+      LOpdX: TSemaXType;
+    begin
+      Result := False;
+      if not IsAddrOfExpr(LM.Tree, ANode, LOpd) or
+         not (LM.Tree.Nodes[LOpd].Kind in [nkIdent, nkMember]) then
+        Exit;
+      LOpdX := GetX(LOpd);
+      Result := XValid(LOpdX) and (XCatOf(CanonTypeX(LOpdX)) = tcProc) and
+        TargetSym(LOpd, LVMid, LVSym) and
+        (FModels[LVMid].Symbols[LVSym].Kind in [skVar, skParam, skField]);
+    end;
+
     // What the argument ACore brings an ARRAY parameter besides its type
     // AArgX (TPasArrayArg), into LArrArg: a `[...]`'s elements, each typed
     // here - a type name a class reference, a constant told apart
@@ -17110,15 +17143,19 @@ var
         begin
           if not XValid(AArgX) then
             LArrArg.InlineElemX := InlineArrayElemX(LMid, LSym);
-          // A variable, a parameter, a field or a typed constant: one value
-          // of the element type is a one-element array (6.2.6).
-          case FModels[LMid].Symbols[LSym].Kind of
-            skVar, skParam, skField:
-              LArrArg.IsVar := True;
-            skConst:
-              LArrArg.IsVar := FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE;
-          end;
-        end;
+          // A variable, a parameter, a field, a typed constant, a property, a
+          // function's result: one value of the element type is a
+          // one-element array (6.2.6, SingleElemShape).
+          LArrArg.IsVar := SingleElemShape(LM.Tree.Nodes[ACore].Kind,
+            FModels[LMid].Symbols[LSym].Kind,
+            FModels[LMid].Symbols[LSym].TypeNode <> NIL_NODE);
+        end
+        // ...and so is an element, a dereference, a call or a cast, and `@P`
+        // of a procedural variable (ProcVarAddr).
+        else if ACore <> NIL_NODE then
+          LArrArg.IsVar := SingleElemShape(LM.Tree.Nodes[ACore].Kind,
+            skKeyword, False) or
+            (LM.Tree.Nodes[ACore].Kind = nkUnaryOp) and ProcVarAddr(ACore);
         Exit;
       end;
       SetLength(LArrArg.Elems, PasChildCount(LM.Tree, ACore));
@@ -17350,6 +17387,43 @@ var
       Result := True;
     end;
 
+    // Is the cast ACall to the type ATypeMid.ATypeSym no variable for a
+    // `var` / `out` parameter (ByRefShapeRejects' note)? One between two
+    // scalars that changes the size (TypeSizeOf of the type and of its
+    // operand's), or a string's to a character pointer (a conversion); a
+    // size not known passes.
+    function ByRefCastRejects(ACall, ATypeMid, ATypeSym: Integer): Boolean;
+    var
+      LOpd: Integer;
+      LOpdX, LCastX: TSemaXType;
+      LTo, LFrom: Int64;
+    begin
+      Result := False;
+      LOpd := LM.Tree.Nodes[ACall].FirstChild;
+      if LOpd <> NIL_NODE then
+        LOpd := LM.Tree.Nodes[LOpd].NextSibling;
+      if (LOpd = NIL_NODE) or (LM.Tree.Nodes[LOpd].NextSibling <> NIL_NODE) then
+        Exit;
+      LOpdX := GetX(LOpd);
+      if not XValid(LOpdX) then
+        Exit;
+      LOpdX := CanonTypeX(LOpdX);
+      LCastX := CanonTypeX(XPlain(ATypeMid, ATypeSym));
+      if not XValid(LCastX) then
+        Exit;
+      if (XCatOf(LOpdX) = tcString) and (XCatOf(LCastX) = tcPointer) and
+         (ParConvKindX(LCastX) in [cnkPChar, cnkPAnsiChar]) then
+        Exit(True);
+      // Between two scalars only: a cast to a pointer or a class from what
+      // types as a number here may be of a value typed wrong (System.Generics.
+      // Collections' `Pointer(PBytes(FItems)[I])` for DynArrayAssign's `var
+      // Dest: Pointer` - the n8 bigflat gate).
+      Result := (XCatOf(LOpdX) in [tcInteger, tcFloat, tcChar, tcBoolean,
+        tcEnum]) and (XCatOf(LCastX) in [tcInteger, tcFloat, tcChar,
+        tcBoolean, tcEnum]) and TypeSizeOf(LCastX.UnitId, LCastX.Sym, LTo) and
+        TypeSizeOf(LOpdX.UnitId, LOpdX.Sym, LFrom) and (LTo <> LFrom);
+    end;
+
     // One argument against the parameter type AParX: AArg its node, or
     // NIL_NODE for a comparison an nkAmbiguous stands for (16.3.1) - typed
     // AArgX, with no node shape to read. A fit on the doubled scale of
@@ -17357,9 +17431,11 @@ var
     // the conversion's rank (ConvRank) for a conversion fit; -1 rejects
     // the candidate. AOpenArr: AParX is an open array's element type
     // (ParamFitTypeX), AOfConst: of `array of const`; AByRef: a `var` /
-    // `out` parameter (ParamIsByRef), which no conversion reaches - no rank.
+    // `out` parameter (ParamIsByRef), which takes a variable of its own type
+    // alone (ByRefShapeRejects, ByRefFitRejects); AUntyped: an untyped one
+    // (ParamIsUntyped), which ranks by UntypedParamRank.
     function ArgScore(AArg: Integer; const AArgX, AParX: TSemaXType;
-      AOpenArr, AOfConst, AByRef: Boolean): Integer;
+      AOpenArr, AOfConst, AByRef, AUntyped: Boolean): Integer;
     var
       LCore, LCoreFirst, LFit, LRank: Integer;
       LConv: PSemaArgConv;
@@ -17387,6 +17463,71 @@ var
       // ArgShapeRejects below decide its fit, as before it had one.
       if LCoreKind = nkAnonMethod then
         LArgX := XNil;
+      // A `var` / `out` parameter, typed or untyped, takes a variable alone:
+      // a literal, a constant, an operator, a property puts the candidate out
+      // (ByRefShapeRejects; n8 Sets V, W).
+      if (AByRef or AUntyped) and (LCore <> NIL_NODE) and
+         not ((LCoreKind = nkUnaryOp) and ProcVarAddr(LCore)) then
+      begin
+        var LHeadKind := skKeyword;
+        var LTrueConst := False;
+        var LHMid, LHSym, LAddrOpd: Integer;
+        if (LCoreKind in [nkIdent, nkMember]) and
+           TargetSym(LCore, LHMid, LHSym) then
+        begin
+          LHeadKind := FModels[LHMid].Symbols[LHSym].Kind;
+          LTrueConst := (LHeadKind = skConst) and
+            (FModels[LHMid].Symbols[LHSym].TypeNode = NIL_NODE);
+        end
+        else if (LCoreKind = nkCall) and AByRef and
+                (LM.Tree.Nodes[LCore].FirstChild <> NIL_NODE) and
+                TargetSym(PeelParens(LM.Tree, LM.Tree.Nodes[LCore].FirstChild),
+                  LHMid, LHSym) then
+          LHeadKind := FModels[LHMid].Symbols[LHSym].Kind;
+        if AByRef then
+        begin
+          if ByRefShapeRejects(LCoreKind, LHeadKind, AOpenArr and
+             ((LCoreKind = nkSetCtor) or XValid(LArgX) and
+              (XCatOf(CanonTypeX(LArgX)) = tcArray))) then
+            Exit(-1);
+          // A cast is a variable only when it keeps the size (`Integer(C)`
+          // for a Cardinal, not `Integer(B)` for a Byte); a string cast to a
+          // character pointer is a conversion (n8 Sets U, W: E2250).
+          if (LCoreKind = nkCall) and
+             (LHeadKind in [skType, skBuiltinType]) and
+             ByRefCastRejects(LCore, LHMid, LHSym) then
+            Exit(-1);
+        end
+        // ...and an untyped `const` one a value E2036 refuses after the
+        // choice: no code that compiles passes one (UntypedConstShapeRejects).
+        else if UntypedConstShapeRejects(LCoreKind, LHeadKind,
+                (LCoreKind = nkStrLit) and IsCharLiteralExpr(LM.Tree, LCore),
+                LTrueConst and XValid(LArgX) and
+                not (XCatOf(CanonTypeX(LArgX)) = tcString),
+                IsAddrOfExpr(LM.Tree, LCore, LAddrOpd) and
+                (LM.Tree.Nodes[LAddrOpd].Kind = nkIndex)) then
+          Exit(-1);
+      end;
+      // An UNTYPED parameter ranks just above the argument's Variant line
+      // (UntypedParamRank, 6.3.1): below every lossless conversion but
+      // Variant, above Variant, the user and the lossy conversions.
+      if AUntyped then
+      begin
+        if (LCore = NIL_NODE) or not XValid(LArgX) then
+          Exit;
+        if LArgConvCore <> LCore then
+        begin
+          LArgConv := ArgConvX(AId, LCore, LArgX);
+          LArgConvCore := LCore;
+        end;
+        LCanonArgX := CanonTypeX(LArgX);
+        LRank := UntypedParamRank(@LArgConv, XCatOf(LCanonArgX),
+          (XCatOf(LCanonArgX) = tcArray) and IsDynArrayTypeX(LCanonArgX),
+          FInfo.ExtendedBytes > 8);
+        if LRank > 0 then
+          Result := ScaledFit(2, LRank);
+        Exit;
+      end;
       LParX := AParX;
       // Each side canonicalized once per argument: the tests below asked for
       // the same CanonTypeX up to four times (C11).
@@ -17537,6 +17678,15 @@ var
       LFit := ArgFitCanonX(LArgX, LParX, LCanonArgX, LCanonParX, LM.Tree,
         LCore, (LCore <> NIL_NODE) and not LClassRef and XValid(LParX) and
         IsProcedureDesignator(LCore), LClassRef, LConv, LRank);
+      // A `var` / `out` parameter takes its own type alone (ByRefFitRejects;
+      // E2033 alone, out in an overload set): `FormatBuf(Buffer^, ...)` for a
+      // Char takes the untyped `var Buffer` overload, not `var Buffer:
+      // UnicodeString`.
+      if AByRef and ByRefFitRejects(LFit, XValid(LArgX) and XValid(LParX) and
+         (XCatOf(LCanonArgX) <> tcUnknown) and
+         (XCatOf(LCanonParX) <> tcUnknown) and not OpenX(LParX) and
+         not OpenX(LArgX)) then
+        Exit(-1);
       Result := ScaledFit(2 * LFit, LRank);
     end;
 
@@ -17599,11 +17749,13 @@ var
             if XValid(GetX(LL)) and XValid(GetX(LR)) then
               LArgX := BuiltinX(AId, 'boolean');
             LS := ArgScore(NIL_NODE, LArgX, LParX, LOpenArr, LOfConst,
-              ParamIsByRef(LPM, LPList[LPos]));
+              ParamIsByRef(LPM, LPList[LPos]),
+          ParamIsUntyped(LPM, LPList[LPos]));
           end
           else
             LS := ArgScore(LL, GetX(LL), LParX, LOpenArr, LOfConst,
-              ParamIsByRef(LPM, LPList[LPos]));
+              ParamIsByRef(LPM, LPList[LPos]),
+              ParamIsUntyped(LPM, LPList[LPos]));
           if LS < 0 then
             Exit(-1);
           Inc(Result, LS);
@@ -17614,7 +17766,8 @@ var
       begin
         LParX := ParamFitTypeX(AMid, LPList[LPos], ACtx, LOpenArr, LOfConst);
         LS := ArgScore(LArg, GetX(LArg), LParX, LOpenArr, LOfConst,
-          ParamIsByRef(LPM, LPList[LPos]));
+          ParamIsByRef(LPM, LPList[LPos]),
+          ParamIsUntyped(LPM, LPList[LPos]));
         if LS < 0 then
           Exit(-1);
         Inc(Result, LS);

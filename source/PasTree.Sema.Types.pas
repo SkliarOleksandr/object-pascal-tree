@@ -177,6 +177,17 @@ const
     F(array of Pointer), F(array of Pointer) over F(TObject)). }
   CPtrRankOpenElem = 28;
 
+  { An UNTYPED parameter's ranks off the ConvRank scale (UntypedParamRank;
+    6.3.1, local/type-conv-2026-11/n8): a reference value's - a class, a
+    class reference, a pointer - below its Pointer (rcClassPointer,
+    rcClassRefPointer: 2) and every other built-in conversion, above 0 (its
+    user conversions, RefUserRank); an interface's above its Variant
+    (rcIntfVariant: 4), below its ancestors (16 ..); a dynamic array's
+    between its Variant (CArrRankVariant) and its Pointer (CArrRankPointer). }
+  CUntypedRefRank = 1;
+  CUntypedIntfRank = 5;
+  CUntypedDynArrRank = CRankLossless + 1;
+
 type
 
   { One operand, after its aliases are chased to the builtin they name - a
@@ -425,6 +436,9 @@ type
       no evidence, a `[...]`'s odd steps between - times CConvScale, plus
       a conversion's rank (ConvRank, ScoreArgRanked); -1 rejected. }
     function ScoreArg(AArg, AAt, AParam: Integer): Integer;
+    // An argument against an UNTYPED parameter (ParamIsUntyped): its
+    // UntypedParamRank on the candidates' scale, 0 for no evidence.
+    function UntypedArgScore(AArg, AAt: Integer): Integer;
     // ScoreArg's rule against the type APt, on ArgFitCanonX's scale (3 a
     // one-character literal for a Char, 2 exact, 1 assignable, 0 no
     // evidence, -1 out), with the rank (ConvRank) of a conversion fit (1)
@@ -1044,6 +1058,111 @@ function MayFoldConvConst(const ATree: TPasTree; ANode: Integer): Boolean;
   to it: `TryTextToValue(S, V, D)` for a Single V calls the `var AValue:
   Single` overload beside the `var AValue: Double` one. }
 function ParamIsByRef(const AModel: TPasSemaModel; ASym: Integer): Boolean;
+
+{ Is parameter ASym of AModel UNTYPED - `const A`, `var A`, `out A` with no
+  type (6.2.7)? Its symbol has no type node. }
+function ParamIsUntyped(const AModel: TPasSemaModel; ASym: Integer): Boolean;
+
+{ The rank of an UNTYPED parameter (`const A`, `var A`, `out A`; 6.2.7,
+  6.3.1) for an argument, a conversion fit's rank: below every lossless
+  built-in conversion of the argument but Variant, above Variant, every user
+  conversion and every lossy built-in one (a Byte takes Integer, Word and
+  Double over it, it over Variant and ShortInt; a Variant its own type over
+  it, it over OleVariant and every number and string). AConv: the argument
+  as the conversion ranking reads it (nil or cnkNone: not a number, string,
+  character or Variant) - then on the ConvRank scale its Variant line
+  (ConvThreshold; ConvRank puts Variant itself one below it), for a PChar /
+  PAnsiChar, which Variant refuses, one below that line (WideString).
+  AArgCat, ADynArray: the argument's category otherwise, on the reference
+  scale (RefConvRank): an interface above its Variant (rcIntfVariant), a
+  dynamic array between its Variant (CArrRankVariant) and its Pointer, a
+  class, a class reference, a pointer, a record, a set, an enumeration, a
+  Boolean, a static array, a procedural value above 0 (a user conversion of
+  such a value ranks below 0) and below every built-in conversion of it. 0
+  for an argument the rule cannot place (no type, a number or string the
+  ranking has no kind for): no evidence. dcc64 37.0 (local/type-conv-2026-11
+  n7 Set D, n8 Sets U, X). }
+function UntypedParamRank(AConv: PSemaArgConv; AArgCat: TSemaTypeCat;
+  ADynArray, AWideExt: Boolean): Integer;
+
+{ Does a `var` / `out` parameter - typed or untyped - refuse the argument
+  for not being a variable (6.2.2, 6.2.7)? In an overload set such a
+  candidate is out (E2250 alone): a literal of any kind, nil, a `[...]`, an
+  operator (`I + 1`, `@X`, `not B`), an inline `if`, a constant - true or
+  typed - an enumeration value, a property, a function's result; ACoreKind
+  the argument's node kind through parentheses, AHeadKind what an nkIdent /
+  nkMember names or an nkCall calls (skKeyword: nothing known). A function
+  result for a typed parameter is E2197 after the choice, for an untyped one
+  out (E2250); a cast that changes the size is out too (not read here) -
+  none of them in code that compiles. AOpenArray: the parameter is a `var` /
+  `out` open array and the argument a `[...]` or an array (not a single
+  element: `GI` for `var A: array of Integer` is E2036). A `[...]` reaches it
+  - dcc picks it, then E2197 (n8 t/vo.dpr) - and so do an array function's
+  result and an array property: TList<T>.Sort
+  passes its `List` property, a getter's dynamic array, to TArray.Sort<T>'s
+  `var Values: array of T` (n8 t/vo2.dpr; a property read from a field is
+  out there, not told apart here).
+  An untyped `const` parameter takes every value to rank it (dcc reports
+  E2036 for `5`, `nil`, `I + 1` after choosing it). dcc64 37.0
+  (local/type-conv-2026-11/n8 Sets L, V, W). }
+function ByRefShapeRejects(ACoreKind: TPasNodeKind;
+  AHeadKind: TSemaSymbolKind; AOpenArray: Boolean): Boolean;
+
+{ Is ANode of ATree (through parentheses) `@X`, with X in AOperand (through
+  parentheses)? `@P` of a procedural variable P is the variable itself
+  (4.8, 6.3.1's pointers bullet): an untyped and a `var Pointer` parameter
+  take it (n7 Set B), which the shape tests are not asked about then. }
+function IsAddrOfExpr(const ATree: TPasTree; ANode: Integer;
+  out AOperand: Integer): Boolean;
+
+{ Does an untyped `const` parameter refuse the argument for not being a
+  variable (6.2.7: E2036)? dcc reports it after the choice - `F(5)` beside
+  `F(A: Variant)` is E2036, the untyped one ranking higher - so no code that
+  compiles passes such a value, and refusing it leaves the overload dcc
+  takes when it compiles (`F(5)` beside `F(A: TSub)` for `TSub = 1..10`,
+  which the ranking does not cover). A literal other than a string of other
+  than one character (ACharLit), nil, an operator, an inline `if`, a true
+  constant that is no string (AHeadKind skConst, AConstNumber), an
+  enumeration value. AAddrOfElem: the argument is `@A[I]`, which dcc takes
+  where it refuses `@X` (observed, n7 Sets B, C). dcc64 37.0 (n8 Sets L,
+  U). }
+function UntypedConstShapeRejects(ACoreKind: TPasNodeKind;
+  AHeadKind: TSemaSymbolKind; ACharLit, AConstNumber,
+  AAddrOfElem: Boolean): Boolean;
+
+{ Is the argument a value an open array parameter takes as its single
+  element when it is of the element type (6.2.6)? A variable, a parameter,
+  a field, a typed constant, a property, a function's result (paren-less or
+  called), an element (`A[0]`), a dereference (`P^`), a cast; not a literal,
+  a true constant, an operator or a `[...]` (n8 Set L: `GI`, `vDA[0]`,
+  `vPI^`, `Obj.Prop`, `Integer(C)` take `array of Integer`, `5`, `K5`, `I +
+  1` do not). ATypedConst: a skConst head is a typed constant. }
+function SingleElemShape(ACoreKind: TPasNodeKind; AHeadKind: TSemaSymbolKind;
+  ATypedConst: Boolean): Boolean;
+
+{ Does a `var` / `out` parameter refuse an argument its type scored AFit for
+  (ArgFitCanonX, ScoreArgRanked: 2 / 3 the same type, 1 a conversion)? It
+  takes its own type only (6.2.2, E2033; in an overload set the candidate is
+  out - n8 Set W: `F(var A: Integer)` beside `F(A: Variant)` takes a Byte
+  through Variant): a conversion between two known types puts it out, a weak
+  alias and one type under two names are the same type. AKnown: both types
+  are bound and neither is a generic parameter (an open type is not
+  compared). }
+function ByRefFitRejects(AFit: Integer; AKnown: Boolean): Boolean;
+
+{ The rank of a Variant value's conversion to the interface whose name -
+  lower case, after its aliases - is AIntfName (14.2.1, 6.3.1): IDispatch
+  above IInterface / IUnknown, both above an untyped parameter and so above
+  every number and string (a lossless built-in conversion, checked at run
+  time); 0 for any other interface, which Variant does not reach (E2250).
+  dcc64 37.0 (local/type-conv-2026-11/n8 Set X, t/pv.dpr). }
+function VariantIntfRank(const AIntfName: string): Integer;
+
+{ The rank of a set value's conversion to another set type its base meets
+  (SetsMeet): above an untyped parameter (CUntypedRefRank), above a record's
+  `Implicit` (n8 Set X: a TSE takes F(TSE2) over F(const A)). }
+const
+  CSetConvRank = 2;
 
 { The rank of the procedural conversion AConv: above the lossless tier of
   the built-in ranking (CRankLossless + 31) and below 1024 (CConvScale's
@@ -2057,7 +2176,13 @@ begin
   if Result <= 0 then
     Exit;
   if Result >= ConvThreshold(AArg, AWideExt) then
-    Inc(Result, CRankLossless)
+  begin
+    Inc(Result, CRankLossless);
+    // Variant one below its line: an untyped parameter ranks between it and
+    // the conversions above it (UntypedParamRank; no raw rank ties Variant's).
+    if AParKind = cnkVariant then
+      Dec(Result);
+  end
   else
     Inc(Result, CRankLossy);
 end;
@@ -2153,8 +2278,9 @@ end;
 function ZeroPointerRank(ATyped: Boolean; AThreshold: Integer): Integer;
 begin
   // An integer constant's raw ranks below its Variant (IntConstRank: 17 or
-  // 19) and above the integers not holding it (1 .. 8) are free.
-  Result := CRankLossless + AThreshold - 2;
+  // 19) and above the integers not holding it (1 .. 8) are free; Variant
+  // itself ranks one below its line (ConvRank).
+  Result := CRankLossless + AThreshold - 3;
   if ATyped then
     Inc(Result);
   if Result < CRankLossless then
@@ -2221,6 +2347,125 @@ begin
   Result := (LParam <> NIL_NODE) and
     (AModel.Tree.Nodes[LParam].Kind = nkParam) and
     (AModel.Tree.Nodes[LParam].Flags * [nfVar, nfOut] <> []);
+end;
+
+function ParamIsUntyped(const AModel: TPasSemaModel; ASym: Integer): Boolean;
+begin
+  Result := (ASym >= 0) and (ASym < AModel.SymCount) and
+    (AModel.Symbols[ASym].Kind = skParam) and
+    (AModel.Symbols[ASym].TypeNode = NIL_NODE) and
+    (AModel.Symbols[ASym].DeclNode <> NIL_NODE);
+end;
+
+function UntypedParamRank(AConv: PSemaArgConv; AArgCat: TSemaTypeCat;
+  ADynArray, AWideExt: Boolean): Integer;
+begin
+  if (AConv <> nil) and (AConv.Kind <> cnkNone) then
+  begin
+    Result := CRankLossless + ConvThreshold(AConv^, AWideExt);
+    if AConv.Kind in [cnkPChar, cnkPAnsiChar] then
+      Dec(Result);
+    Exit;
+  end;
+  case AArgCat of
+    tcInterface:
+      Result := CUntypedIntfRank;
+    tcArray:
+      if ADynArray then
+        Result := CUntypedDynArrRank
+      else
+        Result := CUntypedRefRank;
+    tcClass, tcClassOf, tcPointer, tcRecord, tcSet, tcEnum, tcBoolean,
+    tcProc:
+      Result := CUntypedRefRank;
+  else
+    Result := 0;
+  end;
+end;
+
+function ByRefShapeRejects(ACoreKind: TPasNodeKind;
+  AHeadKind: TSemaSymbolKind; AOpenArray: Boolean): Boolean;
+begin
+  case ACoreKind of
+    nkIntLit, nkRealLit, nkStrLit, nkNilLit, nkCaretChar, nkUnaryOp,
+    nkBinaryOp, nkInlineIf, nkAnonMethod:
+      Result := True;
+    nkSetCtor:
+      Result := not AOpenArray;
+    nkIdent, nkMember:
+      if AOpenArray then
+        Result := AHeadKind in [skConst, skEnumValue]
+      else
+        Result := AHeadKind in [skConst, skEnumValue, skProperty, skRoutine];
+    nkCall:
+      Result := (AHeadKind = skRoutine) and not AOpenArray;
+  else
+    Result := False;
+  end;
+end;
+
+function IsAddrOfExpr(const ATree: TPasTree; ANode: Integer;
+  out AOperand: Integer): Boolean;
+begin
+  AOperand := NIL_NODE;
+  ANode := PeelParens(ATree, ANode);
+  Result := (ANode <> NIL_NODE) and (ATree.Nodes[ANode].Kind = nkUnaryOp) and
+    (ATree.Source.VisibleKind(ATree.Nodes[ANode].Aux) = tkAt) and
+    (ATree.Nodes[ANode].FirstChild <> NIL_NODE);
+  if Result then
+    AOperand := PeelParens(ATree, ATree.Nodes[ANode].FirstChild);
+end;
+
+function UntypedConstShapeRejects(ACoreKind: TPasNodeKind;
+  AHeadKind: TSemaSymbolKind; ACharLit, AConstNumber,
+  AAddrOfElem: Boolean): Boolean;
+begin
+  case ACoreKind of
+    nkIntLit, nkRealLit, nkNilLit, nkCaretChar, nkBinaryOp, nkInlineIf:
+      Result := True;
+    nkUnaryOp:
+      Result := not AAddrOfElem;
+    nkStrLit:
+      Result := ACharLit;
+    nkIdent, nkMember:
+      Result := (AHeadKind = skEnumValue) or
+        (AHeadKind = skConst) and AConstNumber;
+  else
+    Result := False;
+  end;
+end;
+
+function SingleElemShape(ACoreKind: TPasNodeKind; AHeadKind: TSemaSymbolKind;
+  ATypedConst: Boolean): Boolean;
+begin
+  case ACoreKind of
+    nkIndex, nkDeref, nkCall:
+      Result := True;
+    nkIdent, nkMember:
+      Result := (AHeadKind in [skVar, skParam, skField, skProperty,
+        skRoutine]) or (AHeadKind = skConst) and ATypedConst;
+  else
+    Result := False;
+  end;
+end;
+
+function ByRefFitRejects(AFit: Integer; AKnown: Boolean): Boolean;
+begin
+  Result := AKnown and (AFit = 1);
+end;
+
+function VariantIntfRank(const AIntfName: string): Integer;
+const
+  // A Variant's own raw rank, its Variant line (ConvThreshold): an untyped
+  // parameter ranks at CRankLossless + this.
+  CVariantLine = 12;
+begin
+  if AIntfName = 'idispatch' then
+    Result := CRankLossless + CVariantLine + 2
+  else if (AIntfName = 'iinterface') or (AIntfName = 'iunknown') then
+    Result := CRankLossless + CVariantLine + 1
+  else
+    Result := 0;
 end;
 
 function ProcConvRank(AConv: TSemaProcConv): Integer;
@@ -5287,7 +5532,57 @@ end;
 function TPasSemaTyper.ScoreArg(AArg, AAt, AParam: Integer): Integer;
 var
   LDef, LPt, LCore, LElem, LRank: Integer;
+  LByRef, LUntyped, LTrueConst: Boolean;
+  LHeadKind: TSemaSymbolKind;
 begin
+  // A `var` / `out` parameter, typed or untyped, takes a variable alone
+  // (ByRefShapeRejects - CrossType's ArgScore).
+  LByRef := ParamIsByRef(M, AParam);
+  LUntyped := ParamIsUntyped(M, AParam);
+  // `@P` of a procedural variable is the variable (IsAddrOfExpr).
+  if (LByRef or LUntyped) and (AArg <> NIL_NODE) and
+     not (IsAddrOfExpr(T, AArg, LElem) and
+          (Kind(LElem) in [nkIdent, nkMember]) and (Head(LElem) <> NIL_SYM) and
+          (M.Symbols[Head(LElem)].Kind in [skVar, skParam, skField]) and
+          (M.ExprType[LElem] <> NIL_SYM) and
+          (CatOf(M.ExprType[LElem]) = tcProc)) then
+  begin
+    LCore := PeelParens(T, AArg);
+    LHeadKind := skKeyword;
+    LTrueConst := False;
+    if (Kind(LCore) in [nkIdent, nkMember]) and (Head(LCore) <> NIL_SYM) then
+    begin
+      LHeadKind := M.Symbols[Head(LCore)].Kind;
+      LTrueConst := (LHeadKind = skConst) and
+        (M.Symbols[Head(LCore)].TypeNode = NIL_NODE);
+    end
+    else if (Kind(LCore) = nkCall) and (Child(LCore) <> NIL_NODE) then
+    begin
+      LElem := PeelParens(T, Child(LCore));
+      if (Kind(LElem) in [nkIdent, nkMember]) and (Head(LElem) <> NIL_SYM) then
+        LHeadKind := M.Symbols[Head(LElem)].Kind;
+    end;
+    if LByRef then
+    begin
+      LDef := M.Symbols[AParam].TypeNode;
+      if ByRefShapeRejects(Kind(LCore), LHeadKind,
+         (LDef <> NIL_NODE) and (Kind(LDef) = nkArrayType) and
+         ((Kind(LCore) = nkSetCtor) or
+          (AAt <> NIL_SYM) and (CatOf(AAt) = tcArray))) then
+        Exit(-1);
+    end
+    // An untyped `const` one: a value E2036 refuses after the choice
+    // (UntypedConstShapeRejects - CrossType's ArgScore).
+    else if UntypedConstShapeRejects(Kind(LCore), LHeadKind,
+            (Kind(LCore) = nkStrLit) and IsCharLiteralExpr(T, LCore),
+            LTrueConst and (AAt <> NIL_SYM) and (CatOf(AAt) <> tcString),
+            IsAddrOfExpr(T, LCore, LElem) and (Kind(LElem) = nkIndex)) then
+      Exit(-1);
+  end;
+  // An UNTYPED parameter ranks just above the argument's Variant line
+  // (UntypedParamRank).
+  if LUntyped then
+    Exit(UntypedArgScore(AArg, AAt));
   // A parameter's type is a type identifier or `array of` (6.2.6): an
   // array definition in the slot is an open array, which names no type.
   LDef := M.Symbols[AParam].TypeNode;
@@ -5303,7 +5598,7 @@ begin
     // A `var` open array is preferred to Pointer and to the single element
     // where a value one ties them (n6 Set B).
     Result := OpenArrayScore(AArg, AAt, LDef);
-    if (Result > 0) and ParamIsByRef(M, AParam) then
+    if (Result > 0) and LByRef then
       Inc(Result);
     Exit;
   end;
@@ -5338,9 +5633,45 @@ begin
         Exit(SetCtorScore(LCore, LPt));
     end;
   end;
-  Result := ScoreArgRanked(AArg, AAt, LPt, not ParamIsByRef(M, AParam),
-    LRank);
+  Result := ScoreArgRanked(AArg, AAt, LPt, not LByRef, LRank);
+  // A `var` / `out` parameter takes its own type alone (ByRefFitRejects).
+  if LByRef and ByRefFitRejects(Result, (AAt <> NIL_SYM) and
+     (LPt <> NIL_SYM) and (CatOf(AAt) <> tcUnknown) and
+     (CatOf(LPt) <> tcUnknown) and
+     (M.Symbols[AAt].Kind <> skGenericParam) and
+     (M.Symbols[LPt].Kind <> skGenericParam)) then
+    Exit(-1);
   Result := ScaledFit(2 * Result, LRank);
+end;
+
+function TPasSemaTyper.UntypedArgScore(AArg, AAt: Integer): Integer;
+var
+  LCore, LRank: Integer;
+  LArgC: TSemaArgConv;
+  LDyn, LStatic, LCharArr: Boolean;
+begin
+  Result := 0;
+  if (AArg = NIL_NODE) or (AAt = NIL_SYM) then
+    Exit;
+  LCore := PeelParens(T, AArg);
+  LArgC.Kind := ConvKindSym(AAt, LCore, True, LArgC.Facts);
+  LArgC.TypedConst := False;
+  LDyn := False;
+  if CatOf(AAt) = tcArray then
+  begin
+    LStatic := False;
+    LCharArr := False;
+    ArrayShapeSym(AAt, LDyn, LStatic, LCharArr);
+  end;
+  LRank := UntypedParamRank(@LArgC, CatOf(AAt), LDyn, FWideExt);
+  if LRank <= 0 then
+    Exit;
+  // A class's, a class reference's, an interface's conversions below its
+  // ancestors rank 32 lower here (RefConvSym: a parameter of another unit
+  // has no category and ranks 0); so does this one, below them.
+  if CatOf(AAt) in [tcClass, tcClassOf, tcInterface] then
+    Dec(LRank, 32);
+  Result := ScaledFit(2, LRank);
 end;
 
 function TPasSemaTyper.IsConstName(N: Integer): Boolean;
@@ -6380,7 +6711,20 @@ begin
     if (LParCat = tcSet) and (CatOf(AAt) = tcSet) then
     begin
       if SetsMeetSym(LPt, AAt) then
+      begin
+        ARank := CSetConvRank;
         Exit(1);
+      end;
+      Exit(-1);
+    end;
+    // A Variant for an interface: IDispatch, IInterface / IUnknown, nothing
+    // else (VariantIntfRank - ArgFitCanonX's rule).
+    if (LParCat = tcInterface) and (CatOf(AAt) = tcVariant) then
+    begin
+      ARank := VariantIntfRank(M.Symbols[WeakAliasEnd(LPt)].NameLower);
+      if ARank > 0 then
+        Exit(1);
+      ARank := 0;
       Exit(-1);
     end;
     // A named string constant the ranking could not read: a conversion of
@@ -6411,7 +6755,7 @@ end;
   its element is read off that declaration, `array of const`'s as TVarRec. }
 function TPasSemaTyper.OpenArrayScore(AArg, AAt, ADef: Integer): Integer;
 var
-  LCore, LElem, LArgDef, LArgElem, LElemFit, LSym: Integer;
+  LCore, LElem, LArgDef, LArgElem, LElemFit, LSym, LOpd: Integer;
   LOfConst, LIsVar: Boolean;
   LArgCat: TSemaTypeCat;
 
@@ -6495,17 +6839,28 @@ begin
         else
           LElemFit := -1;
     end;
-  // A single value of the element type is one when it is a VARIABLE - a
-  // variable, a parameter, a field or a typed constant named here.
+  // A single value of the element type is one when it is no literal or
+  // operator - a variable, a field, a property, a result, an element
+  // (SingleElemShape).
   LIsVar := False;
-  if (AAt <> NIL_SYM) and (LCore <> NIL_NODE) and
-     (Kind(LCore) in [nkIdent, nkMember]) then
+  if (AAt <> NIL_SYM) and (LCore <> NIL_NODE) then
   begin
-    LSym := Head(LCore);
-    LIsVar := (LSym <> NIL_SYM) and
-      ((M.Symbols[LSym].Kind in [skVar, skParam, skField]) or
-       (M.Symbols[LSym].Kind = skConst) and
-       (M.Symbols[LSym].TypeNode <> NIL_NODE));
+    if Kind(LCore) in [nkIdent, nkMember] then
+    begin
+      LSym := Head(LCore);
+      LIsVar := (LSym <> NIL_SYM) and SingleElemShape(Kind(LCore),
+        M.Symbols[LSym].Kind, M.Symbols[LSym].TypeNode <> NIL_NODE);
+    end
+    else
+    begin
+      LIsVar := SingleElemShape(Kind(LCore), skKeyword, False);
+      // `@P` of a procedural variable is the variable (IsAddrOfExpr).
+      if not LIsVar and IsAddrOfExpr(T, LCore, LOpd) and
+         (Kind(LOpd) in [nkIdent, nkMember]) and (Head(LOpd) <> NIL_SYM) and
+         (M.Symbols[Head(LOpd)].Kind in [skVar, skParam, skField]) and
+         (M.ExprType[LOpd] <> NIL_SYM) then
+        LIsVar := CatOf(M.ExprType[LOpd]) = tcProc;
+    end;
   end;
   if LIsVar and IsPointerSym(LElem) and IsPointerSym(AAt) then
     Exit(ScaledFit(2, CPtrRankOpenElem));

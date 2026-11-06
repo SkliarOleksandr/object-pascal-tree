@@ -11910,6 +11910,185 @@ begin
   end;
 end;
 
+// Parameter modes in overload ranking (6.2.2, 6.2.7, 6.3.1;
+// local/type-conv-2026-11/n8): an untyped parameter ranks just above the
+// argument's Variant line - over a lossy conversion (ZA), Variant (ZB, ZG,
+// ZH), a lossy one for `var` too (ZC), a user conversion (ZE), below a
+// lossless one (ZD, ZF), a Variant's IInterface (ZK), another set type (ZL);
+// a `var` / `out` parameter takes a variable of its own type alone - a
+// conversion (ZM, ZQ, ZR), a literal (ZP), a typed constant (ZT), a property
+// (ZV) put it out, an alias is the type (ZS), the identical type beats an
+// untyped one (ZU), and a Char through a pointer takes `var A` over `var A:
+// string` (ZN, SysUtils' FormatBuf); a `var` open array takes a getter's
+// dynamic array (ZW, TList<T>.Sort's `List` for TArray.Sort<T> - the bigflat
+// gate). The overload dcc picks is declared second; each call compiles with
+// dcc64 (n8/dbg/smoke).
+procedure TestModeConvRanking;
+const
+  SRC_UNIT =
+    'unit MoR;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TCls = class end;'#10 +
+    '  TClsD = class(TCls) end;'#10 +
+    '  TE = (e1, e2);'#10 +
+    '  TSE = set of TE;'#10 +
+    '  TSE2 = set of TE;'#10 +
+    '  TR = record X: Integer; end;'#10 +
+    '  TRo = record X: Integer; class operator Implicit(A: TCls): TRo; end;'#10 +
+    '  TDA = array of Integer;'#10 +
+    '  TId = type Integer;'#10 +
+    '  TIal = Integer;'#10 +
+    '  THo = class'#10 +
+    '    FX: Integer;'#10 +
+    '    property PX: Integer read FX write FX;'#10 +
+    '    function GetA: TDA;'#10 +
+    '    property PA: TDA read GetA;'#10 +
+    '  end;'#10 +
+    'const'#10 +
+    '  KT: Integer = 5;'#10 +
+    'function ZA(A: ShortInt): TRA; overload;'#10 +
+    'function ZA(const A): TRW; overload;'#10 +
+    'function ZB(A: Variant): TRA; overload;'#10 +
+    'function ZB(const A): TRW; overload;'#10 +
+    'function ZC(A: AnsiString): TRA; overload;'#10 +
+    'function ZC(var A): TRW; overload;'#10 +
+    'function ZD(const A): TRA; overload;'#10 +
+    'function ZD(A: Int64): TRW; overload;'#10 +
+    'function ZE(A: TRo): TRA; overload;'#10 +
+    'function ZE(const A): TRW; overload;'#10 +
+    'function ZF(const A): TRA; overload;'#10 +
+    'function ZF(A: Pointer): TRW; overload;'#10 +
+    'function ZG(A: Variant): TRA; overload;'#10 +
+    'function ZG(const A): TRW; overload;'#10 +
+    'function ZH(A: Variant): TRA; overload;'#10 +
+    'function ZH(const A): TRW; overload;'#10 +
+    'function ZK(const A): TRA; overload;'#10 +
+    'function ZK(A: IInterface): TRW; overload;'#10 +
+    'function ZL(const A): TRA; overload;'#10 +
+    'function ZL(A: TSE2): TRW; overload;'#10 +
+    'function ZM(var A: Integer): TRA; overload;'#10 +
+    'function ZM(A: Variant): TRW; overload;'#10 +
+    'function ZN(var A: string): TRA; overload;'#10 +
+    'function ZN(var A): TRW; overload;'#10 +
+    'function ZP(var A: Integer): TRA; overload;'#10 +
+    'function ZP(A: Int64): TRW; overload;'#10 +
+    'function ZQ(var A: TCls): TRA; overload;'#10 +
+    'function ZQ(const A): TRW; overload;'#10 +
+    'function ZR(var A: TId): TRA; overload;'#10 +
+    'function ZR(A: Int64): TRW; overload;'#10 +
+    'function ZS(A: Int64): TRA; overload;'#10 +
+    'function ZS(var A: TIal): TRW; overload;'#10 +
+    'function ZT(var A: Integer): TRA; overload;'#10 +
+    'function ZT(A: Variant): TRW; overload;'#10 +
+    'function ZU(const A): TRA; overload;'#10 +
+    'function ZU(var A: TR): TRW; overload;'#10 +
+    'function ZV(out A: Integer): TRA; overload;'#10 +
+    'function ZV(A: Int64): TRW; overload;'#10 +
+    'function ZW(A: Variant): TRA; overload;'#10 +
+    'function ZW(var A: array of Integer): TRW; overload;'#10 +
+    'implementation'#10 +
+    'class operator TRo.Implicit(A: TCls): TRo; begin end;'#10 +
+    'function ZA(A: ShortInt): TRA; begin end;'#10 +
+    'function ZA(const A): TRW; begin end;'#10 +
+    'function ZB(A: Variant): TRA; begin end;'#10 +
+    'function ZB(const A): TRW; begin end;'#10 +
+    'function ZC(A: AnsiString): TRA; begin end;'#10 +
+    'function ZC(var A): TRW; begin end;'#10 +
+    'function ZD(const A): TRA; begin end;'#10 +
+    'function ZD(A: Int64): TRW; begin end;'#10 +
+    'function ZE(A: TRo): TRA; begin end;'#10 +
+    'function ZE(const A): TRW; begin end;'#10 +
+    'function ZF(const A): TRA; begin end;'#10 +
+    'function ZF(A: Pointer): TRW; begin end;'#10 +
+    'function ZG(A: Variant): TRA; begin end;'#10 +
+    'function ZG(const A): TRW; begin end;'#10 +
+    'function ZH(A: Variant): TRA; begin end;'#10 +
+    'function ZH(const A): TRW; begin end;'#10 +
+    'function ZK(const A): TRA; begin end;'#10 +
+    'function ZK(A: IInterface): TRW; begin end;'#10 +
+    'function ZL(const A): TRA; begin end;'#10 +
+    'function ZL(A: TSE2): TRW; begin end;'#10 +
+    'function ZM(var A: Integer): TRA; begin end;'#10 +
+    'function ZM(A: Variant): TRW; begin end;'#10 +
+    'function ZN(var A: string): TRA; begin end;'#10 +
+    'function ZN(var A): TRW; begin end;'#10 +
+    'function ZP(var A: Integer): TRA; begin end;'#10 +
+    'function ZP(A: Int64): TRW; begin end;'#10 +
+    'function ZQ(var A: TCls): TRA; begin end;'#10 +
+    'function ZQ(const A): TRW; begin end;'#10 +
+    'function ZR(var A: TId): TRA; begin end;'#10 +
+    'function ZR(A: Int64): TRW; begin end;'#10 +
+    'function ZS(A: Int64): TRA; begin end;'#10 +
+    'function ZS(var A: TIal): TRW; begin end;'#10 +
+    'function ZT(var A: Integer): TRA; begin end;'#10 +
+    'function ZT(A: Variant): TRW; begin end;'#10 +
+    'function ZU(const A): TRA; begin end;'#10 +
+    'function ZU(var A: TR): TRW; begin end;'#10 +
+    'function ZV(out A: Integer): TRA; begin end;'#10 +
+    'function ZV(A: Int64): TRW; begin end;'#10 +
+    'function ZW(A: Variant): TRA; begin end;'#10 +
+    'function ZW(var A: array of Integer): TRW; begin end;'#10 +
+    'function THo.GetA: TDA; begin end;'#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program MoRP;'#10 +
+    'uses MoR;'#10 +
+    'var K: Integer; vB: Byte; vS: string; vI: Integer; vO: TClsD; vC: TClsD; vIntf: IInterface; vDA: TDA; vV: Variant; vSE: TSE; vPC: PChar; vR: TR; vH: THo;'#10 +
+    'begin'#10 +
+    '  K := ZA(vB).W;'#10 +
+    '  K := ZB(vB).W;'#10 +
+    '  K := ZC(vS).W;'#10 +
+    '  K := ZD(vI).W;'#10 +
+    '  K := ZE(vO).W;'#10 +
+    '  K := ZF(vC).W;'#10 +
+    '  K := ZG(vIntf).W;'#10 +
+    '  K := ZH(vDA).W;'#10 +
+    '  K := ZK(vV).W;'#10 +
+    '  K := ZL(vSE).W;'#10 +
+    '  K := ZM(vB).W;'#10 +
+    '  K := ZN(vPC^).W;'#10 +
+    '  K := ZP(5).W;'#10 +
+    '  K := ZQ(vC).W;'#10 +
+    '  K := ZR(vI).W;'#10 +
+    '  K := ZS(vI).W;'#10 +
+    '  K := ZT(KT).W;'#10 +
+    '  K := ZU(vR).W;'#10 +
+    '  K := ZV(vH.PX).W;'#10 +
+    '  K := ZW(vH.PA).W;'#10 +
+    'end.'#10;
+var
+  LDir, LName: string;
+begin
+  LDir := FreshDir('pastree_sema_modeconvrank');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TVarRec = record VType: Byte; end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MoR.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'MoRP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'MoRP.dpr'));
+    LName := '';
+    for var LD in ModelByName('morp').Diags do
+      if LD.Code = 'E2003' then
+        LName := LName + ' line ' + IntToStr(LD.Line);
+    Ok('parameter-mode ranking: every call binds dcc''s overload - no E2003 [' +
+      LName + ' ]', DiagCount(ModelByName('morp'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // B35: one operator rule table for both typers (4.2.1) - narrow and alias
 // operands, an enum-subrange array's bounds, a subrange whose bound is
 // another unit's enumeration value or constant, and an inherited cross-unit
@@ -18548,6 +18727,7 @@ begin
   TestProcConvRanking;
   TestArrConvRanking;
   TestPtrConvRanking;
+  TestModeConvRanking;
   TestOperatorTable;
   TestTargetFacts;
   TestOracleDepth;
