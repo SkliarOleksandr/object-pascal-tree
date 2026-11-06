@@ -12120,6 +12120,168 @@ begin
   end;
 end;
 
+// E2010 at an assignment through the one conversion test (5.1.1, 2.6.1;
+// local/type-conv-2026-11/m2): the project's cross pass decides it
+// (CheckAssigns over XConvX), the unit typer leaves it alone in a project.
+// AsgBad's 20 assignments are each E2010 to dcc64 and here, one per line;
+// AsgOkP's are each compiled by dcc64 (m2/dbg/asg), the value rules among
+// them - a literal for a character, a PChar or a pointer, a type name, a
+// called function, a routine's name, `@X`, `[...]`, $T+ - and the type
+// rules the first version had not (an enumeration's subrange, any pointer
+// to a class reference, an interface to Pointer, Variant to IInterface).
+procedure TestAssignConv;
+const
+  SRC_UNIT =
+    'unit AsgU;'#10 +
+    'interface'#10 +
+    'type'#10 +
+    '  TE = (e1, e2, e3);'#10 +
+    '  TF = (f1, f2);'#10 +
+    '  TES = e1..e2;'#10 +
+    '  TES2 = e2..e3;'#10 +
+    '  TSE = set of TE;'#10 +
+    '  TR = record X: Integer; end;'#10 +
+    '  TRi = record X: Integer; class operator Implicit(A: Integer): TRi; end;'#10 +
+    '  TDA = array of Integer;'#10 +
+    '  TDA2 = array of Integer;'#10 +
+    '  TCA = array[0..3] of Char;'#10 +
+    '  PI = ^Integer;'#10 +
+    '  PI2 = ^Integer;'#10 +
+    '  TP1 = procedure(A: Integer);'#10 +
+    '  TF0 = function: Integer;'#10 +
+    '  TK = class class procedure CM; end;'#10 +
+    '  TRefF = reference to function: Integer;'#10 +
+    '  TRefImpl = class(TInterfacedObject, TRefF)'#10 +
+    '    function Invoke: Integer;'#10 +
+    '  end;'#10 +
+    'const KS = ''abc'';'#10 +
+    'var'#10 +
+    '  vI: Integer; vB: Byte; vSg: Single; vD: Double; vCur: Currency;'#10 +
+    '  vBo: Boolean; vS: string; vC: Char; vWC: WideChar; vAC: AnsiChar;'#10 +
+    '  vPC: PChar; vP: Pointer; vPI: PI; vPI2: PI2; vO: TObject;'#10 +
+    '  vCls: TClass; vIntf: IInterface; vV: Variant; vE: TE; vF: TF;'#10 +
+    '  vES: TES; vES2: TES2; vSE: TSE; vR: TR; vRi: TRi; vDA: TDA;'#10 +
+    '  vDA2: TDA2; vCA: TCA; vP1: TP1; vF0: TF0; vRF: TRefF; vRImp: TRefImpl;'#10 +
+    'procedure G1(A: Integer);'#10 +
+    'function GI: Integer;'#10 +
+    'implementation'#10 +
+    'class operator TRi.Implicit(A: Integer): TRi; begin Result.X := A; end;'#10 +
+    'class procedure TK.CM; var C: TClass; begin C := Self; end;'#10 +
+    'procedure G1(A: Integer); begin end;'#10 +
+    'function GI: Integer; begin Result := 0; GI := 1; end;'#10 +
+    'function TRefImpl.Invoke: Integer; begin Result := 1; end;'#10 +
+    'end.'#10;
+  SRC_BAD =
+    'unit AsgBad;'#10 +
+    'interface'#10 +
+    'uses AsgU;'#10 +
+    'procedure Bad;'#10 +
+    'implementation'#10 +
+    'procedure Bad;'#10 +
+    'begin'#10 +
+    '  vC := vAC;'#10 +       // 8
+    '  vAC := vC;'#10 +
+    '  vI := vS;'#10 +
+    '  vS := vI;'#10 +
+    '  vI := vSg;'#10 +
+    '  vO := vCls;'#10 +
+    '  vCls := vO;'#10 +
+    '  vV := vO;'#10 +        // 15
+    '  vIntf := vO;'#10 +
+    '  vPI := vPI2;'#10 +
+    '  vE := vI;'#10 +
+    '  vDA := vDA2;'#10 +
+    '  vI := True;'#10 +      // 20
+    '  vR := nil;'#10 +
+    '  vC := vV;'#10 +
+    '  vE := vF;'#10 +
+    '  vP1 := vO;'#10 +
+    '  vSE := vO;'#10 +       // 25
+    '  vPI := vDA;'#10 +
+    '  vI := vP;'#10 +        // 27
+    'end;'#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program AsgOkP;'#10 +
+    'uses AsgU, AsgBad;'#10 +
+    'function FX: Integer;'#10 +
+    'begin'#10 +
+    '  Result := 5;'#10 +
+    '  FX := 6;'#10 +
+    'end;'#10 +
+    'procedure Q;'#10 +
+    'var B: Byte;'#10 +
+    'begin'#10 +
+    '  for B in vDA do ;'#10 +
+    'end;'#10 +
+    'begin'#10 +
+    '  vE := vES; vES := vE; vES := vES2; vB := vI; vI := vB;'#10 +
+    '  vAC := ''a''; vC := ''a''; vC := #65; vWC := vC; vC := vWC;'#10 +
+    '  vPC := ''abc''; vPC := KS; vP := 0; vPI := 0; vPC := 0;'#10 +
+    '  vPI := @vI; vCls := TObject; vP := TObject; vCls := vPI;'#10 +
+    '  vCls := vPC; vP := vIntf; vI := vF0; vI := GI; vP1 := G1;'#10 +
+    '  vP1 := @G1; vP1 := nil; vO := nil; vCA := ''ab''; vSE := [];'#10 +
+    '  vSE := [e1]; vDA := [1, 2]; vDA := nil; vS := vC; vS := vPC;'#10 +
+    '  vV := vI; vI := vV; vIntf := vV; vS := vCA; vO := vP; vPI := vP;'#10 +
+    '  vRi := vI; vD := vI; vD := vCur; vCur := vI; vSg := vD;'#10 +
+    '  with vR do X := 5;'#10 +
+    '  Q;'#10 +
+    '  {$T+} vPI := vPI2; {$T-}'#10 +
+    '  vRF := TRefImpl.Create(); vRF := vRImp;'#10 +
+    'end.'#10;
+var
+  LDir: string;
+  LBad, LOk: TPasSemaModel;
+  LLines: string;
+  LAll: Boolean;
+begin
+  LDir := FreshDir('pastree_sema_assignconv');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TClass = class of TObject;'#10 +
+    '  TGUID = record D1: Cardinal; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TInterfacedObject = class(TObject, IInterface) end;'#10 +
+    '  TVarRec = record VType: Byte; end;'#10 +
+    '  TArray<T> = array of T;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AsgU.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AsgBad.pas'), SRC_BAD);
+  TFile.WriteAllText(TPath.Combine(LDir, 'AsgOkP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'AsgOkP.dpr'));
+    LBad := ModelByName('asgbad');
+    LOk := ModelByName('asgokp');
+    LLines := '';
+    LAll := LBad <> nil;
+    if LBad <> nil then
+    begin
+      for var LD in LBad.Diags do
+        if LD.Code = 'E2010' then
+          LLines := LLines + ' ' + IntToStr(LD.Line);
+      for var LLine := 8 to 27 do
+        if Pos(' ' + IntToStr(LLine) + ' ', LLines + ' ') = 0 then
+          LAll := False;
+    end;
+    Ok('assignment: each of AsgBad''s 20 is E2010 [lines' + LLines + ']',
+      LAll and (DiagCount(LBad, 'E2010') = 20));
+    LLines := '';
+    if LOk <> nil then
+      for var LD in LOk.Diags do
+        LLines := LLines + ' ' + LD.Code + '@' + IntToStr(LD.Line);
+    Ok('assignment: what dcc compiles reports nothing [' + LLines + ' ]',
+      (LOk <> nil) and (Length(LOk.Diags) = 0));
+    Ok('assignment: the unit typer left E2010 to the project (AsgU clean)',
+      DiagCount(ModelByName('asgu'), 'E2010') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // B35: one operator rule table for both typers (4.2.1) - narrow and alias
 // operands, an enum-subrange array's bounds, a subrange whose bound is
 // another unit's enumeration value or constant, and an inherited cross-unit
@@ -18759,6 +18921,7 @@ begin
   TestArrConvRanking;
   TestPtrConvRanking;
   TestModeConvRanking;
+  TestAssignConv;
   TestOperatorTable;
   TestTargetFacts;
   TestOracleDepth;

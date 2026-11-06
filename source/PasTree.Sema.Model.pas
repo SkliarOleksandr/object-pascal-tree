@@ -671,6 +671,13 @@ type
       model is msCrossReady like any other. Never set on a program, library
       or package - those parse fully whatever the tree says. }
     Light: Boolean;
+    { True when a project analyzes the model (TPasSemaResolver.Analyze's
+      AProjectAssign): the unit typer then leaves E2010 at an assignment to
+      the project's cross pass, which decides it on the whole closure's
+      types through the one conversion test (TPasSemaProject.XConvX; the
+      typer sees this unit's symbols alone). Set before the typer runs and
+      never written after. }
+    ProjectAssign: Boolean;
     { The names the oracle was asked for that stream - every `Declared(X)`
       and symbol question (`SizeOf(T)`, a const) the first pass could not
       answer, lower-cased, dotted names split into their segments. Empty

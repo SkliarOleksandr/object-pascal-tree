@@ -248,10 +248,13 @@ type
       models are replaced by fully-analyzed ones before anyone reads
       diagnostics or ExprType). Collect/Resolve/BindTypes still run, so
       scopes, symbols, RefMap and declared-type bindings - everything
-      navigation and cross-unit resolution read - are complete. }
+      navigation and cross-unit resolution read - are complete.
+      AProjectAssign: a project analyzes the model and decides E2010 at an
+      assignment itself (TPasSemaModel.ProjectAssign). }
     class function Analyze(const ATree: TPasTree;
       ASkipTyper: Boolean = False;
-      APlatform: TPasPlatform = pfWin32): TPasSemaModel; static;
+      APlatform: TPasPlatform = pfWin32;
+      AProjectAssign: Boolean = False): TPasSemaModel; static;
   end;
 
 implementation
@@ -266,7 +269,8 @@ uses
 
 class function TPasSemaResolver.Analyze(const ATree: TPasTree;
   ASkipTyper: Boolean = False;
-  APlatform: TPasPlatform = pfWin32): TPasSemaModel;
+  APlatform: TPasPlatform = pfWin32;
+  AProjectAssign: Boolean = False): TPasSemaModel;
 var
   LR: TPasSemaResolver;
 begin
@@ -276,6 +280,7 @@ begin
     LR.FSkipTyper := ASkipTyper;
     LR.FPlatform := APlatform;
     LR.FModel := TPasSemaModel.Create(ATree);
+    LR.FModel.ProjectAssign := AProjectAssign;
     SetLength(LR.FNodeScope, Length(ATree.Nodes));
     SetLength(LR.FIsDeclName, Length(ATree.Nodes));
     for var LIdx := 0 to High(LR.FNodeScope) do

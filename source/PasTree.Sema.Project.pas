@@ -3850,7 +3850,7 @@ begin
       // path - which will report it the way it always did - never to an error.
       Exit;
     end;
-    Result := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+    Result := TPasSemaResolver.Analyze(LTree, False, FPlatform, True);
     // The parser's rows: the stream is the donor's, so their VisIndex holds.
     // The lexer's half is read from the stream by the same call.
     try
@@ -3944,7 +3944,7 @@ begin
   // type diagnostics. A LIGHT model is permanent: its typer runs, as a full
   // model's does.
   Result := TPasSemaResolver.Analyze(LTree, AIntf and LIsUnit and not LLight,
-    FPlatform);
+    FPlatform, True);
   try
     Result.AddParseDiags(LDiags);
   except
@@ -6933,7 +6933,7 @@ begin
         LNew := TPasSemaResolver.Analyze(
           TPasParser.ParseFile(ProcessUnit(LPP, FFiles[AId], ALight), LDiags,
             LightParseMode(ALight)),
-          False, FPlatform);
+          False, FPlatform, True);
         LNew.AddParseDiags(LDiags);
         LNew.Light := ALight;
         LStable := True;
@@ -13849,26 +13849,13 @@ begin
       PasBuiltinCanonSym(FModels[B.UnitId], B.Sym, FPlatform)));
 end;
 
-// Cross-model mirror of TPasSemaTyper.Assignable: conservative, rejects only
-// definite scalar mismatches; anything unknown/non-scalar is allowed.
+// Assignment compatibility of two types (5.1.1, 2.6.1): the one conversion
+// test's verdict (XConvX) - scNone alone rejects, scMaybe passes, as an
+// error-tolerant analysis must (`nil` reaches a record through its `class
+// operator Implicit` there, audit A4-11).
 function TPasSemaProject.XAssignableX(const ADst, ASrc: TSemaXType): Boolean;
-var
-  D, S: TSemaTypeCat;
 begin
-  D := XCatOf(ADst);
-  S := XCatOf(ASrc);
-  // The unit typer's rule (CatAssignable); `nil` reaches a record through
-  // its `class operator Implicit` (audit A4-11).
-  if (S = tcNil) and (D = tcRecord) then
-  begin
-    var LRec := CanonTypeX(ADst);
-    var LScope := NIL_SCOPE;
-    if XValid(LRec) then
-      LScope := FModels[LRec.UnitId].Symbols[LRec.Sym].MemberScope;
-    Exit((LScope <> NIL_SCOPE) and
-      (FModels[LRec.UnitId].DeclaresOperator(LScope, 'implicit')));
-  end;
-  Result := CatAssignable(D, S, False);
+  Result := XConvX(ADst, ASrc) <> TSemaConv.scNone;
 end;
 
 function TPasSemaProject.IsGuidTypeX(const AX: TSemaXType): Boolean;
@@ -14188,11 +14175,20 @@ end;
     a class reference, an interface to the untyped Pointer;
   - everything else is scMaybe.
   It answers an assignment (2.6.1: a lone value parameter of a routine that
-  is not overloaded converts alike); tests/ConvSmoke.dpr holds dcc's verdict
-  for every pair it is asked about (local/type-conv-2026-11/m2). }
+  is not overloaded converts alike) - E2010 at `:=` is its scNone
+  (CrossType's CheckAssigns); tests/ConvSmoke.dpr holds dcc's verdict for
+  every pair it is asked about (local/type-conv-2026-11/m2). }
 function TPasSemaProject.XConvX(const ADst, ASrc: TSemaXType): TSemaConv;
 begin
   Result := XConvCoreX(ADst, ASrc, True);
+  // A type of a generic read in two frames - its open parameters on one
+  // side, an instance's arguments on the other, or a type nested in it
+  // (System.Net.Mime's TAcceptValueListBase<T>.InternalNegotiate passing
+  // its own TMatchMode, the m2 gate) - does not compare here: no verdict.
+  if (Result = TSemaConv.scNone) and
+     (OpenX(ADst) or OpenX(ASrc) or NestedInGenericX(ADst) or
+      NestedInGenericX(ASrc)) then
+    Result := scMaybe;
 end;
 
 { May the pair of categories be ArrayArgFit's - an array on one side, or a
@@ -16027,8 +16023,15 @@ begin
           Exit(1);
         end;
     end;
+  // The rest is the one conversion test's (XAssignableX): a conversion fit,
+  // or the candidate out where the types do not convert - scNone is backed
+  // by dcc's verdict (tests/ConvSmoke.dpr), so it rejects as an assignment
+  // does (2.6.1), where it scored no evidence while the category table
+  // (CatAssignable) answered.
   if XAssignableX(AParX, AArgX) then
-    Result := 1;
+    Result := 1
+  else
+    Result := -1;
 end;
 
 // A routine's parameter symbols in declaration order (its param scope -
@@ -19809,6 +19812,232 @@ var
       LProbe.FX.TryAdd(N, XNil);
   end;
 
+  { How the value ASrc (its node, peeled) of type ASrcX goes to the target
+    of type ADstX at the assignment AAssign (5.1.1, 2.6.1): the one
+    conversion test (XConvX) - an assignment converts as a lone value
+    parameter of a routine that is not overloaded does (m2 Set A vs Set N:
+    2,870 of 2,870 alike) - after the rules a value has and its type does
+    not, each scMaybe here (no verdict): a type name (a class reference, an
+    interface's GUID), `@X`, a `[...]`, an inline `if`; a procedural value
+    where none is wanted (a parameterless function is called), a routine
+    named for a procedural target (the routine, typed as its result here),
+    a procedure named anywhere, a function's own name as the target; a
+    string or
+    character constant for a character, a pointer or an array (a literal's
+    rules: 'a' for an AnsiChar, 'abc' for a PChar or an `array[0..3] of
+    Char`), an integer constant for a pointer (0); two pointers under $T+ at
+    the statement (one base meets, 10.1.2). m2 Sets A, X, Y. }
+  function AssignConvX(AAssign, ASrc: Integer; const ADstX,
+    ASrcX: TSemaXType): TSemaConv;
+  var
+    LCore, LOpd, LMid, LSym: Integer;
+    LKind: TPasNodeKind;
+    LDst, LSrc: TSemaXType;
+    D, S: TSemaTypeCat;
+    LRoutine: Boolean;
+  begin
+    // The type test first: a value whose type converts needs none of the
+    // value's rules below, which can only take a rejection back (and cost
+    // node walks on every assignment of the unit - bigflat's xtype +6%).
+    if (ADstX.UnitId = ASrcX.UnitId) and (ADstX.Sym = ASrcX.Sym) and
+       (ADstX.Inst = ASrcX.Inst) then
+      Exit(scIdentical);
+    Result := XConvX(ADstX, ASrcX);
+    if Result <> TSemaConv.scNone then
+      Exit;
+    Result := scMaybe;
+    LCore := PeelParens(LM.Tree, ASrc);
+    if LCore = NIL_NODE then
+      Exit;
+    LKind := LM.Tree.Nodes[LCore].Kind;
+    if LKind in [nkSetCtor, nkInlineIf] then
+      Exit;
+    if IsAddrOfExpr(LM.Tree, LCore, LOpd) then
+      Exit;
+    LRoutine := False;
+    if LKind in [nkIdent, nkMember, nkTypeArgs] then
+    begin
+      if IsTypeDesignator(LCore) then
+        Exit;
+      // `Self` in a class method is a class reference, typed as the class.
+      if (LKind = nkIdent) and LM.Tree.NodeTextEquals(LCore, 'Self') then
+        Exit;
+      LRoutine := TargetSym(LCore, LMid, LSym) and
+        (FModels[LMid].Symbols[LSym].Kind = skRoutine);
+      // A procedure named is its address, nothing this walk types.
+      if LRoutine and (FModels[LMid].Symbols[LSym].TypeNode = NIL_NODE) then
+        Exit;
+    end;
+    // A function's own name as the target is its result (typed so), never
+    // judged against the routine itself.
+    LOpd := PeelParens(LM.Tree, LM.Tree.Nodes[AAssign].FirstChild);
+    if (LOpd <> NIL_NODE) and
+       (LM.Tree.Nodes[LOpd].Kind in [nkIdent, nkMember]) and
+       TargetSym(LOpd, LMid, LSym) and
+       (FModels[LMid].Symbols[LSym].Kind = skRoutine) and
+       (XCatOf(CanonTypeX(ADstX)) = tcProc) then
+      Exit;
+    LDst := CanonTypeX(ADstX);
+    LSrc := CanonTypeX(ASrcX);
+    if not XValid(LDst) or not XValid(LSrc) then
+      Exit;
+    D := XCatOf(LDst);
+    S := XCatOf(LSrc);
+    // A procedural value for anything else is called (a parameterless
+    // function), and a function named for a procedural target is the
+    // routine, not the result it is typed as.
+    if (S = tcProc) and (D <> tcProc) then
+      Exit;
+    if (D = tcProc) and (S <> tcProc) and LRoutine then
+      Exit;
+    // A constant's literal rules - asked of the pairs they cover alone, and
+    // without walking an operator (a 10,000-term chain is no stack's;
+    // SemaProjectSmoke's TestOperatorChains): an operator, a literal, a
+    // constant's name, an intrinsic over constants may be one.
+    if (S in [tcChar, tcString]) and (D in [tcChar, tcPointer, tcArray]) or
+       (S = tcInteger) and (D = tcPointer) then
+      case LKind of
+        nkIdent, nkMember:
+          if not TargetSym(LCore, LMid, LSym) or
+             (FModels[LMid].Symbols[LSym].Kind = skConst) then
+            Exit;
+        nkCall:
+          if IsConstArgX(AId, LCore) then
+            Exit;
+      else
+        Exit;
+      end;
+    if (D = tcPointer) and (S = tcPointer) and
+       (Length(LM.Tree.Source.TypedAddressEvents) > 0) and
+       LM.Tree.Source.TypedAddressAt(LM.Tree.Nodes[AAssign].FirstToken) then
+      Exit;
+    Result := TSemaConv.scNone;
+  end;
+
+  { Is the assignment ANode in the body of a `with` whose target this walk
+    did not type? Its names there may still be Phase 1's guesses (5.7; the
+    unit typer withholds the same, TPasSemaTyper.Diag), so no verdict. }
+  function InUntypedWith(ANode: Integer): Boolean;
+  var
+    LWith, LTarget, LNext: Integer;
+  begin
+    LWith := LM.Tree.EnclosingWith(ANode);
+    while LWith <> NIL_NODE do
+    begin
+      LTarget := LM.Tree.Nodes[LWith].FirstChild;
+      while LTarget <> NIL_NODE do
+      begin
+        LNext := LM.Tree.Nodes[LTarget].NextSibling;
+        if LNext = NIL_NODE then
+          Break;   // the body
+        if not XValid(GetX(LTarget)) then
+          Exit(True);
+        LTarget := LNext;
+      end;
+      LWith := LM.Tree.EnclosingWith(LWith);
+    end;
+    Result := False;
+  end;
+
+  { Is the side ANode, typed AX, of the assignment AAssign typed too loosely
+    to judge? Each is a gap of the typing, not of the conversion, and an
+    error-tolerant check stays silent over it (m2 gate):
+    - a type mentioning an open generic parameter (OpenX) or nested in a
+      generic (NestedInGenericX): the same `TPair<K,V>` read in two
+      instantiation frames does not compare (System.Generics.Collections'
+      `Result := GetCurrent`);
+    - a value an overload choice typed - a call of a routine declared
+      `overload`, chained to another, or an override: a misbound overload
+      types it wrongly (a third-party list's `.Add` read as its ancestor's
+      Add: Integer, a third-party `GetScreenBounds` as the Boolean one,
+      SysUtils' `StrNew` as the PAnsiChar one - the frozen client's 35, m2
+      gate) - the binding's own gap, which E2010 would only repeat;
+    - an index over a typed pointer: under $POINTERMATH ON `PBytes(P)[I]`
+      of a `PBytes = ^TBytes` is a TBytes, typed here as the dereferenced
+      array's element (System.Generics.Collections' TListHelper);
+    - a type this unit declares BELOW the statement, which no statement
+      sees: a name the resolver bound past its declaration order (Vcl
+      .ActnMenus' `var ControlClass: TCustomActionControlClass` bound to the
+      unit's later `TCustomActionControlClass = class(TCustomActionControl)`
+      rather than Vcl.ActnMan's class reference). }
+  function Unreliable(AAssign, ANode: Integer; const AX: TSemaXType): Boolean;
+  var
+    LCore, LBase, LHead, LMid, LSym: Integer;
+  begin
+    if OpenX(AX) or NestedInGenericX(AX) then
+      Exit(True);
+    LCore := PeelParens(LM.Tree, ANode);
+    if LCore = NIL_NODE then
+      Exit(True);
+    // A value an overload choice typed: the call, or the paren-less call, of
+    // a routine declared `overload` (or an override, which may sit beside
+    // overloads of its ancestors).
+    LHead := LCore;
+    if LM.Tree.Nodes[LHead].Kind = nkCall then
+      LHead := LM.Tree.Nodes[LHead].FirstChild;
+    if (LHead <> NIL_NODE) and
+       (LM.Tree.Nodes[LHead].Kind in [nkIdent, nkMember, nkTypeArgs]) and
+       TargetSym(LHead, LMid, LSym) and
+       (FModels[LMid].Symbols[LSym].Kind = skRoutine) and
+       ((FModels[LMid].Symbols[LSym].Flags * [sfOverload,
+          sfOverloadDirective, sfOverrideDirective] <> []) or
+        (FModels[LMid].Symbols[LSym].NextOverload <> NIL_SYM)) then
+      Exit(True);
+    if (LCore <> NIL_NODE) and (LM.Tree.Nodes[LCore].Kind = nkIndex) then
+    begin
+      LBase := LM.Tree.Nodes[LCore].FirstChild;
+      if LBase <> NIL_NODE then
+      begin
+        var LBaseX := GetX(LBase);
+        if XValid(LBaseX) then
+          LBaseX := CanonTypeX(LBaseX);
+        if XValid(LBaseX) and (XCatOf(LBaseX) = tcPointer) then
+          Exit(True);
+      end;
+    end;
+    Result := (AX.UnitId = AId) and
+      LM.DeclaredAfter(AX.Sym, LM.Tree.Nodes[AAssign].FirstToken);
+  end;
+
+  { E2010 at every assignment of the unit whose value does not convert to
+    its target (AssignConvX's scNone, the only rejection: scMaybe passes -
+    error-tolerant is the primary mode). Decided here, on the closure's
+    types, in place of the unit typer's CheckAssign (TPasSemaModel
+    .ProjectAssign), which sees one unit's symbols. }
+  procedure CheckAssigns;
+  var
+    N, LDst, LSrc: Integer;
+    LDstX, LSrcX: TSemaXType;
+    LSrcName: string;
+  begin
+    for N := 0 to High(LM.Tree.Nodes) do
+    begin
+      if LM.Tree.Nodes[N].Kind <> nkAssign then
+        Continue;
+      LDst := LM.Tree.Nodes[N].FirstChild;
+      if LDst = NIL_NODE then
+        Continue;
+      LSrc := LM.Tree.Nodes[LDst].NextSibling;
+      if LSrc = NIL_NODE then
+        Continue;
+      LDstX := GetX(LDst);
+      LSrcX := GetX(LSrc);
+      if not XValid(LDstX) or not XValid(LSrcX) then
+        Continue;
+      if AssignConvX(N, LSrc, LDstX, LSrcX) <> TSemaConv.scNone then
+        Continue;
+      if InUntypedWith(N) or Unreliable(N, LDst, LDstX) or
+         Unreliable(N, LSrc, LSrcX) then
+        Continue;
+      // dcc names the nil literal's type `Pointer`.
+      if XCatOf(LSrcX) = tcNil then
+        LSrcName := 'Pointer'
+      else
+        LSrcName := XTypeText(LSrcX);
+      EmitAt(LM, LSrc, 'E2010', Format(SE2010_IncompatibleTypes,
+        [XTypeText(LDstX), LSrcName]));    end;
+  end;
+
 var
   LNode: Integer;
 begin
@@ -19865,7 +20094,11 @@ begin
   LAmbig := nil;
   try
     if Length(LX) > 0 then
+    begin
       Walk(0);
+      if LM.ProjectAssign then
+        CheckAssigns;
+    end;
     BindAggregateLabelsX(AId, LNewExt);
   finally
     LFallback.Free;
@@ -29450,7 +29683,7 @@ begin
     FPP.OnDeclared := SeedDeclaredQuery();
     LPre := FPP.Process(LFull);
     LTree := TPasParser.ParseFile(LPre, LDiags);
-    LNew := TPasSemaResolver.Analyze(LTree, False, FPlatform);
+    LNew := TPasSemaResolver.Analyze(LTree, False, FPlatform, True);
     LNew.AddParseDiags(LDiags);
   except
     // Unparsable now: the full path records that as a known-bad file with a
@@ -29766,7 +29999,7 @@ begin
         procedure(AIdx: Integer)
         begin
           LConsOf[AIdx + 1] := TPasSemaResolver.Analyze(
-            FModels[LIds[AIdx + 1]].Tree, False, FPlatform);
+            FModels[LIds[AIdx + 1]].Tree, False, FPlatform, True);
         end);
       Fault('redo');
       // What the load put on the old model after its Phase 1 - the parse rows

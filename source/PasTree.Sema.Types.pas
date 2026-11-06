@@ -8338,6 +8338,11 @@ procedure TPasSemaTyper.CheckAssign(N: Integer);
 var
   LDst, LSrc, LDstT, LSrcT: Integer;
 begin
+  // A project decides E2010 at an assignment in its cross pass, on the
+  // closure's types and the one conversion test (TPasSemaProject's
+  // CheckAssignsX over XConvX); this rule stays the one-unit analysis's.
+  if M.ProjectAssign then
+    Exit;
   LDst := Child(N);
   if LDst = NIL_NODE then
     Exit;
