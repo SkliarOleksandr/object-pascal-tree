@@ -454,6 +454,19 @@ type
     Empty: Boolean;
   end;
 
+  { A procedural signature (6.6.1) as ProcSigsMeetX compares two: the model
+    it is read in (Mid), its parameter symbols there in order, the frame
+    their types close over (Inst), whether it is a function and its result,
+    its kind and calling convention (DirectiveConvOf; -1 unread). Read off
+    an nkProcType (ProcTypeSigX) or a routine (RoutineSigX). }
+  TPasProcSig = record
+    Mid, Inst, Conv: Integer;
+    Params: TArray<Integer>;
+    IsFunc: Boolean;
+    ResultX: TSemaXType;
+    Kind: TSemaProcKind;
+  end;
+
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
@@ -2258,6 +2271,24 @@ type
       whenever a side cannot be read, so an unknown shape never rejects. }
     function AnonLiteralFitsX(const ALitM: TPasSemaModel;
       ALitMid, ALit: Integer; const AX: TSemaXType): Boolean;
+    { The signature of the procedural type AX (through its aliases and
+      distinct copies, `type TP1`, to its nkProcType, closed over AX's
+      frame); False when AX is none. }
+    function ProcTypeSigX(const AX: TSemaXType; out ASig: TPasProcSig): Boolean;
+    { The signature of routine ASym of model AMid as a procedural value - a
+      method `of object` unless a static class method (RoutineProcKind). }
+    function RoutineSigX(AMid, ASym: Integer; out ASig: TPasProcSig): Boolean;
+    { Do two signatures meet (6.6.1, n5): the same count of parameters, each
+      of one mode (ParamModeOf) and one type, procedure / function alike
+      with one result type, one calling convention. Only a definite
+      difference says False: a side or a type that cannot be read (another
+      model's inline `array of T`, a generic parameter) meets. }
+    function ProcSigsMeetX(const A, B: TPasProcSig): Boolean;
+    { How the procedural value of signature ASrc goes to the procedural
+      parameter type of signature ADst (ProcKindsMeet over ProcSigsMeetX):
+      1 and its rank (ProcConvRank), or -1 out. }
+    function ProcSigFitX(const ADst, ASrc: TPasProcSig;
+      out ARank: Integer): Integer;
     function SigShapeOf(const AModel: TPasSemaModel; ANode: Integer;
       out AParams: Integer; out AFunc: Boolean): Boolean;
     function SigParamsOf(const AModel: TPasSemaModel;
@@ -13823,6 +13854,7 @@ var
   LConv: TSemaRefConv;
   LRel: TPasDescent;
   LStep, LDef: Integer;
+  LSig: TPasProcSig;
 
   function Untyped(const AX: TSemaXType): Boolean;
   begin
@@ -13920,6 +13952,40 @@ begin
       else
         Exit(0);
       end;
+    // An untyped Pointer value - a variable, `@X` (6.3.1; n3 Set C, n5 Set
+    // B): a typed pointer, a plain procedural type, a class (deeper first,
+    // a class reference between TObject and the rest); no interface, method
+    // pointer, `reference to` type or Variant. A typed pointer's own
+    // conversions are not ranked here.
+    tcPointer:
+      begin
+        if not Untyped(ASrc) then
+          Exit(0);
+        case D of
+          tcPointer:
+            LConv := rcPtrTypedPointer;
+          tcProc:
+            begin
+              if not ProcTypeSigX(ADst, LSig) then
+                Exit(0);
+              if LSig.Kind <> pkPlain then
+                Exit(-1);
+              LConv := rcPtrProc;
+            end;
+          tcClass:
+            begin
+              LConv := rcPtrClass;
+              LStep := XHeritageDepthX(ADst);
+            end;
+          tcClassOf:
+            LConv := rcPtrClassRef;
+          tcInterface, tcVariant, tcInteger, tcFloat, tcBoolean, tcChar,
+          tcEnum, tcSet:
+            Exit(-1);
+        else
+          Exit(0);
+        end;
+      end;
   else
     Exit(0);
   end;
@@ -13993,11 +14059,26 @@ begin
     Exit(TSemaConv.scNone);
   end;
   // A class, an interface, nil: XRefConvX (14.2.1, 6.3.1).
-  if S in [tcNil, tcClass, tcInterface] then
+  if S in [tcNil, tcClass, tcInterface, tcPointer] then
     case XRefConvX(LD, LS, D, S, LRank, LUserRank) of
       1: Exit(scImplicit);
       -1: Exit(TSemaConv.scNone);
     end;
+  // Two procedural types: by their kinds and signatures (ProcKindsMeet,
+  // ProcSigsMeetX; 6.6.1, n5) - a `reference to` value goes to another
+  // `reference to` type of its signature in an assignment.
+  if (D = tcProc) and (S = tcProc) then
+  begin
+    var LDSig, LSSig: TPasProcSig;
+    var LPConv: TSemaProcConv;
+    if ProcTypeSigX(LD, LDSig) and ProcTypeSigX(LS, LSSig) then
+    begin
+      if ProcKindsMeet(LSSig.Kind, LDSig.Kind, LPConv) and
+         ProcSigsMeetX(LDSig, LSSig) then
+        Exit(scImplicit);
+      Exit(TSemaConv.scNone);
+    end;
+  end;
   // A set converts to a set whose base is of its family (SetsMeetX) and to
   // nothing else; nothing else converts to a set (2.4.1, 6.3.1; n4 Sets A,
   // D). A record's operators are decided above; a procedural type is left
@@ -14306,24 +14387,22 @@ function TPasSemaProject.AnonLiteralFitsX(const ALitM: TPasSemaModel;
   ALitMid, ALit: Integer; const AX: TSemaXType): Boolean;
 var
   LCanon, LA, LB: TSemaXType;
-  LDef, LLitN, LRefN: Integer;
-  LLitF, LRefF: Boolean;
+  LLitN: Integer;
+  LLitF: Boolean;
   LLitP, LRefP: TArray<Integer>;
+  LSig: TPasProcSig;
 begin
   Result := True;
   LCanon := CanonTypeX(AX);
-  if not XValid(LCanon) then
+  // Through a distinct copy (`type TR1`) too (ProcTypeSigX): a literal goes
+  // to no plain or method type however it is named (n5 Set A: TP1d).
+  if not XValid(LCanon) or not ProcTypeSigX(LCanon, LSig) then
     Exit;
-  LDef := TypeDefNodeOf(LCanon.UnitId, LCanon.Sym);
-  if (LDef = NIL_NODE) or
-     (FModels[LCanon.UnitId].Tree.Nodes[LDef].Kind <> nkProcType) then
-    Exit;
-  if FModels[LCanon.UnitId].Tree.Nodes[LDef].Aux <> 2 then
+  if LSig.Kind <> pkReference then
     Exit(False);
-  if not SigShapeOf(ALitM, ALit, LLitN, LLitF) or
-     not SigShapeOf(FModels[LCanon.UnitId], LDef, LRefN, LRefF) then
+  if not SigShapeOf(ALitM, ALit, LLitN, LLitF) then
     Exit;
-  if (LLitN <> LRefN) or (LLitF <> LRefF) then
+  if (LLitN <> Length(LSig.Params)) or (LLitF <> LSig.IsFunc) then
     Exit(False);
   if ALitMid < 0 then
     Exit;
@@ -14334,20 +14413,160 @@ begin
   // overloads tied and the first declared won). A side that cannot be read,
   // or a generic parameter, never rejects.
   LLitP := SigParamsOf(ALitM, ALit);
-  LRefP := SigParamsOf(FModels[LCanon.UnitId], LDef);
+  LRefP := LSig.Params;
   if Length(LLitP) <> Length(LRefP) then
     Exit;
   for var LI := 0 to High(LLitP) do
   begin
     LA := CanonTypeX(DeclTypeX(ALitMid, LLitP[LI]));
-    LB := CanonTypeX(SubstX(DeclTypeX(LCanon.UnitId, LRefP[LI]),
-      LCanon.Inst, 0));
+    LB := CanonTypeX(SubstX(DeclTypeX(LSig.Mid, LRefP[LI]), LSig.Inst, 0));
     if XValid(LA) and XValid(LB) and
        (FModels[LA.UnitId].Symbols[LA.Sym].Kind <> skGenericParam) and
        (FModels[LB.UnitId].Symbols[LB.Sym].Kind <> skGenericParam) and
        not XSameType(LA, LB) then
       Exit(False);
   end;
+end;
+
+function TPasSemaProject.ProcTypeSigX(const AX: TSemaXType;
+  out ASig: TPasProcSig): Boolean;
+var
+  LCur: TSemaXType;
+  LM: TPasSemaModel;
+  LDef, LCount: Integer;
+begin
+  Result := False;
+  ASig := Default(TPasProcSig);
+  ASig.ResultX := XNil;
+  LCur := AX;
+  // Through aliases and distinct copies (`type TP1` is a procedural type of
+  // TP1's signature) to the nkProcType, as ProcResultX walks.
+  for var LDepth := 1 to 8 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    LM := FModels[LCur.UnitId];
+    case LM.Tree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := AliasStepX(LCur, LDef);
+      nkProcType:
+        begin
+          if not SigShapeOf(LM, LDef, LCount, ASig.IsFunc) then
+            Exit;
+          ASig.Mid := LCur.UnitId;
+          ASig.Inst := LCur.Inst;
+          ASig.Params := SigParamsOf(LM, LDef);
+          if ASig.IsFunc then
+            ASig.ResultX := ProcResultX(LCur, True);
+          ASig.Kind := ProcTypeKind(LM, LDef);
+          ASig.Conv := DirectiveConvOf(LM, LDef);
+          Exit(True);
+        end;
+    else
+      Exit;
+    end;
+  end;
+end;
+
+function TPasSemaProject.RoutineSigX(AMid, ASym: Integer;
+  out ASig: TPasProcSig): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+  LList: TSemaSymList;
+begin
+  ASig := Default(TPasProcSig);
+  ASig.ResultX := XNil;
+  ASig.Mid := AMid;
+  ASig.Inst := NIL_INST;
+  LM := FModels[AMid];
+  Result := LM.Symbols[ASym].Kind = skRoutine;
+  if not Result then
+    Exit;
+  ASig.Kind := RoutineProcKind(LM, ASym, ASig.Conv);
+  LScope := LM.Symbols[ASym].MemberScope;
+  if LScope <> NIL_SCOPE then
+  begin
+    LList := LM.Scopes[LScope].Symbols;
+    for var LI := 0 to LList.Count - 1 do
+      if LM.Symbols[LList[LI]].Kind = skParam then
+        ASig.Params := ASig.Params + [LList[LI]];
+  end;
+  ASig.IsFunc := LM.Symbols[ASym].TypeNode <> NIL_NODE;
+  if ASig.IsFunc then
+    ASig.ResultX := DeclTypeX(AMid, ASym);
+end;
+
+function TPasSemaProject.ProcSigsMeetX(const A, B: TPasProcSig): Boolean;
+
+  // Is the parameter's type written as a NAME - one type wherever it is
+  // written? An inline `array of T` is a type of its own declaration.
+  function NamedType(const S: TPasProcSig; P: Integer): Boolean;
+  var
+    LNode: Integer;
+  begin
+    LNode := FModels[S.Mid].Symbols[P].TypeNode;
+    Result := (LNode <> NIL_NODE) and
+      (FModels[S.Mid].Tree.Nodes[LNode].Kind in [nkIdent, nkMember,
+       nkTypeArgs]);
+  end;
+
+  // Readable and closed: a type that mentions an open generic parameter
+  // (OpenX - `TArray<T>` of a generic method's `TGetListFunc<T>`, System.Rtti's
+  // GetObjectListInVisOrder<T>(_GetDeclaredFields)) is not compared.
+  function Comparable(const AX: TSemaXType): Boolean;
+  begin
+    Result := XValid(AX) and not OpenX(AX);
+  end;
+
+var
+  LA, LB: TSemaXType;
+  LModeA, LModeB: Integer;
+  LTypedA, LTypedB: Boolean;
+begin
+  Result := False;
+  if (Length(A.Params) <> Length(B.Params)) or (A.IsFunc <> B.IsFunc) or
+     ((A.Conv >= 0) and (B.Conv >= 0) and (A.Conv <> B.Conv)) then
+    Exit;
+  for var LI := 0 to High(A.Params) do
+  begin
+    LModeA := ParamModeOf(FModels[A.Mid], A.Params[LI]);
+    LModeB := ParamModeOf(FModels[B.Mid], B.Params[LI]);
+    if (LModeA >= 0) and (LModeB >= 0) and (LModeA <> LModeB) then
+      Exit;
+    // An untyped parameter (`const Buffer`) against a typed one.
+    LTypedA := FModels[A.Mid].Symbols[A.Params[LI]].TypeNode <> NIL_NODE;
+    LTypedB := FModels[B.Mid].Symbols[B.Params[LI]].TypeNode <> NIL_NODE;
+    if LTypedA <> LTypedB then
+      Exit;
+    if LTypedA and NamedType(A, A.Params[LI]) and NamedType(B, B.Params[LI]) then
+    begin
+      LA := SubstX(DeclTypeX(A.Mid, A.Params[LI]), A.Inst, 0);
+      LB := SubstX(DeclTypeX(B.Mid, B.Params[LI]), B.Inst, 0);
+      if Comparable(LA) and Comparable(LB) and
+         not XSameType(CanonTypeX(LA), CanonTypeX(LB)) then
+        Exit;
+    end;
+  end;
+  Result := not (A.IsFunc and Comparable(A.ResultX) and
+    Comparable(B.ResultX) and
+    not XSameType(CanonTypeX(A.ResultX), CanonTypeX(B.ResultX)));
+end;
+
+function TPasSemaProject.ProcSigFitX(const ADst, ASrc: TPasProcSig;
+  out ARank: Integer): Integer;
+var
+  LConv: TSemaProcConv;
+begin
+  ARank := 0;
+  if not ProcKindsMeet(ASrc.Kind, ADst.Kind, LConv) or
+     not ProcSigsMeetX(ADst, ASrc) then
+    Exit(-1);
+  ARank := ProcConvRank(LConv);
+  Result := 1;
 end;
 
 function TPasSemaProject.ArgFitX(const AArgX, AParX: TSemaXType;
@@ -15250,7 +15469,7 @@ begin
   // implements, over Pointer; out where it does not convert - an unrelated
   // class, an interface no class of its chain lists (`ShowHint(Self)`), an
   // interface to a class or a pointer, nil to a Variant or a string.
-  if LArgCat in [tcNil, tcClass, tcInterface] then
+  if LArgCat in [tcNil, tcClass, tcInterface, tcPointer] then
     case XRefConvX(ACanonParX, ACanonArgX, LParCat, LArgCat, LRank,
            LUserRank) of
       -1:
@@ -15883,6 +16102,12 @@ var
   // read once for all of a call's candidates, like LArrArg.
   LArgConvCore: Integer;
   LArgConv: TSemaArgConv;
+  // The argument node ProcArgScore read last, the routine it names (LDesigSym
+  // NIL_SYM: none) and whether one of that routine's overloads can be called
+  // with no argument (LDesigBare), whether its type is procedural
+  // (LDesigProcVal): read once for all of a call's candidates.
+  LDesigCore, LDesigMid, LDesigSym: Integer;
+  LDesigBare, LDesigProcVal: Boolean;
   // The `[...]` a SET parameter read last (ReadSetArg) and its node - the
   // call's brackets, or a true constant's (SetConstArgX); LSetIsConst: the
   // node names such a constant. Read once for all of a call's candidates,
@@ -16523,6 +16748,166 @@ var
       end;
     end;
 
+    // The routine the argument node ACore names, if it is a routine
+    // designator - a bare or qualified name, `DoIt<Integer>` - into
+    // LDesigMid / LDesigSym (NIL_SYM: none), and LDesigBare: one overload of
+    // its set needs no argument, so the name may be a call. Read once per
+    // argument node (LDesigCore), with LDesigProcVal: the argument's type
+    // ACanonArgX is procedural.
+    procedure ReadDesignator(ACore: Integer; const ACanonArgX: TSemaXType);
+    var
+      LMid, LSym, LCand, LReq, LTot, LHops: Integer;
+      LVariadic: Boolean;
+    begin
+      if ACore = LDesigCore then
+        Exit;
+      LDesigCore := ACore;
+      LDesigSym := NIL_SYM;
+      LDesigBare := False;
+      LDesigProcVal := XCatOf(ACanonArgX) = tcProc;
+      if not (LM.Tree.Nodes[ACore].Kind in [nkIdent, nkMember, nkTypeArgs]) or
+         not TargetSym(ACore, LMid, LSym) or
+         (FModels[LMid].Symbols[LSym].Kind <> skRoutine) or
+         (sfBuiltin in FModels[LMid].Symbols[LSym].Flags) or
+         IsConstructorSym(LMid, LSym) then
+        Exit;
+      LDesigMid := LMid;
+      // The head of the routine's set in its scope: a value position names
+      // every overload, the target type picks (n5: GO for TP1 / TPs).
+      LDesigSym := FModels[LMid].FindLocal(FModels[LMid].Symbols[LSym].Scope,
+        FModels[LMid].Symbols[LSym].NameLower);
+      if (LDesigSym = NIL_SYM) or
+         (FModels[LMid].Symbols[LDesigSym].Kind <> skRoutine) then
+        LDesigSym := LSym;
+      LCand := LDesigSym;
+      LHops := 0;
+      while (LCand <> NIL_SYM) and (LHops < 64) and
+            (FModels[LMid].Symbols[LCand].Kind = skRoutine) do
+      begin
+        if RoutineArity(LMid, LCand, LReq, LTot, LVariadic) and (LReq = 0) then
+        begin
+          LDesigBare := True;
+          Break;
+        end;
+        LCand := FModels[LMid].Symbols[LCand].NextOverload;
+        Inc(LHops);
+      end;
+    end;
+
+    // A procedural value against the parameter type ACanonParX (6.3.1,
+    // 6.6.1, 17.1.1; local/type-conv-2026-11/n5), its fit in AScore, or False
+    // where the rule has nothing to say:
+    // - a routine designator for a procedural parameter: the best overload of
+    //   its set whose signature meets the parameter's (ProcSigFitX: a plain
+    //   or method type of it, then a `reference to` one), out when none does;
+    //   for any other parameter (not unknown) out when no overload can be
+    //   called with no argument - `F(GF1)` is E2035 for F(Integer) - and a
+    //   procedure always (F(Variant) too);
+    // - a value of procedural type (a variable, a field, a call's result) for
+    //   another procedural type: by the two signatures (its own type is the
+    //   exact match, decided by ArgFitCanonX); for any other parameter the
+    //   value a parameterless function type's call gives - of the
+    //   parameter's type pcResultExact, else that result's own conversion -
+    //   and out for a procedure or a function needing an argument.
+    function ProcArgScore(ACore: Integer; const ACanonArgX, ACanonParX:
+      TSemaXType; out AScore: Integer): Boolean;
+    var
+      LDst, LSrc: TPasProcSig;
+      LParCat: TSemaTypeCat;
+      LCand, LHops, LFit, LRank, LBest, LBestRank: Integer;
+      LResX, LResCanon: TSemaXType;
+      LConv: TSemaArgConv;
+    begin
+      Result := False;
+      AScore := 0;
+      LParCat := XCatOf(ACanonParX);
+      if FModels[ACanonParX.UnitId].Symbols[ACanonParX.Sym].Kind =
+         skGenericParam then
+        Exit;
+      // ReadDesignator(ACore) has run (ArgScore's gate).
+      begin
+        if LDesigSym <> NIL_SYM then
+        begin
+          if LParCat = tcProc then
+          begin
+            if not ProcTypeSigX(ACanonParX, LDst) then
+              Exit;
+            LBest := -1;
+            LBestRank := 0;
+            LCand := LDesigSym;
+            LHops := 0;
+            while (LCand <> NIL_SYM) and (LHops < 64) and
+                  (FModels[LDesigMid].Symbols[LCand].Kind = skRoutine) do
+            begin
+              // Observed, not derived: a METHOD's set reaches a `reference
+              // to` type through its first overload alone (n5 Set A: O.MO
+              // goes to TR1, not to TRs, while a unit-level GO reaches both).
+              if RoutineSigX(LDesigMid, LCand, LSrc) and
+                 not ((LDst.Kind = pkReference) and (LSrc.Kind = pkMethod) and
+                      (LCand <> LDesigSym)) and
+                 (ProcSigFitX(LDst, LSrc, LRank) > 0) and
+                 ((LBest < 0) or (LRank > LBestRank)) then
+              begin
+                LBest := 1;
+                LBestRank := LRank;
+              end;
+              LCand := FModels[LDesigMid].Symbols[LCand].NextOverload;
+              Inc(LHops);
+            end;
+            AScore := ScaledFit(2 * LBest, LBestRank);
+            Exit(True);
+          end;
+          if (LParCat <> tcUnknown) and not LDesigBare then
+          begin
+            AScore := -1;
+            Exit(True);
+          end;
+          Exit;
+        end;
+      end;
+      if not LDesigProcVal then
+        Exit;
+      if LParCat = tcProc then
+      begin
+        if XSameType(ACanonArgX, ACanonParX) or
+           not ProcTypeSigX(ACanonParX, LDst) or
+           not ProcTypeSigX(ACanonArgX, LSrc) then
+          Exit;
+        AScore := ScaledFit(2 * ProcSigFitX(LDst, LSrc, LRank), LRank);
+        Exit(True);
+      end;
+      if LParCat = tcUnknown then
+        Exit;
+      // The call the value's name makes: none for a procedure or a function
+      // needing an argument (E2250, E2035).
+      if not ProcTypeSigX(ACanonArgX, LSrc) then
+        Exit;
+      LResX := ProcResultX(ACanonArgX, False);
+      if not XValid(LResX) then
+      begin
+        if not LSrc.IsFunc or XValid(ProcResultX(ACanonArgX, True)) then
+        begin
+          AScore := -1;
+          Exit(True);
+        end;
+        Exit;
+      end;
+      LResCanon := CanonTypeX(LResX);
+      if XSameType(LResX, ACanonParX) or XSameType(LResCanon, ACanonParX) then
+      begin
+        AScore := ScaledFit(2, ProcConvRank(pcResultExact));
+        Exit(True);
+      end;
+      LConv := ArgConvX(AId, ACore, LResX);
+      LFit := ArgFitCanonX(LResX, ACanonParX, LResCanon, ACanonParX, LM.Tree,
+        ACore, False, False, @LConv, LRank);
+      if LFit = 2 then
+        AScore := ScaledFit(2, ProcConvRank(pcResultExact))
+      else
+        AScore := ScaledFit(2 * LFit, LRank);
+      Result := True;
+    end;
+
     // One argument against the parameter type AParX: AArg its node, or
     // NIL_NODE for a comparison an nkAmbiguous stands for (16.3.1) - typed
     // AArgX, with no node shape to read. A fit on the doubled scale of
@@ -16610,6 +16995,18 @@ var
            (XCatOf(LParX) = tcProc) and
            not AnonLiteralFitsX(LM, AId, LCore, LParX) then
           Exit(-1);
+        // A routine's name or a procedural value (ProcArgScore). Asked for a
+        // procedural parameter, a procedural value, or a name - the shapes
+        // the rule reads; a by-reference parameter takes no conversion.
+        if not LClassRef and not AOpenArr and not AByRef and
+           XValid(LParX) then
+        begin
+          ReadDesignator(LCore, LCanonArgX);
+          if ((LDesigSym <> NIL_SYM) or LDesigProcVal or
+              (XCatOf(LCanonParX) = tcProc)) and
+             ProcArgScore(LCore, LCanonArgX, LCanonParX, LFit) then
+            Exit(LFit);
+        end;
       end;
       // A `[...]` for a SET parameter, and a true constant whose value is one
       // (`const KS = [e1, e2]`): by its elements (SetCtorFitX). Such a
@@ -16985,6 +17382,7 @@ var
     end;
     LSetArgCore := NIL_NODE;
     LArgConvCore := NIL_NODE;
+    LDesigCore := NIL_NODE;
     LBestScore := -1;
     ABestMid := -1;
     ABestSym := NIL_SYM;
@@ -18701,6 +19099,7 @@ begin
   LArrArgCore := NIL_NODE;
   LArrArg := nil;
   LArgConvCore := NIL_NODE;
+  LDesigCore := NIL_NODE;
   LSetArgCore := NIL_NODE;
   LSetArg := nil;
   if LProbe <> nil then

@@ -247,6 +247,47 @@ type
   // Did the project's with pass type every target of with statement AWith?
   TSemaWithTypedFunc = reference to function(AWith: Integer): Boolean;
 
+  { The three procedural kinds (6.6.1): a plain procedural type (a routine's
+    address), a method pointer (`of object`), a `reference to` type. A
+    routine designator is plain or a method by where it is declared
+    (RoutineProcKind); pkUnknown where that cannot be read (a demoted
+    model's `static`), which never rejects. }
+  TSemaProcKind = (pkPlain, pkMethod, pkReference, pkUnknown);
+
+  { A procedural value's conversion to a procedural parameter, or the call
+    a parameterless function's name makes (6.3.1, 6.6.1, 17.1.1;
+    local/type-conv-2026-11/n5), best first:
+    - pcResultExact: the CALLED result of a procedural variable of a
+      parameterless function type is of the parameter's type - below the
+      variable's own type (an identical match), above the rest (a TF0 =
+      function: Integer variable takes F(TF0) over F(Integer) over
+      F(TRF0));
+    - pcSameSig: a plain or method type of the same signature, not the
+      value's own type - a routine for any of them (all tie: G1 for TP1 /
+      `type TP1` is E2251), a variable for a distinct type of its signature
+      (a TP1 for `type TP1`);
+    - pcToReference: a `reference to` type of the same signature (every one
+      ties: TR1 / TProc<Integer>);
+    - pcRefCopy: another `reference to` type of the signature for a
+      `reference to` value - an assignment takes it, an overload set never
+      (E2250, alone too); scored as a conversion below the rest so that a
+      lone non-overloaded parameter keeps its call.
+    Each ranks above every built-in conversion of a parameterless function's
+    called result (ProcConvRank): a TF0 routine's name takes F(TF0) and
+    F(TRF0) over F(Int64), F(Byte), F(Double), F(Variant). }
+  TSemaProcConv = (pcResultExact, pcSameSig, pcToReference, pcRefCopy);
+
+  { A procedural signature on one unit's symbols (the unit typer's
+    TPasProcSig): the parameter symbols in order, a function's result type
+    symbol (NIL_SYM unbound), the kind and the calling convention
+    (DirectiveConvOf; -1 unread). }
+  TSemaSymSig = record
+    Params: TArray<Integer>;
+    IsFunc: Boolean;
+    ResultSym, Conv: Integer;
+    Kind: TSemaProcKind;
+  end;
+
   TPasSemaTyper = class
   private
     M: TPasSemaModel;
@@ -358,6 +399,19 @@ type
       ranks below 0 here (RefConvRank - 32), above the user conversions. }
     function RefConvSym(ADst, ASrc: Integer; D, S: TSemaTypeCat;
       out ARank, AUserRank: Integer): Integer;
+    { Procedural types on this unit's symbols - TPasSemaProject's
+      ProcTypeSigX, RoutineSigX, ProcSigsMeetX: the nkProcType a type of
+      this unit is (through weak aliases and distinct copies), the
+      signature of one or of a routine, two signatures meeting (a type this
+      unit does not bind meets anything). ProcArgSym is CrossType's
+      ProcArgScore: a routine's name or a procedural value against APt,
+      True with the fit (1 or -1) and rank when the rule decides. }
+    function ProcTypeDefOf(ASym: Integer): Integer;
+    function ProcTypeSigSym(ASym: Integer; out ASig: TSemaSymSig): Boolean;
+    function RoutineSigSym(ASym: Integer; out ASig: TSemaSymSig): Boolean;
+    function ProcSigsMeetSym(const A, B: TSemaSymSig): Boolean;
+    function ProcArgSym(ACore, AAt, APt: Integer; AParCat: TSemaTypeCat;
+      out AFit, ARank: Integer): Boolean;
     // The conversion kind of a parameter of type ASym (ConvKindOf; PChar /
     // PAnsiChar by name), or of an argument of that type, node ANode
     // (ConvArgKindOf, with its facts in AFacts).
@@ -491,7 +545,8 @@ function IsScalarToReference(ADst, ASrc: TSemaTypeCat): Boolean;
   rejects it (`Make(1, procedure begin end)` / `Make(1, Noop)` take the
   `reference to procedure` overload over `B: Boolean = False`, probe-b32 P1);
   a `[...]` (nkSetCtor) rejects what IsBracketToScalar names. A generic
-  parameter, a Variant and an unknown category never reject.
+  parameter and an unknown category never reject; a Variant rejects the
+  procedural values too (n5 Set A: E2250).
 
   ArgCatRejects - decided on the two categories: IsScalarToReference,
   ScalarEnumMismatch, or an ordinal / float / Char value for an array.
@@ -758,10 +813,13 @@ type
     ancestors), to the untyped Pointer; an interface to an ancestor
     interface, to Variant; nil to a pointer, a procedural type, a class, an
     interface, a class reference, a dynamic array. A `reference to` type is
-    an interface here (nil ranks it as one of depth 1). }
+    an interface here (nil ranks it as one of depth 1). An untyped Pointer
+    value - a variable, `@X` - to a typed pointer, a plain procedural type, a
+    class, a class reference (rcPtr*, n5). }
   TSemaRefConv = (rcClassUp, rcClassIntf, rcClassPointer, rcIntfUp,
     rcIntfVariant, rcNilPointer, rcNilTypedPointer, rcNilProc, rcNilClass,
-    rcNilIntf, rcNilClassRef, rcNilDynArray);
+    rcNilIntf, rcNilClassRef, rcNilDynArray, rcPtrTypedPointer, rcPtrProc,
+    rcPtrClass, rcPtrClassRef);
 
 { The rank of a reference conversion AConv (a lossless built-in one, 1 ..
   31, above every user conversion of the value and below no other built-in
@@ -776,7 +834,11 @@ type
   - an interface: its ancestors, nearer first > Variant / OleVariant;
   - nil: Pointer > a typed pointer > a plain or `of object` procedural type >
     a class, deeper first > an interface, deeper first > a class reference
-    > a dynamic array.
+    > a dynamic array;
+  - an untyped Pointer value: Pointer > a typed pointer > a plain procedural
+    type > a class deeper first, a class reference between TObject (AStep
+    0) and its descendants; no interface, method pointer or `reference to`
+    type (n3, n5 Set B).
   Where dcc ties (two unrelated interfaces, two classes off one chain) a
   depth decides here: a call between such candidates is E2251 in dcc, so
   no code that compiles meets it. }
@@ -812,6 +874,51 @@ function MayFoldConvConst(const ATree: TPasTree; ANode: Integer): Boolean;
   to it: `TryTextToValue(S, V, D)` for a Single V calls the `var AValue:
   Single` overload beside the `var AValue: Double` one. }
 function ParamIsByRef(const AModel: TPasSemaModel; ASym: Integer): Boolean;
+
+{ The rank of the procedural conversion AConv: above the lossless tier of
+  the built-in ranking (CRankLossless + 31) and below 1024 (CConvScale's
+  bound for a rank). }
+function ProcConvRank(AConv: TSemaProcConv): Integer;
+
+{ Does a value of procedural kind AFrom go to a parameter of kind ATo whose
+  signature it shares, and by which conversion (AConv)? A plain routine or
+  type goes to a plain type and a `reference to` one, a method to a method
+  pointer and a `reference to` type, a `reference to` value to a `reference
+  to` type alone (pcRefCopy); never plain to `of object` or the reverse
+  (E2009 'method pointer and regular procedure'). pkUnknown on either side
+  goes. }
+function ProcKindsMeet(AFrom, ATo: TSemaProcKind;
+  out AConv: TSemaProcConv): Boolean;
+
+{ The mode of parameter ASym of AModel (6.2): 0 a value, 1 `const`, 2 `var`,
+  3 `out`; -1 when it cannot be read. Two signatures differ by a mode alone
+  (E2009 'Parameter lists differ' for a `const A: Integer` type and a
+  routine taking `A: Integer`). }
+function ParamModeOf(const AModel: TPasSemaModel; ASym: Integer): Integer;
+
+{ The calling convention the directives under ANode (an nkProcType, an
+  nkRoutine) name - the last one written wins (6.5.1): 0 register (none
+  written), 1 pascal, 2 cdecl, 3 stdcall (and winapi), 4 safecall; -1 when
+  the text cannot be read (a demoted model). Two conventions differ even on
+  Win64 (E2009 'Calling conventions differ', n5). }
+function DirectiveConvOf(const AModel: TPasSemaModel; ANode: Integer): Integer;
+
+{ The procedural kind of the nkProcType ADef of AModel (its Aux: 1 `of
+  object`, 2 `reference to`). }
+function ProcTypeKind(const AModel: TPasSemaModel; ADef: Integer): TSemaProcKind;
+
+{ The procedural kind of the routine ASym of AModel as a value: a method -
+  an instance method or a non-static class method of a class, record or
+  object - is one (pkMethod: `of object`), a unit-level or nested routine
+  and a static class method plain (n5 Set A: TC.SM1 goes to TP1, TC.CM1 to
+  TM1); pkUnknown when `static` cannot be read. AConv: its convention
+  (DirectiveConvOf of its nkRoutine). }
+function RoutineProcKind(const AModel: TPasSemaModel; ASym: Integer;
+  out AConv: Integer): TSemaProcKind;
+
+{ The nkRoutine a routine symbol ASym of AModel is declared by (its
+  declaration node's), NIL_NODE when there is none. }
+function RoutineNodeOf(const AModel: TPasSemaModel; ASym: Integer): Integer;
 
 { An argument's score on a candidate's scale (CConvScale) from its fit AFit
   on the doubled scale (CtorElemFit) and, for a conversion fit, its rank
@@ -1201,8 +1308,10 @@ begin
   Result := False;
   if AParIsGenericParam then
     Exit;
+  // Variant takes neither (E2250; n5 Set A: `procedure begin end`, G0,
+  // O.M0).
   if ((ACoreKind = nkAnonMethod) or AIsProcDesig) and
-     not (AParCat in [tcProc, tcVariant, tcUnknown]) then
+     not (AParCat in [tcProc, tcUnknown]) then
     Exit(True);
   if (ACoreKind = nkSetCtor) and IsBracketToScalar(AParCat) then
     Exit(True);
@@ -1245,9 +1354,11 @@ begin
   // (`ShowHint(Self)` takes ShowHint(Control: TControl) beside the TRect
   // overload; dcc64 E2010 for each, 6.3.1). An interface TYPE NAME, a
   // TGUID (`Supports(X, IFoo)`), is the scorers' own case before this.
+  // nil too: a record takes it through an Implicit from a pointer, a class,
+  // an interface or a procedural type alone (6.3.1; n5 Set A: TMethod).
   if (AParCat = tcRecord) and
      (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum, tcClass,
-      tcPointer, tcSet, tcInterface]) then
+      tcPointer, tcSet, tcInterface, tcNil]) then
     Exit(not AParConv);
   // An array against a record, class or interface, either way round.
   Result := ((AParCat = tcArray) and
@@ -1665,6 +1776,17 @@ begin
       Result := 16 + Min(AStep, 9);
     rcNilClassRef:
       Result := 6;
+    rcPtrTypedPointer:
+      Result := 29;
+    rcPtrProc:
+      Result := 27;
+    rcPtrClass:
+      if AStep = 0 then
+        Result := 16
+      else
+        Result := 17 + Min(AStep, 8);
+    rcPtrClassRef:
+      Result := 17;
   else
     Result := 1;
   end;
@@ -1729,6 +1851,153 @@ begin
     (AModel.Tree.Nodes[LParam].Flags * [nfVar, nfOut] <> []);
 end;
 
+function ProcConvRank(AConv: TSemaProcConv): Integer;
+begin
+  case AConv of
+    pcResultExact: Result := 1010;
+    pcSameSig: Result := 1000;
+    pcToReference: Result := 990;
+  else
+    Result := 980;
+  end;
+end;
+
+function ProcKindsMeet(AFrom, ATo: TSemaProcKind;
+  out AConv: TSemaProcConv): Boolean;
+begin
+  AConv := pcSameSig;
+  Result := True;
+  if (AFrom = pkUnknown) or (ATo = pkUnknown) then
+  begin
+    if ATo = pkReference then
+      AConv := pcToReference;
+    Exit;
+  end;
+  if AFrom = pkReference then
+  begin
+    AConv := pcRefCopy;
+    Exit(ATo = pkReference);
+  end;
+  if ATo = pkReference then
+    AConv := pcToReference
+  else
+    Result := AFrom = ATo;
+end;
+
+function ParamModeOf(const AModel: TPasSemaModel; ASym: Integer): Integer;
+var
+  LDecl, LParam: Integer;
+  LFlags: TPasNodeFlags;
+begin
+  Result := -1;
+  if (ASym < 0) or (ASym >= AModel.SymCount) or
+     (AModel.Symbols[ASym].Kind <> skParam) then
+    Exit;
+  LDecl := AModel.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LParam := AModel.Tree.Nodes[LDecl].Parent;
+  if (LParam = NIL_NODE) or (AModel.Tree.Nodes[LParam].Kind <> nkParam) then
+    Exit;
+  LFlags := AModel.Tree.Nodes[LParam].Flags;
+  if nfVar in LFlags then
+    Result := 2
+  else if nfOut in LFlags then
+    Result := 3
+  else if nfConst in LFlags then
+    Result := 1
+  else
+    Result := 0;
+end;
+
+function DirectiveConvOf(const AModel: TPasSemaModel; ANode: Integer): Integer;
+var
+  LChild, LVis: Integer;
+
+  function IsW(const AWord: string): Boolean;
+  begin
+    Result := AModel.Tree.Source.VisibleTextEquals(LVis, AWord);
+  end;
+
+begin
+  Result := 0;
+  if ANode = NIL_NODE then
+    Exit;
+  if AModel.Demoted then
+    Exit(-1);
+  LChild := AModel.Tree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LChild].Kind = nkDirective then
+    begin
+      LVis := AModel.Tree.Nodes[LChild].FirstToken;
+      if (LVis < 0) or (LVis > High(AModel.Tree.Source.Visible)) then
+        Exit(-1);
+      if IsW('register') then
+        Result := 0
+      else if IsW('pascal') then
+        Result := 1
+      else if IsW('cdecl') then
+        Result := 2
+      else if IsW('stdcall') or IsW('winapi') then
+        Result := 3
+      else if IsW('safecall') then
+        Result := 4;
+    end;
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+function ProcTypeKind(const AModel: TPasSemaModel; ADef: Integer): TSemaProcKind;
+begin
+  case AModel.Tree.Nodes[ADef].Aux of
+    1: Result := pkMethod;
+    2: Result := pkReference;
+  else
+    Result := pkPlain;
+  end;
+end;
+
+function RoutineNodeOf(const AModel: TPasSemaModel; ASym: Integer): Integer;
+begin
+  Result := AModel.Symbols[ASym].DeclNode;
+  while (Result <> NIL_NODE) and
+        (AModel.Tree.Nodes[Result].Kind <> nkRoutine) do
+    Result := AModel.Tree.Nodes[Result].Parent;
+end;
+
+function RoutineProcKind(const AModel: TPasSemaModel; ASym: Integer;
+  out AConv: Integer): TSemaProcKind;
+var
+  LRoutine, LScope, LChild, LVis: Integer;
+begin
+  Result := pkPlain;
+  LRoutine := RoutineNodeOf(AModel, ASym);
+  AConv := DirectiveConvOf(AModel, LRoutine);
+  LScope := AModel.Symbols[ASym].Scope;
+  if (LScope = NIL_SCOPE) or (AModel.Scopes[LScope].StructSym = NIL_SYM) then
+    Exit;
+  Result := pkMethod;
+  // A class method (`class` sets Aux 1 on its nkRoutine) is plain when it
+  // says `static`.
+  if (LRoutine = NIL_NODE) or (AModel.Tree.Nodes[LRoutine].Aux <> 1) then
+    Exit;
+  if AModel.Demoted then
+    Exit(pkUnknown);
+  LChild := AModel.Tree.Nodes[LRoutine].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if AModel.Tree.Nodes[LChild].Kind = nkDirective then
+    begin
+      LVis := AModel.Tree.Nodes[LChild].FirstToken;
+      if (LVis >= 0) and (LVis <= High(AModel.Tree.Source.Visible)) and
+         AModel.Tree.Source.VisibleTextEquals(LVis, 'static') then
+        Exit(pkPlain);
+    end;
+    LChild := AModel.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
 function ScaledFit(AFit, ARank: Integer): Integer;
 begin
   if AFit < 0 then
@@ -1743,7 +2012,7 @@ begin
   // ArgStructRejects' cases, without the operators.
   Result := ((AParCat = tcRecord) and
              (AArgCat in [tcRecord, tcInteger, tcFloat, tcBoolean, tcChar,
-              tcEnum, tcClass, tcPointer, tcSet, tcInterface])) or
+              tcEnum, tcClass, tcPointer, tcSet, tcInterface, tcNil])) or
             ((AParCat = tcArray) and
              (AArgCat in [tcRecord, tcClass, tcInterface])) or
             ((AArgCat = tcArray) and
@@ -4919,7 +5188,7 @@ function TPasSemaTyper.RefConvSym(ADst, ASrc: Integer; D, S: TSemaTypeCat;
   out ARank, AUserRank: Integer): Integer;
 var
   LConv: TSemaRefConv;
-  LStep, LShift: Integer;
+  LStep, LShift, LDef: Integer;
 
   function IsPointerSym(ASym: Integer): Boolean;
   begin
@@ -5016,11 +5285,58 @@ begin
             LConv := rcNilPointer
           else
             LConv := rcNilTypedPointer;
+        // A procedural type of this unit: a `reference to` one ranks as an
+        // interface of depth 1, as in XRefConvX.
+        tcProc:
+          begin
+            LDef := ProcTypeDefOf(ADst);
+            if LDef = NIL_NODE then
+              Exit(0);
+            LConv := rcNilProc;
+            if ProcTypeKind(M, LDef) = pkReference then
+            begin
+              LConv := rcNilIntf;
+              LStep := 1;
+            end;
+          end;
         tcVariant, tcString, tcInteger, tcFloat, tcBoolean, tcChar, tcEnum,
         tcSet:
           Exit(-1);
       else
         Exit(0);   // a class, an interface: against another unit's, unknown
+      end;
+    // An untyped Pointer value (XRefConvX): a typed pointer, a plain
+    // procedural type, a class (deeper first), a class reference; no
+    // interface, method pointer, `reference to` type or Variant.
+    tcPointer:
+      begin
+        if not IsPointerSym(ASrc) then
+          Exit(0);
+        case D of
+          tcPointer:
+            LConv := rcPtrTypedPointer;
+          tcProc:
+            begin
+              LDef := ProcTypeDefOf(ADst);
+              if LDef = NIL_NODE then
+                Exit(0);
+              if ProcTypeKind(M, LDef) <> pkPlain then
+                Exit(-1);
+              LConv := rcPtrProc;
+            end;
+          tcClass:
+            begin
+              LConv := rcPtrClass;
+              LStep := Depth(ADst);
+            end;
+          tcClassOf:
+            LConv := rcPtrClassRef;
+          tcInterface, tcVariant, tcInteger, tcFloat, tcBoolean, tcChar,
+          tcEnum, tcSet:
+            Exit(-1);
+        else
+          Exit(0);
+        end;
       end;
     tcClass:
       case D of
@@ -5083,6 +5399,250 @@ begin
   ARank := RefConvRank(LConv, LStep) - LShift;
   AUserRank := RefUserRank(LConv);
   Result := 1;
+end;
+
+function TPasSemaTyper.ProcTypeDefOf(ASym: Integer): Integer;
+var
+  LDef: Integer;
+begin
+  Result := NIL_NODE;
+  for var LDepth := 1 to 8 do
+  begin
+    ASym := WeakAliasEnd(ASym);
+    if (ASym = NIL_SYM) or (M.Symbols[ASym].Kind <> skType) then
+      Exit;
+    LDef := TypeDefNode(ASym);
+    if LDef = NIL_NODE then
+      Exit;
+    if Kind(LDef) = nkProcType then
+      Exit(LDef);
+    // A distinct copy, `type TP1`: TP1's signature.
+    if not (Kind(LDef) in [nkIdent, nkMember]) then
+      Exit;
+    ASym := Head(LDef);
+  end;
+end;
+
+function TPasSemaTyper.ProcTypeSigSym(ASym: Integer;
+  out ASig: TSemaSymSig): Boolean;
+var
+  LDef, LScope, LChild: Integer;
+begin
+  ASig := Default(TSemaSymSig);
+  ASig.ResultSym := NIL_SYM;
+  LDef := ProcTypeDefOf(ASym);
+  Result := LDef <> NIL_NODE;
+  if not Result then
+    Exit;
+  LScope := NIL_SCOPE;
+  if LDef <= High(M.NodeScope) then
+    LScope := M.NodeScope[LDef];
+  if (LScope = NIL_SCOPE) or (M.Scopes[LScope].OwnerNode <> LDef) then
+    Exit(False);
+  ASig.Params := ParamsOf(LScope);
+  LChild := Child(LDef);
+  while LChild <> NIL_NODE do
+  begin
+    if not (Kind(LChild) in [nkParams, nkDirective]) then
+    begin
+      ASig.IsFunc := True;
+      if Kind(LChild) in [nkIdent, nkMember] then
+        ASig.ResultSym := Head(LChild);
+    end;
+    LChild := Sib(LChild);
+  end;
+  ASig.Kind := ProcTypeKind(M, LDef);
+  ASig.Conv := DirectiveConvOf(M, LDef);
+end;
+
+function TPasSemaTyper.RoutineSigSym(ASym: Integer;
+  out ASig: TSemaSymSig): Boolean;
+begin
+  ASig := Default(TSemaSymSig);
+  ASig.ResultSym := NIL_SYM;
+  Result := M.Symbols[ASym].Kind = skRoutine;
+  if not Result then
+    Exit;
+  ASig.Kind := RoutineProcKind(M, ASym, ASig.Conv);
+  if M.Symbols[ASym].MemberScope <> NIL_SCOPE then
+    ASig.Params := ParamsOf(M.Symbols[ASym].MemberScope);
+  ASig.IsFunc := M.Symbols[ASym].TypeNode <> NIL_NODE;
+  if ASig.IsFunc then
+    ASig.ResultSym := M.Symbols[ASym].TypeSym;
+end;
+
+function TPasSemaTyper.ProcSigsMeetSym(const A, B: TSemaSymSig): Boolean;
+
+  // One type, as far as this unit can tell: both bound, not a generic
+  // parameter, the same after weak aliases and the seeded alias groups.
+  function Differ(ASymA, ASymB: Integer): Boolean;
+  begin
+    Result := False;
+    if (ASymA = NIL_SYM) or (ASymB = NIL_SYM) or
+       (M.Symbols[ASymA].Kind = skGenericParam) or
+       (M.Symbols[ASymB].Kind = skGenericParam) then
+      Exit;
+    Result := PasBuiltinCanonSym(M, WeakAliasEnd(ASymA), FPlatform) <>
+      PasBuiltinCanonSym(M, WeakAliasEnd(ASymB), FPlatform);
+  end;
+
+  function NamedType(P: Integer): Boolean;
+  var
+    LNode: Integer;
+  begin
+    LNode := M.Symbols[P].TypeNode;
+    Result := (LNode <> NIL_NODE) and (Kind(LNode) in [nkIdent, nkMember]);
+  end;
+
+var
+  LModeA, LModeB: Integer;
+begin
+  Result := False;
+  if (Length(A.Params) <> Length(B.Params)) or (A.IsFunc <> B.IsFunc) or
+     ((A.Conv >= 0) and (B.Conv >= 0) and (A.Conv <> B.Conv)) then
+    Exit;
+  for var LI := 0 to High(A.Params) do
+  begin
+    LModeA := ParamModeOf(M, A.Params[LI]);
+    LModeB := ParamModeOf(M, B.Params[LI]);
+    if (LModeA >= 0) and (LModeB >= 0) and (LModeA <> LModeB) then
+      Exit;
+    if (M.Symbols[A.Params[LI]].TypeNode = NIL_NODE) <>
+       (M.Symbols[B.Params[LI]].TypeNode = NIL_NODE) then
+      Exit;
+    if NamedType(A.Params[LI]) and NamedType(B.Params[LI]) and
+       Differ(M.Symbols[A.Params[LI]].TypeSym,
+         M.Symbols[B.Params[LI]].TypeSym) then
+      Exit;
+  end;
+  Result := not (A.IsFunc and Differ(A.ResultSym, B.ResultSym));
+end;
+
+function TPasSemaTyper.ProcArgSym(ACore, AAt, APt: Integer;
+  AParCat: TSemaTypeCat; out AFit, ARank: Integer): Boolean;
+
+  // Does the parameter list AParams need an argument (a parameter without
+  // a default)?
+  function NeedsArg(const AParams: TArray<Integer>): Boolean;
+  begin
+    for var LP in AParams do
+      if not (sfHasDefault in M.Symbols[LP].Flags) then
+        Exit(True);
+    Result := False;
+  end;
+
+var
+  LSym, LCand, LHops, LRank, LFit: Integer;
+  LDst, LSrc: TSemaSymSig;
+  LConv: TSemaProcConv;
+  LBare: Boolean;
+begin
+  Result := False;
+  AFit := 0;
+  ARank := 0;
+  if M.Symbols[APt].Kind = skGenericParam then
+    Exit;
+  // A routine's name: CrossType's ProcArgScore, over this unit's routines.
+  if Kind(ACore) in [nkIdent, nkMember, nkTypeArgs] then
+  begin
+    LSym := Head(ACore);
+    // `C.M1` over a variable: the member its type declares.
+    if (LSym = NIL_SYM) and (Kind(ACore) = nkMember) then
+      LSym := MemberSym(ACore);
+    if (LSym <> NIL_SYM) and (M.Symbols[LSym].Kind = skRoutine) and
+       not (sfBuiltin in M.Symbols[LSym].Flags) and
+       (M.RoutineHead(LSym) <> rhConstructor) then
+    begin
+      LCand := M.FindLocal(M.Symbols[LSym].Scope, M.Symbols[LSym].NameLower);
+      if (LCand = NIL_SYM) or (M.Symbols[LCand].Kind <> skRoutine) then
+        LCand := LSym;
+      LSym := LCand;
+      if AParCat = tcProc then
+      begin
+        if not ProcTypeSigSym(APt, LDst) then
+          Exit;
+        AFit := -1;
+        LHops := 0;
+        while (LCand <> NIL_SYM) and (LHops < 64) and
+              (M.Symbols[LCand].Kind = skRoutine) do
+        begin
+          if RoutineSigSym(LCand, LSrc) and
+             not ((LDst.Kind = pkReference) and (LSrc.Kind = pkMethod) and
+                  (LCand <> LSym)) and
+             ProcKindsMeet(LSrc.Kind, LDst.Kind, LConv) and
+             ProcSigsMeetSym(LDst, LSrc) and
+             ((AFit < 0) or (ProcConvRank(LConv) > ARank)) then
+          begin
+            AFit := 1;
+            ARank := ProcConvRank(LConv);
+          end;
+          LCand := M.Symbols[LCand].NextOverload;
+          Inc(LHops);
+        end;
+        Exit(True);
+      end;
+      if AParCat = tcUnknown then
+        Exit;
+      LBare := False;
+      LHops := 0;
+      while (LCand <> NIL_SYM) and (LHops < 64) and
+            (M.Symbols[LCand].Kind = skRoutine) do
+      begin
+        if (M.Symbols[LCand].MemberScope = NIL_SCOPE) or
+           not NeedsArg(ParamsOf(M.Symbols[LCand].MemberScope)) then
+        begin
+          LBare := True;
+          Break;
+        end;
+        LCand := M.Symbols[LCand].NextOverload;
+        Inc(LHops);
+      end;
+      if not LBare then
+      begin
+        AFit := -1;
+        Exit(True);
+      end;
+      Exit;
+    end;
+  end;
+  // A procedural value: by the two signatures, or the call its name makes.
+  if (AAt = NIL_SYM) or (CatOf(AAt) <> tcProc) or (AParCat = tcUnknown) then
+    Exit;
+  if AParCat = tcProc then
+  begin
+    if (WeakAliasEnd(AAt) = WeakAliasEnd(APt)) or
+       not ProcTypeSigSym(APt, LDst) or not ProcTypeSigSym(AAt, LSrc) then
+      Exit;
+    AFit := -1;
+    if ProcKindsMeet(LSrc.Kind, LDst.Kind, LConv) and
+       ProcSigsMeetSym(LDst, LSrc) then
+    begin
+      AFit := 1;
+      ARank := ProcConvRank(LConv);
+    end;
+    Exit(True);
+  end;
+  if not ProcTypeSigSym(AAt, LSrc) then
+    Exit;
+  if not LSrc.IsFunc or NeedsArg(LSrc.Params) then
+  begin
+    AFit := -1;
+    Exit(True);
+  end;
+  if LSrc.ResultSym = NIL_SYM then
+    Exit;
+  LFit := ScoreArgRanked(NIL_NODE, LSrc.ResultSym, APt, True, LRank);
+  if LFit >= 2 then
+  begin
+    AFit := 1;
+    ARank := ProcConvRank(pcResultExact);
+  end
+  else
+  begin
+    AFit := LFit;
+    ARank := LRank;
+  end;
+  Result := LFit <> 0;
 end;
 
 function TPasSemaTyper.ScoreArgRanked(AArg, AAt, APt: Integer;
@@ -5150,6 +5710,18 @@ begin
     if ArgShapeRejects(Kind(LCore), IsProcDesignator(LCore), LParCat,
        M.Symbols[LPt].Kind = skGenericParam) then
       Exit(-1);
+    // A routine's name or a procedural value (ProcArgSym - CrossType's
+    // ProcArgScore); a by-reference parameter takes no conversion.
+    if ARanked and
+       ((Kind(LCore) in [nkIdent, nkMember, nkTypeArgs]) or
+        (LParCat = tcProc) or
+        ((AAt <> NIL_SYM) and (CatOf(AAt) = tcProc))) and
+       ProcArgSym(LCore, AAt, LPt, LParCat, Result, LRank) then
+    begin
+      if Result > 0 then
+        ARank := LRank;
+      Exit;
+    end;
   end;
   // A number, Variant or string against one: dcc's ranking of the
   // conversion (ConvRank) - ArgFitCanonX's rule.
@@ -5227,7 +5799,7 @@ begin
     end;
     // A class instance, an interface, nil: RefConvSym (ArgFitCanonX's
     // XRefConvX over this unit's types).
-    if CatOf(AAt) in [tcNil, tcClass, tcInterface] then
+    if CatOf(AAt) in [tcNil, tcClass, tcInterface, tcPointer] then
       case RefConvSym(WeakAliasEnd(LPt), WeakAliasEnd(AAt), LParCat,
              CatOf(AAt), LRank, LUserRank) of
         -1:

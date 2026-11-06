@@ -1005,6 +1005,179 @@ const
     '  X := VS(S);'#10 +
     'end;'#10'end.'#10;
 
+  { Procedural types and Pointer values in the unit's own typer (ProcArgSym
+    - the project's ProcArgScore; RefConvSym's Pointer and nil rows; 6.3.1,
+    6.6.1, local/type-conv-2026-11/n5): the cases of SemaProjectSmoke's
+    TestProcConvRanking whose types this unit declares (not WT, WW). The
+    overload dcc does NOT pick is declared first. }
+  SRC_PROC =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TP0 = procedure;'#10 +
+    '  TP1 = procedure(A: Integer);'#10 +
+    '  TP1d = type TP1;'#10 +
+    '  TP1b = procedure(A: Byte);'#10 +
+    '  TP1c = procedure(const A: Integer);'#10 +
+    '  TP1s = procedure(A: Integer) stdcall;'#10 +
+    '  TPs = procedure(const S: string);'#10 +
+    '  TF0 = function: Integer;'#10 +
+    '  TF1 = function(A: Integer): Integer;'#10 +
+    '  TM1 = procedure(A: Integer) of object;'#10 +
+    '  TR1 = reference to procedure(A: Integer);'#10 +
+    '  TRF0 = reference to function: Integer;'#10 +
+    '  TRs = reference to procedure(const S: string);'#10 +
+    '  TC = class'#10 +
+    '    procedure M1(A: Integer);'#10 +
+    '    procedure MO(A: Integer); overload;'#10 +
+    '    procedure MO(const S: string); overload;'#10 +
+    '    class procedure SM1(A: Integer); static;'#10 +
+    '  end;'#10 +
+    'procedure G0;'#10 +
+    'procedure G1(A: Integer);'#10 +
+    'procedure G1s(A: Integer); stdcall;'#10 +
+    'procedure GO(A: Integer); overload;'#10 +
+    'procedure GO(const S: string); overload;'#10 +
+    'function GF0: Integer;'#10 +
+    'function GF1(A: Integer): Integer;'#10 +
+    'function WA(A: TR1): TRA; overload;'#10 +
+    'function WA(A: TP1): TRW; overload;'#10 +
+    'function WB(A: TR1): TRA; overload;'#10 +
+    'function WB(A: TM1): TRW; overload;'#10 +
+    'function WC(A: TR1): TRA; overload;'#10 +
+    'function WC(A: TPs): TRW; overload;'#10 +
+    'function WD(A: TP1d): TRA; overload;'#10 +
+    'function WD(A: TP1): TRW; overload;'#10 +
+    'function WE(A: TR1): TRA; overload;'#10 +
+    'function WE(A: TP1d): TRW; overload;'#10 +
+    'function WF(A: Int64): TRA; overload;'#10 +
+    'function WF(A: TF0): TRW; overload;'#10 +
+    'function WG(A: TF0): TRA; overload;'#10 +
+    'function WG(A: Integer): TRW; overload;'#10 +
+    'function WH(A: Integer): TRA; overload;'#10 +
+    'function WH(A: TF0): TRW; overload;'#10 +
+    'function WI(A: TRF0): TRA; overload;'#10 +
+    'function WI(A: Integer): TRW; overload;'#10 +
+    'function WJ(A: Double): TRA; overload;'#10 +
+    'function WJ(A: TRF0): TRW; overload;'#10 +
+    'function WK(A: TP1b): TRA; overload;'#10 +
+    'function WK(A: TR1): TRW; overload;'#10 +
+    'function WL(A: TP1): TRA; overload;'#10 +
+    'function WL(A: TP1s): TRW; overload;'#10 +
+    'function WM(A: TP1c): TRA; overload;'#10 +
+    'function WM(A: TP1): TRW; overload;'#10 +
+    'function WN(A: TP1): TRA; overload;'#10 +
+    'function WN(A: TM1): TRW; overload;'#10 +
+    'function WO(A: TM1): TRA; overload;'#10 +
+    'function WO(A: TR1): TRW; overload;'#10 +
+    'function WP(A: Integer): TRA; overload;'#10 +
+    'function WP(A: TF1): TRW; overload;'#10 +
+    'function WQ(A: TC): TRA; overload;'#10 +
+    'function WQ(A: TP1): TRW; overload;'#10 +
+    'function WR(A: TM1): TRA; overload;'#10 +
+    'function WR(A: TC): TRW; overload;'#10 +
+    'function WS(A: TR1): TRA; overload;'#10 +
+    'function WS(A: TP1): TRW; overload;'#10 +
+    'function WU(A: TM1): TRA; overload;'#10 +
+    'function WU(A: TP1): TRW; overload;'#10 +
+    'function WV(A: TRs): TRA; overload;'#10 +
+    'function WV(A: TR1): TRW; overload;'#10 +
+    'function WX(A: TObject): TRA; overload;'#10 +
+    'function WX(A: TP1): TRW; overload;'#10 +
+    'function WY(A: Variant): TRA; overload;'#10 +
+    'function WY(A: Integer): TRW; overload;'#10 +
+    'function WZ(A: Variant): TRA; overload;'#10 +
+    'function WZ(A: TP0): TRW; overload;'#10 +
+    'implementation'#10 +
+    'procedure TC.M1(A: Integer); begin end;'#10 +
+    'procedure TC.MO(A: Integer); begin end;'#10 +
+    'procedure TC.MO(const S: string); begin end;'#10 +
+    'class procedure TC.SM1(A: Integer); begin end;'#10 +
+    'procedure G0; begin end;'#10 +
+    'procedure G1(A: Integer); begin end;'#10 +
+    'procedure G1s(A: Integer); stdcall; begin end;'#10 +
+    'procedure GO(A: Integer); begin end;'#10 +
+    'procedure GO(const S: string); begin end;'#10 +
+    'function GF0: Integer; begin Result := 0 end;'#10 +
+    'function GF1(A: Integer): Integer; begin Result := A end;'#10 +
+    'function WA(A: TR1): TRA; begin end;'#10 +
+    'function WA(A: TP1): TRW; begin end;'#10 +
+    'function WB(A: TR1): TRA; begin end;'#10 +
+    'function WB(A: TM1): TRW; begin end;'#10 +
+    'function WC(A: TR1): TRA; begin end;'#10 +
+    'function WC(A: TPs): TRW; begin end;'#10 +
+    'function WD(A: TP1d): TRA; begin end;'#10 +
+    'function WD(A: TP1): TRW; begin end;'#10 +
+    'function WE(A: TR1): TRA; begin end;'#10 +
+    'function WE(A: TP1d): TRW; begin end;'#10 +
+    'function WF(A: Int64): TRA; begin end;'#10 +
+    'function WF(A: TF0): TRW; begin end;'#10 +
+    'function WG(A: TF0): TRA; begin end;'#10 +
+    'function WG(A: Integer): TRW; begin end;'#10 +
+    'function WH(A: Integer): TRA; begin end;'#10 +
+    'function WH(A: TF0): TRW; begin end;'#10 +
+    'function WI(A: TRF0): TRA; begin end;'#10 +
+    'function WI(A: Integer): TRW; begin end;'#10 +
+    'function WJ(A: Double): TRA; begin end;'#10 +
+    'function WJ(A: TRF0): TRW; begin end;'#10 +
+    'function WK(A: TP1b): TRA; begin end;'#10 +
+    'function WK(A: TR1): TRW; begin end;'#10 +
+    'function WL(A: TP1): TRA; begin end;'#10 +
+    'function WL(A: TP1s): TRW; begin end;'#10 +
+    'function WM(A: TP1c): TRA; begin end;'#10 +
+    'function WM(A: TP1): TRW; begin end;'#10 +
+    'function WN(A: TP1): TRA; begin end;'#10 +
+    'function WN(A: TM1): TRW; begin end;'#10 +
+    'function WO(A: TM1): TRA; begin end;'#10 +
+    'function WO(A: TR1): TRW; begin end;'#10 +
+    'function WP(A: Integer): TRA; begin end;'#10 +
+    'function WP(A: TF1): TRW; begin end;'#10 +
+    'function WQ(A: TC): TRA; begin end;'#10 +
+    'function WQ(A: TP1): TRW; begin end;'#10 +
+    'function WR(A: TM1): TRA; begin end;'#10 +
+    'function WR(A: TC): TRW; begin end;'#10 +
+    'function WS(A: TR1): TRA; begin end;'#10 +
+    'function WS(A: TP1): TRW; begin end;'#10 +
+    'function WU(A: TM1): TRA; begin end;'#10 +
+    'function WU(A: TP1): TRW; begin end;'#10 +
+    'function WV(A: TRs): TRA; begin end;'#10 +
+    'function WV(A: TR1): TRW; begin end;'#10 +
+    'function WX(A: TObject): TRA; begin end;'#10 +
+    'function WX(A: TP1): TRW; begin end;'#10 +
+    'function WY(A: Variant): TRA; begin end;'#10 +
+    'function WY(A: Integer): TRW; begin end;'#10 +
+    'function WZ(A: Variant): TRA; begin end;'#10 +
+    'function WZ(A: TP0): TRW; begin end;'#10 +
+    'procedure Test(C: TC; vP1: TP1; vF0: TF0; vRF0: TRF0; P: Pointer);'#10 +
+    'var'#10 +
+    '  X: TRW;'#10 +
+    'begin'#10 +
+    '  X := WA(G1);'#10 +
+    '  X := WB(C.M1);'#10 +
+    '  X := WC(GO);'#10 +
+    '  X := WD(vP1);'#10 +
+    '  X := WE(vP1);'#10 +
+    '  X := WF(GF0);'#10 +
+    '  X := WG(GF0);'#10 +
+    '  X := WH(vF0);'#10 +
+    '  X := WI(vF0);'#10 +
+    '  X := WJ(vF0);'#10 +
+    '  X := WK(G1);'#10 +
+    '  X := WL(G1s);'#10 +
+    '  X := WM(G1);'#10 +
+    '  X := WN(C.M1);'#10 +
+    '  X := WO(G1);'#10 +
+    '  X := WP(GF1);'#10 +
+    '  X := WQ(P);'#10 +
+    '  X := WR(P);'#10 +
+    '  X := WS(nil);'#10 +
+    '  X := WU(TC.SM1);'#10 +
+    '  X := WV(C.MO);'#10 +
+    '  X := WX(@G1);'#10 +
+    '  X := WY(vRF0);'#10 +
+    '  X := WZ(G0);'#10 +
+    'end;'#10'end.'#10;
+
   { The Char-literal and nil exemptions of the assignment check (A4-10,
     A4-11; probe-b32 P1): dcc compiles every line but the last, where an
     operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
@@ -1148,6 +1321,15 @@ begin
   for var LName in ['VA', 'VB', 'VC', 'VD', 'VE', 'VF', 'VG', 'VH', 'VI',
     'VJ', 'VK', 'VL', 'VM', 'VN', 'VO', 'VP', 'VQ', 'VS'] do
     Ok('set ranking (6.3.1, 2.4.1): ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  GModel.Free;
+
+  Analyze(SRC_PROC);
+  for var LName in ['WA', 'WB', 'WC', 'WD', 'WE', 'WF', 'WG', 'WH', 'WI',
+    'WJ', 'WK', 'WL', 'WM', 'WN', 'WO', 'WP', 'WQ', 'WR', 'WS', 'WU', 'WV',
+    'WX', 'WY', 'WZ'] do
+    Ok('procedural ranking (6.3.1, 6.6.1): ' + LName +
+      ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   GModel.Free;
 
