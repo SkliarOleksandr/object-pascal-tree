@@ -790,6 +790,92 @@ const
     '  X := V(SG, DV);'#10 +
     'end;'#10'end.'#10;
 
+  { Classes, interfaces and nil in the unit's own typer (RefConvSym, the
+    project's XRefConvX; 6.3.1, 14.2.1, local/type-conv-2026-11/n3): a
+    nearer ancestor class over a farther one (UA), an unrelated class out
+    (UB), a class over an interface (UC), an interface no class of the
+    chain lists out (UD: TImpl lists IB, not its ancestor IA), a nearer
+    ancestor interface (UE), an unrelated one out (UF), an interface over
+    Variant (UG), an interface to a class out (UH), nil to Pointer over
+    Variant (UI) and to a class with Variant out (UJ), an interface type
+    name to TGUID, not to itself (UK). The overload dcc does NOT pick is
+    declared first. }
+  SRC_REF =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TGUID = record D1: Cardinal; end;'#10 +
+    '  IA = interface end;'#10 +
+    '  IB = interface(IA) end;'#10 +
+    '  IC = interface(IB) end;'#10 +
+    '  IX = interface end;'#10 +
+    '  TBase = class end;'#10 +
+    '  TMid = class(TBase) end;'#10 +
+    '  TDer = class(TMid) end;'#10 +
+    '  TOther = class end;'#10 +
+    '  TImpl = class(TBase, IB) end;'#10 +
+    'function UA(X: TBase): TRA; overload;'#10 +
+    'function UA(X: TMid): TRW; overload;'#10 +
+    'function UB(X: TOther): TRA; overload;'#10 +
+    'function UB(X: TBase): TRW; overload;'#10 +
+    'function UC(const X: IB): TRA; overload;'#10 +
+    'function UC(X: TBase): TRW; overload;'#10 +
+    'function UD(const X: IA): TRA; overload;'#10 +
+    'function UD(X: Pointer): TRW; overload;'#10 +
+    'function UE(const X: IA): TRA; overload;'#10 +
+    'function UE(const X: IB): TRW; overload;'#10 +
+    'function UF(const X: IX): TRA; overload;'#10 +
+    'function UF(const X: IA): TRW; overload;'#10 +
+    'function UG(const X: Variant): TRA; overload;'#10 +
+    'function UG(const X: IB): TRW; overload;'#10 +
+    'function UH(X: TBase): TRA; overload;'#10 +
+    'function UH(const X: Variant): TRW; overload;'#10 +
+    'function UI(const X: Variant): TRA; overload;'#10 +
+    'function UI(X: Pointer): TRW; overload;'#10 +
+    'function UJ(const X: Variant): TRA; overload;'#10 +
+    'function UJ(X: TBase): TRW; overload;'#10 +
+    'function UK(const X: IA): TRA; overload;'#10 +
+    'function UK(const G: TGUID): TRW; overload;'#10 +
+    'implementation'#10 +
+    'function UA(X: TBase): TRA; begin end;'#10 +
+    'function UA(X: TMid): TRW; begin end;'#10 +
+    'function UB(X: TOther): TRA; begin end;'#10 +
+    'function UB(X: TBase): TRW; begin end;'#10 +
+    'function UC(const X: IB): TRA; begin end;'#10 +
+    'function UC(X: TBase): TRW; begin end;'#10 +
+    'function UD(const X: IA): TRA; begin end;'#10 +
+    'function UD(X: Pointer): TRW; begin end;'#10 +
+    'function UE(const X: IA): TRA; begin end;'#10 +
+    'function UE(const X: IB): TRW; begin end;'#10 +
+    'function UF(const X: IX): TRA; begin end;'#10 +
+    'function UF(const X: IA): TRW; begin end;'#10 +
+    'function UG(const X: Variant): TRA; begin end;'#10 +
+    'function UG(const X: IB): TRW; begin end;'#10 +
+    'function UH(X: TBase): TRA; begin end;'#10 +
+    'function UH(const X: Variant): TRW; begin end;'#10 +
+    'function UI(const X: Variant): TRA; begin end;'#10 +
+    'function UI(X: Pointer): TRW; begin end;'#10 +
+    'function UJ(const X: Variant): TRA; begin end;'#10 +
+    'function UJ(X: TBase): TRW; begin end;'#10 +
+    'function UK(const X: IA): TRA; begin end;'#10 +
+    'function UK(const G: TGUID): TRW; begin end;'#10 +
+    'procedure Test(Der: TDer; Impl: TImpl; const JB: IB; const JC: IC);'#10 +
+    'var'#10 +
+    '  X: TRW;'#10 +
+    'begin'#10 +
+    '  X := UA(Der);'#10 +
+    '  X := UB(Der);'#10 +
+    '  X := UC(Impl);'#10 +
+    '  X := UD(Impl);'#10 +
+    '  X := UE(JC);'#10 +
+    '  X := UF(JB);'#10 +
+    '  X := UG(JC);'#10 +
+    '  X := UH(JB);'#10 +
+    '  X := UI(nil);'#10 +
+    '  X := UJ(nil);'#10 +
+    '  X := UK(IA);'#10 +
+    'end;'#10'end.'#10;
+
   { The Char-literal and nil exemptions of the assignment check (A4-10,
     A4-11; probe-b32 P1): dcc compiles every line but the last, where an
     operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
@@ -918,6 +1004,14 @@ begin
   for var LName in ['IA', 'IB', 'IC', 'ID', 'IE', 'IFs', 'IG', 'IH', 'IJ',
     'IM', 'INs', 'IO', 'IP', 'IQ'] do
     Ok('Implicit by signature (6.3.1): ' + LName + ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  GModel.Free;
+
+  Analyze(SRC_REF);
+  for var LName in ['UA', 'UB', 'UC', 'UD', 'UE', 'UF', 'UG', 'UH', 'UI',
+    'UJ', 'UK'] do
+    Ok('class / interface / nil ranking (6.3.1, 14.2.1): ' + LName +
+      ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   GModel.Free;
 

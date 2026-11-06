@@ -326,6 +326,22 @@ type
     // alone, as before the ranking.
     function ScoreArgRanked(AArg, AAt, APt: Integer; ARanked: Boolean;
       out ARank: Integer): Integer;
+    // One heritage hop of the class or interface ASym of this unit: 1 with
+    // its parent in AParent, 0 at one with no heritage clause (the parent
+    // is the implicit root, which no unit but System declares), -1 at a
+    // link this unit cannot follow (a type of another unit, none bound).
+    function HeritageHop(ASym: Integer; out AParent: Integer): Integer;
+    { The project's XRefConvX over this unit's symbols (ADst, ASrc weak
+      alias ends, of the categories D and S): 1 with the rank (RefConvRank)
+      in ARank and a user conversion's through it (RefUserRank) in
+      AUserRank, -1 for a pair that does not convert, 0 when it is no
+      reference pair or the walk leaves the unit. A parameter of another
+      unit has no category here and ranks 0, so a conversion that may rank
+      below such a one - a class to an interface or to Pointer (TObject,
+      another unit's ancestor, wins over both), an interface to Variant -
+      ranks below 0 here (RefConvRank - 32), above the user conversions. }
+    function RefConvSym(ADst, ASrc: Integer; D, S: TSemaTypeCat;
+      out ARank, AUserRank: Integer): Integer;
     // The conversion kind of a parameter of type ASym (ConvKindOf; PChar /
     // PAnsiChar by name), or of an argument of that type, node ANode
     // (ConvArgKindOf, with its facts in AFacts).
@@ -651,6 +667,47 @@ function UserConvLevel(const AArg: TSemaArgConv; AQKind: TSemaConvKind;
   as for a variable of that type: a record with `Implicit(R): Integer` takes
   F(Byte) over F(ShortInt), F(Int64) over F(Double). }
 function UserConvRank(ALevel, AFine: Integer): Integer;
+
+type
+  { A built-in conversion between reference types, which the ranking of
+    numbers and strings (CConvRanks) does not cover (6.3.1, 14.2.1;
+    local/type-conv-2026-11/n3): a class instance to an ancestor class, to
+    an interface its class or an ancestor LISTS (not that interface's
+    ancestors), to the untyped Pointer; an interface to an ancestor
+    interface, to Variant; nil to a pointer, a procedural type, a class, an
+    interface, a class reference, a dynamic array. A `reference to` type is
+    an interface here (nil ranks it as one of depth 1). }
+  TSemaRefConv = (rcClassUp, rcClassIntf, rcClassPointer, rcIntfUp,
+    rcIntfVariant, rcNilPointer, rcNilTypedPointer, rcNilProc, rcNilClass,
+    rcNilIntf, rcNilClassRef, rcNilDynArray);
+
+{ The rank of a reference conversion AConv (a lossless built-in one, 1 ..
+  31, above every user conversion of the value and below no other built-in
+  conversion of it). AStep: for rcClassUp / rcIntfUp the distance to the
+  ancestor (1 the parent), for rcClassIntf / rcNilIntf the target
+  interface's depth below IInterface (0 IInterface itself), for rcNilClass
+  the target class's depth below TObject. The order dcc keeps (n3, Sets
+  A-D, 2,250 calls, none depending on the declaration order):
+  - a class instance: its ancestors, nearer first (TObject last) > the
+    interfaces it implements, an interface over its own ancestors (two
+    unrelated ones tie) > Pointer;
+  - an interface: its ancestors, nearer first > Variant / OleVariant;
+  - nil: Pointer > a typed pointer > a plain or `of object` procedural type >
+    a class, deeper first > an interface, deeper first > a class reference
+    > a dynamic array.
+  Where dcc ties (two unrelated interfaces, two classes off one chain) a
+  depth decides here: a call between such candidates is E2251 in dcc, so
+  no code that compiles meets it. }
+function RefConvRank(AConv: TSemaRefConv; AStep: Integer): Integer;
+
+{ The rank of a user conversion (`class operator Implicit`) whose built-in
+  part is the reference conversion AConv - UserConvRank's levels, below 0
+  as for any value the ranking does not cover: a class to its ancestor or
+  to an interface one lossless level (`Implicit(A: TObject)` and
+  `Implicit(A: IInterface)` tie for a TInterfacedObject), to Pointer one
+  below; an interface to Variant the Variant level; nil to a pointer above
+  nil to a class above nil to an interface (n3 Set B). }
+function RefUserRank(AConv: TSemaRefConv): Integer;
 
 { An integer argument ANode of ATree that is a constant expression dcc folds
   (ConstExprKind), read as ConvRank ranks it: its value in AArg.Facts
@@ -1088,14 +1145,14 @@ begin
   // for - makes them so.
   if (AParCat = tcRecord) and (AArgCat = tcRecord) then
     Exit(not AParConv and not AArgConv);
-  // A scalar but a string, a class instance, a pointer or a set for a
-  // record: only the record's operator converts (`ShowHint(Self)` takes
-  // ShowHint(Control: TControl) beside the TRect overload; dcc64 E2010 for
-  // each, 6.3.1). Not an interface: its type name is a TGUID
-  // (`Supports(X, IFoo)`).
+  // A scalar but a string, a class instance, a pointer, a set or an
+  // interface for a record: only the record's operator converts
+  // (`ShowHint(Self)` takes ShowHint(Control: TControl) beside the TRect
+  // overload; dcc64 E2010 for each, 6.3.1). An interface TYPE NAME, a
+  // TGUID (`Supports(X, IFoo)`), is the scorers' own case before this.
   if (AParCat = tcRecord) and
      (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum, tcClass,
-      tcPointer, tcSet]) then
+      tcPointer, tcSet, tcInterface]) then
     Exit(not AParConv);
   // An array against a record, class or interface, either way round.
   Result := ((AParCat = tcArray) and
@@ -1428,6 +1485,58 @@ begin
   Result := CRankUser + 32 * ALevel + AFine;
 end;
 
+function RefConvRank(AConv: TSemaRefConv; AStep: Integer): Integer;
+
+  function Min(A, B: Integer): Integer;
+  begin
+    if A < B then
+      Result := A
+    else
+      Result := B;
+  end;
+
+begin
+  if AStep < 0 then
+    AStep := 0;
+  case AConv of
+    rcClassUp, rcIntfUp:
+      Result := 31 - Min(AStep, 15);
+    rcClassIntf, rcNilIntf:
+      Result := 8 + Min(AStep, 7);
+    rcClassPointer:
+      Result := 2;
+    rcIntfVariant, rcNilDynArray:
+      Result := 4;
+    rcNilPointer:
+      Result := 31;
+    rcNilTypedPointer:
+      Result := 29;
+    rcNilProc:
+      Result := 27;
+    rcNilClass:
+      Result := 16 + Min(AStep, 9);
+    rcNilClassRef:
+      Result := 6;
+  else
+    Result := 1;
+  end;
+end;
+
+function RefUserRank(AConv: TSemaRefConv): Integer;
+begin
+  case AConv of
+    rcClassPointer, rcIntfVariant:
+      Result := UserConvRank(1, 0);
+    rcNilPointer, rcNilTypedPointer:
+      Result := UserConvRank(2, 2);
+    rcNilProc, rcNilClass:
+      Result := UserConvRank(2, 1);
+  else
+    Result := UserConvRank(2, 0);
+  end;
+  Dec(Result, CRankLossless);
+end;
+
 function MayFoldConvConst(const ATree: TPasTree; ANode: Integer): Boolean;
 begin
   ANode := PeelParens(ATree, ANode);
@@ -1486,7 +1595,7 @@ begin
   // ArgStructRejects' cases, without the operators.
   Result := ((AParCat = tcRecord) and
              (AArgCat in [tcRecord, tcInteger, tcFloat, tcBoolean, tcChar,
-              tcEnum, tcClass, tcPointer, tcSet])) or
+              tcEnum, tcClass, tcPointer, tcSet, tcInterface])) or
             ((AParCat = tcArray) and
              (AArgCat in [tcRecord, tcClass, tcInterface])) or
             ((AArgCat = tcArray) and
@@ -4479,7 +4588,7 @@ var
     LArg: TSemaArgConv;
     LTo: TSemaConvKind;
     LF: TSemaOpFacts;
-    LRaw: Integer;
+    LRaw, LUr: Integer;
     LCt, LCf: TSemaTypeCat;
   begin
     ALeg := scMaybe;
@@ -4499,7 +4608,9 @@ var
         Exit;
       // No chain: a record converts to nothing but itself here.
       if (LCt = tcRecord) or (LCf = tcRecord) or ArgCatRejects(LCt, LCf) or
-         not Assignable(ATo, AFrom) then
+         not Assignable(ATo, AFrom) or
+         (LCf in [tcNil, tcClass, tcInterface]) and
+         (RefConvSym(ATo, AFrom, LCt, LCf, LRaw, LUr) = -1) then
       begin
         ALeg := scNone;
         Exit;
@@ -4517,9 +4628,13 @@ var
     if (LArg.Kind = cnkNone) or (LTo = cnkNone) then
     begin
       // A value the ranking does not cover: under the built-in conversions
-      // of rank 0 (a class to its ancestor).
+      // of rank 0 (a class to its ancestor); a reference conversion by
+      // RefUserRank, as UserConvX.
       if ALeg = scIdentical then
         Exit(UserConvRank(7, 0) - CRankLossless);
+      if RefConvSym(ATo, AFrom, CatOf(ATo), CatOf(AFrom), LRaw,
+         Result) = 1 then
+        Exit;
       Exit(UserConvRank(2, 0) - CRankLossless);
     end;
     LRaw := ConvRawRank(LArg, LTo, FWideExt);
@@ -4607,10 +4722,205 @@ begin
     Result := scMaybe;
 end;
 
+function TPasSemaTyper.HeritageHop(ASym: Integer;
+  out AParent: Integer): Integer;
+var
+  LDef, LItem: Integer;
+begin
+  AParent := NIL_SYM;
+  LDef := TypeDefNode(ASym);
+  // A forward declaration says nothing of the heritage (Aux: 1 for a class,
+  // bit 2 for an interface).
+  if (LDef = NIL_NODE) or
+     not (Kind(LDef) in [nkClassType, nkInterfaceType]) or
+     (Kind(LDef) = nkClassType) and (T.Nodes[LDef].Aux = 1) or
+     (Kind(LDef) = nkInterfaceType) and (T.Nodes[LDef].Aux and 2 <> 0) then
+    Exit(-1);
+  LItem := PasHeritageRef(T, LDef);
+  if LItem = NIL_NODE then
+    Exit(0);
+  if Kind(LItem) = nkTypeArgs then
+    Exit(-1);   // a generic ancestor: its instance is the project's to read
+  AParent := WeakAliasEnd(Head(LItem));
+  if (AParent = NIL_SYM) or (M.Symbols[AParent].Kind <> skType) then
+    Exit(-1);
+  Result := 1;
+end;
+
+function TPasSemaTyper.RefConvSym(ADst, ASrc: Integer; D, S: TSemaTypeCat;
+  out ARank, AUserRank: Integer): Integer;
+var
+  LConv: TSemaRefConv;
+  LStep, LShift: Integer;
+
+  function IsPointerSym(ASym: Integer): Boolean;
+  begin
+    Result := (M.Symbols[ASym].Kind = skBuiltinType) and
+      (M.Symbols[ASym].NameLower = 'pointer');
+  end;
+
+  // The hops from ADesc up to ABase: -1 when the walk reached the root
+  // without it, -2 when it left the unit.
+  function Dist(ADesc, ABase: Integer): Integer;
+  var
+    LCur, LNext, LN: Integer;
+  begin
+    LCur := ADesc;
+    for LN := 0 to 31 do
+    begin
+      if LCur = ABase then
+        Exit(LN);
+      case HeritageHop(LCur, LNext) of
+        0: Exit(-1);
+        -1: Exit(-2);
+      end;
+      LCur := LNext;
+    end;
+    Result := -2;
+  end;
+
+  function Depth(ASym: Integer): Integer;
+  var
+    LNext: Integer;
+  begin
+    Result := 0;
+    while (Result < 15) and (HeritageHop(ASym, LNext) = 1) do
+    begin
+      ASym := LNext;
+      Inc(Result);
+    end;
+  end;
+
+  // Does the class AClass, or an ancestor of it in this unit, list AIntf
+  // (XImplementsX)? 1 yes, -1 no (the walk reached the root), 0 unknown.
+  function Lists(AClass, AIntf: Integer): Integer;
+  var
+    LCur, LNext, LDef, LItem, LSym, LN: Integer;
+    LUnknown: Boolean;
+  begin
+    LUnknown := False;
+    LCur := AClass;
+    for LN := 0 to 31 do
+    begin
+      LDef := TypeDefNode(LCur);
+      if (LDef <> NIL_NODE) and (Kind(LDef) = nkClassType) then
+      begin
+        LItem := PasHeritageRef(T, LDef);
+        if LItem <> NIL_NODE then
+          LItem := Sib(LItem);
+        while (LItem <> NIL_NODE) and
+              (Kind(LItem) in [nkIdent, nkMember, nkTypeArgs]) do
+        begin
+          LSym := NIL_SYM;
+          if Kind(LItem) <> nkTypeArgs then
+            LSym := WeakAliasEnd(Head(LItem));
+          if LSym = AIntf then
+            Exit(1);
+          if LSym = NIL_SYM then
+            LUnknown := True;
+          LItem := Sib(LItem);
+        end;
+      end;
+      case HeritageHop(LCur, LNext) of
+        0:
+          if LUnknown then
+            Exit(0)
+          else
+            Exit(-1);
+        -1:
+          Exit(0);
+      end;
+      LCur := LNext;
+    end;
+    Result := 0;
+  end;
+
+begin
+  ARank := 0;
+  AUserRank := 0;
+  LStep := 0;
+  LShift := 0;
+  case S of
+    tcNil:
+      case D of
+        tcPointer:
+          if IsPointerSym(ADst) then
+            LConv := rcNilPointer
+          else
+            LConv := rcNilTypedPointer;
+        tcVariant, tcString, tcInteger, tcFloat, tcBoolean, tcChar, tcEnum,
+        tcSet:
+          Exit(-1);
+      else
+        Exit(0);   // a class, an interface: against another unit's, unknown
+      end;
+    tcClass:
+      case D of
+        tcClass:
+          begin
+            LStep := Dist(ASrc, ADst);
+            if LStep = -1 then
+              Exit(-1);
+            if LStep < 0 then
+              Exit(0);
+            LConv := rcClassUp;
+          end;
+        tcInterface:
+          begin
+            case Lists(ASrc, ADst) of
+              -1: Exit(-1);
+              0: Exit(0);
+            end;
+            LConv := rcClassIntf;
+            LStep := Depth(ADst);
+            LShift := 32;
+          end;
+        tcPointer:
+          if IsPointerSym(ADst) then
+          begin
+            LConv := rcClassPointer;
+            LShift := 32;
+          end
+          else
+            Exit(-1);
+        tcVariant:
+          Exit(-1);
+      else
+        Exit(0);
+      end;
+    tcInterface:
+      case D of
+        tcInterface:
+          begin
+            LStep := Dist(ASrc, ADst);
+            if LStep = -1 then
+              Exit(-1);
+            if LStep < 0 then
+              Exit(0);
+            LConv := rcIntfUp;
+          end;
+        tcVariant:
+          begin
+            LConv := rcIntfVariant;
+            LShift := 32;
+          end;
+        tcClass, tcPointer, tcClassOf:
+          Exit(-1);
+      else
+        Exit(0);
+      end;
+  else
+    Exit(0);
+  end;
+  ARank := RefConvRank(LConv, LStep) - LShift;
+  AUserRank := RefUserRank(LConv);
+  Result := 1;
+end;
+
 function TPasSemaTyper.ScoreArgRanked(AArg, AAt, APt: Integer;
   ARanked: Boolean; out ARank: Integer): Integer;
 var
-  LCore, LPt, LCAt, LCPt, LRank: Integer;
+  LCore, LPt, LCAt, LCPt, LRank, LUserRank: Integer;
   LParCat: TSemaTypeCat;
   LArgC: TSemaArgConv;
   LArgP: PSemaArgConv;
@@ -4645,6 +4955,24 @@ begin
         tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
         tcChar, tcString, tcEnum, tcSet, tcArray:
           Result := -1;
+      end;
+      Exit;
+    end;
+    // An interface TYPE NAME is its GUID (14.1.1; ArgFitCanonX): TGUID
+    // takes it, a record of this unit through an Implicit from TGUID
+    // (another unit's TGUID has no category here: unknown), nothing else.
+    if (Kind(LCore) in [nkIdent, nkMember]) and (AAt <> NIL_SYM) and
+       (Head(LCore) = AAt) and (M.Symbols[AAt].Kind = skType) and
+       (CatOf(AAt) = tcInterface) then
+    begin
+      case LParCat of
+        tcUnknown:
+          ;
+        tcRecord:
+          if M.Symbols[WeakAliasEnd(LPt)].NameLower = 'tguid' then
+            Result := 2;
+      else
+        Result := -1;
       end;
       Exit;
     end;
@@ -4729,6 +5057,19 @@ begin
             Exit(-1);
       end;
     end;
+    // A class instance, an interface, nil: RefConvSym (ArgFitCanonX's
+    // XRefConvX over this unit's types).
+    if CatOf(AAt) in [tcNil, tcClass, tcInterface] then
+      case RefConvSym(WeakAliasEnd(LPt), WeakAliasEnd(AAt), LParCat,
+             CatOf(AAt), LRank, LUserRank) of
+        -1:
+          Exit(-1);
+        1:
+          begin
+            ARank := LRank;
+            Exit(1);
+          end;
+      end;
     if ArgCatRejects(LParCat, CatOf(AAt)) or
        (ArgStructNeedsConv(LParCat, CatOf(AAt)) and
         ArgStructRejects(LParCat, CatOf(AAt), LOps and (LParCat = tcRecord),

@@ -10983,6 +10983,200 @@ begin
   end;
 end;
 
+// Classes, interfaces and nil in overload resolution (XRefConvX, 6.3.1,
+// 14.2.1; local/type-conv-2026-11/n3, each the overload dcc picks declared
+// second): a nearer ancestor class over a farther one (RA); a class over an
+// interface it implements (RB); an interface over its own ancestor (RC); an
+// interface over Pointer (RD); an interface the class's chain does not list
+// is out - T1 lists IB, not IB's ancestor IA (RE) - and so is an unrelated
+// class (RF); an interface variable takes its ancestor over Variant (RG),
+// the nearer ancestor (RH), never a class (RI) or a pointer (RJ) or TGUID
+// (RM); an interface TYPE NAME is its GUID - TGUID over a record through
+// TGUID (RK), never the interface itself (RL); nil takes Pointer over a
+// class (RN), a class over an interface (RO) and over Variant, which takes
+// no nil (RP), a deeper interface over IInterface (RT); user conversions
+// through a reference by RefUserRank - nil through Pointer over through a
+// class (RQ), a class through an interface over through Pointer (RR); an
+// interface name in a `[...]` for `array of TGUID` (RU), a generic class
+// reaching a generic interface its generic ancestor lists, in the frame of
+// the instance (RV: TDel<Pointer> to IG<Pointer>), a generic interface's
+// name for TGUID (RX). dcc64 37.0, 2026-11-06.
+procedure TestRefConvRanking;
+const
+  SRC_UNIT =
+    'unit CvR;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  IA = interface end;'#10 +
+    '  IB = interface(IA) end;'#10 +
+    '  IC = interface(IB) end;'#10 +
+    '  IX = interface end;'#10 +
+    '  T1 = class(TInterfacedObject, IB) end;'#10 +
+    '  T2 = class(T1, IX) end;'#10 +
+    '  T3 = class(T2) end;'#10 +
+    '  T4 = class(T3, IA) end;'#10 +
+    '  TPlain = class end;'#10 +
+    '  TRo = record class operator Implicit(A: TObject): TRo; end;'#10 +
+    '  TRu = record class operator Implicit(const A: IInterface): TRu; end;'#10 +
+    '  TRp = record class operator Implicit(A: Pointer): TRp; end;'#10 +
+    '  TRg = record class operator Implicit(const A: TGUID): TRg; end;'#10 +
+    '  IG<T> = interface end;'#10 +
+    '  TCmp<T> = class(TInterfacedObject, IG<T>) end;'#10 +
+    '  TDel<T> = class(TCmp<T>) end;'#10 +
+    'function RA(X: TObject): TRA; overload;'#10 +
+    'function RA(X: T1): TRW; overload;'#10 +
+    'function RB(const X: IB): TRA; overload;'#10 +
+    'function RB(X: TObject): TRW; overload;'#10 +
+    'function RC(const X: IInterface): TRA; overload;'#10 +
+    'function RC(const X: IB): TRW; overload;'#10 +
+    'function RD(X: Pointer): TRA; overload;'#10 +
+    'function RD(const X: IX): TRW; overload;'#10 +
+    'function RE(const X: IA): TRA; overload;'#10 +
+    'function RE(X: Pointer): TRW; overload;'#10 +
+    'function RF(X: TPlain): TRA; overload;'#10 +
+    'function RF(X: TObject): TRW; overload;'#10 +
+    'function RG(const X: Variant): TRA; overload;'#10 +
+    'function RG(const X: IA): TRW; overload;'#10 +
+    'function RH(const X: IA): TRA; overload;'#10 +
+    'function RH(const X: IB): TRW; overload;'#10 +
+    'function RI(X: TObject): TRA; overload;'#10 +
+    'function RI(const X: TRu): TRW; overload;'#10 +
+    'function RJ(X: Pointer): TRA; overload;'#10 +
+    'function RJ(const X: TRu): TRW; overload;'#10 +
+    'function RK(const X: TRg): TRA; overload;'#10 +
+    'function RK(const G: TGUID): TRW; overload;'#10 +
+    'function RL(const X: IA): TRA; overload;'#10 +
+    'function RL(const G: TGUID): TRW; overload;'#10 +
+    'function RM(const G: TGUID): TRA; overload;'#10 +
+    'function RM(const X: Variant): TRW; overload;'#10 +
+    'function RN(X: TObject): TRA; overload;'#10 +
+    'function RN(X: Pointer): TRW; overload;'#10 +
+    'function RO(const X: IA): TRA; overload;'#10 +
+    'function RO(X: TObject): TRW; overload;'#10 +
+    'function RP(const X: Variant): TRA; overload;'#10 +
+    'function RP(X: TObject): TRW; overload;'#10 +
+    'function RQ(const X: TRo): TRA; overload;'#10 +
+    'function RQ(const X: TRp): TRW; overload;'#10 +
+    'function RR(const X: TRp): TRA; overload;'#10 +
+    'function RR(const X: TRu): TRW; overload;'#10 +
+    'function RT(const X: IInterface): TRA; overload;'#10 +
+    'function RT(const X: IA): TRW; overload;'#10 +
+    'function RU(const A: array of Integer): TRA; overload;'#10 +
+    'function RU(const A: array of TGUID): TRW; overload;'#10 +
+    'function RV(X: Integer): TRA; overload;'#10 +
+    'function RV(const X: IG<Pointer>): TRW; overload;'#10 +
+    'function RX(X: Integer): TRA; overload;'#10 +
+    'function RX(const G: TGUID): TRW; overload;'#10 +
+    'implementation'#10 +
+    'class operator TRo.Implicit(A: TObject): TRo; begin end;'#10 +
+    'class operator TRu.Implicit(const A: IInterface): TRu; begin end;'#10 +
+    'class operator TRp.Implicit(A: Pointer): TRp; begin end;'#10 +
+    'class operator TRg.Implicit(const A: TGUID): TRg; begin end;'#10 +
+    'function RA(X: TObject): TRA; begin end;'#10 +
+    'function RA(X: T1): TRW; begin end;'#10 +
+    'function RB(const X: IB): TRA; begin end;'#10 +
+    'function RB(X: TObject): TRW; begin end;'#10 +
+    'function RC(const X: IInterface): TRA; begin end;'#10 +
+    'function RC(const X: IB): TRW; begin end;'#10 +
+    'function RD(X: Pointer): TRA; begin end;'#10 +
+    'function RD(const X: IX): TRW; begin end;'#10 +
+    'function RE(const X: IA): TRA; begin end;'#10 +
+    'function RE(X: Pointer): TRW; begin end;'#10 +
+    'function RF(X: TPlain): TRA; begin end;'#10 +
+    'function RF(X: TObject): TRW; begin end;'#10 +
+    'function RG(const X: Variant): TRA; begin end;'#10 +
+    'function RG(const X: IA): TRW; begin end;'#10 +
+    'function RH(const X: IA): TRA; begin end;'#10 +
+    'function RH(const X: IB): TRW; begin end;'#10 +
+    'function RI(X: TObject): TRA; begin end;'#10 +
+    'function RI(const X: TRu): TRW; begin end;'#10 +
+    'function RJ(X: Pointer): TRA; begin end;'#10 +
+    'function RJ(const X: TRu): TRW; begin end;'#10 +
+    'function RK(const X: TRg): TRA; begin end;'#10 +
+    'function RK(const G: TGUID): TRW; begin end;'#10 +
+    'function RL(const X: IA): TRA; begin end;'#10 +
+    'function RL(const G: TGUID): TRW; begin end;'#10 +
+    'function RM(const G: TGUID): TRA; begin end;'#10 +
+    'function RM(const X: Variant): TRW; begin end;'#10 +
+    'function RN(X: TObject): TRA; begin end;'#10 +
+    'function RN(X: Pointer): TRW; begin end;'#10 +
+    'function RO(const X: IA): TRA; begin end;'#10 +
+    'function RO(X: TObject): TRW; begin end;'#10 +
+    'function RP(const X: Variant): TRA; begin end;'#10 +
+    'function RP(X: TObject): TRW; begin end;'#10 +
+    'function RQ(const X: TRo): TRA; begin end;'#10 +
+    'function RQ(const X: TRp): TRW; begin end;'#10 +
+    'function RR(const X: TRp): TRA; begin end;'#10 +
+    'function RR(const X: TRu): TRW; begin end;'#10 +
+    'function RT(const X: IInterface): TRA; begin end;'#10 +
+    'function RT(const X: IA): TRW; begin end;'#10 +
+    'function RU(const A: array of Integer): TRA; begin end;'#10 +
+    'function RU(const A: array of TGUID): TRW; begin end;'#10 +
+    'function RV(X: Integer): TRA; begin end;'#10 +
+    'function RV(const X: IG<Pointer>): TRW; begin end;'#10 +
+    'function RX(X: Integer): TRA; begin end;'#10 +
+    'function RX(const G: TGUID): TRW; begin end;'#10 +
+    'end.'#10;
+  SRC_PROG =
+    'program CvRP;'#10'uses CvR;'#10 +
+    'var K: Integer; O1: T1; O2: T2; O3: T3; O4: T4;'#10 +
+    '  DP: TDel<Pointer>;'#10 +
+    '  JA: IA; JB: IB; JC: IC;'#10 +
+    'begin'#10 +
+    '  K := RA(O3).W;'#10 +
+    '  K := RB(O1).W;'#10 +
+    '  K := RC(O4).W;'#10 +
+    '  K := RD(O2).W;'#10 +
+    '  K := RE(O1).W;'#10 +
+    '  K := RF(O1).W;'#10 +
+    '  K := RG(JB).W;'#10 +
+    '  K := RH(JC).W;'#10 +
+    '  K := RI(JA).W;'#10 +
+    '  K := RJ(JA).W;'#10 +
+    '  K := RK(IA).W;'#10 +
+    '  K := RL(IA).W;'#10 +
+    '  K := RM(JA).W;'#10 +
+    '  K := RN(nil).W;'#10 +
+    '  K := RO(nil).W;'#10 +
+    '  K := RP(nil).W;'#10 +
+    '  K := RQ(nil).W;'#10 +
+    '  K := RR(O1).W;'#10 +
+    '  K := RT(nil).W;'#10 +
+    '  K := RU([IA]).W;'#10 +
+    '  K := RV(DP).W;'#10 +
+    '  K := RX(IG<Integer>).W;'#10 +
+    'end.'#10;
+var
+  LDir, LName: string;
+begin
+  LDir := FreshDir('pastree_sema_refconvrank');
+  TFile.WriteAllText(TPath.Combine(LDir, 'System.pas'),
+    'unit System;'#10'interface'#10'type'#10 +
+    '  TObject = class end;'#10 +
+    '  TGUID = record D1: Cardinal; end;'#10 +
+    '  IInterface = interface end;'#10 +
+    '  TInterfacedObject = class(TObject, IInterface) end;'#10 +
+    'implementation'#10'end.'#10);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CvR.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'CvRP.dpr'), SRC_PROG);
+  GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
+  try
+    GProj.ReportUnresolvedMembers := True;
+    GProj.AnalyzeProject(TPath.Combine(LDir, 'CvRP.dpr'));
+    LName := '';
+    for var LD in ModelByName('cvrp').Diags do
+      if LD.Code = 'E2003' then
+        LName := LName + ' line ' + IntToStr(LD.Line);
+    Ok('class / interface / nil ranking: every call binds dcc''s overload' +
+      ' - no E2003 [' + LName + ' ]',
+      DiagCount(ModelByName('cvrp'), 'E2003') = 0);
+  finally
+    GProj.Free;
+    if TDirectory.Exists(LDir) then
+      TDirectory.Delete(LDir, True);
+  end;
+end;
+
 // B35: one operator rule table for both typers (4.2.1) - narrow and alias
 // operands, an enum-subrange array's bounds, a subrange whose bound is
 // another unit's enumeration value or constant, and an inherited cross-unit
@@ -17616,6 +17810,7 @@ begin
   TestValueOverloads;
   TestConvRanking;
   TestImplicitRanking;
+  TestRefConvRanking;
   TestOperatorTable;
   TestTargetFacts;
   TestOracleDepth;

@@ -2098,6 +2098,30 @@ type
       reached the end of ADesc's ancestry without meeting it; xdUnknown at a
       link it cannot follow. A diagnostic acts on xdNo alone. }
     function XDescent(const ADesc, ABase: TSemaXType): TPasDescent;
+    function XAncestryStepX(var ACur: TSemaXType; out ADef: Integer;
+      out AHop: Boolean): TPasDescent;
+    { XDescent with the number of heritage hops from ADesc to ABase in ADist
+      (0 the same type, 1 the parent), -1 unless xdYes. }
+    function XDescentDistX(const ADesc, ABase: TSemaXType;
+      out ADist: Integer): TPasDescent;
+    { How many heritage hops lead from the class or interface AX to its root
+      (TObject, IInterface; 0 the root itself) - up to a link it cannot
+      follow, or 15. }
+    function XHeritageDepthX(const AX: TSemaXType): Integer;
+    { Does the class AClass implement the interface AIntf - is AIntf (both
+      canonical) in the implements list of AClass or of one of its ancestors
+      (14.2.1: an interface's ancestor is implemented only when listed too)?
+      xdUnknown at a link or an item it cannot resolve. }
+    function XImplementsX(const AClass, AIntf: TSemaXType): TPasDescent;
+    { A built-in conversion between reference types (TSemaRefConv) from ASrc
+      to ADst, canonical and not the same type, of the categories S and D:
+      1 with its rank (RefConvRank) in ARank and the rank of a user
+      conversion through it (RefUserRank) in AUserRank, -1 when the pair
+      does not convert, 0 when it is no reference pair or a link is unknown. }
+    function XRefConvX(const ADst, ASrc: TSemaXType; D, S: TSemaTypeCat;
+      out ARank, AUserRank: Integer): Integer;
+    // Is AX (canonical) System's TGUID?
+    function IsGuidTypeX(const AX: TSemaXType): Boolean;
     function DeclTypeX(AMid, ASym: Integer): TSemaXType;
     function SubstX(const AX: TSemaXType; AInst, ADepth: Integer): TSemaXType;
     function ResolveTypeExpr(AId, ANode: Integer;
@@ -10640,6 +10664,63 @@ begin
   Result := XDescent(ADesc, ABase) = xdYes;
 end;
 
+{ One step of an ancestry walk from ACur (XDescent's, XImplementsX's): to
+  the type an alias names, to a seeded stand-in's real declaration, or -
+  AHop True - to the heritage parent (HeritageHopX). xdYes: moved, ACur the
+  next type; xdNo: the root, or a type with no ancestry (a record, an
+  enumeration); xdUnknown: a link that does not resolve. ADef: ACur's
+  definition before the step (NIL_NODE for a stand-in). }
+function TPasSemaProject.XAncestryStepX(var ACur: TSemaXType;
+  out ADef: Integer; out AHop: Boolean): TPasDescent;
+var
+  LNext: TSemaXType;
+  LM: TPasSemaModel;
+  LRMid, LRSym: Integer;
+begin
+  AHop := False;
+  ADef := NIL_NODE;
+  if not XValid(ACur) then
+    Exit(xdUnknown);
+  LM := FModels[ACur.UnitId];
+  ADef := TypeDefNodeOf(ACur.UnitId, ACur.Sym);
+  if ADef = NIL_NODE then
+  begin
+    // A seeded stand-in: hop to the real declaration when there is one.
+    if ResolveRealDecl(ACur.UnitId, LM.Symbols[ACur.Sym].NameLower,
+         LRMid, LRSym) and
+       ((LRMid <> ACur.UnitId) or (LRSym <> ACur.Sym)) then
+    begin
+      ACur := XPlain(LRMid, LRSym);
+      Exit(xdYes);
+    end;
+    Exit(xdUnknown);
+  end;
+  case LM.Tree.Nodes[ADef].Kind of
+    nkIdent, nkMember, nkTypeArgs:
+      begin
+        LNext := ResolveTypeExprNested(ACur.UnitId, ADef);   // alias
+        if not XValid(LNext) then
+          Exit(xdUnknown);
+        if (LNext.UnitId = ACur.UnitId) and (LNext.Sym = ACur.Sym) then
+          Exit(xdUnknown);   // self-referential alias
+      end;
+    nkClassType, nkInterfaceType, nkObjectType:
+      begin
+        case HeritageHopX(ACur.UnitId, ACur.Sym, ADef, LNext) of
+          hhNone:
+            Exit(xdNo);
+          hhBroken:
+            Exit(xdUnknown);
+        end;
+        AHop := True;
+      end;
+  else
+    Exit(xdNo);   // a record, an enumeration, ... - known, and no class
+  end;
+  ACur := LNext;
+  Result := xdYes;
+end;
+
 { Inheritance test across models: is ADesc ABase, or a descendant of it?
   The hop is HeritageHopX, the one every ancestry walk takes. Tri-state
   because both of its diagnostic callers promise to say nothing when unsure
@@ -10649,54 +10730,123 @@ end;
 function TPasSemaProject.XDescent(const ADesc,
   ABase: TSemaXType): TPasDescent;
 var
-  LCur, LNext, LBase: TSemaXType;
-  LM: TPasSemaModel;
-  LDef, LDepth, LRMid, LRSym: Integer;
+  LDist: Integer;
 begin
+  Result := XDescentDistX(ADesc, ABase, LDist);
+end;
+
+function TPasSemaProject.XDescentDistX(const ADesc, ABase: TSemaXType;
+  out ADist: Integer): TPasDescent;
+var
+  LCur, LBase: TSemaXType;
+  LDef, LDepth, LDist: Integer;
+  LHop: Boolean;
+begin
+  ADist := -1;
   // The base canonicalized (16.4.1): `T: TBaseAlias` is TBase, and the walk
   // below never meets the alias symbol (audit A2-16).
   LBase := CanonTypeX(ABase);
   LCur := ADesc;
+  LDist := 0;
   for LDepth := 1 to 32 do
   begin
     if not XValid(LCur) then
       Exit(xdUnknown);
     if (LCur.UnitId = LBase.UnitId) and (LCur.Sym = LBase.Sym) then
+    begin
+      ADist := LDist;
       Exit(xdYes);
+    end;
+    Result := XAncestryStepX(LCur, LDef, LHop);
+    if Result <> xdYes then
+      Exit;
+    if LHop then
+      Inc(LDist);
+  end;
+  Result := xdUnknown;   // the depth cap
+end;
+
+function TPasSemaProject.XHeritageDepthX(const AX: TSemaXType): Integer;
+var
+  LCur: TSemaXType;
+  LDef, LDepth: Integer;
+  LHop: Boolean;
+begin
+  Result := 0;
+  LCur := AX;
+  for LDepth := 1 to 32 do
+  begin
+    if (XAncestryStepX(LCur, LDef, LHop) <> xdYes) or (Result >= 15) then
+      Exit;
+    if LHop then
+      Inc(Result);
+  end;
+end;
+
+{ The class walk of XDescent, reading at each class the items of its
+  heritage list after the ancestor (OvBuildTypeEdges' convention: the first
+  item is the class ancestor - dcc requires one, `class(IA)` is E2021). An
+  item is compared canonical, in the frame of the class that lists it
+  (`class(TBase, IG<T>)` in a TImpl<T> reached as TImpl<Integer>). }
+function TPasSemaProject.XImplementsX(const AClass,
+  AIntf: TSemaXType): TPasDescent;
+var
+  LCur, LItemX: TSemaXType;
+  LM: TPasSemaModel;
+  LDef, LDepth, LItem, LInst: Integer;
+  LHop, LUnknown: Boolean;
+  LStep: TPasDescent;
+begin
+  LUnknown := False;
+  LCur := AClass;
+  for LDepth := 1 to 32 do
+  begin
+    if not XValid(LCur) then
+      Exit(xdUnknown);
     LM := FModels[LCur.UnitId];
     LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
-    if LDef = NIL_NODE then
+    if (LDef <> NIL_NODE) and (LM.Tree.Nodes[LDef].Kind = nkClassType) then
     begin
-      // A seeded stand-in: hop to the real declaration when there is one.
-      if ResolveRealDecl(LCur.UnitId, LM.Symbols[LCur.Sym].NameLower,
-           LRMid, LRSym) and
-         ((LRMid <> LCur.UnitId) or (LRSym <> LCur.Sym)) then
+      LItem := PasHeritageRef(LM.Tree, LDef);
+      if LItem <> NIL_NODE then
+        LItem := LM.Tree.Nodes[LItem].NextSibling;
+      while (LItem <> NIL_NODE) and
+            (LM.Tree.Nodes[LItem].Kind in [nkIdent, nkMember, nkTypeArgs]) do
       begin
-        LCur := XPlain(LRMid, LRSym);
-        Continue;
+        LItemX := ResolveTypeExprNested(LCur.UnitId, LItem);
+        if XValid(LItemX) and (LCur.Inst <> NIL_INST) then
+          LItemX := SubstX(LItemX, LCur.Inst, 0);
+        if XValid(LItemX) then
+          LItemX := CanonTypeX(LItemX);
+        if not XValid(LItemX) then
+          LUnknown := True
+        else if XSameType(LItemX, AIntf) then
+          Exit(xdYes)
+        // One generic interface in two instantiations the frames may not
+        // have closed alike (`IComparer<T>` read inside a generic body):
+        // not a proof of "no".
+        else if (LItemX.UnitId = AIntf.UnitId) and
+                (LItemX.Sym = AIntf.Sym) then
+          LUnknown := True;
+        LItem := LM.Tree.Nodes[LItem].NextSibling;
       end;
-      Exit(xdUnknown);
     end;
-    case LM.Tree.Nodes[LDef].Kind of
-      nkIdent, nkMember, nkTypeArgs:
-        begin
-          LNext := ResolveTypeExprNested(LCur.UnitId, LDef);   // alias
-          if not XValid(LNext) then
-            Exit(xdUnknown);
-          if (LNext.UnitId = LCur.UnitId) and (LNext.Sym = LCur.Sym) then
-            Exit(xdUnknown);   // self-referential alias
-        end;
-      nkClassType, nkInterfaceType, nkObjectType:
-        case HeritageHopX(LCur.UnitId, LCur.Sym, LDef, LNext) of
-          hhNone:
-            Exit(xdNo);
-          hhBroken:
-            Exit(xdUnknown);
-        end;
-    else
-      Exit(xdNo);   // a record, an enumeration, ... - known, and no class
+    // The parent read in this class's frame: `TDelegatedComparer<T> =
+    // class(TComparer<T>)` reached as TDelegatedComparer<Pointer> climbs to
+    // TComparer<Pointer>, whose list then names IComparer<Pointer>.
+    LInst := LCur.Inst;
+    LStep := XAncestryStepX(LCur, LDef, LHop);
+    if (LStep = xdYes) and LHop and (LInst <> NIL_INST) and XValid(LCur) then
+      LCur := SubstX(LCur, LInst, 0);
+    case LStep of
+      xdNo:
+        if LUnknown then
+          Exit(xdUnknown)
+        else
+          Exit(xdNo);
+      xdUnknown:
+        Exit(xdUnknown);
     end;
-    LCur := LNext;
   end;
   Result := xdUnknown;   // the depth cap
 end;
@@ -13626,6 +13776,135 @@ begin
   Result := CatAssignable(D, S, False);
 end;
 
+function TPasSemaProject.IsGuidTypeX(const AX: TSemaXType): Boolean;
+var
+  LRMid, LRSym: Integer;
+begin
+  Result := XValid(AX) and
+    (FModels[AX.UnitId].Symbols[AX.Sym].NameLower = 'tguid') and
+    (XCatOf(AX) = tcRecord);
+  // System's own, when System is on the path.
+  if Result and ImplicitRootX(AX.UnitId, 'tguid', LRMid, LRSym) then
+    Result := (LRMid = AX.UnitId) and (LRSym = AX.Sym);
+end;
+
+function TPasSemaProject.XRefConvX(const ADst, ASrc: TSemaXType;
+  D, S: TSemaTypeCat; out ARank, AUserRank: Integer): Integer;
+var
+  LConv: TSemaRefConv;
+  LRel: TPasDescent;
+  LStep, LDef: Integer;
+
+  function Untyped(const AX: TSemaXType): Boolean;
+  begin
+    Result := (FModels[AX.UnitId].Symbols[AX.Sym].Kind = skBuiltinType) and
+      (FModels[AX.UnitId].Symbols[AX.Sym].NameLower = 'pointer');
+  end;
+
+begin
+  ARank := 0;
+  AUserRank := 0;
+  LStep := 0;
+  LRel := xdYes;
+  case S of
+    tcNil:
+      case D of
+        tcPointer:
+          if Untyped(ADst) then
+            LConv := rcNilPointer
+          else
+            LConv := rcNilTypedPointer;
+        tcProc:
+          begin
+            // A `reference to` type is an interface (17.1): nil ranks it as
+            // one of depth 1.
+            LConv := rcNilProc;
+            LDef := TypeDefNodeOf(ADst.UnitId, ADst.Sym);
+            if (LDef <> NIL_NODE) and
+               (FModels[ADst.UnitId].Tree.Nodes[LDef].Kind = nkProcType) and
+               (FModels[ADst.UnitId].Tree.Nodes[LDef].Aux = 2) then
+            begin
+              LConv := rcNilIntf;
+              LStep := 1;
+            end;
+          end;
+        tcClass:
+          begin
+            LConv := rcNilClass;
+            LStep := XHeritageDepthX(ADst);
+          end;
+        tcInterface:
+          begin
+            LConv := rcNilIntf;
+            LStep := XHeritageDepthX(ADst);
+          end;
+        tcClassOf:
+          LConv := rcNilClassRef;
+        tcArray:
+          if IsDynArrayTypeX(ADst) then
+            LConv := rcNilDynArray
+          else
+            Exit(-1);
+        // nil is no Variant, no string, no number (n3 Set A: E2250).
+        tcVariant, tcString, tcInteger, tcFloat, tcBoolean, tcChar, tcEnum,
+        tcSet:
+          Exit(-1);
+      else
+        Exit(0);
+      end;
+    tcClass:
+      case D of
+        tcClass:
+          begin
+            LConv := rcClassUp;
+            LRel := XDescentDistX(ASrc, ADst, LStep);
+          end;
+        tcInterface:
+          begin
+            LConv := rcClassIntf;
+            LRel := XImplementsX(ASrc, ADst);
+            if LRel = xdYes then
+              LStep := XHeritageDepthX(ADst);
+          end;
+        tcPointer:
+          if Untyped(ADst) then
+            LConv := rcClassPointer
+          else
+            Exit(-1);
+        tcVariant:
+          Exit(-1);
+      else
+        Exit(0);
+      end;
+    tcInterface:
+      case D of
+        tcInterface:
+          begin
+            LConv := rcIntfUp;
+            LRel := XDescentDistX(ASrc, ADst, LStep);
+          end;
+        tcVariant:
+          LConv := rcIntfVariant;
+        // An interface reaches no class, no pointer (n3 Set A).
+        tcClass, tcPointer, tcClassOf:
+          Exit(-1);
+      else
+        Exit(0);
+      end;
+  else
+    Exit(0);
+  end;
+  case LRel of
+    xdNo:
+      Exit(-1);
+    xdUnknown:
+      Exit(0);
+  end;
+  ARank := RefConvRank(LConv, LStep);
+  AUserRank := RefUserRank(LConv);
+  Result := 1;
+end;
+
 { The first version of the one conversion test (TSemaConv,
   local/TYPE-CONVERSION-PLAN.md has the rest). Rules, each a plain
   statement of the language's assignment compatibility (spec 6.3, 7.x):
@@ -13633,11 +13912,11 @@ end;
   - an integer converts to an integer or a float, a Char or a PChar to a
     string, Char to Char, Boolean to Boolean, a pointer or nil to a
     pointer, a scalar to a Variant and a Variant to a scalar;
-  - nil converts to a class, an interface, a class reference, a procedural
-    type and a dynamic array;
-  - a class converts to its ancestors (XDescent: xdNo is scNone, xdUnknown
-    scMaybe); an interface to its ancestors likewise; a class to an
-    interface is not checked (scMaybe);
+  - a class, an interface and nil convert as XRefConvX says (14.2.1,
+    6.3.1): a class to its ancestors, to an interface its chain lists, to
+    Pointer; an interface to its ancestors and Variant; nil to a pointer,
+    a procedural type, a class, an interface, a class reference, a dynamic
+    array - not to Variant or a string; a link it cannot follow is scMaybe;
   - a record with `class operator Implicit` on either side converts as its
     operators say (UserConvX), and two different records without one do
     not convert;
@@ -13658,7 +13937,7 @@ const
 var
   LD, LS, LPointee: TSemaXType;
   D, S: TSemaTypeCat;
-  LRank: Integer;
+  LRank, LUserRank: Integer;
   LOps: Boolean;
 begin
   if not XValid(ADst) or not XValid(ASrc) then
@@ -13684,6 +13963,12 @@ begin
     // No operator: a record converts to and from nothing but itself.
     Exit(TSemaConv.scNone);
   end;
+  // A class, an interface, nil: XRefConvX (14.2.1, 6.3.1).
+  if S in [tcNil, tcClass, tcInterface] then
+    case XRefConvX(LD, LS, D, S, LRank, LUserRank) of
+      1: Exit(scImplicit);
+      -1: Exit(TSemaConv.scNone);
+    end;
   if S = tcNil then
   begin
     if (D in [tcPointer, tcClass, tcInterface, tcClassOf, tcProc,
@@ -13721,14 +14006,6 @@ begin
     tcPointer:
       if S = tcPointer then
         Exit(scImplicit);
-    tcClass, tcInterface:
-      if S = D then
-        case XDescent(LS, LD) of
-          xdYes: Exit(scImplicit);
-          xdNo: Exit(TSemaConv.scNone);
-        else
-          Exit(scMaybe);
-        end;
   end;
   if (D in SCALARS) and (S in SCALARS) then
     Exit(TSemaConv.scNone);
@@ -13786,9 +14063,14 @@ var
     begin
       // A value the ranking does not cover (a class, a record, nil): under
       // its built-in conversions of rank 0 (a class to its ancestor, nil
-      // to a pointer) - one lossless level, or its own type.
+      // to a pointer) - one lossless level, or its own type; a reference
+      // conversion by RefUserRank (a class to Pointer below a class to its
+      // ancestor; nil to a pointer above nil to a class).
       if ALeg = scIdentical then
         Exit(UserConvRank(7, 0) - CRankLossless);
+      if XRefConvX(AToX, AFromX, XCatOf(AToX), XCatOf(AFromX), LRaw,
+         Result) = 1 then
+        Exit;
       Exit(UserConvRank(2, 0) - CRankLossless);
     end;
     LRaw := ConvRawRank(LArg, LTo, LWide);
@@ -14425,7 +14707,7 @@ function TPasSemaProject.ArgFitCanonX(const AArgX, AParX, ACanonArgX,
 var
   LParCat, LArgCat: TSemaTypeCat;
   LTarget: TSemaXType;
-  LRank: Integer;
+  LRank, LUserRank: Integer;
   LUser: TSemaConv;
   LOps: Boolean;
 begin
@@ -14456,6 +14738,39 @@ begin
       tcClass, tcRecord, tcInterface, tcInteger, tcFloat, tcBoolean,
       tcChar, tcString, tcEnum, tcSet, tcArray:
         Result := -1;
+    end;
+    Exit;
+  end;
+  // An interface TYPE NAME is its GUID (14.1.1): it converts to TGUID and
+  // through it to a record whose Implicit takes one (`Supports(X, IFoo)`),
+  // to nothing else - not to the interface itself, IInterface, a Pointer
+  // or a Variant (local/type-conv-2026-11/n3 Set A: E2250).
+  if AClassRef and XValid(AArgX) and (XCatOf(ACanonArgX) = tcInterface) then
+  begin
+    case XCatOf(ACanonParX) of
+      tcUnknown:
+        Result := 0;
+      tcRecord:
+        if IsGuidTypeX(ACanonParX) then
+          Result := 2
+        else
+        begin
+          var LGMid, LGSym: Integer;
+          Result := -1;
+          if ImplicitRootX(AArgX.UnitId, 'tguid', LGMid, LGSym) then
+            case UserConvX(ACanonParX, XPlain(LGMid, LGSym), nil, LRank,
+                   LOps) of
+              scImplicit:
+                begin
+                  ARank := LRank;
+                  Result := 1;
+                end;
+              scMaybe:
+                Result := 0;
+            end;
+        end;
+    else
+      Result := -1;
     end;
     Exit;
   end;
@@ -14601,6 +14916,22 @@ begin
   // scorer has no such branch, so the rule is this pass's alone.
   if (LParCat = tcClassOf) and (LArgCat = tcClass) then
     Exit(-1);
+  // A class instance, an interface, nil (XRefConvX, RefConvRank): a class
+  // to its nearer ancestor over a farther one, over an interface it
+  // implements, over Pointer; out where it does not convert - an unrelated
+  // class, an interface no class of its chain lists (`ShowHint(Self)`), an
+  // interface to a class or a pointer, nil to a Variant or a string.
+  if LArgCat in [tcNil, tcClass, tcInterface] then
+    case XRefConvX(ACanonParX, ACanonArgX, LParCat, LArgCat, LRank,
+           LUserRank) of
+      -1:
+        Exit(-1);
+      1:
+        begin
+          ARank := LRank;
+          Exit(1);
+        end;
+    end;
   if XAssignableX(AParX, AArgX) then
     Result := 1;
 end;
@@ -15742,6 +16073,21 @@ var
          (LKind = nkTypeArgs) and not HeadIsRoutine(ANode));
     end;
 
+    // Is the value node ANode, of the canonical type ACanonX, an interface
+    // TYPE NAME - its GUID (14.1.1), `Supports(X, IFoo)`, `[IFoo]`,
+    // `IdxService<TFormat, Boolean>` - rather than an interface value?
+    // ArgFitCanonX scores it with the class references (AClassRef).
+    function IsIntfNameValue(ANode: Integer;
+      const ACanonX: TSemaXType): Boolean;
+    var
+      LKind: TPasNodeKind;
+    begin
+      LKind := LM.Tree.Nodes[ANode].Kind;
+      Result := (XCatOf(ACanonX) = tcInterface) and
+        ((LKind in [nkIdent, nkMember]) and IsTypeDesignator(ANode) or
+         (LKind = nkTypeArgs) and not HeadIsRoutine(ANode));
+    end;
+
     // What the argument ACore brings an ARRAY parameter besides its type
     // AArgX (TPasArrayArg), into LArrArg: a `[...]`'s elements, each typed
     // here - a type name a class reference, a constant told apart
@@ -15778,7 +16124,8 @@ var
       while LKid <> NIL_NODE do
       begin
         LElem := CtorElemX(GetX(LKid), cekValue, LM.Tree, LKid);
-        if XValid(LElem.X) and IsClassRefValue(LKid, LElem.CanonX) then
+        if XValid(LElem.X) and (IsClassRefValue(LKid, LElem.CanonX) or
+           IsIntfNameValue(LKid, LElem.CanonX)) then
           LElem.Kind := cekClassRef
         else if IsConstExprX(AId, LKid) then
           LElem.Kind := cekConstant;
@@ -15852,11 +16199,12 @@ var
               LCanonArgX := CanonTypeX(LArgX);
           end;
         end
-        // A TYPE NAME is a class reference (IsClassRefValue); ArgFitCanonX
-        // scores it.
+        // A TYPE NAME is a class reference (IsClassRefValue), an interface's
+        // its GUID; ArgFitCanonX scores both.
         else
           LClassRef := XValid(LArgX) and XValid(LParX) and
-            IsClassRefValue(LCore, LCanonArgX);
+            (IsClassRefValue(LCore, LCanonArgX) or
+             IsIntfNameValue(LCore, LCanonArgX));
         // An anonymous-method literal against a procedural parameter it
         // cannot be passed to (AnonLiteralFitsX): a method pointer, a plain
         // procedural type, or a `reference to` type of another signature. dcc
