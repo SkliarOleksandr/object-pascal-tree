@@ -15594,14 +15594,24 @@ function TPasSemaProject.ArgConvX(AMid, ANode: Integer;
   const AX: TSemaXType): TSemaArgConv;
 var
   LVMid, LVNode, LLit: Integer;
+  LX: TSemaXType;
 begin
   Result := Default(TSemaArgConv);
   if not XValid(AX) then
     Exit;
-  case XCatOf(AX) of
+  // An alias its unit's own typer could not categorize - one written through
+  // a unit qualifier, `LPWSTR = Windows.LPWSTR`, `LPW = System.PWideChar` -
+  // is the type it names (2.5.1): read through CanonTypeX, or a PChar typed
+  // so has no conversion kind, misses ConvRank's string conversions and
+  // ArgCatRejects puts F(string) out (a Windows header unit's `LPWSTR =
+  // Windows.LPWSTR` for `ShowMessage(AMessage: string)`).
+  LX := AX;
+  if XCatOf(LX) = tcUnknown then
+    LX := CanonTypeX(LX);
+  case XCatOf(LX) of
     tcInteger, tcFloat, tcVariant, tcString, tcChar:
       begin
-        Result.Facts := OpFactsX(AMid, ANode, AX);
+        Result.Facts := OpFactsX(AMid, ANode, LX);
         Result.Kind := ConvArgKindOf(Result.Facts);
         Result.StrConstName := (Result.Facts.Cat in [tcString, tcChar]) and
           (Result.Kind <> cnkStrLit) and (Result.Kind <> cnkCharLit) and
@@ -15631,7 +15641,7 @@ begin
         end;
       end;
     tcPointer:
-      Result.Kind := ConvPtrKindX(AX);
+      Result.Kind := ConvPtrKindX(LX);
   end;
 end;
 

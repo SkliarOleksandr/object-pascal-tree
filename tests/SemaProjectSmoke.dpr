@@ -11751,8 +11751,11 @@ end;
 // untyped Pointer variable to a typed pointer over `array of Pointer` (YN);
 // nil to a record's Implicit from Pointer over one from PChar (YU); a
 // distinct copy `type Pointer` is the untyped Pointer, which a class takes
-// over an untyped parameter (YV, the bigflat gate's Vcl.Themes handle). The
-// overload dcc picks is declared second; each call compiles with dcc64.
+// over an untyped parameter (YV, the bigflat gate's Vcl.Themes handle); an
+// alias of PWideChar written through a unit qualifier, and a self-named alias
+// of that one, is a PChar and goes to a string over Integer (YW, the wide
+// gate's `LPWSTR = Windows.LPWSTR`). The overload dcc picks is declared second; each
+// call compiles with dcc64.
 procedure TestPtrConvRanking;
 const
   SRC_UNIT =
@@ -11772,6 +11775,7 @@ const
     '  TRp = record X: Integer; class operator Implicit(A: Pointer): TRp; end;'#10 +
     '  TRpc = record X: Integer; class operator Implicit(A: PChar): TRpc; end;'#10 +
     '  THnd = type Pointer;'#10 +
+    '  TPW = System.PWideChar;'#10 +
     'procedure Proc;'#10 +
     'function YA(A: PI2): TRA; overload;'#10 +
     'function YA(A: Pointer): TRW; overload;'#10 +
@@ -11811,6 +11815,8 @@ const
     'function YU(A: TRp): TRW; overload;'#10 +
     'function YV(const A): TRA; overload;'#10 +
     'function YV(A: TCls): TRW; overload;'#10 +
+    'function YW(A: Integer): TRA; overload;'#10 +
+    'function YW(A: string): TRW; overload;'#10 +
     'implementation'#10 +
     'class operator TRp.Implicit(A: Pointer): TRp; begin end;'#10 +
     'class operator TRpc.Implicit(A: PChar): TRpc; begin end;'#10 +
@@ -11853,11 +11859,24 @@ const
     'function YU(A: TRp): TRW; begin end;'#10 +
     'function YV(const A): TRA; begin end;'#10 +
     'function YV(A: TCls): TRW; begin end;'#10 +
+    'function YW(A: Integer): TRA; begin end;'#10 +
+    'function YW(A: string): TRW; begin end;'#10 +
+    'end.'#10;
+  // A self-named alias through a unit qualifier, as a Windows header unit's
+  // `LPWSTR = Windows.LPWSTR` (the wide gate's ShowMessage(...Description)).
+  SRC_QUAL =
+    'unit PtQ;'#10 +
+    'interface'#10 +
+    'uses PtR;'#10 +
+    'type'#10 +
+    '  TPW = PtR.TPW;'#10 +
+    'implementation'#10 +
     'end.'#10;
   SRC_PROG =
     'program PtRP;'#10 +
-    'uses PtR;'#10 +
+    'uses PtR, PtQ;'#10 +
     'var K: Integer; vPI: PI; vPChar: PChar; vDC: TClsDC; vI: Integer; vDA: TDA; vPtr: Pointer; vV: Variant; vH: THnd;'#10 +
+    '  vPW: PtR.TPW; vQW: TPW;'#10 +
     'begin'#10 +
     '  K := YA(vPI).W;'#10 +
     '  K := YB(vPI).W;'#10 +
@@ -11880,6 +11899,8 @@ const
     '  K := YS(''abc'').W;'#10 +
     '  K := YU(nil).W;'#10 +
     '  K := YV(vH).W;'#10 +
+    '  K := YW(vPW).W;'#10 +
+    '  K := YW(vQW).W;'#10 +
     'end.'#10;
 var
   LDir, LName: string;
@@ -11892,6 +11913,7 @@ begin
     '  TArray<T> = array of T;'#10 +
     'implementation'#10'end.'#10);
   TFile.WriteAllText(TPath.Combine(LDir, 'PtR.pas'), SRC_UNIT);
+  TFile.WriteAllText(TPath.Combine(LDir, 'PtQ.pas'), SRC_QUAL);
   TFile.WriteAllText(TPath.Combine(LDir, 'PtRP.dpr'), SRC_PROG);
   GProj := TPasSemaProject.Create(pfWin64, [LDir], []);
   try
@@ -11903,6 +11925,15 @@ begin
         LName := LName + ' line ' + IntToStr(LD.Line);
     Ok('pointer ranking: every call binds dcc''s overload - no E2003 [' +
       LName + ' ]', DiagCount(ModelByName('ptrp'), 'E2003') = 0);
+    // An unbound call reports no E2003: YW's two calls must bind (to the
+    // string overload, or `.W` above is E2003).
+    var LYW := 0;
+    var LPM := ModelByName('ptrp');
+    for var LPr in LPM.CallTargetX do
+      if GProj.Model(LPr.Value.UnitId).Symbols[LPr.Value.Sym].NameLower = 'yw' then
+        Inc(LYW);
+    Ok('pointer ranking: a PChar through a qualified alias binds YW(string) [' +
+      IntToStr(LYW) + ' of 2]', LYW = 2);
   finally
     GProj.Free;
     if TDirectory.Exists(LDir) then
