@@ -1800,7 +1800,12 @@ const
     '      0: (VInt: Integer);'#10 +                             // 31
     '      1: (case Byte of 0: (VB: Byte));'#10 +                // 32
     '  end;'#10 +                                                // 33
-    'end.'#10;                                                   // 34
+    'procedure Wrapped('#10 +                                    // 34
+    '  const A: Integer;'#10 +                                   // 35
+    '  B: string'#10 +                                           // 36
+    '  );'#10 +                                                  // 37
+    'begin end;'#10 +                                            // 38
+    'end.'#10;                                                   // 39
 
   // DefinesAt and an `$I` below the cursor with no main-file directive
   // between them (audit A2-22): FROMINC counts from line 7 on, not before.
@@ -6349,7 +6354,7 @@ begin
         // The project was demoted further up: the module outline reads text.
         Ok('nested: NavNest hydrated', GProj.EnsureHydrated(LMidNest));
         var LNOut := PasModuleOutline(GProj.Model(LMidNest).Tree);
-        Ok('nested outline: 17 rows', Length(LNOut) = 17);
+        Ok('nested outline: 18 rows', Length(LNOut) = 18);
         CheckOut(LNOut, 5, okRoutine, 'procedure', 'TCid', 'Click', '', 8, 11,
           True);
         CheckOut(LNOut, 6, okRoutine, 'function', 'TCid.Click', 'IsOutside',
@@ -6374,8 +6379,17 @@ begin
           11, False);
         CheckOut(LNOut, 16, okVar, 'field', 'TVarRec', 'VB', ': Byte', 32,
           28, False);
+        // A header wrapped after its `(` and before its `)` reads as it would
+        // on one line - no space just inside the brackets (0.149.1: RAD
+        // Studio's Structure pane drew `( const A` unformatted) - and its
+        // type spans follow the text.
+        CheckOut(LNOut, 17, okRoutine, 'procedure', '', 'Wrapped',
+          '(const A: Integer; B: string)', 34, 11, True);
+        Ok('nested outline types: wrapped header - Integer and string',
+          (Length(LNOut) = 18) and
+          SpansAre(LNOut[17].DetailTypes, [11, 7, 23, 6]));
         Ok('nested outline: rows in the implementation section',
-          (Length(LNOut) = 17) and (LNOut[6].Section = osImplementation) and
+          (Length(LNOut) = 18) and (LNOut[6].Section = osImplementation) and
           (LNOut[9].Section = osImplementation));
 
         // The project outline, before and after the unit's text is demoted:
@@ -6408,8 +6422,12 @@ begin
             (OutRow(LNPO, 'TCid.Click.IsOutside', 'A') = -1) and
             (OutRow(LNPO, 'TCid.Click.IsOutside', 'Result') = -1));
           // TCid, Click, IsOutside, Deeper, TLocalRec, LField, Plain, Helper;
-          // TVarRec and its Tag, Kind (the variant tag), VInt, VB.
-          Ok(LTag + ': 14 rows', Length(LNPO) = 14);
+          // TVarRec and its Tag, Kind (the variant tag), VInt, VB; Wrapped.
+          Ok(LTag + ': 15 rows', Length(LNPO) = 15);
+          var LRWr := OutRow(LNPO, '', 'Wrapped');
+          Ok(LTag + ': the wrapped header reads as one line',
+            (LRWr >= 0) and not LNPO[LRWr].Detail.Contains('( ') and
+            not LNPO[LRWr].Detail.Contains(' )'));
           Ok(LTag + ': a variant tag is a field row, as in the module outline',
             OutRow(LNPO, 'TVarRec', 'Kind') >= 0);
           if LRIs >= 0 then

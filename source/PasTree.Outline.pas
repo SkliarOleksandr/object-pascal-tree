@@ -189,9 +189,12 @@ type
 
 // Whitespace runs (a declaration wrapped over lines) become one space, and
 // anything past DETAIL_MAX is cut - the detail column is a hint, not the
-// declaration. With AMapped, AMap[I] is where raw character I (1-based)
-// landed in the result, 0 for one folded away; AKept is how many characters
-// of the collapsed text survive the cut.
+// declaration. No space is kept just inside a bracket: a parameter list
+// wrapped after its `(` or before its `)` reads `(const A: T)`, as it would
+// on one line - `( const A: T)` is how the header was wrapped, not what it
+// says. With AMapped, AMap[I] is where raw
+// character I (1-based) landed in the result, 0 for one folded away; AKept
+// is how many characters of the collapsed text survive the cut.
 function CollapseMapped(const AText: string; AMapped: Boolean;
   var AMap: TArray<Integer>; out AKept: Integer): string;
 var
@@ -203,26 +206,28 @@ begin
     SetLength(AMap, Length(AText) + 1);
   LBuf := TStringBuilder.Create(Length(AText));
   try
+    // The space of a run is written when the next character comes, so the
+    // characters on both sides decide it, and a trailing run writes none.
     LInSpace := False;
     for LIdx := 1 to Length(AText) do
     begin
       if AMapped then
         AMap[LIdx] := 0;
       if AText[LIdx] <= ' ' then
-      begin
-        if not LInSpace and (LBuf.Length > 0) then
-          LBuf.Append(' ');
-        LInSpace := True;
-      end
+        LInSpace := True
       else
       begin
+        if LInSpace and (LBuf.Length > 0) and
+           not CharInSet(LBuf.Chars[LBuf.Length - 1], ['(', '[']) and
+           not CharInSet(AText[LIdx], [')', ']']) then
+          LBuf.Append(' ');
         LBuf.Append(AText[LIdx]);
         if AMapped then
           AMap[LIdx] := LBuf.Length;
         LInSpace := False;
       end;
     end;
-    Result := LBuf.ToString.TrimRight;
+    Result := LBuf.ToString;
   finally
     LBuf.Free;
   end;
