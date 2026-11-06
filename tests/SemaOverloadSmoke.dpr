@@ -876,6 +876,135 @@ const
     '  X := UK(IA);'#10 +
     'end;'#10'end.'#10;
 
+  { Sets in the unit's own typer (SetCtorScore, SetsMeetSym - the project's
+    SetCtorFitX, SetsMeetX; 6.3.1, local/type-conv-2026-11/n4): a set
+    variable's own type over another that meets it (VA), a `[...]` or a
+    variable of another enumeration's family out (VB, VC, VD), an integer
+    `[...]` for an enumeration set out (VE), an exact element over `array of
+    const` (VF), a constant below it (VG) and above a dynamic array's exact
+    constant (VH, VO), an integer constant outside 0..255 out (VI), a true
+    constant holding a `[...]` a set and no array (VJ), no Variant for a set
+    or a `[...]` (VK, VL), an AnsiChar exact for a set of Char (VM), `[]`
+    over a user conversion (VN), a range no array takes (VP), a character
+    range out of an integer set (VQ), a set of a distinct copy of the
+    enumeration (`type TE`) meeting a set of it (VS). The overload dcc does
+    NOT pick is declared first. }
+  SRC_SET =
+    'unit U;'#10'interface'#10'type'#10 +
+    '  TRA = record A: Integer; end;'#10 +
+    '  TRW = record W: Integer; end;'#10 +
+    '  TE = (e0, e1, e2, e3, e4);'#10 +
+    '  TF = (f0, f1);'#10 +
+    '  TSE = set of TE;'#10 +
+    '  TSE2 = set of TE;'#10 +
+    '  TSF = set of TF;'#10 +
+    '  TSB = set of Byte;'#10 +
+    '  TSC = set of Char;'#10 +
+    '  TSBool = set of Boolean;'#10 +
+    '  TED = type TE;'#10 +
+    '  TSEd2 = set of TED;'#10 +
+    '  TByteDyn = array of Byte;'#10 +
+    '  TBoolDyn = array of Boolean;'#10 +
+    '  TRs = record X: Integer; class operator Implicit(const A: TSE): TRs; end;'#10 +
+    'const KS = [e1, e2];'#10 +
+    'function VA(A: TSE): TRA; overload;'#10 +
+    'function VA(A: TSE2): TRW; overload;'#10 +
+    'function VB(A: TSE): TRA; overload;'#10 +
+    'function VB(A: TSF): TRW; overload;'#10 +
+    'function VC(A: TSF): TRA; overload;'#10 +
+    'function VC(A: TSE): TRW; overload;'#10 +
+    'function VD(A: TSE): TRA; overload;'#10 +
+    'function VD(A: TSF): TRW; overload;'#10 +
+    'function VE(A: TSE): TRA; overload;'#10 +
+    'function VE(A: TSB): TRW; overload;'#10 +
+    'function VF(const A: array of const): TRA; overload;'#10 +
+    'function VF(A: TSB): TRW; overload;'#10 +
+    'function VG(A: TSB): TRA; overload;'#10 +
+    'function VG(const A: array of const): TRW; overload;'#10 +
+    'function VH(A: TByteDyn): TRA; overload;'#10 +
+    'function VH(A: TSB): TRW; overload;'#10 +
+    'function VI(A: TSB): TRA; overload;'#10 +
+    'function VI(const A: array of Integer): TRW; overload;'#10 +
+    'function VJ(const A: array of TE): TRA; overload;'#10 +
+    'function VJ(A: TSE): TRW; overload;'#10 +
+    'function VK(const A: Variant): TRA; overload;'#10 +
+    'function VK(A: TSE2): TRW; overload;'#10 +
+    'function VL(const A: Variant): TRA; overload;'#10 +
+    'function VL(A: TSE): TRW; overload;'#10 +
+    'function VM(const A: array of const): TRA; overload;'#10 +
+    'function VM(A: TSC): TRW; overload;'#10 +
+    'function VN(const A: TRs): TRA; overload;'#10 +
+    'function VN(A: TSB): TRW; overload;'#10 +
+    'function VO(A: TBoolDyn): TRA; overload;'#10 +
+    'function VO(A: TSBool): TRW; overload;'#10 +
+    'function VP(const A: array of TE): TRA; overload;'#10 +
+    'function VP(A: TSE): TRW; overload;'#10 +
+    'function VQ(A: TSB): TRA; overload;'#10 +
+    'function VQ(A: TSC): TRW; overload;'#10 +
+    'function VS(const A): TRA; overload;'#10 +
+    'function VS(A: TSEd2): TRW; overload;'#10 +
+    'implementation'#10 +
+    'class operator TRs.Implicit(const A: TSE): TRs; begin end;'#10 +
+    'function VA(A: TSE): TRA; begin end;'#10 +
+    'function VA(A: TSE2): TRW; begin end;'#10 +
+    'function VB(A: TSE): TRA; begin end;'#10 +
+    'function VB(A: TSF): TRW; begin end;'#10 +
+    'function VC(A: TSF): TRA; begin end;'#10 +
+    'function VC(A: TSE): TRW; begin end;'#10 +
+    'function VD(A: TSE): TRA; begin end;'#10 +
+    'function VD(A: TSF): TRW; begin end;'#10 +
+    'function VE(A: TSE): TRA; begin end;'#10 +
+    'function VE(A: TSB): TRW; begin end;'#10 +
+    'function VF(const A: array of const): TRA; begin end;'#10 +
+    'function VF(A: TSB): TRW; begin end;'#10 +
+    'function VG(A: TSB): TRA; begin end;'#10 +
+    'function VG(const A: array of const): TRW; begin end;'#10 +
+    'function VH(A: TByteDyn): TRA; begin end;'#10 +
+    'function VH(A: TSB): TRW; begin end;'#10 +
+    'function VI(A: TSB): TRA; begin end;'#10 +
+    'function VI(const A: array of Integer): TRW; begin end;'#10 +
+    'function VJ(const A: array of TE): TRA; begin end;'#10 +
+    'function VJ(A: TSE): TRW; begin end;'#10 +
+    'function VK(const A: Variant): TRA; begin end;'#10 +
+    'function VK(A: TSE2): TRW; begin end;'#10 +
+    'function VL(const A: Variant): TRA; begin end;'#10 +
+    'function VL(A: TSE): TRW; begin end;'#10 +
+    'function VM(const A: array of const): TRA; begin end;'#10 +
+    'function VM(A: TSC): TRW; begin end;'#10 +
+    'function VN(const A: TRs): TRA; begin end;'#10 +
+    'function VN(A: TSB): TRW; begin end;'#10 +
+    'function VO(A: TBoolDyn): TRA; begin end;'#10 +
+    'function VO(A: TSBool): TRW; begin end;'#10 +
+    'function VP(const A: array of TE): TRA; begin end;'#10 +
+    'function VP(A: TSE): TRW; begin end;'#10 +
+    'function VQ(A: TSB): TRA; begin end;'#10 +
+    'function VQ(A: TSC): TRW; begin end;'#10 +
+    'function VS(const A): TRA; begin end;'#10 +
+    'function VS(A: TSEd2): TRW; begin end;'#10 +
+    'procedure Test(S: TSE; S2: TSE2; SF: TSF; B: Byte; AC: AnsiChar);'#10 +
+    'var'#10 +
+    '  X: TRW;'#10 +
+    'begin'#10 +
+    '  X := VA(S2);'#10 +
+    '  X := VB([f0]);'#10 +
+    '  X := VC([e1..e3]);'#10 +
+    '  X := VD(SF);'#10 +
+    '  X := VE([5]);'#10 +
+    '  X := VF([B]);'#10 +
+    '  X := VG([5]);'#10 +
+    '  X := VH([5]);'#10 +
+    '  X := VI([B, 300]);'#10 +
+    '  X := VJ(KS);'#10 +
+    '  X := VK(S);'#10 +
+    '  X := VL([]);'#10 +
+    '  X := VM([AC]);'#10 +
+    '  X := VN([]);'#10 +
+    '  X := VO([True]);'#10 +
+    '  X := VP([e1..e3]);'#10 +
+    '  X := VQ([''a''..''z'']);'#10 +
+    '  X := VS(S);'#10 +
+    'end;'#10'end.'#10;
+
   { The Char-literal and nil exemptions of the assignment check (A4-10,
     A4-11; probe-b32 P1): dcc compiles every line but the last, where an
     operator-less record takes nil - E2010 naming `Pointer`, not `_nil`. }
@@ -1012,6 +1141,13 @@ begin
     'UJ', 'UK'] do
     Ok('class / interface / nil ranking (6.3.1, 14.2.1): ' + LName +
       ' binds the TRW overload',
+      HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
+  GModel.Free;
+
+  Analyze(SRC_SET);
+  for var LName in ['VA', 'VB', 'VC', 'VD', 'VE', 'VF', 'VG', 'VH', 'VI',
+    'VJ', 'VK', 'VL', 'VM', 'VN', 'VO', 'VP', 'VQ', 'VS'] do
+    Ok('set ranking (6.3.1, 2.4.1): ' + LName + ' binds the TRW overload',
       HasCallTyped(LName, 'TRW') and not HasCallTyped(LName, 'TRA'));
   GModel.Free;
 

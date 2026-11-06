@@ -435,6 +435,25 @@ type
     InlineElemX: TSemaXType;
   end;
 
+  { One element of a `[...]` passed to a SET parameter - or one bound of a
+    range in it - with what every set candidate reads of it, worked out once
+    (TPasSemaProject.SetElemX; SetCtorElemFit is the rule). }
+  TPasSetElem = record
+    X: TSemaXType;        // its type after aliases; XNil: not typed
+    Host: TSemaXType;     // an enumeration's: the enumeration (EnumHostX)
+    Cat: TSemaTypeCat;    // X's category; tcChar for a one-character literal
+    Constant, HasValue: Boolean;
+    Value: Int64;         // a constant's ordinal value, when HasValue
+  end;
+
+  { A `[...]` - written in the call, or the value of a true constant the
+    argument names (`const KS = [e1, e2]`) - as a set parameter reads it:
+    its elements, range bounds flattened, and whether it is `[]`. }
+  TPasSetArg = record
+    Elems: TArray<TPasSetElem>;
+    Empty: Boolean;
+  end;
+
   TPasSemaProject = class
   private
     FPlatform: TPasPlatform;
@@ -1555,6 +1574,16 @@ type
     // A `[...]` against an array parameter - see the implementation.
     function CtorFitX(const ACanonElemX: TSemaXType; ATarget: TSemaCtorTarget;
       const ATree: TPasTree; ACtor: Integer; const AArg: TPasArrayArg): Integer;
+    // Sets: their bases, a `[...]`'s elements, its fit - see the
+    // implementation.
+    function SetBaseX(const AX: TSemaXType; out ABase: TSemaSetBase;
+      out AHostX, AExactX: TSemaXType): Boolean;
+    function EnumHostX(const AX: TSemaXType): TSemaXType;
+    function SetsMeetX(const ADstX, ASrcX: TSemaXType): Boolean;
+    function SetElemX(AMid, ANode: Integer; const AX: TSemaXType): TPasSetElem;
+    function SetConstArgX(AMid, ANode: Integer; out AArg: TPasSetArg): Boolean;
+    function SetCtorFitX(const ACanonParX: TSemaXType;
+      const AArg: TPasSetArg): Integer;
     // The element type of an array type - see the implementation.
     function ArrayElemX(const AX: TSemaXType): TSemaXType;
     // ACallMid / AArgNodes: the call site's model and argument nodes, read
@@ -13969,6 +13998,17 @@ begin
       1: Exit(scImplicit);
       -1: Exit(TSemaConv.scNone);
     end;
+  // A set converts to a set whose base is of its family (SetsMeetX) and to
+  // nothing else; nothing else converts to a set (2.4.1, 6.3.1; n4 Sets A,
+  // D). A record's operators are decided above; a procedural type is left
+  // alone (a parameterless function in a value position is called).
+  if (D = tcSet) or (S = tcSet) then
+  begin
+    if (D = tcSet) and (S = tcSet) and SetsMeetX(LD, LS) then
+      Exit(scImplicit);
+    if (D <> tcProc) and (S <> tcProc) then
+      Exit(TSemaConv.scNone);
+  end;
   if S = tcNil then
   begin
     if (D in [tcPointer, tcClass, tcInterface, tcClassOf, tcProc,
@@ -14615,6 +14655,286 @@ begin
     Result := ArrayElemX(ACanonParX);
 end;
 
+{ The enumeration an enumeration type or a subrange of one is of: AX itself
+  for an enumeration, the type of the low bound's value for a subrange
+  (`TESub = e1..e3` gives TE), through aliases and distinct copies - `type
+  TArithmeticException` is of TArithmeticException's family (dcc64 37.0,
+  n4 P5.dpr: `set of TEd` and `set of TE` meet; System.Math passes a
+  TArithmeticExceptionMask for a TFPUExceptionMask). XNil when not read. }
+function TPasSemaProject.EnumHostX(const AX: TSemaXType): TSemaXType;
+var
+  LCur: TSemaXType;
+  LDef, LBound, LMid, LSym, LDepth: Integer;
+  LTree: TPasTree;
+begin
+  Result := XNil;
+  LCur := CanonTypeX(AX);
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    LTree := FModels[LCur.UnitId].Tree;
+    if LTree.Nodes[LDef].Kind in [nkIdent, nkMember, nkTypeArgs] then
+    begin
+      LCur := CanonTypeX(AliasStepX(LCur, LDef));   // a distinct copy
+      Continue;
+    end;
+    if LTree.Nodes[LDef].Kind <> nkSubrange then
+      Exit(LCur);
+    LBound := LTree.Nodes[LDef].FirstChild;
+    while (LBound <> NIL_NODE) and (LTree.Nodes[LBound].Kind = nkParen) do
+      LBound := LTree.Nodes[LBound].FirstChild;
+    if (LBound = NIL_NODE) or
+       not (LTree.Nodes[LBound].Kind in [nkIdent, nkMember]) or
+       not DesignatorSymX(LCur.UnitId, LBound, LMid, LSym) or
+       (FModels[LMid].Symbols[LSym].Kind <> skEnumValue) or
+       (FModels[LMid].Symbols[LSym].TypeSym = NIL_SYM) then
+      Exit;
+    LCur := CanonTypeX(XPlain(LMid, FModels[LMid].Symbols[LSym].TypeSym));
+  end;
+end;
+
+{ The base of the set type AX (2.4.1), after aliases and distinct `type X`
+  copies: ABase its category and range (TSemaSetBase), AHostX the
+  enumeration of an enumeration base (EnumHostX), AExactX the base type
+  itself when a type names it - AnsiChar for a set of Char or WideChar, which
+  is a set of AnsiChar; XNil for a range written in place (`set of 0..5`,
+  `set of 'a'..'z'`), whose values no variable is of. False when AX is no
+  set type or its base is not read (an enumeration written in place). }
+function TPasSemaProject.SetBaseX(const AX: TSemaXType; out ABase: TSemaSetBase;
+  out AHostX, AExactX: TSemaXType): Boolean;
+var
+  LCur, LBaseX: TSemaXType;
+  LDef, LDepth, LBase, LBound, LMid: Integer;
+  LTree: TPasTree;
+  LF: TSemaOrdFacts;
+begin
+  Result := False;
+  ABase := Default(TSemaSetBase);
+  AHostX := XNil;
+  AExactX := XNil;
+  LCur := AX;
+  for LDepth := 1 to 8 do
+  begin
+    if not XValid(LCur) then
+      Exit;
+    LDef := TypeDefNodeOf(LCur.UnitId, LCur.Sym);
+    if LDef = NIL_NODE then
+      Exit;
+    LTree := FModels[LCur.UnitId].Tree;
+    case LTree.Nodes[LDef].Kind of
+      nkIdent, nkMember, nkTypeArgs:
+        LCur := AliasStepX(LCur, LDef);   // alias link
+      nkSetType:
+        Break;
+    else
+      Exit;
+    end;
+  end;
+  if (LDef = NIL_NODE) or (LTree.Nodes[LDef].Kind <> nkSetType) then
+    Exit;
+  LMid := LCur.UnitId;
+  LBase := LTree.Nodes[LDef].FirstChild;
+  if LBase = NIL_NODE then
+    Exit;
+  case LTree.Nodes[LBase].Kind of
+    nkIdent, nkMember, nkTypeArgs:
+      begin
+        LBaseX := CanonTypeX(SubstX(ResolveTypeExpr(LMid, LBase), LCur.Inst, 0));
+        if not XValid(LBaseX) then
+          Exit;
+        ABase.Cat := XCatOf(LBaseX);
+        AExactX := LBaseX;
+        LF := OrdFactsX(LMid, NIL_NODE, LBaseX);
+        if LF.HasRange then
+        begin
+          ABase.HasRange := True;
+          ABase.Lo := LF.Lo;
+          ABase.Hi := LF.Hi;
+        end
+        else if (LF.Builtin = 'byte') or (LF.Builtin = 'ansichar') or
+                (LF.Builtin = 'char') or (LF.Builtin = 'widechar') then
+        begin
+          ABase.HasRange := True;
+          ABase.Hi := 255;
+          if ABase.Cat = tcChar then
+            AExactX := BuiltinX(LMid, 'ansichar');
+        end
+        else if LF.Builtin = 'boolean' then
+        begin
+          ABase.HasRange := True;
+          ABase.Hi := 1;
+        end;
+        if ABase.Cat = tcEnum then
+          AHostX := EnumHostX(LBaseX);
+      end;
+    nkSubrange:
+      begin
+        LBound := LTree.Nodes[LBase].FirstChild;
+        if LBound = NIL_NODE then
+          Exit;
+        if IsCharLiteralExpr(LTree, LBound) then
+        begin
+          // A set of a character range is a set of AnsiChar: an AnsiChar
+          // is its exact element (`[AC]` takes `set of 'a'..'z'` over
+          // `array of const`, n4 Set B).
+          ABase.Cat := tcChar;
+          AExactX := BuiltinX(LMid, 'ansichar');
+        end
+        else
+        begin
+          LBaseX := UntypedInitTypeX(LMid, LBound, True);
+          ABase.Cat := XCatOf(LBaseX);
+          if ABase.Cat = tcEnum then
+            AHostX := EnumHostX(LBaseX);
+        end;
+        ABase.HasRange := OrdinalDefRange(LTree, LBase, OrdNameValueX(LMid),
+          ABase.Lo, ABase.Hi, ConstFactsX(LMid));
+      end;
+  else
+    Exit;
+  end;
+  if (ABase.Cat = tcEnum) and not XValid(AHostX) then
+    ABase.Cat := tcUnknown;
+  Result := ABase.Cat in [tcInteger, tcChar, tcBoolean, tcEnum];
+end;
+
+{ Do the set types ADstX and ASrcX meet (SetsMeet over SetBaseX)? True
+  when either base is not read. }
+function TPasSemaProject.SetsMeetX(const ADstX, ASrcX: TSemaXType): Boolean;
+var
+  LD, LS: TSemaSetBase;
+  LDHost, LSHost, LExact: TSemaXType;
+begin
+  if not SetBaseX(ADstX, LD, LDHost, LExact) or
+     not SetBaseX(ASrcX, LS, LSHost, LExact) then
+    Exit(True);
+  Result := SetsMeet(LD, LS, (LD.Cat <> tcEnum) or XSameType(LDHost, LSHost));
+end;
+
+{ One element ANode of model AMid (or a range's bound) of a `[...]` for a
+  set parameter, typed AX by the caller (TPasSetElem). A one-character
+  literal is a character; a constant's ordinal value is read as dcc folds
+  it (FoldedIntValue, OrdinalNodeValue). }
+function TPasSemaProject.SetElemX(AMid, ANode: Integer;
+  const AX: TSemaXType): TPasSetElem;
+var
+  LTree: TPasTree;
+  LCharLit: Boolean;
+begin
+  Result := Default(TPasSetElem);
+  Result.X := XNil;
+  Result.Host := XNil;
+  LTree := FModels[AMid].Tree;
+  LCharLit := IsCharLiteralExpr(LTree, ANode);
+  Result.X := AX;
+  if not XValid(Result.X) and (LCharLit or IsConstExprX(AMid, ANode)) then
+    Result.X := UntypedInitTypeX(AMid, ANode, True);
+  if XValid(Result.X) then
+    Result.X := CanonTypeX(Result.X);
+  Result.Cat := XCatOf(Result.X);
+  if LCharLit then
+    Result.Cat := tcChar;
+  Result.Constant := LCharLit or IsConstExprX(AMid, ANode);
+  if Result.Constant then
+    case Result.Cat of
+      tcInteger:
+        Result.HasValue := FoldedIntValue(LTree, ANode, 0, ConstFactsX(AMid),
+          OrdNameValueX(AMid), Result.Value);
+      tcChar:
+        Result.HasValue := OrdinalNodeValue(LTree, PeelParens(LTree, ANode), 0,
+          OrdNameValueX(AMid), Result.Value);
+    end;
+  if Result.Cat = tcEnum then
+  begin
+    Result.Host := EnumHostX(Result.X);
+    if not XValid(Result.Host) then
+      Result.Cat := tcUnknown;   // an enumeration not read: no evidence
+  end;
+end;
+
+{ The argument ANode of model AMid names a true constant whose value is a
+  `[...]` (`const KS = [e1, e2]`): its elements, read in the constant's own
+  model, into AArg. dcc reads such a constant as a set - a set parameter
+  takes it, no array does (n4 Set A: KS, KB, KE). }
+function TPasSemaProject.SetConstArgX(AMid, ANode: Integer;
+  out AArg: TPasSetArg): Boolean;
+var
+  LVMid, LVNode, LKid, LBound, LN: Integer;
+  LTree: TPasTree;
+begin
+  AArg := Default(TPasSetArg);
+  Result := False;
+  ConstValueNodeX(AMid, ANode, LVMid, LVNode);
+  if LVNode = NIL_NODE then
+    Exit;
+  LTree := FModels[LVMid].Tree;
+  LVNode := PeelParens(LTree, LVNode);
+  if (LVNode = NIL_NODE) or (LTree.Nodes[LVNode].Kind <> nkSetCtor) then
+    Exit;
+  Result := True;
+  AArg.Empty := LTree.Nodes[LVNode].FirstChild = NIL_NODE;
+  LN := 0;
+  LKid := LTree.Nodes[LVNode].FirstChild;
+  while LKid <> NIL_NODE do
+  begin
+    if LTree.Nodes[LKid].Kind = nkRange then
+      LBound := LTree.Nodes[LKid].FirstChild
+    else
+      LBound := LKid;
+    while LBound <> NIL_NODE do
+    begin
+      SetLength(AArg.Elems, LN + 1);
+      AArg.Elems[LN] := SetElemX(LVMid, LBound, XNil);
+      Inc(LN);
+      if LTree.Nodes[LKid].Kind <> nkRange then
+        Break;
+      LBound := LTree.Nodes[LBound].NextSibling;
+    end;
+    LKid := LTree.Nodes[LKid].NextSibling;
+  end;
+end;
+
+{ The `[...]` AArg (read by the caller: the call's own brackets, or a true
+  constant's, SetConstArgX) against the set parameter ACanonParX:
+  SetCtorElemFit, the rule, over each element against the set's base
+  (SetBaseX) - its category and enumeration, whether its type is the base
+  type, its value against the base's range - the worst deciding (SetCtorFit).
+  A base not read gives no evidence. The unit pass's SetCtorScore reads the
+  same. }
+function TPasSemaProject.SetCtorFitX(const ACanonParX: TSemaXType;
+  const AArg: TPasSetArg): Integer;
+var
+  LBase: TSemaSetBase;
+  LHost, LExact: TSemaXType;
+  LWorst, LFit: TSemaSetElemFit;
+  LIdx: Integer;
+begin
+  if not SetBaseX(ACanonParX, LBase, LHost, LExact) then
+    Exit(0);
+  if AArg.Empty then
+    Exit(SetCtorFit(sefExact, True));
+  LWorst := sefExact;
+  for LIdx := 0 to High(AArg.Elems) do
+  begin
+    LFit := SetCtorElemFit(LBase, AArg.Elems[LIdx].Cat,
+      (AArg.Elems[LIdx].Cat <> tcEnum) or
+        XSameType(AArg.Elems[LIdx].Host, LHost),
+      XValid(LExact) and XValid(AArg.Elems[LIdx].X) and
+        XSameType(AArg.Elems[LIdx].X, LExact),
+      AArg.Elems[LIdx].Constant, AArg.Elems[LIdx].HasValue,
+      AArg.Elems[LIdx].Value);
+    if LFit < LWorst then
+      LWorst := LFit;
+    if LWorst = sefOut then
+      Break;
+  end;
+  Result := SetCtorFit(LWorst, False);
+end;
+
 function TPasSemaProject.ConvPtrKindX(const AX: TSemaXType): TSemaConvKind;
 var
   LC: TSemaXType;
@@ -14853,6 +15173,15 @@ begin
     Exit(2);
   LParCat := ParCatOf(AParX, ACanonParX);
   LArgCat := XCatOf(ACanonArgX);
+  // A set for a set (SetsMeetX): one conversion for every set whose base is
+  // of the value's family, none for another - a set variable takes its own
+  // type, then any set that meets it, all of one rank (n4 Set B).
+  if (LParCat = tcSet) and (LArgCat = tcSet) then
+  begin
+    if SetsMeetX(ACanonParX, ACanonArgX) then
+      Exit(1);
+    Exit(-1);
+  end;
   // Two DIFFERENT record types REJECT the candidate, and so does an
   // ARRAY parameter against a record/class/interface argument or the
   // reverse (ArgStructRejects). The general "the types do not fit"
@@ -15554,6 +15883,13 @@ var
   // read once for all of a call's candidates, like LArrArg.
   LArgConvCore: Integer;
   LArgConv: TSemaArgConv;
+  // The `[...]` a SET parameter read last (ReadSetArg) and its node - the
+  // call's brackets, or a true constant's (SetConstArgX); LSetIsConst: the
+  // node names such a constant. Read once for all of a call's candidates,
+  // on the heap like LArrArg.
+  LSetArgCore: Integer;
+  LSetIsConst: Boolean;
+  LSetArg: ^TPasSetArg;
 
   // The probe ElementX and PointeeOfDeclX are given: the walk's own in a
   // probe, where FX already holds the base; the pass's LFallback otherwise.
@@ -16135,6 +16471,58 @@ var
       end;
     end;
 
+    // May a name typed AArgX be a true constant whose value is a `[...]`?
+    // Such a constant types as nothing or as a set; asked before the
+    // constant's value is looked up (SetConstArgX).
+    function MaySetConst(const AArgX: TSemaXType): Boolean;
+    begin
+      Result := not XValid(AArgX) or (XCatOf(AArgX) = tcSet);
+    end;
+
+    // What the argument ACore brings a SET parameter (TPasSetArg), into
+    // LSetArg: a `[...]`'s elements - each bound of a range one - typed here
+    // (SetElemX), or the elements of the true constant it names
+    // (SetConstArgX; LSetIsConst). Read once for all of a call's candidates
+    // (LSetArgCore), like ReadArrayArg.
+    procedure ReadSetArg(ACore: Integer);
+    var
+      LKid, LBound, LN: Integer;
+    begin
+      if LSetArg = nil then
+        New(LSetArg)
+      else if ACore = LSetArgCore then
+        Exit;
+      LSetArgCore := ACore;
+      LSetIsConst := False;
+      LSetArg.Elems := nil;
+      LSetArg.Empty := False;
+      if LM.Tree.Nodes[ACore].Kind <> nkSetCtor then
+      begin
+        LSetIsConst := SetConstArgX(AId, ACore, LSetArg^);
+        Exit;
+      end;
+      LSetArg.Empty := LM.Tree.Nodes[ACore].FirstChild = NIL_NODE;
+      LN := 0;
+      LKid := LM.Tree.Nodes[ACore].FirstChild;
+      while LKid <> NIL_NODE do
+      begin
+        if LM.Tree.Nodes[LKid].Kind = nkRange then
+          LBound := LM.Tree.Nodes[LKid].FirstChild
+        else
+          LBound := LKid;
+        while LBound <> NIL_NODE do
+        begin
+          SetLength(LSetArg.Elems, LN + 1);
+          LSetArg.Elems[LN] := SetElemX(AId, LBound, GetX(LBound));
+          Inc(LN);
+          if LM.Tree.Nodes[LKid].Kind <> nkRange then
+            Break;
+          LBound := LM.Tree.Nodes[LBound].NextSibling;
+        end;
+        LKid := LM.Tree.Nodes[LKid].NextSibling;
+      end;
+    end;
+
     // One argument against the parameter type AParX: AArg its node, or
     // NIL_NODE for a comparison an nkAmbiguous stands for (16.3.1) - typed
     // AArgX, with no node shape to read. A fit on the doubled scale of
@@ -16151,6 +16539,7 @@ var
       LCoreKind: TPasNodeKind;
       LArgX, LParX, LCanonParX, LCanonArgX, LElemX: TSemaXType;
       LClassRef: Boolean;
+      LParCat: TSemaTypeCat;
     begin
       Result := 0;
       LClassRef := False;
@@ -16221,6 +16610,32 @@ var
            (XCatOf(LParX) = tcProc) and
            not AnonLiteralFitsX(LM, AId, LCore, LParX) then
           Exit(-1);
+      end;
+      // A `[...]` for a SET parameter, and a true constant whose value is one
+      // (`const KS = [e1, e2]`): by its elements (SetCtorFitX). Such a
+      // constant is a set to dcc, which no array takes (n4 Set A: KS, KB, KE
+      // reach the sets alone).
+      if XValid(LParX) and not LClassRef and
+         ((LCoreKind = nkSetCtor) or
+          (LCoreKind in [nkIdent, nkMember]) and MaySetConst(LArgX)) then
+      begin
+        if AOpenArr then
+          LParCat := tcArray
+        else
+        begin
+          LParCat := XCatOf(LCanonParX);
+          if (LParCat = tcUnknown) and IsDynArrayTypeX(LCanonParX) then
+            LParCat := tcArray;
+        end;
+        if (LParCat = tcSet) or
+           (LParCat = tcArray) and (LCoreKind <> nkSetCtor) then
+        begin
+          ReadSetArg(LCore);
+          if LSetIsConst and (LParCat = tcArray) then
+            Exit(-1);
+          if (LParCat = tcSet) and (LSetIsConst or (LCoreKind = nkSetCtor)) then
+            Exit(SetCtorFitX(LCanonParX, LSetArg^));
+        end;
       end;
       // An OPEN ARRAY, AParX its element type, has its own rule; a class
       // reference (a type name, a class method's Self) decides nothing there.
@@ -16568,6 +16983,7 @@ var
       LArrArg.Elems := nil;
       LArrArg.InlineElemX := XNil;
     end;
+    LSetArgCore := NIL_NODE;
     LArgConvCore := NIL_NODE;
     LBestScore := -1;
     ABestMid := -1;
@@ -18285,6 +18701,8 @@ begin
   LArrArgCore := NIL_NODE;
   LArrArg := nil;
   LArgConvCore := NIL_NODE;
+  LSetArgCore := NIL_NODE;
+  LSetArg := nil;
   if LProbe <> nil then
   begin
     // A PROBE: the probe's tables in place of the arrays and overlays, the
@@ -18302,6 +18720,8 @@ begin
     finally
       if LArrArg <> nil then
         Dispose(LArrArg);
+      if LSetArg <> nil then
+        Dispose(LSetArg);
     end;
     Exit;
   end;
@@ -18332,6 +18752,8 @@ begin
     LFallback.Free;
     LUsesHeads.Free;
     LAmbig.Free;
+    if LSetArg <> nil then
+      Dispose(LSetArg);
     if LArrArg <> nil then
       Dispose(LArrArg);
     // Unmanaged case (AnalyzeFile): single-threaded, so the overlay goes
@@ -23140,12 +23562,20 @@ end;
 //
 // AUntyped: an open target at ANode typed to nothing - its member set is
 // unknown, so a miss proves nothing (the WithUnopened rule; audit A3-07).
+//
+// A member the code cannot see is passed over and the walk goes on from the
+// ancestor of the type declaring it (FindVisibleMemberX, spec 3.3.2's
+// visibility filter, 5.7): `with Canvas do ... State` in a TCustomColorBox
+// method of Vcl.ExtCtrls is the method's parameter, not TCanvas's private
+// field of Vcl.Graphics (dcc64 37.0, local/type-conv-2026-11/n4 W1.dpr: a
+// private field of another unit yields to the ancestor's public one, a
+// strict private one to the parameter).
 function TPasSemaProject.FindInEnclosingWith(AId, ANode: Integer;
   const ANameLower: string; out AUid, ASym: Integer;
   out AX: TSemaXType; out AUntyped: Boolean; AProbe: TPasXProbe): Boolean;
 var
   LM: TPasSemaModel;
-  LCur, LParent, LLast, LChild, LIdx, LCtx, LFrom: Integer;
+  LCur, LParent, LLast, LChild, LIdx, LCtx, LFrom, LHere: Integer;
   LTargets: TArray<Integer>;
   LX: TSemaXType;
 begin
@@ -23153,6 +23583,7 @@ begin
   AX := XNil;
   AUntyped := False;
   LM := FModels[AId];
+  LHere := -2;   // the method's type (StructSymOfNode), read on first use
   LCur := ANode;
   LParent := LM.Tree.Nodes[LCur].Parent;
   while LParent <> NIL_NODE do
@@ -23191,8 +23622,10 @@ begin
           LX := WithTargetTypeX(AId, LTargets[LIdx], AProbe);
           if not XValid(LX) then
             AUntyped := True;
-          if XValid(LX) and
-             FindMemberX(AId, LX, ANameLower, AUid, ASym, LCtx) then
+          if XValid(LX) and (LHere = -2) then
+            LHere := StructSymOfNode(LM, ANode);
+          if XValid(LX) and FindVisibleMemberX(AId, LHere, LX, ANameLower,
+               AUid, ASym, LCtx) then
           begin
             // The member's declared type, closed over the instantiation
             // frame FindMemberX reported - travels back with the hit (see

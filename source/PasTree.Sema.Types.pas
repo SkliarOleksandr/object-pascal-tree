@@ -53,6 +53,22 @@ type
     const`. }
   TSemaCtorTarget = (ctOpenArray, ctDynArray, ctArrayOfConst);
 
+  { The base type of a SET type as the scorers read it (SetCtorElemFit,
+    SetsMeet): its category - an integer, a character, Boolean or an
+    enumeration (tcUnknown: not read) - and its ordinal range when known. A
+    set of Char is a set of AnsiChar (2.4.1): its range is 0..255. }
+  TSemaSetBase = record
+    Cat: TSemaTypeCat;
+    HasRange: Boolean;
+    Lo, Hi: Int64;
+  end;
+
+  { How one element of a `[...]` - or one bound of a range in it - stands to
+    the base type of a set parameter (SetCtorElemFit): not known, out (the
+    candidate is), a conversion, a constant the base holds, a value of the
+    base type itself. Ordered: the worst element decides. }
+  TSemaSetElemFit = (sefOut, sefUnknown, sefConv, sefConst, sefExact);
+
   { What a value is to the overload ranking of numbers and strings
     (ConvRank, 6.3.1): the predefined type it is stored as - an integer by
     width and sign, a real, Variant, a string or character kind
@@ -355,6 +371,14 @@ type
     // ScoreArg for a `[...]` - see the implementation.
     function CtorScore(ACtor, AElem: Integer;
       ATarget: TSemaCtorTarget): Integer;
+    // Sets: a set type's base, two sets meeting, a `[...]` for a set, a true
+    // constant whose value is one - see the implementation.
+    function SetBaseOf(ASym: Integer; out ABase: TSemaSetBase;
+      out AHost, AExact: Integer): Boolean;
+    function EnumHostOf(ASym: Integer): Integer;
+    function SetsMeetSym(ADst, ASrc: Integer): Boolean;
+    function SetCtorScore(ACtor, ASet: Integer): Integer;
+    function SetConstCtor(N: Integer): Integer;
     // The type symbol an element type node names - see the implementation.
     function ElemTypeSym(ANode: Integer): Integer;
     { The type of the comparison `ALeft < ARight` / `ALeft > ARight` an
@@ -574,6 +598,64 @@ function CtorElemFit(ATarget: TSemaCtorTarget; AElemCat: TSemaTypeCat;
   AStaticArray, ACharValue, AConstant, AParChar, AParString: Boolean;
   AValueFit: Integer): Integer;
 
+{ Do two set types meet - can a value of one be passed for the other (2.4.1,
+  6.3.1)? Their bases ABase / AOther must be of one category and, for two
+  enumerations, of one enumeration (ASameEnum: the caller's reading of the
+  enumerations or subranges of one under them); unread (tcUnknown) is not
+  "no". `set of 0..5`, `set of 10..20` and `set of Byte` meet, so do `set of
+  Char`, `set of AnsiChar` and `set of 'a'..'z'`, `set of TE` and `set of
+  e1..e3`; `set of TE` and `set of TF` do not, nor `set of Byte` and `set of
+  Char`. Each such pair converts either way, and to the overload ranking
+  every one is the same conversion: a set variable takes the overload of its
+  own type over any other that meets it, which all tie (dcc64 37.0,
+  local/type-conv-2026-11/n4 Sets A-C). }
+function SetsMeet(const ABase, AOther: TSemaSetBase; ASameEnum: Boolean): Boolean;
+
+{ One element of a `[...]` passed to a set parameter of base ABase, or one
+  bound of a range in it (`[e1..e3]`): AElemCat its category (a
+  one-character literal tcChar), ASameEnum for an enumeration whether it is
+  the base's enumeration or a subrange of it, AExactType whether its type is
+  the base type itself (an AnsiChar for `set of Char`), AConstant whether it
+  is a constant dcc folds (a literal, a true constant, an enumeration value,
+  True), AHasValue / AValue its ordinal value when read:
+  - out (the candidate is): a value of another category or enumeration -
+    `[fsBold]` for TShiftState, `[1]` for `set of Char`; an integer constant
+    outside 0..255 for an integer base (dcc picks another overload, or reports
+    E1012 when there is none);
+  - a value of the base type itself (a Byte variable for `set of Byte`, an
+    enumeration variable for `set of` it): exact - above `array of const`,
+    level with the open and the dynamic array of that type;
+  - an integer or character constant the base's range holds, True or an
+    enumeration value of the base type itself: a constant - below `array of
+    const`, above a dynamic array's exact constant (`[5]` takes `set of Byte`
+    over TArray<Byte>, `array of const` over `set of Byte`);
+  - anything else of the base's family - a narrower or wider variable (an
+    Integer for `set of Byte`, a Char for `set of Char`, a subrange value for
+    `set of` its enumeration), a constant outside the base's range (`[15]` for
+    `set of 0..5`), an enumeration value for a set of a subrange of it: a
+    conversion;
+  - an element not read: unknown.
+  dcc64 37.0, 2026-11-06 (spec 6.3.1; local/type-conv-2026-11/n4 Sets A-D:
+  1,242 lone calls, 1,872 + 340 pair calls, none answered by the order). }
+function SetCtorElemFit(const ABase: TSemaSetBase; AElemCat: TSemaTypeCat;
+  ASameEnum, AExactType, AConstant, AHasValue: Boolean;
+  AValue: Int64): TSemaSetElemFit;
+
+{ A `[...]` passed to a set parameter, scored on the overload candidates'
+  scale (ScaledFit) from its WORST element's SetCtorElemFit (AWorst; AEmpty
+  for `[]`, which every set takes): -1 out, 0 unknown, else as SetCtorElemFit
+  places it against the arrays' CtorElemFit - an exact one at 3 (the dynamic
+  array's step), a constant and `[]` at 1, a conversion no evidence: dcc
+  ranks a set's widening below an open array's and above a dynamic one's, its
+  narrowing below a dynamic array's and above an open one's, all of which
+  CtorElemFit leaves at 0.
+  dcc ranks a `[...]` the same for every set it fits, so two sets of one
+  family tie (E2251) whatever their bases' widths: `[B]` for `set of Byte` /
+  `set of 0..5` is ambiguous though the one ranks above TArray<Integer> and
+  the other below it - an order no single score keeps, and code that
+  compiles never asks it. }
+function SetCtorFit(AWorst: TSemaSetElemFit; AEmpty: Boolean): Integer;
+
 { The conversion kind of a value or a parameter of the facts AF
   (TSemaConvKind): an integer by its rank and sign, a real (a Currency or
   Comp one by name), Variant, a string or character kind by AF.Text.
@@ -777,8 +859,9 @@ function ScalarEnumMismatch(ADst, ASrc: TSemaTypeCat): Boolean;
   read "none found" (pastree-mcp's task pilot on the client group, F6.2).
   dcc32 37.0 probed: `[...]` and `[]` pick the open array, the set or the
   dynamic array overload in either declaration order, and a string parameter
-  alone is E2010. A record (an Implicit operator) and a Variant are left out,
-  as is anything unknown. }
+  alone is E2010. A Variant takes none either - no `[...]`, `[]` included
+  (dcc64 37.0, local/type-conv-2026-11/n4 Set A: E2250 for 46 of them). A
+  record (an Implicit operator) is left out, as is anything unknown. }
 function IsBracketToScalar(ADst: TSemaTypeCat): Boolean;
 
 { The 4.2.1 rule table, both typers' one copy (dcc32 / dcc64 37.0,
@@ -1131,10 +1214,22 @@ begin
   // conversion makes `B[0]` a TBytes, so `Write(B[0], N)` takes TStream's
   // untyped `Write(const Buffer; Count)` (local/probe-b33 O1: P(1) beside
   // P(const A: array of Integer) calls P(Double)). A string is left out.
+  // A set takes and goes to nothing but a set (and a record through its
+  // operator, decided before this): no number, character, string,
+  // enumeration, Variant, pointer, nil, class, interface or array (n4 Sets A,
+  // D: E2250 for each). A procedural value is left out - a parameterless
+  // function in a value position is called.
   Result := IsScalarToReference(AParCat, AArgCat) or
     ScalarEnumMismatch(AParCat, AArgCat) or
     ((AParCat = tcArray) and
-     (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum]));
+     (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcEnum])) or
+    ((AParCat = tcSet) and
+     (AArgCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum,
+      tcVariant, tcPointer, tcNil, tcClass, tcInterface, tcClassOf,
+      tcArray])) or
+    ((AArgCat = tcSet) and
+     (AParCat in [tcInteger, tcFloat, tcBoolean, tcChar, tcString, tcEnum,
+      tcVariant, tcPointer, tcClass, tcInterface, tcClassOf, tcArray]));
 end;
 
 function ArgStructRejects(AParCat, AArgCat: TSemaTypeCat;
@@ -1210,6 +1305,59 @@ begin
     Result := 4;
   if ATarget = ctDynArray then
     Dec(Result);
+end;
+
+function SetsMeet(const ABase, AOther: TSemaSetBase; ASameEnum: Boolean): Boolean;
+begin
+  if (ABase.Cat = tcUnknown) or (AOther.Cat = tcUnknown) then
+    Exit(True);
+  Result := (ABase.Cat = AOther.Cat) and ((ABase.Cat <> tcEnum) or ASameEnum);
+end;
+
+function SetCtorElemFit(const ABase: TSemaSetBase; AElemCat: TSemaTypeCat;
+  ASameEnum, AExactType, AConstant, AHasValue: Boolean;
+  AValue: Int64): TSemaSetElemFit;
+begin
+  if (ABase.Cat = tcUnknown) or (AElemCat = tcUnknown) then
+    Exit(sefUnknown);
+  if (AElemCat <> ABase.Cat) or ((AElemCat = tcEnum) and not ASameEnum) then
+    Exit(sefOut);
+  if AConstant then
+  begin
+    if AElemCat in [tcInteger, tcChar] then
+    begin
+      if not AHasValue then
+        Exit(sefConst);
+      // A set's integer elements are 0..255 whatever its base (2.4.1).
+      if (AElemCat = tcInteger) and ((AValue < 0) or (AValue > 255)) then
+        Exit(sefOut);
+      if ABase.HasRange and ((AValue < ABase.Lo) or (AValue > ABase.Hi)) then
+        Exit(sefConv);
+      Exit(sefConst);
+    end;
+    if AExactType then
+      Exit(sefConst);
+    Exit(sefConv);
+  end;
+  if AExactType then
+    Exit(sefExact);
+  Result := sefConv;
+end;
+
+function SetCtorFit(AWorst: TSemaSetElemFit; AEmpty: Boolean): Integer;
+begin
+  if AEmpty then
+    Exit(ScaledFit(1, 2));
+  case AWorst of
+    sefOut:
+      Result := -1;
+    sefExact:
+      Result := ScaledFit(3);
+    sefConst:
+      Result := ScaledFit(1, 2);
+  else
+    Result := 0;   // a conversion, or not known
+  end;
 end;
 
 function ConvKindOf(const AF: TSemaOpFacts): TSemaConvKind;
@@ -1671,7 +1819,8 @@ end;
 function IsBracketToScalar(ADst: TSemaTypeCat): Boolean;
 begin
   Result := ADst in [tcInteger, tcFloat, tcBoolean, tcChar, tcString,
-    tcPointer, tcNil, tcEnum, tcClass, tcInterface, tcProc, tcClassOf, tcFile];
+    tcPointer, tcNil, tcEnum, tcClass, tcInterface, tcProc, tcClassOf, tcFile,
+    tcVariant];
 end;
 
 // Does AValue fit the integer type of rank ARank / signedness AUns?
@@ -4500,9 +4649,25 @@ begin
   // A parameter's type is a type identifier or `array of` (6.2.6): an
   // array definition in the slot is an open array, which names no type.
   LDef := M.Symbols[AParam].TypeNode;
+  // A true constant whose value is a `[...]` is a set to dcc: no array
+  // takes it, a set reads its elements (n4 Set A: KS, KB, KE).
+  LCore := NIL_NODE;
+  if (AArg <> NIL_NODE) and ((AAt = NIL_SYM) or (CatOf(AAt) = tcSet)) then
+    LCore := SetConstCtor(AArg);
   if (LDef <> NIL_NODE) and (Kind(LDef) = nkArrayType) then
+  begin
+    if LCore <> NIL_NODE then
+      Exit(-1);
     Exit(ScaledFit(OpenArrayScore(AArg, AAt, LDef)));
+  end;
   LPt := M.Symbols[AParam].TypeSym;
+  if (LCore <> NIL_NODE) and (LPt <> NIL_SYM) then
+    case CatOf(LPt) of
+      tcSet:
+        Exit(SetCtorScore(LCore, LPt));
+      tcArray:
+        Exit(-1);
+    end;
   // A `[...]` for a dynamic array of a type this unit can see is scored by
   // its elements, as for the open array; one of an element not known here
   // (`TArray<string>`, an instantiation) gives no evidence. Peeled only
@@ -4521,6 +4686,9 @@ begin
           Exit(0);
         Exit(ScaledFit(CtorScore(LCore, LElem, ctDynArray)));
       end;
+      // ...and one for a SET by its elements (SetCtorScore).
+      if CatOf(LPt) = tcSet then
+        Exit(SetCtorScore(LCore, LPt));
     end;
   end;
   Result := ScoreArgRanked(AArg, AAt, LPt, not ParamIsByRef(M, AParam),
@@ -5070,6 +5238,14 @@ begin
             Exit(1);
           end;
       end;
+    // A set for a set: one conversion if they meet, else out (SetsMeetSym -
+    // ArgFitCanonX's SetsMeetX).
+    if (LParCat = tcSet) and (CatOf(AAt) = tcSet) then
+    begin
+      if SetsMeetSym(LPt, AAt) then
+        Exit(1);
+      Exit(-1);
+    end;
     if ArgCatRejects(LParCat, CatOf(AAt)) or
        (ArgStructNeedsConv(LParCat, CatOf(AAt)) and
         ArgStructRejects(LParCat, CatOf(AAt), LOps and (LParCat = tcRecord),
@@ -5247,6 +5423,251 @@ begin
     LFirst := False;
     LKid := Sib(LKid);
   end;
+end;
+
+{ The enumeration the type ASym of this unit is of: ASym for an enumeration,
+  the type of a subrange's low bound value (`TESub = e1..e3` gives TE); a distinct
+  copy (`type TE`) is of its family;
+  NIL_SYM when not read here - another unit's subrange among them. }
+function TPasSemaTyper.EnumHostOf(ASym: Integer): Integer;
+var
+  LDef, LBound, LVal, LDepth: Integer;
+begin
+  Result := NIL_SYM;
+  for LDepth := 1 to 8 do
+  begin
+    ASym := WeakAliasEnd(ASym);
+    if (ASym = NIL_SYM) or (M.Symbols[ASym].Kind <> skType) then
+      Exit;
+    LDef := TypeDefNode(ASym);
+    if LDef = NIL_NODE then
+      Exit;
+    if Kind(LDef) <> nkIdent then
+      Break;
+    ASym := M.RefMap[LDef];   // a distinct copy (`type TE`): its family
+  end;
+  if Kind(LDef) <> nkSubrange then
+    Exit(ASym);
+  LBound := PeelParens(T, Child(LDef));
+  if (LBound = NIL_NODE) or (Kind(LBound) <> nkIdent) then
+    Exit;
+  LVal := M.RefMap[LBound];
+  if (LVal <> NIL_SYM) and (M.Symbols[LVal].Kind = skEnumValue) then
+    Result := WeakAliasEnd(M.Symbols[LVal].TypeSym);
+end;
+
+{ The base of the set type ASym as this unit reads it - TPasSemaProject's
+  SetBaseX: ABase its category and range, AHost an enumeration base's
+  enumeration (EnumHostOf), AExact the base type itself when a type names it
+  (AnsiChar for any set of characters, a set of Char being a set of AnsiChar);
+  NIL_SYM for a range written in place. Plain alias links and distinct
+  copies followed, same-unit ones only (a base of another unit has no
+  category here). False when ASym is no set this unit reads. }
+function TPasSemaTyper.SetBaseOf(ASym: Integer; out ABase: TSemaSetBase;
+  out AHost, AExact: Integer): Boolean;
+var
+  LDepth, LDef, LBase, LB, LBound: Integer;
+begin
+  Result := False;
+  ABase := Default(TSemaSetBase);
+  AHost := NIL_SYM;
+  AExact := NIL_SYM;
+  for LDepth := 1 to 8 do
+  begin
+    if (ASym = NIL_SYM) or (M.Symbols[ASym].Kind <> skType) then
+      Exit;
+    LDef := TypeDefNode(ASym);
+    if LDef = NIL_NODE then
+      Exit;
+    case Kind(LDef) of
+      nkSetType:
+        Break;
+      nkIdent:
+        ASym := M.RefMap[LDef];   // alias link - follow it
+    else
+      Exit;
+    end;
+  end;
+  if (LDef = NIL_NODE) or (Kind(LDef) <> nkSetType) then
+    Exit;
+  LBase := Child(LDef);
+  if LBase = NIL_NODE then
+    Exit;
+  case Kind(LBase) of
+    nkIdent, nkMember:
+      begin
+        LB := WeakAliasEnd(Head(LBase));
+        if (LB = NIL_SYM) or
+           not (M.Symbols[LB].Kind in [skType, skBuiltinType]) then
+          Exit;
+        ABase.Cat := CatOf(LB);
+        AExact := LB;
+        if M.Symbols[LB].Kind = skType then
+          ABase.HasRange := OrdinalDefRange(T, TypeDefNode(LB), OrdNameValue(),
+            ABase.Lo, ABase.Hi, ConstFacts())
+        else if (M.Symbols[LB].NameLower = 'byte') or
+                (ABase.Cat = tcChar) then
+          begin
+            ABase.HasRange := True;
+            ABase.Hi := 255;
+          end
+        else if ABase.Cat = tcBoolean then
+        begin
+          ABase.HasRange := True;
+          ABase.Hi := 1;
+        end;
+        if ABase.Cat = tcEnum then
+          AHost := EnumHostOf(LB);
+      end;
+    nkSubrange:
+      begin
+        LBound := Child(LBase);
+        if LBound = NIL_NODE then
+          Exit;
+        if IsCharLiteralExpr(T, LBound) then
+          ABase.Cat := tcChar
+        else
+          ABase.Cat := CatOfSubrangeBound(LBound);
+        if ABase.Cat = tcEnum then
+        begin
+          LBound := PeelParens(T, LBound);
+          if (Kind(LBound) = nkIdent) and (M.RefMap[LBound] <> NIL_SYM) and
+             (M.Symbols[M.RefMap[LBound]].Kind = skEnumValue) then
+            AHost := WeakAliasEnd(M.Symbols[M.RefMap[LBound]].TypeSym);
+        end;
+        ABase.HasRange := OrdinalDefRange(T, LBase, OrdNameValue(), ABase.Lo,
+          ABase.Hi, ConstFacts());
+      end;
+  else
+    Exit;
+  end;
+  if ABase.Cat = tcChar then
+    AExact := AChr;
+  if (ABase.Cat = tcEnum) and (AHost = NIL_SYM) then
+    ABase.Cat := tcUnknown;
+  Result := ABase.Cat in [tcInteger, tcChar, tcBoolean, tcEnum];
+end;
+
+{ Do the set types ADst and ASrc meet (SetsMeet over SetBaseOf)? True when
+  either is not read here. }
+function TPasSemaTyper.SetsMeetSym(ADst, ASrc: Integer): Boolean;
+var
+  LD, LS: TSemaSetBase;
+  LDHost, LSHost, LExact: Integer;
+begin
+  if not SetBaseOf(ADst, LD, LDHost, LExact) or
+     not SetBaseOf(ASrc, LS, LSHost, LExact) then
+    Exit(True);
+  Result := SetsMeet(LD, LS, LDHost = LSHost);
+end;
+
+{ The `[...]` a true constant of this unit named by N holds (`const KS =
+  [e1, e2]`), parentheses peeled; NIL_NODE for anything else - another
+  unit's constant among them (SetConstArgX reads those). }
+function TPasSemaTyper.SetConstCtor(N: Integer): Integer;
+var
+  LSym, LDecl: Integer;
+begin
+  Result := NIL_NODE;
+  N := PeelParens(T, N);
+  if (N = NIL_NODE) or not (Kind(N) in [nkIdent, nkMember]) then
+    Exit;
+  LSym := Head(N);
+  if (LSym = NIL_SYM) or (M.Symbols[LSym].Kind <> skConst) or
+     (M.Symbols[LSym].TypeNode <> NIL_NODE) then
+    Exit;
+  LDecl := M.Symbols[LSym].DeclNode;
+  if (LDecl = NIL_NODE) or (T.Nodes[LDecl].Parent = NIL_NODE) or
+     (Kind(T.Nodes[LDecl].Parent) <> nkConstDecl) then
+    Exit;
+  LDecl := PeelParens(T, Sib(LDecl));
+  if (LDecl <> NIL_NODE) and (Kind(LDecl) = nkSetCtor) then
+    Result := LDecl;
+end;
+
+{ ScoreArg for the `[...]` ACtor - the call's own, or a true constant's
+  (SetConstCtor) - passed to the set type ASet: SetCtorElemFit over each
+  element, each bound of a range one, against the set's base (SetBaseOf) -
+  its category (CatOfSubrangeBound for a node not typed: a constant's
+  initializer), enumeration, whether its type is the base type, its value
+  against the base's range - the worst deciding (SetCtorFit); the project's
+  SetCtorFitX reads the same in project space. }
+function TPasSemaTyper.SetCtorScore(ACtor, ASet: Integer): Integer;
+var
+  LBase: TSemaSetBase;
+  LHost, LExact, LKid, LBound, LAt, LElemHost: Integer;
+  LWorst, LFit: TSemaSetElemFit;
+  LCat: TSemaTypeCat;
+  LConst, LHasValue, LCharLit: Boolean;
+  LValue: Int64;
+begin
+  if not SetBaseOf(ASet, LBase, LHost, LExact) then
+    Exit(0);
+  if Child(ACtor) = NIL_NODE then
+    Exit(SetCtorFit(sefExact, True));
+  LWorst := sefExact;
+  LKid := Child(ACtor);
+  while LKid <> NIL_NODE do
+  begin
+    if Kind(LKid) = nkRange then
+      LBound := Child(LKid)
+    else
+      LBound := LKid;
+    while LBound <> NIL_NODE do
+    begin
+      LAt := M.ExprType[LBound];
+      if (LAt <> NIL_SYM) and (M.Symbols[LAt].Kind = skGenericParam) then
+        LAt := NIL_SYM;
+      LCharLit := IsCharLiteralExpr(T, LBound);
+      if LCharLit then
+        LCat := tcChar
+      else if LAt <> NIL_SYM then
+        LCat := CatOf(LAt)
+      else
+        LCat := CatOfSubrangeBound(LBound);
+      LConst := LCharLit or IsConstExpr(LBound);
+      LHasValue := False;
+      LValue := 0;
+      if LConst then
+        case LCat of
+          tcInteger:
+            LHasValue := FoldedIntValue(T, LBound, 0, ConstFacts(),
+              OrdNameValue(), LValue);
+          tcChar:
+            LHasValue := OrdinalNodeValue(T, PeelParens(T, LBound), 0,
+              OrdNameValue(), LValue);
+        end;
+      LElemHost := NIL_SYM;
+      if LCat = tcEnum then
+      begin
+        if LAt <> NIL_SYM then
+          LElemHost := EnumHostOf(LAt)
+        else if (Kind(PeelParens(T, LBound)) = nkIdent) and
+                (M.RefMap[PeelParens(T, LBound)] <> NIL_SYM) and
+                (M.Symbols[M.RefMap[PeelParens(T, LBound)]].Kind =
+                 skEnumValue) then
+          LElemHost := WeakAliasEnd(
+            M.Symbols[M.RefMap[PeelParens(T, LBound)]].TypeSym);
+        if LElemHost = NIL_SYM then
+          LCat := tcUnknown;
+      end;
+      LFit := SetCtorElemFit(LBase, LCat, LElemHost = LHost,
+        (LExact <> NIL_SYM) and (LAt <> NIL_SYM) and
+        ((WeakAliasEnd(LAt) = LExact) or
+         (PasBuiltinCanonSym(M, WeakAliasEnd(LAt), FPlatform) =
+          PasBuiltinCanonSym(M, LExact, FPlatform))),
+        LConst, LHasValue, LValue);
+      if LFit < LWorst then
+        LWorst := LFit;
+      if LWorst = sefOut then
+        Exit(-1);
+      if Kind(LKid) <> nkRange then
+        Break;
+      LBound := Sib(LBound);
+    end;
+    LKid := Sib(LKid);
+  end;
+  Result := SetCtorFit(LWorst, False);
 end;
 
 { The type symbol the type node ANode names when this unit can see it - a
