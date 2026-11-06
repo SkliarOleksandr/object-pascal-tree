@@ -14176,8 +14176,20 @@ end;
     operators say (UserConvX), and two different records without one do
     not convert;
   - two scalar categories that none of the above joins are scNone, as are
-    two different enumerations, and a scalar against a structured type;
-  - everything else is scMaybe. }
+    two different enumerations (an enumeration and its subranges are one),
+    a Char and an AnsiChar, and a scalar against a structured type;
+  - a Variant goes to IInterface / IUnknown / IDispatch alone among the
+    interfaces and to no character, pointer, class, class reference,
+    procedural type or set; a procedural value to procedural types alone,
+    and only a pointer, nil and (for a `reference to` type, an interface) a
+    class listing it to one; no class, interface or class reference to an
+    array, no instance to a class reference;
+  - an assignment's own two (2.6.1, not an overload set's): any pointer to
+    a class reference, an interface to the untyped Pointer;
+  - everything else is scMaybe.
+  It answers an assignment (2.6.1: a lone value parameter of a routine that
+  is not overloaded converts alike); tests/ConvSmoke.dpr holds dcc's verdict
+  for every pair it is asked about (local/type-conv-2026-11/m2). }
 function TPasSemaProject.XConvX(const ADst, ASrc: TSemaXType): TSemaConv;
 begin
   Result := XConvCoreX(ADst, ASrc, True);
@@ -14239,6 +14251,87 @@ begin
     end;
     // No operator: a record converts to and from nothing but itself.
     Exit(TSemaConv.scNone);
+  end;
+  // Two enumerations convert when they are one: an enumeration and its
+  // subranges, two subranges of one, whatever their ranges (2.6.1; m2 Set
+  // X: TE := TES, TES := TES2 compile) - and not otherwise.
+  if (D = tcEnum) and (S = tcEnum) then
+  begin
+    var LHostD := EnumHostX(LD);
+    var LHostS := EnumHostX(LS);
+    if not XValid(LHostD) or not XValid(LHostS) then
+      Exit(scMaybe);
+    if XSameType(LHostD, LHostS) then
+      Exit(scImplicit);
+    Exit(TSemaConv.scNone);
+  end;
+  // A Variant goes to the other Variant type, to IInterface / IUnknown /
+  // IDispatch among the interfaces (VariantIntfRank), and to no character,
+  // pointer, class, class reference, procedural type or set (6.3.1; m2 Sets
+  // A, Y: a dynamic array and a record are decided above).
+  if S = tcVariant then
+    case D of
+      tcVariant:
+        Exit(scImplicit);
+      tcInterface:
+        if VariantIntfRank(FModels[LD.UnitId].Symbols[LD.Sym].NameLower) > 0 then
+          Exit(scImplicit)
+        else
+          Exit(TSemaConv.scNone);
+      tcChar, tcPointer, tcClass, tcClassOf, tcProc, tcSet:
+        Exit(TSemaConv.scNone);
+    end;
+  // A Char and an AnsiChar value do not convert either way (m2 Set A; a
+  // one-character literal, which goes to both, is the value's rule). A
+  // character subrange has no conversion kind and converts as before.
+  if (D = tcChar) and (S = tcChar) then
+  begin
+    var LKD := ParConvKindX(LD);
+    var LKS := ParConvKindX(LS);
+    if (LKD in [cnkChar, cnkAnsiChar]) and (LKS in [cnkChar, cnkAnsiChar]) and
+       (LKD <> LKS) then
+      Exit(TSemaConv.scNone);
+  end;
+  // A procedural value converts to procedural types alone - calling a
+  // parameterless function is the value's rule, not its type's - and nothing
+  // but a pointer and nil (above, below) to one: no class, class reference,
+  // interface, set, array or Variant either way (m2 Sets A, Y).
+  if (S = tcProc) and (D <> tcProc) then
+    Exit(TSemaConv.scNone);
+  // A `reference to` type is an interface (17.1.1): a class whose chain
+  // lists it converts to it (`TImpl = class(TInterfacedObject, TRefF)` for
+  // `TRefF = reference to function: IFoo`, a client unit in the m2 gate).
+  if (D = tcProc) and (S = tcClass) then
+  begin
+    var LSig: TPasProcSig;
+    if not ProcTypeSigX(LD, LSig) or (LSig.Kind in [pkReference, pkUnknown]) then
+      case XImplementsX(LS, LD) of
+        xdYes: Exit(scImplicit);
+        xdUnknown: Exit(scMaybe);
+      end;
+  end;
+  if (D = tcProc) and
+     (S in [tcClass, tcClassOf, tcInterface, tcSet, tcArray, tcVariant]) then
+    Exit(TSemaConv.scNone);
+  // No class, interface or class reference goes to an array; an instance to
+  // no class reference (m2 Set A; a TYPE NAME is a class reference - the
+  // caller's, not the type's, rule).
+  if (D = tcArray) and (S in [tcClass, tcInterface, tcClassOf]) then
+    Exit(TSemaConv.scNone);
+  if (D = tcClassOf) and (S = tcClass) then
+    Exit(TSemaConv.scNone);
+  // Two conversions an assignment and a lone parameter of a routine that is
+  // not overloaded take, which an overload set never does (6.3.1, 5.1.1;
+  // m2 Set A vs n8 Set L, Set Y): any pointer - typed, PChar - to any class
+  // reference, an interface to the untyped Pointer. Not for a user
+  // conversion's built-in parts (AUser False), which were probed as
+  // arguments only.
+  if AUser then
+  begin
+    if (D = tcClassOf) and (S = tcPointer) then
+      Exit(scImplicit);
+    if (D = tcPointer) and (S = tcInterface) and IsUntypedPointerX(LD) then
+      Exit(scImplicit);
   end;
   // A class, an interface, nil: XRefConvX (14.2.1, 6.3.1).
   if S in [tcNil, tcClass, tcInterface, tcPointer, tcClassOf] then
